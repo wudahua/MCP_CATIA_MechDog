@@ -21,12 +21,11 @@ from catia_mcp.results import operation_result
 from catia_mcp.tools.assembly import AssemblyTools
 from catia_mcp.tools.diagnostics import DiagnosticsTools
 from catia_mcp.tools.document import DocumentTools
-from catia_mcp.tools.drawing import DraftingTools
 from catia_mcp.tools.export import ExportTools
 from catia_mcp.tools.gsd import GSDTools
-from catia_mcp.tools.knowledge import KnowledgeTools
 from catia_mcp.tools.measurement import MeasurementTools
 from catia_mcp.tools.part_design import PartDesignTools
+from catia_mcp.tools.planner import PlannerTools
 from catia_mcp.tools.sketcher import SketcherTools
 
 logging.basicConfig(
@@ -80,22 +79,20 @@ class CATIAMCPServer:
         self.part_design_tools = PartDesignTools(self.connection)
         self.gsd_tools = GSDTools(self.connection)
         self.diagnostics_tools = DiagnosticsTools(self.connection)
-        self.drafting_tools = DraftingTools(self.connection)
-        self.knowledge_tools = KnowledgeTools(self.connection)
         self.assembly_tools = AssemblyTools(self.connection)
         self.measurement_tools = MeasurementTools(self.connection)
         self.export_tools = ExportTools(self.connection)
+        self.planner_tools = PlannerTools(self.connection)
         self._tool_modules = [
             self.document_tools,
             self.sketcher_tools,
             self.part_design_tools,
             self.gsd_tools,
             self.diagnostics_tools,
-            self.drafting_tools,
-            self.knowledge_tools,
             self.assembly_tools,
             self.measurement_tools,
             self.export_tools,
+            self.planner_tools,
         ]
         self._tool_router: dict[str, Any] = {}
         self._schemas: dict[str, dict] = {}
@@ -106,6 +103,9 @@ class CATIAMCPServer:
                     raise ValueError(f"Duplicate tool: {name}")
                 self._tool_router[name] = module
                 self._schemas[name] = definition["inputSchema"]
+        # The planner dispatches sub-steps through this same router, so it can
+        # only be bound once every module has registered its tools.
+        self.planner_tools.bind(self._tool_router)
         self._setup_handlers()
 
     def _setup_handlers(self) -> None:

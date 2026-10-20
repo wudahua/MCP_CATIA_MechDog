@@ -933,7 +933,7 @@ class PartDesignTools:
             pass
         donor_doc = app.Documents.Add("Part")
         try:
-            donor = donor_doc.Part
+            donor = self.conn.part_of(donor_doc)
             hsf = donor.HybridShapeFactory
             geoset = donor.HybridBodies.Add()
             dx, dy, dz = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}[axis]

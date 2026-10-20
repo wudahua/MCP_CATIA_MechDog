@@ -9,6 +9,7 @@ import json
 import os
 from typing import Any
 
+from catia_mcp import dialogs
 from catia_mcp.connection import CATIAConnection
 
 
@@ -87,7 +88,11 @@ class DocumentTools:
             },
             {
                 "name": "catia_save_document",
-                "description": "Save the active CATIA document. Optionally save to a new path (Save As).",
+                "description": (
+                    "Save the active CATIA document. Optionally save to a new path (Save As). "
+                    "Retries around CATIA's modal dialogs (overwrite prompt, first-SaveAs "
+                    "dialog), which would otherwise freeze the worker thread."
+                ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -160,13 +165,14 @@ class DocumentTools:
         self.conn.ensure_connected()
         docs = self.conn.documents
         doc = docs.Add("Part")
+        part = self.conn.part_of(doc)
         rename_note = ""
         if name:
             try:
-                doc.Part.Name = name
+                part.Name = name
             except Exception as e:
                 rename_note = f" (rename to '{name}' not supported by this CATIA version: {e})"
-        part_name = doc.Part.Name
+        part_name = part.Name
         self.conn.refresh_display()
         return f"Created new Part document: '{part_name}'{rename_note}"
 
@@ -174,19 +180,20 @@ class DocumentTools:
         self.conn.ensure_connected()
         docs = self.conn.documents
         doc = docs.Add("Product")
+        product = self.conn.product_of(doc)
         rename_note = ""
         if name:
             try:
-                doc.Product.Name = name
+                product.Name = name
             except Exception as e:
                 rename_note = f" (rename to '{name}' not supported by this CATIA version: {e})"
             else:
-                if doc.Product.Name != name:
+                if product.Name != name:
                     rename_note = (
                         f" (requested name '{name}' was not applied by CATIA; "
-                        f"kept '{doc.Product.Name}')"
+                        f"kept '{product.Name}')"
                     )
-        product_name = doc.Product.Name
+        product_name = product.Name
         self.conn.refresh_display()
         return f"Created new Product (assembly) document: '{product_name}'{rename_note}"
 
@@ -201,19 +208,18 @@ class DocumentTools:
     def _save_document(self, file_path: str | None = None) -> str:
         doc = self.conn.active_document
         if file_path:
-            # CATIA's SaveAs rejects forward-slash paths (E_FAIL);
-            # normalize to native Windows separators first.
-            doc.SaveAs(os.path.normpath(file_path))
-            return f"Document saved as: {file_path}"
-        else:
-            doc.Save()
-            return f"Document '{doc.Name}' saved"
+            # CATIA's SaveAs rejects forward-slash paths (E_FAIL) and pops a
+            # modal prompt when the target exists, which freezes the STA worker.
+            target = dialogs.save_as(doc, file_path)
+            return f"Document saved as: {target}"
+        name = dialogs.save(doc)
+        return f"Document '{name}' saved"
 
     def _close_document(self, save: bool = False) -> str:
         doc = self.conn.active_document
         name = doc.Name
         if save:
-            doc.Save()
+            dialogs.save(doc)
         doc.Close()
         return f"Document '{name}' closed" + (" (saved)" if save else "")
 
@@ -227,13 +233,14 @@ class DocumentTools:
                 "name": doc.Name,
                 "path": doc.FullName if hasattr(doc, "FullName") else "unsaved",
             }
-            # Detect document type
+            # Detect document type; must go through the dynamic re-wrap, because a
+            # gen_py-typed Document exposes only the base interface.
             try:
-                _ = doc.Part
+                self.conn.part_of(doc)
                 doc_info["type"] = "CATPart"
             except Exception:
                 try:
-                    _ = doc.Product
+                    self.conn.product_of(doc)
                     doc_info["type"] = "CATProduct"
                 except Exception:
                     doc_info["type"] = "Other"
@@ -252,7 +259,7 @@ class DocumentTools:
 
         # Try Part document
         try:
-            part = doc.Part
+            part = self.conn.part_of(doc)
             info["type"] = "CATPart"
             info["part_name"] = part.Name
 

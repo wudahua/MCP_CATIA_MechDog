@@ -151,27 +151,53 @@ class CATIAConnection:
 
     # ── Document type detection ──
 
+    @staticmethod
+    def _dynamic(obj: Any) -> Any:
+        """Re-wrap a COM object in a purely dynamic dispatcher.
+
+        ``win32com.client.GetActiveObject`` resolves through the pywin32 gen_py
+        cache, and a cached ``Document`` exposes only the base interface: reading
+        ``doc.Part`` then fails with ``AttributeError: <unknown>.Part`` even
+        though the live object implements it. Querying the same object
+        dynamically hits the real IDispatch, where ``Part``/``Product`` resolve.
+        Behaviour therefore depends on cache state, which is why this is done
+        defensively rather than assumed.
+        """
+        try:
+            return win32com.client.dynamic.Dispatch(obj._oleobj_)
+        except Exception:
+            return obj
+
     def get_active_part(self) -> Any:
         """Get the Part object from the active PartDocument."""
-        doc = self.active_document
-        try:
-            return doc.Part
-        except Exception:
-            raise RuntimeError(
-                "Active document is not a Part document. "
-                "Open or create a Part document first."
-            )
+        return self.part_of(self.active_document)
 
     def get_active_product(self) -> Any:
         """Get the Product object from the active ProductDocument."""
-        doc = self.active_document
-        try:
-            return doc.Product
-        except Exception:
-            raise RuntimeError(
-                "Active document is not a Product document. "
-                "Open or create an Assembly (Product) document first."
+        return self.product_of(self.active_document)
+
+    def _interface(self, doc: Any, name: str) -> Any:
+        for candidate in (doc, self._dynamic(doc)):
+            try:
+                return getattr(candidate, name)
+            except Exception:
+                continue
+        raise RuntimeError(
+            f"Active document '{getattr(doc, 'Name', '?')}' exposes no '{name}'. "
+            + (
+                "Open or create a Part document first."
+                if name == "Part"
+                else "Open or create an Assembly (Product) document first."
             )
+        )
+
+    def part_of(self, doc: Any) -> Any:
+        """The Part behind a PartDocument, robust to the gen_py cache state."""
+        return self._interface(doc, "Part")
+
+    def product_of(self, doc: Any) -> Any:
+        """The Product behind a ProductDocument, robust to the gen_py cache state."""
+        return self._interface(doc, "Product")
 
     def get_active_part_body(self) -> Any:
         """Get the main PartBody from the active Part document."""

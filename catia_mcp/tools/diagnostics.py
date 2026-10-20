@@ -189,7 +189,7 @@ class DiagnosticsTools:
         part = None
         if doc is not None:
             try:
-                part = doc.Part
+                part = self.conn.part_of(doc)
             except Exception:
                 pass
         if part is None:

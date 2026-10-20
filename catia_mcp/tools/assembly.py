@@ -185,6 +185,72 @@ class AssemblyTools:
                     "properties": {},
                 },
             },
+            {
+                "name": "catia_get_component_transform",
+                "description": (
+                    "Read a component's absolute placement as an explicit rotation + "
+                    "translation, with the rotation matrix in BOTH conventions. Native "
+                    "CATIA stores the nine rotation values as the three basis vectors "
+                    "(columns of R, i.e. where local X/Y/Z point in the assembly); "
+                    "specs usually quote R row-major. Returns det and orthogonality so a "
+                    "transpose mistake is visible immediately."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "component_name": {
+                            "type": "string",
+                            "description": "Component name, or its 1-based index as a string",
+                        },
+                    },
+                    "required": ["component_name"],
+                },
+            },
+            {
+                "name": "catia_set_component_transform",
+                "description": (
+                    "Set a component's absolute placement from a rotation matrix and a "
+                    "translation. Accepts `rotation_rows` (3x3 row-major, the way specs and "
+                    "papers write P_asm = R * P_local + T — the server transposes it for you) "
+                    "or `position_components` (12 numbers in CATIA's native order: three "
+                    "basis vectors then the origin). Reads the placement back and reports the "
+                    "deviation, det and orthogonality, so a wrong handedness or a stray "
+                    "transpose cannot pass silently."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "component_name": {
+                            "type": "string",
+                            "description": "Component name, or its 1-based index as a string",
+                        },
+                        "rotation_rows": {
+                            "type": "array",
+                            "description": "3x3 rotation, ROW-major: [[R00,R01,R02],[R10,...],[...]]",
+                            "items": {"type": "array", "items": {"type": "number"}},
+                        },
+                        "position_components": {
+                            "type": "array",
+                            "description": (
+                                "12 numbers in CATIA's native order: "
+                                "[i0,i1,i2, j0,j1,j2, k0,k1,k2, Tx,Ty,Tz]"
+                            ),
+                            "items": {"type": "number"},
+                        },
+                        "translation": {
+                            "type": "array",
+                            "description": "Translation (Tx, Ty, Tz) in mm; defaults to 0,0,0",
+                            "items": {"type": "number"},
+                        },
+                        "verify": {
+                            "type": "boolean",
+                            "description": "Read the placement back and report the deviation",
+                            "default": True,
+                        },
+                    },
+                    "required": ["component_name"],
+                },
+            },
         ]
 
     def execute(self, tool_name: str, arguments: dict[str, Any]) -> str:
@@ -207,6 +273,10 @@ class AssemblyTools:
                 return self._list_components()
             case "catia_list_constraints":
                 return self._list_constraints()
+            case "catia_get_component_transform":
+                return self._get_component_transform(arguments["component_name"])
+            case "catia_set_component_transform":
+                return self._set_component_transform(arguments)
             case _:
                 raise ValueError(f"Unknown assembly tool: {tool_name}")
 
@@ -285,15 +355,164 @@ class AssemblyTools:
             f"'{args['component1']}' and '{args['component2']}'"
         )
 
+    # ---- placement matrices -------------------------------------------------
+    # Position.GetComponents fills a CATSafeArrayVariant *out* parameter. That
+    # does not marshal through late-bound IDispatch: the Python list passed in
+    # comes back untouched, i.e. twelve zeros. Upstream then wrote those zeros
+    # straight back with SetComponents — which erases the component's rotation —
+    # and reported every component at (0, 0, 0). Same root cause as the GetCOG
+    # bug fixed in 0.2.2, same fix: fill the array inside CATIA.
+    _POSITION_SCRIPT = (
+        "Public Function position_components(p)\n"
+        "    Dim a(11)\n"
+        "    p.GetComponents a\n"
+        "    position_components = a\n"
+        "End Function\n"
+    )
+
+    def _position_components(self, position: Any) -> list[float]:
+        raw = self.conn.app.SystemService.Evaluate(
+            self._POSITION_SCRIPT, 0, "position_components", [position]
+        )
+        return [float(value) for value in raw]
+
+    @staticmethod
+    def _resolve_component(product: Any, name: str) -> Any:
+        """Accept a component name or its 1-based index (as a string)."""
+        products = product.Products
+        if name.isdigit():
+            index = int(name)
+            if 1 <= index <= products.Count:
+                return products.Item(index)
+        for i in range(1, products.Count + 1):
+            component = products.Item(i)
+            if component.Name == name:
+                return component
+        available = [products.Item(i).Name for i in range(1, products.Count + 1)]
+        raise ValueError(f"No component '{name}'. Available: {available}")
+
+    @staticmethod
+    def _matrix_report(components9: list[float]) -> dict[str, Any]:
+        """Describe nine rotation values read in CATIA's own (column) order."""
+        i_vec, j_vec, k_vec = components9[0:3], components9[3:6], components9[6:9]
+        rows = [[components9[0], components9[3], components9[6]],
+                [components9[1], components9[4], components9[7]],
+                [components9[2], components9[5], components9[8]]]
+        det = (
+            rows[0][0] * (rows[1][1] * rows[2][2] - rows[1][2] * rows[2][1])
+            - rows[0][1] * (rows[1][0] * rows[2][2] - rows[1][2] * rows[2][0])
+            + rows[0][2] * (rows[1][0] * rows[2][1] - rows[1][1] * rows[2][0])
+        )
+        ortho = max(
+            abs(sum(rows[a][b] * rows[c][b] for b in range(3)) - (1.0 if a == c else 0.0))
+            for a in range(3)
+            for c in range(3)
+        )
+        return {
+            "basis_columns": {
+                "local_x_maps_to": [round(v, 9) for v in i_vec],
+                "local_y_maps_to": [round(v, 9) for v in j_vec],
+                "local_z_maps_to": [round(v, 9) for v in k_vec],
+            },
+            "rotation_rows": [[round(v, 9) for v in row] for row in rows],
+            "checks": {
+                "det": round(det, 9),
+                "right_handed": abs(det - 1.0) < 1e-6,
+                "orthogonality_error": round(ortho, 12),
+                "orthogonal": ortho < 1e-6,
+            },
+        }
+
+    def _get_component_transform(self, name: str) -> str:
+        product = self.conn.get_active_product()
+        component = self._resolve_component(product, name)
+        values = self._position_components(component.Position)
+        report = {
+            "component": component.Name,
+            "position_components": [round(v, 9) for v in values],
+            "translation": [round(v, 6) for v in values[9:12]],
+            **self._matrix_report(values[:9]),
+            "note": (
+                "position_components is CATIA's native order: the three basis vectors "
+                "(columns of R) then the origin. rotation_rows is the same matrix written "
+                "row-major, i.e. the form P_asm = R * P_local + T assumes."
+            ),
+        }
+        return json.dumps(report, indent=2, ensure_ascii=False)
+
+    def _set_component_transform(self, args: dict[str, Any]) -> str:
+        product = self.conn.get_active_product()
+        component = self._resolve_component(product, args["component_name"])
+
+        rows = args.get("rotation_rows")
+        components = args.get("position_components")
+        translation = [float(v) for v in (args.get("translation") or [0.0, 0.0, 0.0])]
+        if len(translation) != 3:
+            raise ValueError("translation must hold exactly three numbers")
+
+        if components is not None:
+            values = [float(v) for v in components]
+            if len(values) != 12:
+                raise ValueError("position_components must hold exactly twelve numbers")
+            values[9:12] = translation
+            source = "position_components"
+        elif rows is not None:
+            if len(rows) != 3 or any(len(row) != 3 for row in rows):
+                raise ValueError("rotation_rows must be a 3x3 array")
+            # R is given row-major; CATIA wants the columns, so flatten per column.
+            values = [float(rows[r][c]) for c in range(3) for r in range(3)] + translation
+            source = "rotation_rows (transposed into CATIA's column order)"
+        elif translation != [0.0, 0.0, 0.0]:
+            # Translation-only move: keep the existing orientation.
+            current = self._position_components(component.Position)
+            values = current[:9] + translation
+            source = "translation only (orientation preserved)"
+        else:
+            raise ValueError(
+                "Provide rotation_rows, position_components, or a non-zero translation"
+            )
+
+        component.Position.SetComponents(values)
+        self.conn.refresh_display()
+
+        report: dict[str, Any] = {
+            "component": component.Name,
+            "source": source,
+            "requested": {
+                "position_components": [round(v, 9) for v in values],
+                "translation": [round(v, 6) for v in translation],
+            },
+        }
+        if args.get("verify", True):
+            actual = self._position_components(component.Position)
+            deviation = max(abs(a - b) for a, b in zip(actual, values))
+            report["verified"] = {
+                "position_components": [round(v, 9) for v in actual],
+                "max_deviation": round(deviation, 12),
+                "matches_request": deviation < 1e-6,
+                **self._matrix_report(actual[:9]),
+            }
+            if not report["verified"]["checks"]["right_handed"]:
+                report["warning"] = (
+                    "det R != +1: the matrix mirrors the part. Check for a transposed or "
+                    "sign-flipped row before trusting this placement."
+                )
+            elif deviation >= 1e-6:
+                report["warning"] = (
+                    "CATIA did not store the requested placement verbatim; inspect "
+                    "verified.position_components before continuing."
+                )
+        return json.dumps(report, indent=2, ensure_ascii=False)
+
     def _move_component(self, args: dict[str, Any]) -> str:
         import math
         product = self.conn.get_active_product()
-        component = product.Products.Item(args["component_name"])
+        component = self._resolve_component(product, args["component_name"])
 
-        # Get the current position matrix (4x3 = 12 values in CATIA)
+        # Read through SystemService.Evaluate: a plain Python list would come back
+        # as twelve zeros and writing it back would erase the rotation.
         position = component.Position
-        matrix = [0.0] * 12
-        position.GetComponents(matrix)
+        matrix = self._position_components(position)
 
         # Apply translation (values 9, 10, 11 are tx, ty, tz)
         matrix[9] += args.get("tx", 0)
@@ -351,11 +570,10 @@ class AssemblyTools:
         for i in range(1, products.Count + 1):
             comp = products.Item(i)
             pos = comp.Position
-            matrix = [0.0] * 12
             try:
-                pos.GetComponents(matrix)
+                matrix = self._position_components(pos)
             except Exception:
-                pass
+                matrix = [0.0] * 12
             components.append({
                 "index": i,
                 "name": comp.Name,
