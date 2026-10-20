@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "catia-v5-mcp-server"
-version = "0.2.2"
-description = "MCP Server for CATIA V5 - Connect Claude AI to Dassault Systèmes CATIA V5 via COM Automation"
+name = "catia-v5-mcp-lite"
+version = "0.3.0"
+description = "CATIA V5 MCP server (lite fork): build solids from a written spec and verify them, via COM Automation"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"

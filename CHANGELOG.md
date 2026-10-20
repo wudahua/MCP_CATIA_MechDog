@@ -2,6 +2,44 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.0] — 2026-10-20 · lite fork
+
+First public state of the fork. Based on upstream `0.2.2` plus the unreleased
+98-tool work and a zh-CN CATIA compatibility patch. **86 tools** (98 − 16 + 4).
+See `README.md` for the diff table and `FORK.md` for measurements.
+
+### Removed
+- `tools/drawing.py` (11 tools): requires a Drafting licence, emits 2D views.
+- `tools/knowledge.py` (5 tools): parameters, formulas, design tables.
+- Upstream repository-traffic plumbing (`traffic/`, its workflow and collector)
+  and `.github/FUNDING.yml`: they belong to the upstream repository, not a fork.
+
+### Added
+- `catia_run_plan`: executes an ordered `{tool, args}` recipe in one call, then
+  asserts volume, area, face/edge/vertex counts and centre of gravity.
+  Counts compare exactly; volume and area use a percentage tolerance.
+- `catia_measure_topology`: face/edge/vertex counts, excluding `Selection_Wire*`
+  elements (a topology search also returns the consumed sketch's lines).
+- `catia_set_component_transform` / `catia_get_component_transform`: absolute
+  placement from a row-major 3x3 or CATIA's native 12 numbers, with read-back,
+  deviation, det and orthogonality.
+
+### Fixed
+- `Position.GetComponents` returned twelve zeros (SAFEARRAY out-param does not
+  marshal through late-bound IDispatch): `catia_move_component` erased the
+  component's rotation and `catia_list_components` reported `(0,0,0)` for every
+  component. Reads now go through `SystemService.Evaluate`.
+- `doc.Part` / `doc.Product` raised `AttributeError` on a gen_py-typed document:
+  added `connection.part_of()` / `product_of()` with a dynamic re-wrap.
+- `catia_save_document` now retries around CATIA modal dialogs and runs a
+  watchdog thread that answers `#32770` message boxes while the COM call is in
+  flight, so a blocked SaveAs no longer freezes the STA worker.
+- `catia_new_part` reports a rename refusal instead of failing the whole call.
+
+### Tests
+- `tests/test_planner_assertions.py`: assertions, plan validation, matrix
+  reporting, wireframe filtering, registration. 24 offline tests pass.
+
 ## [Unreleased]
 
 ### Changed
