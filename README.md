@@ -62,7 +62,7 @@ Details, measurements and caveats: **[`FORK.md`](FORK.md)** (Chinese).
 ## Install
 
 ```bash
-git clone https://github.com/<your-org>/catia-v5-mcp-lite.git
+git clone https://github.com/wzyn20051216/catia-v5-mcp-lite.git
 cd catia-v5-mcp-lite
 python -m venv .venv
 .venv/Scripts/pip install -e .
