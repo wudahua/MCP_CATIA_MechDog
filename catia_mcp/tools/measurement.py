@@ -10,6 +10,7 @@ import re
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
+from catia_mcp.topo_search import search_topology
 
 # CATIA V5's SPAWorkbench Measurable API returns every value in MKS units
 # (meters, m2, m3, kg.m2) regardless of the document's display units.
@@ -239,10 +240,12 @@ class MeasurementTools:
                         f"Cannot resolve '{name}': the active body has no "
                         "solid shape to enumerate topology from."
                     )
-                last_shape = body.Shapes.Item(body.Shapes.Count)
+                # Search the body itself: only it resolves to the final
+                # solid's topology (Shapes.Item(last) is the last feature's
+                # own region).
                 sel.Clear()
-                sel.Add(last_shape)
-                sel.Search(f"Topology.{kind},sel")
+                sel.Add(body)
+                search_topology(sel, kind)
                 count = sel.Count
                 if idx < 1 or idx > count:
                     raise RuntimeError(
@@ -277,10 +280,14 @@ class MeasurementTools:
         ref1 = self._resolve_reference(part, elem1_name)
         ref2 = self._resolve_reference(part, elem2_name)
 
-        # Area/Volume are MKS (field-confirmed); the minimum distance is
-        # assumed MKS too and converted to mm. Not yet field-verified.
+        # Unit split in the SPA Measurable API (field-verified 2026-10-13 on
+        # V5-6R2020 B30, zh): Volume/Area are MKS, GetCOG and
+        # GetMinimumDistance come back in the document's length unit (mm).
+        # GetMinimumDistance therefore needs NO conversion - multiplying by
+        # 1000 here used to inflate every distance 1000x (a phi80 disc cannot
+        # have two edges 2828 mm apart).
         measurable = spa.GetMeasurable(ref1)
-        distance = measurable.GetMinimumDistance(ref2) * _M_TO_MM
+        distance = measurable.GetMinimumDistance(ref2)
 
         return f"Minimum distance between '{elem1_name}' and '{elem2_name}': {distance:.4f} mm"
 
@@ -354,14 +361,15 @@ class MeasurementTools:
         body = self.conn.get_active_part_body()
         if body.Shapes.Count == 0:
             raise RuntimeError("The active body has no solid shape yet.")
-        last_shape = body.Shapes.Item(body.Shapes.Count)
 
+        # Search the body itself: only it resolves to the final solid's
+        # topology (Shapes.Item(last) is the last feature's own region).
         sel = self.conn.hso
         refs = []
         try:
             sel.Clear()
-            sel.Add(last_shape)
-            sel.Search("Topology.Vertex,sel")
+            sel.Add(body)
+            search_topology(sel, "Vertex")
             count = sel.Count
             if count == 0:
                 raise RuntimeError(

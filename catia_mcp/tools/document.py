@@ -6,6 +6,7 @@ Create, open, save, close, and list documents (Part, Product, Drawing).
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
@@ -192,13 +193,17 @@ class DocumentTools:
     def _open_document(self, file_path: str) -> str:
         self.conn.ensure_connected()
         docs = self.conn.documents
-        doc = docs.Open(file_path)
+        # CATIA's Documents.Open rejects forward-slash paths (E_FAIL);
+        # normalize to native Windows separators first.
+        doc = docs.Open(os.path.normpath(file_path))
         return f"Opened document: '{doc.Name}' from {file_path}"
 
     def _save_document(self, file_path: str | None = None) -> str:
         doc = self.conn.active_document
         if file_path:
-            doc.SaveAs(file_path)
+            # CATIA's SaveAs rejects forward-slash paths (E_FAIL);
+            # normalize to native Windows separators first.
+            doc.SaveAs(os.path.normpath(file_path))
             return f"Document saved as: {file_path}"
         else:
             doc.Save()

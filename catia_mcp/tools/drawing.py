@@ -22,6 +22,7 @@ from typing import Any
 
 from catia_mcp.connection import CATIAConnection
 from catia_mcp.tools.measurement import read_measurable_array
+from catia_mcp.topo_search import search_topology
 
 # DefineFrontView takes the two sheet-plane axis vectors expressed in the
 # 3D part's coordinate system.
@@ -647,12 +648,13 @@ class DraftingTools:
         body = part.Bodies.Item(body_name) if body_name else part.MainBody
         if body.Shapes.Count == 0:
             raise RuntimeError("The body has no solid shape to take a face from.")
-        last_shape = body.Shapes.Item(body.Shapes.Count)
+        # Search the body itself: only it resolves to the final solid's
+        # topology (Shapes.Item(last) is the last feature's own region).
         sel = part_doc.Selection
         try:
             sel.Clear()
-            sel.Add(last_shape)
-            sel.Search("Topology.Face,sel")
+            sel.Add(body)
+            search_topology(sel, "Face")
             if idx < 1 or idx > sel.Count:
                 raise RuntimeError(
                     f"{face_name} is out of range: the final shape exposes "

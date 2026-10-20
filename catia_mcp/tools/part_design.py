@@ -11,6 +11,7 @@ import re
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
+from catia_mcp.topo_search import search_topology
 
 
 class PartDesignTools:
@@ -534,7 +535,14 @@ class PartDesignTools:
         return sketches.Item(sketches.Count)
 
     def _get_last_shape(self, feature_name: str | None = None) -> Any:
-        """Get a shape/feature by name or the last one in the body."""
+        """Get a shape/feature by name, or the body's final solid.
+
+        The body itself (not ``body.Shapes.Item(last)``) is returned for the
+        no-name case: a selection search on the body enumerates the final
+        solid's topology, while ``Shapes.Item(last)`` resolves to only the
+        last feature's own region (a pocket's cut cylinders, a fillet's
+        torus, ...), not the accumulated solid.
+        """
         body = self.conn.get_active_part_body()
         shapes = body.Shapes
 
@@ -550,7 +558,7 @@ class PartDesignTools:
 
         if shapes.Count == 0:
             raise RuntimeError("No features found in the active body.")
-        return shapes.Item(shapes.Count)
+        return body
 
     def _pad(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
@@ -717,12 +725,13 @@ class PartDesignTools:
         body = self.conn.get_active_part_body()
         if body.Shapes.Count == 0:
             raise RuntimeError("The active body has no solid shape yet.")
-        last_shape = body.Shapes.Item(body.Shapes.Count)
+        # Search the body, not Shapes.Item(last): only the body resolves to
+        # the final solid's topology in a selection search.
         sel = self.conn.hso
         try:
             sel.Clear()
-            sel.Add(last_shape)
-            sel.Search(f"Topology.{kind},sel")
+            sel.Add(body)
+            search_topology(sel, kind)
             count = sel.Count
             if index < 1 or index > count:
                 raise RuntimeError(
@@ -1278,12 +1287,13 @@ class PartDesignTools:
         try:
             if body.Shapes.Count == 0:
                 return "No solid shape in the active body yet"
-            last_shape = body.Shapes.Item(body.Shapes.Count)
+            # Search the body itself: only it resolves to the final solid's
+            # topology (Shapes.Item(last) is the last feature's own region).
             sel = self.conn.hso
             try:
                 sel.Clear()
-                sel.Add(last_shape)
-                sel.Search("Topology.Face,sel")
+                sel.Add(body)
+                search_topology(sel, "Face")
                 for i in range(1, sel.Count + 1):
                     faces.append({"index": i, "name": f"Face.{i}"})
             finally:
@@ -1312,7 +1322,7 @@ class PartDesignTools:
             try:
                 sel.Clear()
                 sel.Add(last_shape)
-                sel.Search("Topology.Edge,sel")
+                search_topology(sel, "Edge")
                 for i in range(1, sel.Count + 1):
                     # Canonical indexed name accepted by catia_measure_distance,
                     # catia_fillet and catia_chamfer. Raw HSO names are long

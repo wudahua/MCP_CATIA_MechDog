@@ -161,8 +161,9 @@ class ExportTools:
         if output_dir and not os.path.exists(output_dir):
             os.makedirs(output_dir, exist_ok=True)
 
-        # CATIA V5 export via SaveAs with format specification
-        doc.ExportData(file_path, FORMAT_MAP[fmt_key])
+        # CATIA V5 export via SaveAs with format specification.
+        # Normalize separators: ExportData rejects forward-slash paths (E_FAIL).
+        doc.ExportData(os.path.normpath(file_path), FORMAT_MAP[fmt_key])
 
         size_info = ""
         if os.path.exists(file_path):
@@ -193,7 +194,7 @@ class ExportTools:
             capture_format = 5
 
         viewer = self.conn.active_window.ActiveViewer
-        viewer.CaptureToFile(capture_format, file_path)
+        viewer.CaptureToFile(capture_format, os.path.normpath(file_path))
 
         return f"Screenshot saved to {file_path} ({width}x{height})"
 
