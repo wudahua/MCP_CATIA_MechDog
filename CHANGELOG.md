@@ -38,7 +38,12 @@ See `README.md` for the diff table and `FORK.md` for measurements.
 
 ### Tests
 - `tests/test_planner_assertions.py`: assertions, plan validation, matrix
-  reporting, wireframe filtering, registration. 24 offline tests pass.
+  reporting, wireframe filtering, registration. 34 offline tests pass.
+- `tests/test_http_transport.py`: HTTP clients now pass `trust_env=False`. With a
+  system `HTTP_PROXY` set, httpx sent an absolute-form request line, uvicorn put
+  the whole URI into `scope["path"]`, and the server 404'd a correct request.
+  The test failed on any machine with a proxy (upstream included); the suite is
+  now independent of the environment. No server code changed.
 
 ## [Unreleased]
 

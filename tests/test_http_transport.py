@@ -8,11 +8,20 @@ import pytest
 import uvicorn
 from mcp import ClientSession
 
+# Every client below passes trust_env=False. These tests talk to a loopback
+# uvicorn instance, so a system HTTP_PROXY must not be obeyed: httpx would send
+# an absolute-form request line ("POST http://127.0.0.1:PORT/mcp"), uvicorn puts
+# that whole URI into scope["path"], and the server then 404s a request whose
+# path is in fact correct. Without this the suite goes red on any machine that
+# exports a proxy - which says nothing about the code under test.
+
 try:  # mcp >= 1.28 renamed the client and takes an httpx client
     from mcp.client.streamable_http import streamable_http_client
 
     def open_client(url, headers):
-        return streamable_http_client(url, http_client=httpx.AsyncClient(headers=headers))
+        return streamable_http_client(
+            url, http_client=httpx.AsyncClient(headers=headers, trust_env=False)
+        )
 
 except ImportError:  # pragma: no cover - older SDKs
     from mcp.client.streamable_http import streamablehttp_client
@@ -74,7 +83,7 @@ async def _with_server(token, body):
 
 def test_missing_or_wrong_token_is_rejected():
     async def body(url, _):
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(trust_env=False) as client:
             for headers in ({}, {"Authorization": "Bearer wrong-token-0123456789"}):
                 response = await client.post(url, json={}, headers=headers)
                 assert response.status_code == 401
@@ -97,7 +106,8 @@ def test_authenticated_client_lists_tools_and_gets_structured_errors(monkeypatch
         ):
             await session.initialize()
             tools = await session.list_tools()
-            assert len(tools.tools) == 98
+            # Lite fork: 86 (see test_server_runtime for the arithmetic).
+            assert len(tools.tools) == 86
             result = await session.call_tool("catia_list_documents", {})
             assert result.isError is True
             assert result.structuredContent["code"] == "COM_ERROR"
@@ -110,7 +120,7 @@ def test_authenticated_client_lists_tools_and_gets_structured_errors(monkeypatch
 
 def test_loopback_without_token_rejects_foreign_host_header():
     async def body(url, _):
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(trust_env=False) as client:
             response = await client.post(
                 url,
                 json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
