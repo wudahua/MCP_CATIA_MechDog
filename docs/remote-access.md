@@ -60,7 +60,7 @@ claude mcp add --transport http catia-v5 http://HOST:8765/mcp \
 ```json
 {
   "mcpServers": {
-    "catia-v5": {
+    "catia-v5-lite": {
       "url": "http://HOST:8765/mcp",
       "headers": { "Authorization": "Bearer YOUR_TOKEN" }
     }
@@ -73,7 +73,7 @@ claude mcp add --transport http catia-v5 http://HOST:8765/mcp \
 ```json
 {
   "servers": {
-    "catia-v5": {
+    "catia-v5-lite": {
       "type": "http",
       "url": "http://HOST:8765/mcp",
       "headers": { "Authorization": "Bearer YOUR_TOKEN" }
@@ -88,7 +88,7 @@ so it goes through the `mcp-remote` bridge (needs Node.js on the Mac):
 ```json
 {
   "mcpServers": {
-    "catia-v5": {
+    "catia-v5-lite": {
       "command": "npx",
       "args": [
         "mcp-remote", "http://HOST:8765/mcp",
