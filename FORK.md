@@ -176,7 +176,7 @@ Vertex 12 -> {'Selection_WireFVertex': 4, 'Selection_FVertex': 8}
 ## 5. 安装与接入
 
 ```bash
-cd "F:/WorkBuddy Space/MCP catia-v5-lite"
+cd /path/to/catia-v5-mcp-lite
 
 # 独立 venv（推荐，别和上游共用，否则两个 catia_mcp 包会互相盖）
 python -m venv .venv
@@ -188,7 +188,7 @@ python -m venv .venv
 
 ```bash
 .venv/Scripts/python -m pytest tests/test_planner_assertions.py tests/test_server_runtime.py -q
-# 24 passed
+# 72 passed
 ```
 
 MCP 客户端配置：
@@ -197,7 +197,7 @@ MCP 客户端配置：
 {
   "mcpServers": {
     "catia-v5-lite": {
-      "command": "F:\\WorkBuddy Space\\MCP catia-v5-lite\\.venv\\Scripts\\catia-mcp.exe"
+      "command": "<path to this repo>\\.venv\\Scripts\\catia-mcp.exe"
     }
   }
 }
@@ -209,9 +209,9 @@ MCP 客户端配置：
 {
   "mcpServers": {
     "catia-v5-lite": {
-      "command": "F:\\WorkBuddy Space\\MCP catia-v5-mcp-server\\.venv\\Scripts\\python.exe",
+      "command": "<path to upstream>\\.venv\\Scripts\\python.exe",
       "args": ["-m", "catia_mcp"],
-      "env": { "PYTHONPATH": "F:\\WorkBuddy Space\\MCP catia-v5-lite" }
+      "env": { "PYTHONPATH": "<path to this repo>" }
     }
   }
 }

@@ -49,7 +49,7 @@
 4. 回到本地：
 
 ```bash
-cd "F:/WorkBuddy Space/MCP catia-v5-lite"
+cd /path/to/catia-v5-mcp-lite
 git push -u origin main --force
 ```
 
@@ -63,7 +63,7 @@ git push -u origin main --force
 3. 本地：
 
 ```bash
-cd "F:/WorkBuddy Space/MCP catia-v5-lite"
+cd /path/to/catia-v5-mcp-lite
 git push -u origin main
 ```
 
@@ -87,7 +87,7 @@ git push -u origin main
 git status --short                 # 干净
 git ls-files | wc -l               # 50
 git ls-files | grep -c '^\.venv/'  # 0，没有 .venv 被提交
-python -m pytest tests -q          # 34 passed
+python -m pytest tests test_server.py -q  # 72 passed
 ```
 
 工具数：GSD 24 + PartDesign 18 + Sketcher 11 + Assembly 11 + Document 9 +
