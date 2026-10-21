@@ -33,7 +33,7 @@ https://api.github.com/users/wudahua                        → 200   （账号�
 | CI 命令 | 与 `.github/workflows/ci.yml` 完全一致，同上 |
 | 工具数 | **87**，与 README / CHANGELOG / 测试断言三处一致 |
 
-### 这次审计修掉的两个问题
+### 这次审计修掉的三个问题
 
 **1. `test_server.py` 会让 CI 第一次就红（阻塞项）**
 
@@ -53,30 +53,51 @@ planner 模块（否则工具数对不上），顺带把两个 `return int` 改�
 MCP 客户端配置示例和安装步骤里写着 `F:\WorkBuddy Space\MCP catia-v5-lite\...`。
 不是密钥，但对读者毫无意义，也暴露了本机目录结构。已全部换成 `<path to this repo>`。
 
+**3. 这是一个 shallow clone（阻塞项，决定"fork 还是新建"时才查出来）**
+
+`.git/shallow` 里有两个边界提交 —— 历史是被截断的，本地只有 125 个提交。
+后果：`git merge-base` 和上游算不出共同祖先，推送时 Git 无法证明历史连通，
+推上去也可能是残缺历史。
+
+已用 `git fetch --unshallow upstream` 补全，现在是完整的 **188 个提交**，
+`git fsck --connectivity-only` 干净（只有一个 filter-branch 留下的 dangling blob，无害）。
+
+这一条之前几轮审计都没发现，因为只看 `git status` 和文件清单看不出浅克隆。
+
 ---
 
 ## 二、只剩这一步要你做
 
 ### 建仓库并推送
 
-选一种：
+两条路的实测差异（2026-10-22 查证，历史已从 shallow 补全）：
 
-**A. 真 fork**（推荐）—— 想继续跟上游同步、想给上游提 PR
-
-1. 打开 https://github.com/daiemon12/catia-v5-mcp-server
-2. 右上角 **Fork** → owner 选 `wudahua` → Create fork
-3. 建好后进你 fork 的仓库 → Settings → 把仓库名改成 `MCP_CATIA_MechDog`（fork 关系会保留）
-4. 回到本地：
-
-```bash
-cd /path/to/MCP_CATIA_MechDog
-git push -u origin main --force
+```
+上游 main              176 个提交，HEAD = 8d84073
+本地 main              188 个提交，HEAD = e388e15
+共同分叉点             feb9c38
+本地领先上游           14 个提交
+本地落后上游            2 个提交（都是 chore(traffic) 自动提交，正是本 fork 删掉的功能）
+本地是否包含 upstream/main   否   →  推到 fork 必须 --force
 ```
 
-`--force` 是必须的：上游那 113 个提交的 SHA 你这边是原样的，但 Fork 出来的仓库
-默认在同样的提交上，本地多了 9 个改写过的提交，历史不一致，普通 push 会被拒。
+**推荐 B：新建空仓库。**
 
-**B. 独立仓库** —— 打算彻底分道，或要私有
+1. 本地不含 `upstream/main`（落后那 2 个 traffic 提交），fork 之后必须 `--force` 去覆盖
+   fork 的默认分支。那 2 个提交本身是垃圾，但为了推上去还得强推一次。
+2. 项目已经叫 `MCP_CATIA_MechDog`，定位是独立产品线。挂在
+   "forked from daiemon12/catia-v5-mcp-server" 下面、头上还长期顶着 "2 commits behind"，
+   和这个定位不符。
+3. 免费账号的 fork 不能设为 private。
+4. 空仓库 push 没有任何历史约束，一次成功。
+
+fork 更适合这些场景：打算长期高频跟随上游（比如每周 merge）、需要 GitHub 那个
+"Sync fork" 按钮、或者就是想把"这是上游衍生"写在脸上。它真正的优势是同步顺手，
+而当前的取舍（删 16 个工具、改 5 处核心行为）已经离上游挺远了。
+
+两条路都不影响给上游提 PR —— 历史共享分叉点 `feb9c38`，GitHub 认得出共同祖先。
+
+**B. 新建空仓库（推荐）**
 
 1. https://github.com/new → Repository name 填 `MCP_CATIA_MechDog`
 2. **不要**勾 "Add a README file"、不要加 .gitignore、不要选 license（否则会有初始提交，push 冲突）
@@ -86,6 +107,20 @@ git push -u origin main --force
 cd /path/to/MCP_CATIA_MechDog
 git push -u origin main
 ```
+
+**A. Fork 上游** —— 想长期跟随上游更新
+
+1. 打开 https://github.com/daiemon12/catia-v5-mcp-server → 右上角 **Fork** → owner 选 `wudahua`
+2. 建好后进仓库 → Settings → 把仓库名改成 `MCP_CATIA_MechDog`（fork 关系会保留）
+3. 本地：
+
+```bash
+cd /path/to/MCP_CATIA_MechDog
+git push -u origin main --force
+```
+
+`--force` 是必须的：fork 的 main 停在上游 `8d84073`，本地 main 从分叉点 `feb9c38`
+起领先 14 个提交、缺那 2 个 traffic 提交，普通 push 会被判 non-fast-forward。
 
 > push 会弹凭据窗口。账号 `wudahua`，密码位置填 **Personal Access Token**（GitHub 早已
 > 不接受账号密码）。没有 token 就去 Settings → Developer settings → Personal access
