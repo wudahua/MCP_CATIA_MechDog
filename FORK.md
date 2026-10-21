@@ -103,7 +103,7 @@ P05_CylinderCap position_components =
 {
   "steps": [
     {"tool": "catia_new_part",              "args": {}},
-    {"tool": "catia_create_sketch",         "args": {"plane": "XY"}},
+    {"tool": "catia_create_sketch",         "args": {"plane": "xy"}},
     {"tool": "catia_sketch_rectangle",      "args": {"x1": -20, "y1": -10, "x2": 20, "y2": 10}},
     {"tool": "catia_close_sketch",          "args": {}},
     {"tool": "catia_pad",                   "args": {"height": 10, "direction": "normal"}}

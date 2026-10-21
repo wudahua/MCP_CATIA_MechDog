@@ -10,6 +10,7 @@ import json
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
+from catia_mcp.topo_search import topology_reference
 
 # Plane name mapping
 PLANE_MAP = {
@@ -33,18 +34,74 @@ class SketcherTools:
             {
                 "name": "catia_create_sketch",
                 "description": (
-                    "Create a new 2D sketch on a reference plane (xy, yz, or zx). "
-                    "The sketch is opened for editing. You must close it with catia_close_sketch "
-                    "before creating 3D features."
+                    "Create a new 2D sketch and open it for editing. The support "
+                    "is a main datum plane ('xy', 'yz', 'zx'), optionally offset "
+                    "along its normal, or a planar face of the solid that already "
+                    "exists. Close the sketch with catia_close_sketch before "
+                    "creating 3D features."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "plane": {
-                            "type": "string",
-                            "description": "Reference plane: 'xy' (front), 'yz' (right), 'zx' (top)",
-                            "enum": ["xy", "yz", "zx"],
+                            "description": (
+                                "Sketch support. Either a main plane name "
+                                "('xy' front, 'yz' right, 'zx' top) together with "
+                                "the flat 'offset', or one of "
+                                "{'type': 'offset', 'base': 'xy', 'distance': 40} "
+                                "and {'type': 'face', 'index': 3}. Use the "
+                                "offset form for any face parallel to a main "
+                                "plane - a spec that says 'on the z=530 face' is "
+                                "plane='xy' with offset=530, and its sketch "
+                                "coordinates are then the global ones. Use the "
+                                "face form only for a face that is not parallel "
+                                "to a main plane, or when the sketch must stay "
+                                "attached to the solid and follow it; 'index' is "
+                                "a 1-based Face.N from catia_list_faces, and the "
+                                "coordinates you draw are in that face's own "
+                                "frame, which cannot be read back - a wrong "
+                                "guess cuts nothing rather than failing."
+                            ),
+                            "oneOf": [
+                                {
+                                    "type": "string",
+                                    "enum": ["xy", "yz", "zx"],
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": {
+                                            "type": "string",
+                                            "enum": ["offset", "face"],
+                                        },
+                                        "base": {
+                                            "type": "string",
+                                            "enum": ["xy", "yz", "zx"],
+                                            "description": "For type='offset': the plane to offset from. Default 'xy'.",
+                                        },
+                                        "distance": {
+                                            "type": "number",
+                                            "description": "For type='offset': mm along the base plane normal. Negative goes the other way.",
+                                        },
+                                        "index": {
+                                            "type": "integer",
+                                            "description": "For type='face': 1-based Face.N from catia_list_faces.",
+                                        },
+                                    },
+                                    "required": ["type"],
+                                },
+                            ],
                             "default": "xy",
+                        },
+                        "offset": {
+                            "type": "number",
+                            "description": (
+                                "Offset from that plane along its normal, in mm. "
+                                "Negative goes the opposite way. This is how a feature "
+                                "at z=362.5 on an xy sketch is placed: plane='xy', "
+                                "offset=362.5. Omit for the plane itself. Ignored "
+                                "when 'plane' is an object."
+                            ),
                         },
                     },
                 },
@@ -64,7 +121,9 @@ class SketcherTools:
                 "name": "catia_sketch_line",
                 "description": (
                     "Draw a line in the active sketch from (x1, y1) to (x2, y2). "
-                    "Coordinates in mm."
+                    "Coordinates in mm. Set construction=true to make it a "
+                    "construction line - needed for a revolution axis, or any "
+                    "reference geometry that must not become part of the profile."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -73,6 +132,14 @@ class SketcherTools:
                         "y1": {"type": "number", "description": "Start Y coordinate (mm)"},
                         "x2": {"type": "number", "description": "End X coordinate (mm)"},
                         "y2": {"type": "number", "description": "End Y coordinate (mm)"},
+                        "construction": {
+                            "type": "boolean",
+                            "description": (
+                                "Draw as construction geometry (excluded from the "
+                                "profile). Default false."
+                            ),
+                            "default": False,
+                        },
                     },
                     "required": ["x1", "y1", "x2", "y2"],
                 },
@@ -231,13 +298,16 @@ class SketcherTools:
     def execute(self, tool_name: str, arguments: dict[str, Any]) -> str:
         match tool_name:
             case "catia_create_sketch":
-                return self._create_sketch(arguments.get("plane", "xy"))
+                return self._create_sketch(
+                    arguments.get("plane", "xy"), arguments.get("offset")
+                )
             case "catia_close_sketch":
                 return self._close_sketch()
             case "catia_sketch_line":
                 return self._draw_line(
                     arguments["x1"], arguments["y1"],
                     arguments["x2"], arguments["y2"],
+                    arguments.get("construction", False),
                 )
             case "catia_sketch_rectangle":
                 return self._draw_rectangle(
@@ -278,20 +348,115 @@ class SketcherTools:
                 "No active sketch. Use catia_create_sketch first to open a sketch."
             )
 
-    def _create_sketch(self, plane: str = "xy") -> str:
+    def _reference_plane(self, part: Any, body: Any, plane_key: str,
+                         offset: float | None) -> Any:
+        """Reference to the sketch support: a main plane, or one offset from it.
+
+        The offset plane is inserted into the body, not into a geometrical set:
+        AddNewPad refuses a sketch whose support lives outside the body (E_FAIL
+        from the factory), which is not an error message that points anywhere
+        useful. Without offsets at all, every feature that sits at z=0 can be
+        modelled and nothing else can - which is the wall a spec like a cylinder
+        with a counterbore at z=352.5 hits immediately.
+        """
+        origin = part.OriginElements
+        ref = part.CreateReferenceFromObject(getattr(origin, PLANE_MAP[plane_key]))
+        if offset is None or abs(offset) < 1e-9:
+            return ref
+
+        factory = part.HybridShapeFactory
+        # Negative offsets go the other way along the plane normal.
+        plane = factory.AddNewPlaneOffset(ref, abs(offset), offset < 0)
+        plane.Name = f"Datum_{plane_key}_{offset:g}"
+        body.InsertHybridShape(plane)
+        part.UpdateObject(plane)
+        return part.CreateReferenceFromObject(plane)
+
+    _PLANE_LABELS = {"xy": "XY (front)", "yz": "YZ (right)", "zx": "ZX (top)"}
+
+    def _describe_plane(self, plane_key: str, offset: float | None) -> str:
+        where = self._PLANE_LABELS.get(plane_key, plane_key)
+        if offset is not None and abs(offset) > 1e-9:
+            where += f" offset {offset:g} mm"
+        return where
+
+    def _resolve_support(self, part: Any, body: Any, plane: Any,
+                         offset: float | None) -> tuple[Any, str]:
+        """Turn the `plane` argument into (reference, human description).
+
+        Two shapes are accepted, because two different needs show up in a
+        spec: 'on the z=530 face' is really an offset from xy (robust, and the
+        sketch survives a rebuild), while a face that is not parallel to a
+        main plane can only be reached through the solid's own topology.
+        """
+        if isinstance(plane, str):
+            key = plane.lower()
+            if key not in PLANE_MAP:
+                raise ValueError(f"Unknown plane '{plane}'. Use 'xy', 'yz', or 'zx'.")
+            return (
+                self._reference_plane(part, body, key, offset),
+                self._describe_plane(key, offset),
+            )
+
+        if not isinstance(plane, dict):
+            raise ValueError(
+                "plane must be 'xy'/'yz'/'zx' or an object with a 'type' of "
+                f"'offset' or 'face', got {type(plane).__name__}."
+            )
+
+        kind = str(plane.get("type", "")).strip().lower()
+
+        if kind == "face":
+            index = plane.get("index")
+            if isinstance(index, bool) or not isinstance(index, int):
+                raise ValueError(
+                    "plane of type 'face' needs an integer 'index' - a 1-based "
+                    "Face.N from catia_list_faces. The face order is CATIA's "
+                    "own, so read the list before choosing."
+                )
+            found = topology_reference(
+                self.conn, body, "Face", index,
+                hint="Call catia_list_faces on this body and pick one of its indices.",
+            )
+            # Coordinates drawn on a face are in that face's own frame, and the
+            # frame cannot be read back through automation (measuring the
+            # 2D axis origin fails). Say so, because a wrong guess does not
+            # error - the pocket simply removes nothing.
+            return found.reference, (
+                f"Face.{index} of the solid (sketch coordinates are in that "
+                "face's own frame, not global - prefer the offset form when the "
+                "face is parallel to a datum plane)"
+            )
+
+        if kind == "offset":
+            base = str(plane.get("base", "xy")).strip().lower()
+            if base not in PLANE_MAP:
+                raise ValueError(
+                    f"Unknown offset base '{plane.get('base')}'. Use 'xy', 'yz', or 'zx'."
+                )
+            distance = plane.get("distance", plane.get("offset", 0))
+            if isinstance(distance, bool) or not isinstance(distance, (int, float)):
+                raise ValueError(
+                    "plane of type 'offset' needs a numeric 'distance' in mm "
+                    f"(it may be negative), got {distance!r}."
+                )
+            distance = float(distance)
+            return (
+                self._reference_plane(part, body, base, distance),
+                self._describe_plane(base, distance),
+            )
+
+        raise ValueError(
+            f"Unknown plane type {plane.get('type')!r}. Use 'offset', 'face', or "
+            "pass plane='xy' | 'yz' | 'zx'."
+        )
+
+    def _create_sketch(self, plane: Any = "xy", offset: float | None = None) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
         body = self.conn.get_active_part_body()
 
-        # Get the reference plane
-        origin = part.OriginElements
-        plane_key = plane.lower()
-        if plane_key not in PLANE_MAP:
-            raise ValueError(f"Unknown plane '{plane}'. Use 'xy', 'yz', or 'zx'.")
-
-        plane_attr = PLANE_MAP[plane_key]
-        ref_plane = getattr(origin, plane_attr)
-        ref = part.CreateReferenceFromObject(ref_plane)
+        ref, where = self._resolve_support(part, body, plane, offset)
 
         # Create the sketch on the plane
         sketches = body.Sketches
@@ -302,8 +467,7 @@ class SketcherTools:
         self._sketch_part = part
         self._active_factory = sketch.OpenEdition()
 
-        plane_names = {"xy": "XY (front)", "yz": "YZ (right)", "zx": "ZX (top)"}
-        return f"Sketch created on {plane_names.get(plane_key, plane)} plane. Ready for geometry."
+        return f"Sketch '{sketch.Name}' created on {where}. Ready for geometry."
 
     def _close_sketch(self) -> str:
         if self._active_sketch is None:
@@ -338,11 +502,15 @@ class SketcherTools:
             "(pad, pocket, user pattern on its points, etc.)."
         )
 
-    def _draw_line(self, x1: float, y1: float, x2: float, y2: float) -> str:
+    def _draw_line(self, x1: float, y1: float, x2: float, y2: float,
+                   construction: bool = False) -> str:
         self._ensure_sketch_open()
         factory = self._active_factory
         line = factory.CreateLine(x1, y1, x2, y2)
-        return f"Line created from ({x1}, {y1}) to ({x2}, {y2}) mm"
+        if construction:
+            line.Construction = True
+        kind = "Construction line" if construction else "Line"
+        return f"{kind} created from ({x1}, {y1}) to ({x2}, {y2}) mm"
 
     def _draw_rectangle(self, x1: float, y1: float, x2: float, y2: float) -> str:
         self._ensure_sketch_open()

@@ -41,12 +41,26 @@ are domain-neutral and cheap. See `FORK.md` §8 if you want to cut further.
 | `doc.Part` / `doc.Product` raise `AttributeError: <unknown>.Part` on a gen_py-typed document | `catia_new_part` and every measurement failed depending on cache state |
 | `SaveAs` leaves a modal dialog open, freezing the serial STA worker | Documented upstream as a runtime *limit* ("close the dialog yourself") — but the worker thread that would close it is the blocked one |
 | `Topology.Edge` on a body also returns the consumed sketch's lines | A 40×20×10 box counted **16 edges / 12 vertices** instead of 12 / 8 |
+| `catia_shaft` / `catia_groove` called `AddNewShaft(sketch)` and assigned `FirstAngle = angle` | The feature could never be updated (E_FAIL), so **no turned part could be built at all** — piston, cylinder-head cover and front cover had no other route |
+| `catia_hole` with a finite depth reported success while cutting nothing | The depth is stored on `BottomLimit` but not applied on B30; the tree carried a dead feature that poisoned every later measurement |
 
 The fixes: reads go through `SystemService.Evaluate` (the same route that fixed
 `GetCOG` upstream in 0.2.2); `connection.part_of()` retries via
 `dynamic.Dispatch`; `dialogs.py` removes a pre-existing target, retries, and runs
 a watchdog thread that answers `#32770` message boxes **while the COM call is in
-flight**; topology counts filter `Selection_Wire*` elements.
+flight**; topology counts filter `Selection_Wire*` elements. Revolution now goes
+through `AddNewShaftFromRef` + `SetProfileElement` + `RevoluteAxis` with
+`FirstAngle.Value`, and every cut is measured before it is reported.
+
+### Modelling a written spec: the four arguments that were missing
+
+| Argument | Why a spec needs it |
+|---|---|
+| `catia_create_sketch` → `offset`, or `{"type": "offset", "base", "distance"}` | A spec says "on the z=530 face". Only three datum planes existed, so most features of a real part could not be placed. The offset plane is inserted **into the body** — `AddNewPad` rejects a sketch whose support lives in a geometrical set |
+| `catia_create_sketch` → `{"type": "face", "index"}` | For a face that is not parallel to a datum plane. Sketches on a face use **that face's own coordinate frame**, which cannot be read back through automation — prefer the offset form whenever the face is axis-aligned |
+| `catia_sketch_line` → `construction` | A revolution axis or reference geometry that must not join the profile |
+| `catia_pocket` / `catia_hole` → `through_all` | CATIA's "up to last": the cut finds its own extent instead of you guessing a depth taller than the part |
+| `catia_shaft` / `catia_groove` → `axis` (`horizontal`/`vertical`) | Which of the sketch's two absolute axes to revolve about. A construction line is accepted by the property setter and then rejected at update time, so it is not offered |
 
 Details, measurements and caveats: **[`FORK.md`](FORK.md)** (Chinese).
 
@@ -97,7 +111,7 @@ A plan is data, not conversation. This one builds a 40×20×10 block and proves 
 {
   "steps": [
     {"tool": "catia_new_part",         "args": {}},
-    {"tool": "catia_create_sketch",    "args": {"plane": "XY"}},
+    {"tool": "catia_create_sketch",    "args": {"plane": "xy"}},
     {"tool": "catia_sketch_rectangle", "args": {"x1": -20, "y1": -10, "x2": 20, "y2": 10}},
     {"tool": "catia_close_sketch",     "args": {}},
     {"tool": "catia_pad",              "args": {"height": 10, "direction": "normal"}}

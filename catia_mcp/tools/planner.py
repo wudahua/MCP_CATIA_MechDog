@@ -54,12 +54,14 @@ class PlannerTools:
                 ),
                 "inputSchema": {
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "steps": {
                             "type": "array",
                             "description": "Ordered steps; each is {tool, args, id?}",
                             "items": {
                                 "type": "object",
+                                "additionalProperties": False,
                                 "properties": {
                                     "tool": {"type": "string"},
                                     "args": {"type": "object"},
@@ -74,6 +76,7 @@ class PlannerTools:
                         "expect": {
                             "type": "object",
                             "description": "Assertions measured after the last step",
+                            "additionalProperties": False,
                             "properties": {
                                 "volume_mm3": {"type": "number"},
                                 "volume_tolerance_pct": {"type": "number", "default": 1.0},

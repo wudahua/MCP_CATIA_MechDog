@@ -189,3 +189,28 @@ def test_planner_tools_are_registered_in_the_server():
     # The dropped modules must not linger in the router.
     assert not {"catia_drawing_add_view", "catia_create_parameter"} & names
     assert len(json.dumps(list(names))) > 0
+
+
+def test_plan_rejects_keys_it_would_silently_ignore():
+    """A typo must not turn verification off.
+
+    `assertions` instead of `expect`, or `volume` instead of `volume_mm3`, used
+    to validate and then be ignored - the plan reported PLAN_OK with an empty
+    assertion list, which is the worst possible answer from a tool whose point
+    is verification.
+    """
+    from jsonschema import ValidationError, validate
+
+    from catia_mcp.server import CATIAMCPServer
+
+    schema = CATIAMCPServer()._schemas["catia_run_plan"]
+    for plan in (
+        {"steps": [{"tool": "catia_new_part"}], "assertions": {"volume_mm3": 1}},
+        {"steps": [{"tool": "catia_new_part"}], "expect": {"volume": 1}},
+        {"steps": [{"tool": "catia_new_part", "arg": {}}]},
+    ):
+        try:
+            validate(plan, schema)
+        except ValidationError:
+            continue
+        raise AssertionError(f"schema accepted a key it ignores: {plan}")

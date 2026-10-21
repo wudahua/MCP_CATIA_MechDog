@@ -23,8 +23,47 @@ See `README.md` for the diff table and `FORK.md` for measurements.
 - `catia_set_component_transform` / `catia_get_component_transform`: absolute
   placement from a row-major 3x3 or CATIA's native 12 numbers, with read-back,
   deviation, det and orthogonality.
+- `catia_create_sketch` takes `offset` (mm along the plane normal, negative
+  allowed), or `plane` as an object: `{"type": "offset", "base", "distance"}`
+  and `{"type": "face", "index"}`. The datum plane is inserted into the
+  PartBody, because `AddNewPad` rejects a sketch whose support lives in a
+  geometrical set. A sketch on a solid face uses that face's own coordinate
+  frame, which automation cannot read back (measuring the 2D axis origin fails,
+  and `Measurable.GetPlane` fails on a solid face), so the reply says so - a
+  wrong guess removes no material rather than raising.
+- `catia_sketch_line` takes `construction`: a revolution axis or reference
+  geometry that must not join the profile.
+- `catia_pocket` / `catia_hole` take `through_all` (CATIA "up to last"), so a
+  hole no longer depends on guessing a depth taller than the part.
+- `catia_shaft` / `catia_groove` take `axis` (`horizontal` | `vertical`). Only
+  the sketch's own axes work; a construction-line reference is accepted by the
+  property setter and then rejected at update time.
 
 ### Fixed
+- `catia_shaft` / `catia_groove` never produced a solid: they called
+  `AddNewShaft(sketch)` and assigned `FirstAngle = angle`. The feature object it
+  returns cannot be updated (E_FAIL), `FirstAngle` is an object with a `.Value`
+  rather than a number, and the profile and axis must be set explicitly. Now
+  uses `AddNewShaftFromRef` + `SetProfileElement` + `RevoluteAxis`; verified on
+  V5-6R2020 B30 at 0.000% volume deviation on a six-segment profile.
+  This is what blocked every turned part in the cylinder spec - piston,
+  cylinder-head cover and front cover had no other route.
+- `catia_hole` with a finite depth cut nothing on V5-6R2020 B30: the depth is
+  stored on `BottomLimit` but not applied. It used to report success with an
+  unchanged volume. The call now measures the result, rolls the feature back and
+  explains, instead of leaving a dead feature in the tree.
+- `catia_pocket` returned a raw E_FAIL from `UpdateObject` when a through-all cut
+  was attempted from a sketch on a face CATIA will not cut from (measured: the
+  bottom face of a plain box). The feature is now rolled back and the error says
+  to use a datum plane with an offset.
+- `Topology` index resolution moved to `topo_search.topology_reference` so the
+  sketcher and every face/edge tool share one rule; `catia_list_faces` and the
+  fillet path are unchanged.
+- `catia_run_plan` silently ignored misspelled keys: `assertions` instead of
+  `expect`, `volume` instead of `volume_mm3`, `arg` instead of `args` all
+  validated fine and were dropped, so the plan answered `PLAN_OK` with an empty
+  assertion list. `additionalProperties: false` on the plan, its steps and its
+  `expect` object turns those into `INVALID_ARGUMENT`.
 - `Position.GetComponents` returned twelve zeros (SAFEARRAY out-param does not
   marshal through late-bound IDispatch): `catia_move_component` erased the
   component's rotation and `catia_list_components` reported `(0,0,0)` for every
@@ -38,12 +77,18 @@ See `README.md` for the diff table and `FORK.md` for measurements.
 
 ### Tests
 - `tests/test_planner_assertions.py`: assertions, plan validation, matrix
-  reporting, wireframe filtering, registration. 34 offline tests pass.
+  reporting, wireframe filtering, registration.
+- `tests/test_modelling_gaps.py`: 26 tests locking the arguments that a written
+  spec needs (`offset`, both `plane` object forms, `construction`, `through_all`,
+  `axis`), the absolute-axis lookup by index rather than the localized name, and
+  the sketch-support resolver. Subtracting `depth` from `required` is asserted
+  too, since a schema that still demands it makes `through_all` unreachable.
 - `tests/test_http_transport.py`: HTTP clients now pass `trust_env=False`. With a
   system `HTTP_PROXY` set, httpx sent an absolute-form request line, uvicorn put
   the whole URI into `scope["path"]`, and the server 404'd a correct request.
   The test failed on any machine with a proxy (upstream included); the suite is
   now independent of the environment. No server code changed.
+- **61 offline tests** in total, none of which start CATIA.
 
 ## [Unreleased]
 

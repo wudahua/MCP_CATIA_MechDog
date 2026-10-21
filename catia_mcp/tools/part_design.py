@@ -11,7 +11,7 @@ import re
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
-from catia_mcp.topo_search import search_topology
+from catia_mcp.topo_search import search_topology, topology_reference
 
 
 class PartDesignTools:
@@ -57,15 +57,25 @@ class PartDesignTools:
             {
                 "name": "catia_pocket",
                 "description": (
-                    "Create a Pocket (cut extrusion) from the last sketch. "
-                    "Removes material by extruding a 2D profile inward."
+                    "Create a Pocket (cut extrusion) from a sketch. Removes material "
+                    "by extruding a 2D profile into the solid. Give either `depth` or "
+                    "`through_all`. This is also the tool for a plain cylindrical hole: "
+                    "sketch a circle and cut it."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "depth": {
                             "type": "number",
-                            "description": "Cut depth in mm",
+                            "description": "Cut depth in mm. Omit when through_all is true.",
+                        },
+                        "through_all": {
+                            "type": "boolean",
+                            "description": (
+                                "Cut through the whole solid (CATIA 'up to last'), "
+                                "whatever its thickness. Ignored if depth is given."
+                            ),
+                            "default": False,
                         },
                         "direction": {
                             "type": "string",
@@ -78,15 +88,16 @@ class PartDesignTools:
                             "description": "Name of sketch to use. If not specified, uses the last sketch.",
                         },
                     },
-                    "required": ["depth"],
                 },
             },
             {
                 "name": "catia_shaft",
                 "description": (
-                    "Create a Shaft (revolution) from the last sketch. "
-                    "Revolves a 2D profile around an axis to create a solid of revolution. "
-                    "The sketch must contain a line to use as the revolution axis."
+                    "Create a Shaft (solid of revolution) from a sketch. "
+                    "The profile must be a closed contour; it is revolved about one "
+                    "of the sketch's axes (see `axis`). Use this for stepped shafts, "
+                    "pistons, covers - anything whose cross-section is a polygon "
+                    "turned 360 degrees, which Pad cannot produce."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -95,6 +106,19 @@ class PartDesignTools:
                             "type": "number",
                             "description": "Revolution angle in degrees (default: 360 for full revolution)",
                             "default": 360,
+                        },
+                        "axis": {
+                            "type": "string",
+                            "enum": ["horizontal", "vertical"],
+                            "description": (
+                                "Axis to revolve about. 'horizontal' (default) revolves "
+                                "about the sketch's H axis (u axis, v=0) and suits a "
+                                "profile drawn above it with x = axial, y = radius. "
+                                "'vertical' uses the V axis (v axis, u=0). Only the "
+                                "sketch's own axes work: CATIA rejects a reference to a "
+                                "construction line here (verified)."
+                            ),
+                            "default": "horizontal",
                         },
                         "sketch_name": {
                             "type": "string",
@@ -106,8 +130,9 @@ class PartDesignTools:
             {
                 "name": "catia_groove",
                 "description": (
-                    "Create a Groove (revolution cut). "
-                    "Removes material by revolving a 2D profile around an axis."
+                    "Create a Groove (revolution cut), e.g. a piston ring groove. "
+                    "Removes material by revolving a closed profile about one of the "
+                    "sketch's axes (see `axis`)."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -116,6 +141,15 @@ class PartDesignTools:
                             "type": "number",
                             "description": "Revolution angle in degrees (default: 360)",
                             "default": 360,
+                        },
+                        "axis": {
+                            "type": "string",
+                            "enum": ["horizontal", "vertical"],
+                            "description": (
+                                "Axis to revolve about: 'horizontal' (default) or "
+                                "'vertical' - the sketch's own H or V axis."
+                            ),
+                            "default": "horizontal",
                         },
                         "sketch_name": {
                             "type": "string",
@@ -176,7 +210,10 @@ class PartDesignTools:
                 "name": "catia_hole",
                 "description": (
                     "Create a Hole feature at a point in the active sketch. "
-                    "Supports simple, tapered, counterbored, and countersunk holes."
+                    "Supports simple, tapered, counterbored, and countersunk holes. "
+                    "Give either `depth` or `through_all`. Note: on V5-6R2020 B30 a "
+                    "finite depth does not cut through automation (verified), so for a "
+                    "blind cylindrical hole prefer catia_pocket with a circle sketch."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -187,7 +224,16 @@ class PartDesignTools:
                         },
                         "depth": {
                             "type": "number",
-                            "description": "Hole depth in mm",
+                            "description": "Hole depth in mm. Omit when through_all is true.",
+                        },
+                        "through_all": {
+                            "type": "boolean",
+                            "description": (
+                                "Drill through the whole solid (CATIA 'up to last'). "
+                                "This is the only depth mode that works through "
+                                "automation on this CATIA build."
+                            ),
+                            "default": False,
                         },
                         "type": {
                             "type": "string",
@@ -205,7 +251,7 @@ class PartDesignTools:
                             "description": "Sketch containing the hole center point",
                         },
                     },
-                    "required": ["diameter", "depth"],
+                    "required": ["diameter"],
                 },
             },
             {
@@ -604,17 +650,37 @@ class PartDesignTools:
         sf = part.ShapeFactory
 
         sketch = self._get_last_sketch(args.get("sketch_name"))
-        depth = args["depth"]
+        through_all = bool(args.get("through_all")) and "depth" not in args
+        depth = args.get("depth", 0)
         reverse = args.get("direction") == "reverse"
 
         before = self._body_volume_mm3(part, body)
 
-        pocket = sf.AddNewPocket(sketch, depth)
+        pocket = sf.AddNewPocket(sketch, 0 if through_all else depth)
+        if through_all:
+            # catUpToLastLimit: CATIA works out the extent itself, so the cut
+            # reaches through whatever thickness the solid has.
+            pocket.FirstLimit.LimitMode = 2
         # A pocket cuts on one side of the profile's support plane only, so
         # the orientation is set explicitly in both cases (field-verified:
         # the wrong side produces a tree feature that removes nothing).
         pocket.DirectionOrientation = 1 if reverse else 0
-        part.UpdateObject(pocket)
+        try:
+            part.UpdateObject(pocket)
+        except Exception as exc:
+            # A through-all cut from a sketch that sits on a solid face can be
+            # rejected outright rather than removing nothing (measured: 1 of 6
+            # faces of a plain box). Roll the dead feature back and point at the
+            # route that does not depend on the face frame.
+            self._remove_feature(part, pocket)
+            raise RuntimeError(
+                "CATIA rejected the pocket and it was removed from the tree. "
+                "When through_all is set, this usually means the sketch sits on "
+                "a face it cannot cut from - most often a face sketch whose "
+                "local coordinates do not land on the material. Put the sketch "
+                "on a datum plane with an offset instead, which uses global "
+                f"coordinates. Original error: {exc}"
+            ) from exc
 
         explicit_direction = "direction" in args
         flipped = False
@@ -655,46 +721,116 @@ class PartDesignTools:
                     "profile intersects the solid."
                 )
             flip_note = " (direction auto-flipped to reach material)" if flipped else ""
+            extent = "through all" if through_all else f"{depth} mm deep"
             return (
-                f"Pocket '{pocket.Name}' created: {depth} mm deep{flip_note}. "
+                f"Pocket '{pocket.Name}' created: {extent}{flip_note}. "
                 f"Removed {removed:.1f} mm3 ({before:.1f} -> {after:.1f})."
             )
+        extent = "through all" if through_all else f"{depth} mm deep"
         return (
-            f"Pocket created: {depth} mm deep. Feature: '{pocket.Name}' "
+            f"Pocket created: {extent}. Feature: '{pocket.Name}' "
             "(volume verification unavailable on this installation)."
         )
+
+    @staticmethod
+    def _sketch_absolute_axis(sketch: Any) -> Any:
+        """The sketch's absolute axis element.
+
+        Always item 1 of GeometricElements. Never looked up by name: a Chinese
+        build calls it '绝对轴' and Item("AbsoluteAxis") fails with E_FAIL there.
+        """
+        elements = sketch.GeometricElements
+        try:
+            return elements.Item(1)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                "This sketch exposes no absolute axis, so it cannot be revolved. "
+                "Re-create the sketch and try again."
+            ) from exc
+
+    def _revolve_axis_reference(self, part: Any, sketch: Any, mode: str) -> Any:
+        """Resolve the revolution axis to the Reference CATIA wants.
+
+        Only the sketch's own absolute axes work. A reference to a construction
+        line inside the sketch is accepted by the property setter and then
+        rejected at update time with E_FAIL, so it is not offered as an option.
+        """
+        mode = (mode or "horizontal").lower()
+        axis = self._sketch_absolute_axis(sketch)
+        if mode == "horizontal":
+            return axis.HorizontalReference
+        if mode == "vertical":
+            return axis.VerticalReference
+        raise ValueError(f"Unknown axis '{mode}'. Use 'horizontal' or 'vertical'.")
+
+    def _build_revolution(self, part: Any, sketch: Any, angle: float, axis_mode: str,
+                          from_ref: str, label: str) -> Any:
+        """Create a Shaft/Groove through the ...FromRef constructor.
+
+        AddNewShaft(sketch) looks like the obvious call and always fails at
+        UpdateObject: CATIA wants the profile and the axis set explicitly on a
+        feature created empty, and FirstAngle is an object with a .Value, not a
+        number. Verified against V5-6R2020 B30; see FORK.md.
+        """
+        factory = part.ShapeFactory
+        feature = getattr(factory, from_ref)(part.CreateReferenceFromName(""))
+        feature.FirstAngle.Value = angle
+        feature.SetProfileElement(part.CreateReferenceFromObject(sketch))
+        feature.RevoluteAxis = self._revolve_axis_reference(part, sketch, axis_mode)
+        self._safe_update(part, feature)
+        self.conn.refresh_display()
+        return feature
 
     def _shaft(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
-        body = self.conn.get_active_part_body()
-        sf = part.ShapeFactory
-
         sketch = self._get_last_sketch(args.get("sketch_name"))
         angle = args.get("angle", 360)
+        axis_mode = args.get("axis", "horizontal")
 
-        shaft = sf.AddNewShaft(sketch)
-        shaft.FirstAngle = angle
+        before = self._body_volume_mm3(part, self.conn.get_active_part_body())
+        shaft = self._build_revolution(part, sketch, angle, axis_mode, "AddNewShaftFromRef", "Shaft")
+        after = self._body_volume_mm3(part, self.conn.get_active_part_body())
 
-        part.UpdateObject(shaft)
-        self.conn.refresh_display()
-        return f"Shaft (revolution) created: {angle}°. Feature: '{shaft.Name}'"
+        detail = ""
+        if before is not None and after is not None:
+            detail = f" Volume {before:.1f} -> {after:.1f} mm3 (added {after - before:.1f})."
+        return (
+            f"Shaft created: {angle}° about the {axis_mode} axis of '{sketch.Name}'."
+            f"{detail} Feature: '{shaft.Name}'"
+        )
 
     def _groove(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
-        body = self.conn.get_active_part_body()
-        sf = part.ShapeFactory
-
         sketch = self._get_last_sketch(args.get("sketch_name"))
         angle = args.get("angle", 360)
+        axis_mode = args.get("axis", "horizontal")
 
-        groove = sf.AddNewGroove(sketch)
-        groove.FirstAngle = angle
+        before = self._body_volume_mm3(part, self.conn.get_active_part_body())
+        groove = self._build_revolution(part, sketch, angle, axis_mode, "AddNewGrooveFromRef", "Groove")
+        after = self._body_volume_mm3(part, self.conn.get_active_part_body())
 
-        part.UpdateObject(groove)
-        self.conn.refresh_display()
-        return f"Groove (revolution cut) created: {angle}°. Feature: '{groove.Name}'"
+        detail = ""
+        if before is not None and after is not None:
+            removed = before - after
+            detail = f" Removed {removed:.1f} mm3 ({before:.1f} -> {after:.1f})."
+            if abs(removed) < 1e-6:
+                detail += " WARNING: nothing was removed - check the profile side of the axis."
+        return (
+            f"Groove created: {angle}° about the {axis_mode} axis of '{sketch.Name}'."
+            f"{detail} Feature: '{groove.Name}'"
+        )
+
+    def _remove_feature(self, part: Any, feature: Any) -> None:
+        """Remove a feature from the tree, best effort."""
+        try:
+            selection = self.conn.hso
+            selection.Clear()
+            selection.Add(feature)
+            selection.Delete()
+        except Exception:  # noqa: BLE001 - nothing better to do than carry on
+            pass
 
     def _safe_update(self, part: Any, feature: Any) -> None:
         """Update a feature; if CATIA rejects it, remove the broken feature
@@ -702,13 +838,7 @@ class PartDesignTools:
         try:
             part.UpdateObject(feature)
         except Exception as e:
-            try:
-                selection = self.conn.hso
-                selection.Clear()
-                selection.Add(feature)
-                selection.Delete()
-            except Exception:
-                pass
+            self._remove_feature(part, feature)
             raise RuntimeError(
                 f"CATIA rejected the feature (update failed) and it was "
                 f"removed from the tree: {e}"
@@ -717,34 +847,12 @@ class PartDesignTools:
     def _topo_reference(self, kind: str, index: int) -> Any:
         """Resolve Face.N / Edge.N on the body's final shape to a Reference.
 
-        References come from the selection's Reference property because
-        CreateReferenceFromObject rejects HSO-resolved topology cells
-        (field-verified E_INVALIDARG). Indices match catia_list_faces /
-        catia_list_edges.
+        Indices match catia_list_faces / catia_list_edges. The resolution
+        itself lives in topo_search so the sketcher can put a sketch on a
+        solid face with exactly the same rules.
         """
         body = self.conn.get_active_part_body()
-        if body.Shapes.Count == 0:
-            raise RuntimeError("The active body has no solid shape yet.")
-        # Search the body, not Shapes.Item(last): only the body resolves to
-        # the final solid's topology in a selection search.
-        sel = self.conn.hso
-        try:
-            sel.Clear()
-            sel.Add(body)
-            search_topology(sel, kind)
-            count = sel.Count
-            if index < 1 or index > count:
-                raise RuntimeError(
-                    f"{kind}.{index} is out of range: the final shape exposes "
-                    f"{count} {kind.lower()}(s). Use catia_list_faces / "
-                    "catia_list_edges to enumerate valid indices."
-                )
-            return sel.Item(index).Reference
-        finally:
-            try:
-                sel.Clear()
-            except Exception:
-                pass
+        return topology_reference(self.conn, body, kind, index).reference
 
     @staticmethod
     def _topo_index(name: str, kind: str) -> int:
@@ -822,14 +930,20 @@ class PartDesignTools:
 
         sketch = self._get_last_sketch(args.get("sketch_name"))
         diameter = args["diameter"]
-        depth = args["depth"]
+        through_all = bool(args.get("through_all")) and "depth" not in args
+        depth = args.get("depth", 0)
+        before = self._body_volume_mm3(part, body)
 
         # AddNewHole takes a support FACE reference; the sketch-positioned
         # form is AddNewHoleFromSketch. Diameter is a read-only Length
         # parameter object whose .Value is assigned.
-        hole = sf.AddNewHoleFromSketch(sketch, depth)
+        hole = sf.AddNewHoleFromSketch(sketch, 0 if through_all else depth)
         hole.Diameter.Value = diameter
         hole.BottomType = 0  # catFlatBottom
+        if through_all:
+            # BottomLimit is the hole's depth control (FirstLimit is the
+            # pocket's). LimitMode 2 = catUpToLastLimit.
+            hole.BottomLimit.LimitMode = 2
 
         hole_type = args.get("type", "simple")
         type_map = {"simple": 0, "tapered": 1, "counterbored": 2, "countersunk": 3}
@@ -849,7 +963,35 @@ class PartDesignTools:
 
         part.UpdateObject(hole)
         self.conn.refresh_display()
-        return f"Hole created: D{diameter} mm, depth {depth} mm. Feature: '{hole.Name}'.{type_note}"
+
+        after = self._body_volume_mm3(part, body)
+        extent = "through all" if through_all else f"depth {depth} mm"
+        if before is not None and after is not None:
+            removed = before - after
+            if removed <= 0:
+                # A tree feature that removes nothing is worse than an error:
+                # it looks like success and poisons every later measurement.
+                # Roll it back and say what actually happened.
+                self._remove_feature(part, hole)
+                if through_all:
+                    raise RuntimeError(
+                        f"The hole D{diameter} removed no material even with "
+                        f"through_all. Check that the sketch point sits inside the "
+                        f"solid and that its plane faces the material."
+                    )
+                raise RuntimeError(
+                    f"A finite-depth hole D{diameter} x {depth} mm cuts nothing on "
+                    f"this CATIA build (V5-6R2020 B30): the depth is stored but not "
+                    f"applied by the Hole feature through automation. The hole was "
+                    f"rolled back. Use catia_pocket with a circle sketch of the same "
+                    f"diameter instead - that is how the spec itself builds these "
+                    f"holes, and it can be patterned afterwards."
+                )
+            return (
+                f"Hole created: D{diameter} mm, {extent}. Removed {removed:.1f} mm3 "
+                f"({before:.1f} -> {after:.1f}). Feature: '{hole.Name}'.{type_note}"
+            )
+        return f"Hole created: D{diameter} mm, {extent}. Feature: '{hole.Name}'.{type_note}"
 
     def _rect_pattern(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()

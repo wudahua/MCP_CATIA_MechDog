@@ -20,7 +20,7 @@ runs on both.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NamedTuple
 
 # Verified localized type names (Simplified Chinese CATIA V5).
 _LOCALIZED_TYPE_NAMES: dict[str, str] = {
@@ -54,3 +54,48 @@ def search_topology(sel: Any, kind: str) -> None:
         sel.Search(f"Topology.{kind},sel")
         return
     sel.Search(f"{localized},sel")
+
+
+class TopoRef(NamedTuple):
+    """A resolved topology cell: the reference, and CATIA's name for it."""
+
+    reference: Any
+    name: str
+
+
+def topology_reference(conn: Any, body: Any, kind: str, index: int,
+                       hint: str | None = None) -> TopoRef:
+    """Resolve ``<kind>.<index>`` on the body's final shape to a Reference.
+
+    References come from the selection's ``Reference`` property because
+    ``CreateReferenceFromObject`` rejects HSO-resolved topology cells
+    (field-verified E_INVALIDARG). Indices match ``catia_list_faces`` /
+    ``catia_list_edges``.
+
+    The body is searched rather than ``Shapes.Item(last)``: only the body
+    resolves to the final solid's topology - a shape reference yields the
+    region that feature itself created.
+    """
+    if body.Shapes.Count == 0:
+        raise RuntimeError("The active body has no solid shape yet.")
+    sel = conn.hso
+    try:
+        sel.Clear()
+        sel.Add(body)
+        search_topology(sel, kind)
+        count = sel.Count
+        if index < 1 or index > count:
+            where = hint or (
+                "Use catia_list_faces / catia_list_edges to enumerate valid indices."
+            )
+            raise RuntimeError(
+                f"{kind}.{index} is out of range: the final shape exposes "
+                f"{count} {kind.lower()}(s). {where}"
+            )
+        cell = sel.Item(index)
+        return TopoRef(cell.Reference, str(cell.Name))
+    finally:
+        try:
+            sel.Clear()
+        except Exception:
+            pass

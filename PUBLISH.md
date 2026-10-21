@@ -22,6 +22,7 @@
 | **远端** | `origin` 指向上游 `daiemon12/catia-v5-mcp-server`（你无写权限） | `origin` → `wudahua/catia-v5-mcp-lite`；上游保留为 `upstream` |
 | **工具数断言** | `tests/` 里两处还写着上游的 98 | 已同步为 86 |
 | **HTTP 测试** | `test_missing_or_wrong_token_is_rejected` 在设了 `HTTP_PROXY` 的机器上必红 | 见下方"顺手修的一个测试缺陷" |
+| **建模能力缺口** | `catia_shaft` 任何时候都建不出实体；草图只能落在 3 张主基准面上；画不出构造线；贯通切除只能靠猜一个比零件更高的深度 | 四项全部补齐，并逐项真机验证（体积偏差 0.000%），明细见 `CHANGELOG.md`；离线测试 34 → **61** 全绿 |
 
 ### 顺手修的一个测试缺陷
 
