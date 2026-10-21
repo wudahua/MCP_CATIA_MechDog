@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "catia-v5-mcp-lite"
+name = "MCP_CATIA_MechDog"
 version = "0.3.0"
 description = "CATIA V5 MCP server (lite fork): build solids from a written spec and verify them, via COM Automation"
 readme = "README.md"

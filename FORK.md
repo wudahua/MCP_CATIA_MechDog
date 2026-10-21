@@ -1,4 +1,4 @@
-# catia-v5-lite — 薄壳 fork 使用说明
+# MCP_CATIA_MechDog — 薄壳 fork 使用说明
 
 上游：[daiemon12/catia-v5-mcp-server](https://github.com/daiemon12/catia-v5-mcp-server)（MIT，作者 Adam M'HAMDI）
 本 fork 保留上游全部 COM 现场知识，砍掉与实体建模无关的模块，补上"建模—验收"闭环最缺的四件事。
@@ -176,7 +176,7 @@ Vertex 12 -> {'Selection_WireFVertex': 4, 'Selection_FVertex': 8}
 ## 5. 安装与接入
 
 ```bash
-cd /path/to/catia-v5-mcp-lite
+cd /path/to/MCP_CATIA_MechDog
 
 # 独立 venv（推荐，别和上游共用，否则两个 catia_mcp 包会互相盖）
 python -m venv .venv
@@ -196,7 +196,7 @@ MCP 客户端配置：
 ```json
 {
   "mcpServers": {
-    "catia-v5-lite": {
+    "MCP_CATIA_MechDog": {
       "command": "<path to this repo>\\.venv\\Scripts\\catia-mcp.exe"
     }
   }
@@ -208,7 +208,7 @@ MCP 客户端配置：
 ```json
 {
   "mcpServers": {
-    "catia-v5-lite": {
+    "MCP_CATIA_MechDog": {
       "command": "<path to upstream>\\.venv\\Scripts\\python.exe",
       "args": ["-m", "catia_mcp"],
       "env": { "PYTHONPATH": "<path to this repo>" }

@@ -77,8 +77,8 @@ Details, measurements and caveats: **[`FORK.md`](FORK.md)** (Chinese).
 ## Install
 
 ```bash
-git clone https://github.com/wudahua/catia-v5-mcp-lite.git
-cd catia-v5-mcp-lite
+git clone https://github.com/wudahua/MCP_CATIA_MechDog.git
+cd MCP_CATIA_MechDog
 python -m venv .venv
 .venv/Scripts/pip install -e .
 
@@ -94,8 +94,8 @@ python -m venv .venv
 ```json
 {
   "mcpServers": {
-    "catia-v5-lite": {
-      "command": "C:\\path\\to\\catia-v5-mcp-lite\\.venv\\Scripts\\catia-mcp.exe"
+    "MCP_CATIA_MechDog": {
+      "command": "C:\\path\\to\\MCP_CATIA_MechDog\\.venv\\Scripts\\catia-mcp.exe"
     }
   }
 }

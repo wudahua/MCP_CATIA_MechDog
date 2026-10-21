@@ -5,12 +5,12 @@
 刚做过一遍发布前审计（2026-10-22），逐项结果见第二节。审计里修掉了一个会让 CI
 第一次就红的阻塞项，和一批泄露本机路径的文档。
 
-实测两件事：
+实测三个地址：
 
 ```
 https://api.github.com/repos/daiemon12/catia-v5-mcp-server  → 200   （上游在）
-https://api.github.com/repos/wudahua/catia-v5-mcp-lite       → 404   （目标仓库还没建）
-https://api.github.com/users/wudahua                         → 200   （账号在，2013-10-30 建号）
+https://api.github.com/repos/wudahua/MCP_CATIA_MechDog      → 404   （目标仓库还没建）
+https://api.github.com/users/wudahua                        → 200   （账号在，2013-10-30 建号）
 ```
 
 所以现在直接 `git push` 会 404，不是权限问题，是仓库根本不存在。
@@ -27,7 +27,7 @@ https://api.github.com/users/wudahua                         → 200   （账号
 | 密钥 / token | 无（`api_key`/`secret`/`token`/`ghp_`/`sk-` 全仓扫描为空） |
 | 本机绝对路径 | 无（`F:\WorkBuddy Space\...`、`C:\Users\...` 全仓扫描为空） |
 | 提交署名 | 只剩上游作者 + `wudahua <wudahua@users.noreply.github.com>`，没有 `WorkBuddy <workbuddy@local>` |
-| 远端 | `origin` → `wudahua/catia-v5-mcp-lite`，`upstream` → `daiemon12/catia-v5-mcp-server` |
+| 远端 | `origin` → `wudahua/MCP_CATIA_MechDog`，`upstream` → `daiemon12/catia-v5-mcp-server` |
 | LICENSE | 原样保留（MIT 强制，删了就违规） |
 | 测试 | `pytest tests test_server.py -q` → **72 passed**，无警告 |
 | CI 命令 | 与 `.github/workflows/ci.yml` 完全一致，同上 |
@@ -65,11 +65,11 @@ MCP 客户端配置示例和安装步骤里写着 `F:\WorkBuddy Space\MCP catia-
 
 1. 打开 https://github.com/daiemon12/catia-v5-mcp-server
 2. 右上角 **Fork** → owner 选 `wudahua` → Create fork
-3. 建好后进你 fork 的仓库 → Settings → 把仓库名改成 `catia-v5-mcp-lite`（fork 关系会保留）
+3. 建好后进你 fork 的仓库 → Settings → 把仓库名改成 `MCP_CATIA_MechDog`（fork 关系会保留）
 4. 回到本地：
 
 ```bash
-cd /path/to/catia-v5-mcp-lite
+cd /path/to/MCP_CATIA_MechDog
 git push -u origin main --force
 ```
 
@@ -78,12 +78,12 @@ git push -u origin main --force
 
 **B. 独立仓库** —— 打算彻底分道，或要私有
 
-1. https://github.com/new → Repository name 填 `catia-v5-mcp-lite`
+1. https://github.com/new → Repository name 填 `MCP_CATIA_MechDog`
 2. **不要**勾 "Add a README file"、不要加 .gitignore、不要选 license（否则会有初始提交，push 冲突）
 3. 本地：
 
 ```bash
-cd /path/to/catia-v5-mcp-lite
+cd /path/to/MCP_CATIA_MechDog
 git push -u origin main
 ```
 
@@ -107,13 +107,13 @@ git push -u origin main
 
 | 项 | 原状 | 现状 |
 |---|---|---|
-| `README.md` | 上游版：badge、clone 命令、Discord/LinkedIn 全指向上游；工具表还列着已删的 Drafting 11 个、Knowledgeware 5 个 | 重写为 fork README；clone 地址是 `github.com/wudahua/catia-v5-mcp-lite` |
+| `README.md` | 上游版：badge、clone 命令、Discord/LinkedIn 全指向上游；工具表还列着已删的 Drafting 11 个、Knowledgeware 5 个 | 重写为 fork README；clone 地址是 `github.com/wudahua/MCP_CATIA_MechDog` |
 | `.github/FUNDING.yml` | `github: daiemon12` —— 等于让访客给上游作者打钱 | 已删除 |
 | `traffic/` + `traffic.yml` + `collect_traffic.py` | 上游的克隆量统计，依赖 `secrets.TRAFFIC_TOKEN`（你没有，workflow 会天天失败并自动提交垃圾 commit） | 已全部删除 |
-| `pyproject.toml` | `catia-v5-mcp-server` / `0.2.2` | `catia-v5-mcp-lite` / `0.3.0` |
+| `pyproject.toml` | `catia-v5-mcp-server` / `0.2.2` | `MCP_CATIA_MechDog` / `0.3.0` |
 | `CHANGELOG.md` | 只有上游的 `[Unreleased]` | 顶部加了 `[0.3.0] — lite fork`，并记录本轮全部修复 |
 | **提交署名** | 混着 `WorkBuddy <workbuddy@local>` | 全部改写为 `wudahua`；上游 113 个提交的历史一个字节没动 |
-| **远端** | `origin` 指向上游（你无写权限） | `origin` → `wudahua/catia-v5-mcp-lite`，上游保留为 `upstream` |
+| **远端** | `origin` 指向上游（你无写权限） | `origin` → `wudahua/MCP_CATIA_MechDog`，上游保留为 `upstream` |
 | **工具数断言** | 两处还写着上游的 98 | 已同步为 87 |
 | **建模能力** | `catia_shaft` 建不出实体；草图只能落在 3 张主基准面；画不出构造线；贯通切除只能猜深度 | 四项全补齐并真机验证；另修了「pad/pocket 拿错草图」这个会静默切错轮廓的 bug |
 | **装配可读性** | 9 个组件全叫 `Part1.1 / Part2.1 / …` | 新增 `catia_rename_component`，树里显示 `Part1 (P01_CylinderBlock)` |
