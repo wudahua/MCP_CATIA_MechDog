@@ -91,7 +91,12 @@ class DocumentTools:
                 "description": (
                     "Save the active CATIA document. Optionally save to a new path (Save As). "
                     "Retries around CATIA's modal dialogs (overwrite prompt, first-SaveAs "
-                    "dialog), which would otherwise freeze the worker thread."
+                    "dialog), which would otherwise freeze the worker thread. "
+                    "IMPORTANT: with file_path this is Save As, and CATIA only accepts it "
+                    "while the document still has no geometry (E_FAIL afterwards, verified "
+                    "on V5-6R2020 B30). To keep a model on disk, save the empty part to its "
+                    "final path right after catia_new_part, then call this tool with no "
+                    "file_path once the model is built - that goes through doc.Save()."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -165,6 +170,9 @@ class DocumentTools:
         self.conn.ensure_connected()
         docs = self.conn.documents
         doc = docs.Add("Part")
+        # A fresh part has no sketches; carrying the previous part's would make
+        # the first pad/pocket in this document use the wrong profile.
+        self.conn.last_sketch = None
         part = self.conn.part_of(doc)
         rename_note = ""
         if name:
@@ -203,6 +211,9 @@ class DocumentTools:
         # CATIA's Documents.Open rejects forward-slash paths (E_FAIL);
         # normalize to native Windows separators first.
         doc = docs.Open(os.path.normpath(file_path))
+        # Whatever sketch belonged to the previously active document does not
+        # belong to this one.
+        self.conn.last_sketch = None
         return f"Opened document: '{doc.Name}' from {file_path}"
 
     def _save_document(self, file_path: str | None = None) -> str:

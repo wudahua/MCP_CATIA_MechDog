@@ -288,3 +288,100 @@ def test_plane_must_be_a_string_or_an_object():
     with pytest.raises(ValueError, match="type' of"):
         sketcher()._resolve_support(FakePart(), FakeBody(), 3, None)
 
+
+
+# --------------------------------------------------------------------------
+# "The last sketch" cannot be read back from body.Sketches.
+# --------------------------------------------------------------------------
+
+
+class FakeSketchRef:
+    def __init__(self, name):
+        self.Name = name
+
+
+class OrderedSketches:
+    """Mimics CATIA: Item(i) is tree order, which is neither creation nor
+    alphabetical order. Observed on a cylinder cap: 草图.1, 草图.3, 草图.2."""
+
+    def __init__(self, sk):
+        self._items = sk
+        self.Count = len(sk)
+
+    def Item(self, key):
+        if isinstance(key, int):
+            return self._items[key - 1]
+        for s in self._items:
+            if s.Name == key:
+                return s
+        raise ValueError(key)
+
+
+def test_last_sketch_prefers_creation_order_over_tree_order():
+    newest = FakeSketchRef("草图.3")
+    tree = [FakeSketchRef("草图.1"), FakeSketchRef("草图.3"), FakeSketchRef("草图.2")]
+    conn = type("C", (), {
+        "last_sketch": newest,
+        "get_active_part": lambda self: None,
+        "get_active_part_body": lambda self: type("B", (), {"Sketches": OrderedSketches(tree)})(),
+    })()
+    got = PartDesignTools(connection=conn)._get_last_sketch()
+    # Item(Count) would hand back 草图.2 here, which is how the bolt-hole pocket
+    # ended up cutting the boss off.
+    assert got.Name == "草图.3"
+
+
+def test_last_sketch_falls_back_when_the_handle_is_stale():
+    class Dead:
+        @property
+        def Name(self):
+            raise RuntimeError("closed")
+
+    tree = [FakeSketchRef("草图.1")]
+    conn = type("C", (), {
+        "last_sketch": Dead(),
+        "get_active_part": lambda self: None,
+        "get_active_part_body": lambda self: type("B", (), {"Sketches": OrderedSketches(tree)})(),
+    })()
+    assert PartDesignTools(connection=conn)._get_last_sketch().Name == "草图.1"
+
+
+def test_named_sketch_still_wins():
+    tree = [FakeSketchRef("草图.1"), FakeSketchRef("草图.3")]
+    conn = type("C", (), {
+        "last_sketch": tree[0],
+        "get_active_part": lambda self: None,
+        "get_active_part_body": lambda self: type("B", (), {"Sketches": OrderedSketches(tree)})(),
+    })()
+    assert PartDesignTools(connection=conn)._get_last_sketch("草图.3").Name == "草图.3"
+
+
+def test_list_edges_reports_lengths_so_a_fillet_can_pick_its_edge():
+    """Without a length, the only handle is an index that shifts per feature.
+
+    P08's R5 fillet sits on the 281.301 mm outline arc; the previous pass found
+    it by length through custom COM, which the tool now has to offer itself.
+    """
+    props = CATIAMCPServer()._schemas["catia_list_edges"]
+    assert props is not None
+    # The schema stays an empty object - the geometry is in the reply, not the
+    # arguments - so assert on the implementation instead.
+    import inspect
+
+    source = inspect.getsource(PartDesignTools._list_edges)
+    assert "length_mm" in source
+    assert "GetMeasurable" in source
+
+    faces_source = inspect.getsource(PartDesignTools._list_faces)
+    assert "area_mm2" in faces_source
+
+
+def test_save_as_documents_its_own_ordering_constraint():
+    """SaveAs after geometry fails, so the tool has to say how to keep a file."""
+    from catia_mcp.tools.document import DocumentTools
+
+    doc = [d for d in DocumentTools(connection=None).get_tool_definitions()
+           if d["name"] == "catia_save_document"][0]
+    text = doc["description"]
+    assert "no geometry" in text
+    assert "doc.Save()" in text

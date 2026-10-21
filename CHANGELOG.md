@@ -64,6 +64,23 @@ See `README.md` for the diff table and `FORK.md` for measurements.
   validated fine and were dropped, so the plan answered `PLAN_OK` with an empty
   assertion list. `additionalProperties: false` on the plan, its steps and its
   `expect` object turns those into `INVALID_ARGUMENT`.
+- **`pad` / `pocket` could use the wrong sketch.** `body.Sketches` is ordered by
+  **tree position, not creation order** - a cylinder cap with three sketches
+  enumerated as 草图.1 / 草图.3 / 草图.2 - so `Item(Count)`, the previous "last
+  sketch", returned the boss profile and a bolt-hole pocket cut the boss off
+  instead (the removed volume landed exactly on the boss volume, 18 142 mm³).
+  The sketch created last is now remembered on the connection and preferred; a
+  stale handle falls back to the collection, an explicit `sketch_name` still
+  wins.
+- `catia_list_edges` / `catia_list_faces` returned only `Edge.N` / `Face.N`
+  names. That is enough to fillet an edge whose index you already know, and
+  useless for the case that actually comes up: "the outline arc" has no stable
+  index, only a length (281.301 mm on the rear lug). They now report
+  `length_mm` and `area_mm2`, so an edge can be selected by geometry.
+- `catia_save_document` now states its ordering constraint: Save As only works
+  while the document has no geometry, so a model is kept on disk by saving the
+  empty part to its final path right after `catia_new_part`, then calling the
+  tool with no path once the model is built.
 - `Position.GetComponents` returned twelve zeros (SAFEARRAY out-param does not
   marshal through late-bound IDispatch): `catia_move_component` erased the
   component's rotation and `catia_list_components` reported `(0,0,0)` for every
@@ -88,7 +105,7 @@ See `README.md` for the diff table and `FORK.md` for measurements.
   the whole URI into `scope["path"]`, and the server 404'd a correct request.
   The test failed on any machine with a proxy (upstream included); the suite is
   now independent of the environment. No server code changed.
-- **61 offline tests** in total, none of which start CATIA.
+- **66 offline tests** in total, none of which start CATIA.
 
 ## [Unreleased]
 

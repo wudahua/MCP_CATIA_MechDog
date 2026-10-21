@@ -30,6 +30,10 @@ class CATIAConnection:
     def __init__(self) -> None:
         self.app: Any | None = None
         self._initialized_com = False
+        # Last sketch this session created and closed. body.Sketches is ordered
+        # by tree position, not creation order, so "the last sketch" cannot be
+        # read back from the collection - see PartDesignTools._get_last_sketch.
+        self.last_sketch: Any | None = None
 
     @property
     def is_connected(self) -> bool:

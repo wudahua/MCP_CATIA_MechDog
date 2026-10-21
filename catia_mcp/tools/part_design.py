@@ -560,7 +560,15 @@ class PartDesignTools:
                 raise ValueError(f"Unknown part design tool: {tool_name}")
 
     def _get_last_sketch(self, sketch_name: str | None = None) -> Any:
-        """Get a sketch by name or the last sketch in the body."""
+        """Get a sketch by name, or the most recently created one.
+
+        ``body.Sketches`` is ordered by **tree position, not creation order**.
+        On a real part that means ``Item(Count)`` returns some earlier profile:
+        a cylinder cap with three sketches came back as 草图.1 / 草图.3 / 草图.2,
+        so a pocket aimed at the bolt-hole sketch cut the boss instead, and the
+        volume landed exactly on the boss volume. Creation order is therefore
+        remembered on the connection and preferred here.
+        """
         part = self.conn.get_active_part()
         body = self.conn.get_active_part_body()
         sketches = body.Sketches
@@ -575,7 +583,14 @@ class PartDesignTools:
                     f"Available: {names or 'none'}."
                 )
 
-        # Get the last sketch
+        remembered = getattr(self.conn, "last_sketch", None)
+        if remembered is not None:
+            try:
+                _ = remembered.Name  # still alive?
+                return remembered
+            except Exception:
+                self.conn.last_sketch = None
+
         if sketches.Count == 0:
             raise RuntimeError("No sketches found in the active body. Create a sketch first.")
         return sketches.Item(sketches.Count)
@@ -1410,6 +1425,16 @@ class PartDesignTools:
             return "No features in the active body"
         return json.dumps(features, indent=2)
 
+    def _topo_measure(self, part: Any) -> Any:
+        """SPA workbench for edge/face geometry, or None if unavailable."""
+        try:
+            return part.Parent.GetWorkbench("SPAWorkbench")
+        except Exception:
+            try:
+                return self.conn.app.GetWorkbench("SPAWorkbench")
+            except Exception:
+                return None
+
     def _list_faces(self, body_name: str | None = None) -> str:
         self.conn.ensure_connected()
         if body_name:
@@ -1424,6 +1449,8 @@ class PartDesignTools:
                 )
         else:
             body = self.conn.get_active_part_body()
+        part = self.conn.get_active_part()
+        spa = self._topo_measure(part)
 
         faces = []
         try:
@@ -1437,7 +1464,16 @@ class PartDesignTools:
                 sel.Add(body)
                 search_topology(sel, "Face")
                 for i in range(1, sel.Count + 1):
-                    faces.append({"index": i, "name": f"Face.{i}"})
+                    entry: dict[str, Any] = {"index": i, "name": f"Face.{i}"}
+                    if spa is not None:
+                        # Area, so an A-list of faces can be identified without
+                        # a second round trip per face. SPA returns m2.
+                        try:
+                            entry["area_mm2"] = round(
+                                spa.GetMeasurable(sel.Item(i).Reference).Area * 1e6, 3)
+                        except Exception:
+                            pass
+                    faces.append(entry)
             finally:
                 try:
                     sel.Clear()
@@ -1453,7 +1489,7 @@ class PartDesignTools:
     def _list_edges(self) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
-        body = self.conn.get_active_part_body()
+        spa = self._topo_measure(part)
 
         # Get edges from the last shape
         last_shape = self._get_last_shape()
@@ -1469,7 +1505,18 @@ class PartDesignTools:
                     # Canonical indexed name accepted by catia_measure_distance,
                     # catia_fillet and catia_chamfer. Raw HSO names are long
                     # and unusable in searches.
-                    edges.append({"index": i, "name": f"Edge.{i}"})
+                    entry: dict[str, Any] = {"index": i, "name": f"Edge.{i}"}
+                    if spa is not None:
+                        # Without a length there is no way to pick "the edge of
+                        # the outline" for a fillet: the only other handle is a
+                        # bare index, which shifts whenever a feature is added.
+                        # SPA returns Length in the document unit (mm).
+                        try:
+                            entry["length_mm"] = round(
+                                spa.GetMeasurable(sel.Item(i).Reference).Length, 4)
+                        except Exception:
+                            pass
+                    edges.append(entry)
             finally:
                 try:
                     sel.Clear()

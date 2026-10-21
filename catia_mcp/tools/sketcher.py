@@ -466,6 +466,11 @@ class SketcherTools:
         self._active_sketch = sketch
         self._sketch_part = part
         self._active_factory = sketch.OpenEdition()
+        # Remember it by identity: body.Sketches is ordered by tree position,
+        # not by creation, so a later feature cannot find "the sketch I just
+        # made" by index. Recording it here is what makes pad/pocket/shallow
+        # features land on the intended profile in a multi-sketch part.
+        self.conn.last_sketch = sketch
 
         return f"Sketch '{sketch.Name}' created on {where}. Ready for geometry."
 
