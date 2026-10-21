@@ -446,3 +446,102 @@ def test_rename_tool_is_registered():
 
     names = [d["name"] for d in AssemblyTools(connection=None).get_tool_definitions()]
     assert "catia_rename_component" in names
+
+
+# --------------------------------------------------------------------------
+# Multi-body: a part may hold several solids that interpenetrate.
+# --------------------------------------------------------------------------
+
+
+class FakeSolidBody:
+    def __init__(self, name, volume=0.0):
+        self.Name = name
+        self._volume = volume
+        self.Shapes = type("S", (), {"Count": 1 if volume else 0})()
+
+
+def _pd_with_bodies(names, main="PartBody"):
+    from catia_mcp.tools.part_design import PartDesignTools
+
+    bodies = [FakeSolidBody(n) for n in names]
+    main_body = FakeSolidBody(main)
+    coll = type("C", (), {
+        "Count": len(bodies),
+        "Item": lambda self, k: bodies[k - 1] if isinstance(k, int) else
+                                 next(b for b in bodies if b.Name == k),
+        "Add": lambda self: (bodies.append(FakeSolidBody("Body.%d" % (len(bodies) + 1))),
+                             bodies[-1])[1],
+    })()
+    part = type("P", (), {"Bodies": coll, "MainBody": main_body})()
+    conn = type("C2", (), {
+        "active_body": None,
+        "last_sketch": None,
+        "ensure_connected": lambda self: None,
+        "get_active_part": lambda self: part,
+        "get_active_part_body": lambda self: self.active_body or part.MainBody,
+        "refresh_display": lambda self: None,
+    })()
+    return PartDesignTools(connection=conn), conn, part
+
+
+def test_new_body_becomes_the_active_body():
+    tools, conn, _ = _pd_with_bodies(["PartBody"])
+    out = tools._new_body("ArmEnd_1")
+    assert "ArmEnd_1" in out
+    assert conn.active_body.Name == "ArmEnd_1"
+    # Subsequent pads must land in the new body, not MainBody.
+    assert conn.get_active_part_body().Name == "ArmEnd_1"
+
+
+def test_boolean_defaults_to_the_other_body_not_the_tool():
+    """You just built the tool body, so the active body IS the tool. The
+    survivor has to fall back to MainBody instead of refusing."""
+    tools, conn, part = _pd_with_bodies(["PartBody", "Tool"])
+    conn.active_body = part.Bodies.Item("Tool")
+    recorded = {}
+
+    class FakeFeature:
+        Name = "Add.1"
+
+    class FakeSF:
+        def AddNewAssemble(self, body):
+            recorded["tool"] = body.Name
+            return FakeFeature()
+
+    part.ShapeFactory = FakeSF()
+    part.InWorkObject = None
+    part.CreateReferenceFromObject = lambda o: o
+    part.UpdateObject = lambda f: None
+
+    tools._boolean({"operation": "assemble", "tool_body": "Tool"})
+    assert recorded["tool"] == "Tool"
+    assert conn.active_body.Name == "PartBody"
+
+
+def test_boolean_rejects_one_body_against_itself():
+    tools, conn, part = _pd_with_bodies(["PartBody", "Other"])
+    try:
+        tools._boolean({"operation": "add", "tool_body": "Other",
+                        "target_body": "Other"})
+    except ValueError as e:
+        assert "same body" in str(e)
+    else:
+        raise AssertionError("should reject tool == target")
+
+
+def test_boolean_passes_the_body_itself_not_a_reference():
+    """A Reference is silently ignored by add/remove/assemble and rejected by
+    intersect, so the tool must hand over the Body object."""
+    tools, conn, part = _pd_with_bodies(["PartBody", "Tool"])
+    seen = {}
+
+    class FakeSF:
+        def AddNewIntersect(self, arg):
+            seen["arg"] = arg
+            return type("F", (), {"Name": "Inter.1"})()
+
+    part.ShapeFactory = FakeSF()
+    part.InWorkObject = None
+    part.UpdateObject = lambda f: None
+    tools._boolean({"operation": "intersect", "tool_body": "Tool"})
+    assert isinstance(seen["arg"], FakeSolidBody), type(seen["arg"])

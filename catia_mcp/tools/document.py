@@ -173,6 +173,7 @@ class DocumentTools:
         # A fresh part has no sketches; carrying the previous part's would make
         # the first pad/pocket in this document use the wrong profile.
         self.conn.last_sketch = None
+        self.conn.active_body = None
         part = self.conn.part_of(doc)
         rename_note = ""
         if name:
@@ -214,6 +215,7 @@ class DocumentTools:
         # Whatever sketch belonged to the previously active document does not
         # belong to this one.
         self.conn.last_sketch = None
+        self.conn.active_body = None
         return f"Opened document: '{doc.Name}' from {file_path}"
 
     def _save_document(self, file_path: str | None = None) -> str:

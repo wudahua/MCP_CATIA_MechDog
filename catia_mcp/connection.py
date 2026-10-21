@@ -34,6 +34,8 @@ class CATIAConnection:
         # by tree position, not creation order, so "the last sketch" cannot be
         # read back from the collection - see PartDesignTools._get_last_sketch.
         self.last_sketch: Any | None = None
+        # Solid body new features should go into. None = the part's MainBody.
+        self.active_body: Any | None = None
 
     @property
     def is_connected(self) -> bool:
@@ -204,8 +206,21 @@ class CATIAConnection:
         return self._interface(doc, "Product")
 
     def get_active_part_body(self) -> Any:
-        """Get the main PartBody from the active Part document."""
+        """Get the solid body new features should go into.
+
+        Defaults to MainBody, but catia_new_body switches it: a part can hold
+        several solid bodies, and each pad/pocket/hole belongs to exactly one.
+        The handle is remembered on the connection because part.Bodies is a
+        collection with no "current" notion of its own.
+        """
         part = self.get_active_part()
+        remembered = getattr(self, "active_body", None)
+        if remembered is not None:
+            try:
+                _ = remembered.Name          # still alive?
+                return remembered
+            except Exception:
+                self.active_body = None
         return part.MainBody
 
     def get_origin_elements(self) -> dict[str, Any]:

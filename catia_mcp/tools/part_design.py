@@ -486,6 +486,80 @@ class PartDesignTools:
                 },
             },
             {
+                "name": "catia_new_body",
+                "description": (
+                    "Create a new empty solid body and make it active: every later "
+                    "pad/pocket/hole/shaft goes into it. A Part can hold several "
+                    "bodies, which is how a spec that declares 'Merge = false' "
+                    "(several solids in one part, possibly interpenetrating) is "
+                    "reproduced without collapsing them into one volume. Switch "
+                    "back with catia_list_bodies + catia_boolean(assemble)."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Optional body name (e.g. 'ArmEnd_1')",
+                        },
+                    },
+                },
+            },
+            {
+                "name": "catia_list_bodies",
+                "description": (
+                    "List every solid body in the active part, with its volume and "
+                    "feature count, and mark which one is active for new features."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
+                "name": "catia_boolean",
+                "description": (
+                    "Combine two solid bodies. The target keeps the result and the "
+                    "tool body is consumed (as CATIA does), so `target_body` is the "
+                    "survivor. To keep several solids that may interpenetrate WITHOUT "
+                    "fusing them, do not use this at all - leave them in separate "
+                    "bodies created by catia_new_body; a part's volume is then the sum "
+                    "of its bodies. 'assemble' joins them into one body and does "
+                    "deduplicate the overlap, so it is not a substitute for that."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "operation": {
+                            "type": "string",
+                            "enum": ["add", "remove", "intersect", "assemble"],
+                            "description": (
+                                "add = union (overlap counted once), remove = target "
+                                "minus tool, intersect = common volume, assemble = "
+                                "one body holding both (overlap still counted once, "
+                                "so this does NOT preserve a sum-of-solids volume)"
+                            ),
+                        },
+                        "tool_body": {
+                            "type": "string",
+                            "description": "Body consumed by the operation (from catia_list_bodies)",
+                        },
+                        "target_body": {
+                            "type": "string",
+                            "description": (
+                                "Body that keeps the result. Defaults to the active "
+                                "body; the active body then becomes the target."
+                            ),
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Optional feature name",
+                        },
+                    },
+                    "required": ["operation", "tool_body"],
+                },
+            },
+            {
                 "name": "catia_list_edges",
                 "description": (
                     "List the edges of the final solid shape as indexed names "
@@ -552,6 +626,12 @@ class PartDesignTools:
                 return self._delete_feature(arguments)
             case "catia_list_features":
                 return self._list_features()
+            case "catia_new_body":
+                return self._new_body(arguments.get("name"))
+            case "catia_list_bodies":
+                return self._list_bodies()
+            case "catia_boolean":
+                return self._boolean(arguments)
             case "catia_list_faces":
                 return self._list_faces(arguments.get("body_name"))
             case "catia_list_edges":
@@ -1424,6 +1504,157 @@ class PartDesignTools:
         if not features:
             return "No features in the active body"
         return json.dumps(features, indent=2)
+
+    _BOOLEAN_METHODS = {
+        "add": "AddNewAdd",
+        "remove": "AddNewRemove",
+        "intersect": "AddNewIntersect",
+        "assemble": "AddNewAssemble",
+    }
+
+    def _new_body(self, name: str | None = None) -> str:
+        """Create a solid body and route subsequent features into it."""
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        bodies = part.Bodies
+        before = bodies.Count
+        body = bodies.Add()
+        if name:
+            try:
+                body.Name = name
+            except Exception:
+                # CATIA refuses some names; the default one is still usable.
+                pass
+        self.conn.active_body = body
+        try:
+            part.InWorkObject = body
+        except Exception:
+            pass
+        self.conn.refresh_display()
+        return (
+            f"Solid body '{body.Name}' created and made active "
+            f"({before} -> {bodies.Count} bodies). Later features go into it."
+        )
+
+    def _list_bodies(self) -> str:
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        bodies = part.Bodies
+        spa = self._topo_measure(part)
+        sel = self.conn.hso
+        try:
+            active_name = str(self.conn.get_active_part_body().Name)
+        except Exception:
+            active_name = ""
+
+        out = []
+        total_volume = 0.0
+        total_faces = 0
+        for i in range(1, bodies.Count + 1):
+            body = bodies.Item(i)
+            entry: dict[str, Any] = {
+                "index": i,
+                "name": body.Name,
+                "features": body.Shapes.Count,
+                "active": str(body.Name) == active_name,
+            }
+            # An empty body has nothing to measure; that is normal for a freshly
+            # created one, not an error.
+            if body.Shapes.Count:
+                if spa is not None:
+                    try:
+                        measurable = spa.GetMeasurable(
+                            part.CreateReferenceFromObject(body))
+                        volume = measurable.Volume * 1e9
+                        entry["volume_mm3"] = round(volume, 1)
+                        total_volume += volume
+                    except Exception:
+                        pass
+                try:
+                    sel.Clear()
+                    sel.Add(body)
+                    search_topology(sel, "Face")
+                    entry["faces"] = sel.Count
+                    total_faces += sel.Count
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        sel.Clear()
+                    except Exception:
+                        pass
+            out.append(entry)
+
+        if not out:
+            return "No solid bodies in the active part"
+        # The part's volume is the sum of its bodies, which is what a spec means
+        # by "several solids that interpenetrate, Merge = false".
+        return json.dumps({
+            "bodies": out,
+            "count": len(out),
+            "total_volume_mm3": round(total_volume, 1),
+            "total_faces": total_faces,
+        }, indent=2)
+
+    def _boolean(self, args: dict[str, Any]) -> str:
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        operation = args["operation"]
+        method = self._BOOLEAN_METHODS[operation]
+        bodies = part.Bodies
+
+        try:
+            tool = bodies.Item(args["tool_body"])
+        except Exception:
+            names = ", ".join(str(bodies.Item(i).Name)
+                              for i in range(1, bodies.Count + 1))
+            raise RuntimeError(
+                f"No body named '{args['tool_body']}'. Bodies: {names or 'none'}."
+            ) from None
+
+        if args.get("target_body"):
+            try:
+                target = bodies.Item(args["target_body"])
+            except Exception:
+                raise RuntimeError(
+                    f"No body named '{args['target_body']}'."
+                ) from None
+        else:
+            # Default target is "the other body". The active body is the usual
+            # answer (you just built the tool body), but when the tool body IS
+            # the active one, MainBody is the only sensible survivor.
+            active = self.conn.get_active_part_body()
+            if str(active.Name) != str(tool.Name):
+                target = active
+            elif str(part.MainBody.Name) != str(tool.Name):
+                target = part.MainBody
+            else:
+                raise ValueError(
+                    f"'{tool.Name}' is the only candidate; pass target_body "
+                    f"explicitly to say which body should survive."
+                )
+
+        if str(tool.Name) == str(target.Name):
+            raise ValueError(
+                "tool_body and target_body are the same body - a boolean needs two."
+            )
+
+        # These four take the Body itself, not a Reference: passing a Reference
+        # is accepted for add/remove/assemble and then does nothing, and
+        # AddNewIntersect rejects it outright with a type mismatch.
+        part.InWorkObject = target
+        feature = getattr(part.ShapeFactory, method)(tool)
+        if args.get("name"):
+            feature.Name = args["name"]
+        part.UpdateObject(feature)
+
+        # The tool body is consumed by CATIA, so it can no longer be the target
+        # of new features.
+        self.conn.active_body = target
+        return (
+            f"Boolean '{operation}': '{tool.Name}' into '{target.Name}' "
+            f"(feature '{feature.Name}'). Active body is now '{target.Name}'."
+        )
 
     def _topo_measure(self, part: Any) -> Any:
         """SPA workbench for edge/face geometry, or None if unavailable."""
