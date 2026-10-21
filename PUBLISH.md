@@ -20,7 +20,7 @@
 | `LICENSE` | 上游三方版权 | **原样保留**（MIT 强制要求，删了就违规） |
 | **提交署名** | 7 个提交混着 `WorkBuddy <workbuddy@local>` 和一个用不上的 `users.noreply.github.com` 邮箱 | 全部改写为 `wudahua <wudahua@users.noreply.github.com>`；上游 113 个提交的历史**一个字节没动** |
 | **远端** | `origin` 指向上游 `daiemon12/catia-v5-mcp-server`（你无写权限） | `origin` → `wudahua/catia-v5-mcp-lite`；上游保留为 `upstream` |
-| **工具数断言** | `tests/` 里两处还写着上游的 98 | 已同步为 86 |
+| **工具数断言** | `tests/` 里两处还写着上游的 98 | 已同步为 87 |
 | **HTTP 测试** | `test_missing_or_wrong_token_is_rejected` 在设了 `HTTP_PROXY` 的机器上必红 | 见下方"顺手修的一个测试缺陷" |
 | **建模能力缺口** | `catia_shaft` 任何时候都建不出实体；草图只能落在 3 张主基准面上；画不出构造线；贯通切除只能靠猜一个比零件更高的深度 | 四项全部补齐，并逐项真机验证（体积偏差 0.000%），明细见 `CHANGELOG.md`；离线测试 34 → **61** 全绿 |
 
@@ -91,7 +91,7 @@ python -m pytest tests -q          # 34 passed
 ```
 
 工具数：GSD 24 + PartDesign 18 + Sketcher 11 + Assembly 11 + Document 9 +
-Measurement 6 + Export 4 + Planner 2 + Diagnostics 1 = **86**。
+Measurement 6 + Export 4 + Planner 2 + Diagnostics 1 = 86，加装配改名 1 = **87**。
 
 ## 四、几个容易踩的坑
 

@@ -170,6 +170,30 @@ class AssemblyTools:
                 },
             },
             {
+                "name": "catia_rename_component",
+                "description": (
+                    "Rename a component INSTANCE inside the active assembly. This is the "
+                    "only way to get a readable tree on CATIA V5-6R2020: the part's own "
+                    "Name is read-only there (Part.Name raises E_NOTIMPL), so every part "
+                    "added from file arrives as Part1.1, Part2.1, ... regardless of the "
+                    "file name. The instance name is writable."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "component_name": {
+                            "type": "string",
+                            "description": "Component name, or its 1-based index as a string",
+                        },
+                        "new_name": {
+                            "type": "string",
+                            "description": "Instance name to set, e.g. 'P01_CylinderBlock'",
+                        },
+                    },
+                    "required": ["component_name", "new_name"],
+                },
+            },
+            {
                 "name": "catia_list_components",
                 "description": "List all components in the active assembly/product with their names and positions.",
                 "inputSchema": {
@@ -269,6 +293,8 @@ class AssemblyTools:
                 return self._angle_constraint(arguments)
             case "catia_move_component":
                 return self._move_component(arguments)
+            case "catia_rename_component":
+                return self._rename_component(arguments)
             case "catia_list_components":
                 return self._list_components()
             case "catia_list_constraints":
@@ -297,6 +323,22 @@ class AssemblyTools:
             new_product.Name = name
         self.conn.refresh_display()
         return f"New Part component created in assembly: '{new_product.Name}'"
+
+    def _rename_component(self, args: dict[str, Any]) -> str:
+        """Rename a component instance and report whether CATIA kept it."""
+        product = self.conn.get_active_product()
+        component = self._resolve_component(product, str(args["component_name"]))
+        before = str(component.Name)
+        wanted = str(args["new_name"])
+        component.Name = wanted
+        after = str(component.Name)
+        self.conn.refresh_display()
+        if after != wanted:
+            return (
+                f"Rename not applied: CATIA kept '{after}' instead of '{wanted}' "
+                f"(component was '{before}')."
+            )
+        return f"Component '{before}' renamed to '{after}'."
 
     def _fix_constraint(self, component_name: str) -> str:
         product = self.conn.get_active_product()

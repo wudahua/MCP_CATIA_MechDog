@@ -385,3 +385,64 @@ def test_save_as_documents_its_own_ordering_constraint():
     text = doc["description"]
     assert "no geometry" in text
     assert "doc.Save()" in text
+
+
+# --------------------------------------------------------------------------
+# Renaming a component instance: the only readable name in the tree.
+# --------------------------------------------------------------------------
+
+
+class FakeInstance:
+    def __init__(self, name, writable=True):
+        self._name = name
+        self._writable = writable
+
+    @property
+    def Name(self):
+        return self._name
+
+    @Name.setter
+    def Name(self, value):
+        if not self._writable:
+            return                      # CATIA silently keeps the old name
+        self._name = value
+
+
+def _assembly_tools(instances):
+    from catia_mcp.tools.assembly import AssemblyTools
+
+    products = type("P", (), {
+        "Count": len(instances),
+        "Item": lambda self, i: instances[i - 1],
+    })()
+    product = type("Pr", (), {"Products": products})()
+    conn = type("C", (), {
+        "get_active_product": lambda self: product,
+        "refresh_display": lambda self: None,
+    })()
+    return AssemblyTools(connection=conn)
+
+
+def test_rename_sets_the_instance_name():
+    instances = [FakeInstance("Part1.1"), FakeInstance("Part2.1")]
+    out = _assembly_tools(instances)._rename_component(
+        {"component_name": "2", "new_name": "P02_PistonRod"})
+    assert instances[1].Name == "P02_PistonRod"
+    assert "renamed" in out
+
+
+def test_rename_reports_a_refused_rename_instead_of_claiming_success():
+    # Part.Name is read-only on V5-6R2020; if a rename does not stick the reply
+    # has to say so rather than echo the requested name back.
+    instances = [FakeInstance("Part1.1", writable=False)]
+    out = _assembly_tools(instances)._rename_component(
+        {"component_name": "1", "new_name": "P01_CylinderBlock"})
+    assert "not applied" in out
+    assert "Part1.1" in out
+
+
+def test_rename_tool_is_registered():
+    from catia_mcp.tools.assembly import AssemblyTools
+
+    names = [d["name"] for d in AssemblyTools(connection=None).get_tool_definitions()]
+    assert "catia_rename_component" in names

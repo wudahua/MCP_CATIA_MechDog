@@ -5,7 +5,7 @@ All notable changes to this project are documented here.
 ## [0.3.0] — 2026-10-20 · lite fork
 
 First public state of the fork. Based on upstream `0.2.2` plus the unreleased
-98-tool work and a zh-CN CATIA compatibility patch. **86 tools** (98 − 16 + 4).
+98-tool work and a zh-CN CATIA compatibility patch. **87 tools** (98 − 16 + 5).
 See `README.md` for the diff table and `FORK.md` for measurements.
 
 ### Removed
@@ -38,6 +38,12 @@ See `README.md` for the diff table and `FORK.md` for measurements.
 - `catia_shaft` / `catia_groove` take `axis` (`horizontal` | `vertical`). Only
   the sketch's own axes work; a construction-line reference is accepted by the
   property setter and then rejected at update time.
+- `catia_rename_component`: a readable assembly tree. `Part.Name` is read-only on
+  V5-6R2020 (`E_NOTIMPL`), so every part added from file shows up as `Part1.1`,
+  `Part2.1`, … no matter what the file is called - nine parts of a cylinder all
+  collapse to `Part1.1 / Part2.1 / Part2.2 / Part3.1 …` and cannot be told apart.
+  The instance name is writable, so this is the only way to get `P01_CylinderBlock`
+  into the tree. The reply reports whether CATIA actually kept the new name.
 
 ### Fixed
 - `catia_shaft` / `catia_groove` never produced a solid: they called
@@ -105,7 +111,7 @@ See `README.md` for the diff table and `FORK.md` for measurements.
   the whole URI into `scope["path"]`, and the server 404'd a correct request.
   The test failed on any machine with a proxy (upstream included); the suite is
   now independent of the environment. No server code changed.
-- **66 offline tests** in total, none of which start CATIA.
+- **69 offline tests** in total, none of which start CATIA.
 
 ## [Unreleased]
 

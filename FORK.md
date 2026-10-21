@@ -3,7 +3,7 @@
 上游：[daiemon12/catia-v5-mcp-server](https://github.com/daiemon12/catia-v5-mcp-server)（MIT，作者 Adam M'HAMDI）
 本 fork 保留上游全部 COM 现场知识，砍掉与实体建模无关的模块，补上"建模—验收"闭环最缺的四件事。
 
-**工具数：98 → 86**（−11 绘图、−5 知识工程，+4 新增）
+**工具数：98 → 87**（−11 绘图、−5 知识工程，+5 新增）
 
 ---
 

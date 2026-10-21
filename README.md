@@ -6,7 +6,7 @@ A trimmed, verification-first fork of
 only what builds and checks a **solid from a written spec**, and fixes four
 defects that make that loop unreliable.
 
-**86 tools** (upstream: 98). Nothing in the COM layer was rewritten — the value
+**87 tools** (upstream: 98). Nothing in the COM layer was rewritten — the value
 of upstream is the field-verified knowledge in its comments, so this fork is
 strictly add / subtract / patch.
 
@@ -24,7 +24,7 @@ strictly add / subtract / patch.
 `export` (STEP/STL hand-off) and `http_transport` (remote agent) are kept: they
 are domain-neutral and cheap. See `FORK.md` §8 if you want to cut further.
 
-### Added (4 tools)
+### Added (5 tools)
 
 | Tool | What it gives you |
 |---|---|
@@ -32,6 +32,7 @@ are domain-neutral and cheap. See `FORK.md` §8 if you want to cut further.
 | `catia_measure_topology` | Face, edge and vertex counts — the cheapest guard against a part with the right volume and the wrong shape |
 | `catia_set_component_transform` | Absolute placement from a **row-major 3×3** (transposed server-side) or CATIA's native 12 numbers; reads back and reports deviation, det, orthogonality |
 | `catia_get_component_transform` | The same placement in both conventions, plus where local X/Y/Z point in the assembly |
+| `catia_rename_component` | A readable assembly tree. `Part.Name` is read-only on V5-6R2020, so every part arrives as `Part1.1 / Part2.1 / …`; the instance name is writable |
 
 ### Fixed (latent upstream bugs, reproduced on a live V5-6R2020 B30 session)
 
