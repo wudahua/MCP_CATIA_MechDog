@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Added
+- `catia_gsd_extract`: extract a curve or surface from existing geometry into the
+  active geometrical set, with a propagation setting (none / point / tangent /
+  curvature). `catia_gsd_fill` needs a boundary *curve* - a sketch reference is
+  rejected - so without this there was no way to cap a lofted surface and turn it
+  into a solid. It was simply missing from the 24 GSD tools.
+
+### Fixed
+- `catia_sketch_spline` with `closed: true` built **two** entities: the spline,
+  plus a straight line from the last point back to the first. Anything that
+  consumes an outline as a single curve then fails - a loft section, for
+  instance, is accepted by `AddSectionToLoft` and rejected at update. A closed
+  spline now repeats its first point so the result is one continuous curve, and
+  a closed spline (unlike a four-line outline) can be used as a loft section -
+  verified by lofting two closed splines and getting a surface.
+
+### Known limitation
+- A loft section must be a **single curve**. A closed outline made of several
+  lines is accepted by `AddSectionToLoft` and then fails at `UpdateObject` - even
+  two identical rectangles fail, so this is not a coupling or start-point problem.
+  A closed spline works around it, except on a long narrow cross-section where
+  the spline overshoots at the sharp corners and self-intersects, which then
+  breaks `catia_gsd_fill`.
+
 ## [0.3.1] — 2026-10-22 · multi-body parts, loft sections from topology, curved bounding boxes
 
 Three gaps that a written specification hits as soon as it stops being a single

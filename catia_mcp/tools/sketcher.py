@@ -231,7 +231,13 @@ class SketcherTools:
                         },
                         "closed": {
                             "type": "boolean",
-                            "description": "Whether to close the spline (default: false)",
+                            "description": (
+                                "Close the spline into ONE continuous curve by repeating "
+                                "its first point (default: false). This matters for lofts: "
+                                "a multi-entity outline - several lines, or a spline plus "
+                                "a closing line - is accepted by AddSectionToLoft and then "
+                                "fails at update."
+                            ),
                             "default": False,
                         },
                     },
@@ -570,23 +576,23 @@ class SketcherTools:
         self._ensure_sketch_open()
         factory = self._active_factory
 
-        # Create a spline using control points
-        # CATIA V5 Sketch.OpenEdition() returns a Factory2D
-        # Factory2D.CreateSpline expects an array of 2D points
-        spline_pts = []
-        for pt in points:
-            ctrl_pt = factory.CreatePoint(pt[0], pt[1])
-            spline_pts.append(ctrl_pt)
+        # Closing the spline by appending a LINE back to the start produces two
+        # entities, and a multi-entity outline cannot be used as a loft section
+        # (CATIA accepts it in AddSectionToLoft and then fails at update). A
+        # closed spline has to repeat its first point instead, so the result is
+        # one continuous curve.
+        control = [list(p) for p in points]
+        if closed and len(control) >= 3:
+            control.append(list(control[0]))
 
+        # Factory2D.CreateSpline expects an array of 2D points.
+        spline_pts = [factory.CreatePoint(p[0], p[1]) for p in control]
         spline = factory.CreateSpline(spline_pts)
-
-        if closed and len(points) >= 3:
-            # Close the spline by adding a line from last to first point
-            factory.CreateLine(points[-1][0], points[-1][1], points[0][0], points[0][1])
 
         pts_str = ", ".join(f"({p[0]}, {p[1]})" for p in points)
         return f"Spline created through {len(points)} points: {pts_str}" + (
-            " (closed)" if closed else ""
+            " (closed into a single curve)" if closed and len(control) > len(points)
+            else ""
         )
 
     def _draw_point(self, x: float, y: float) -> str:

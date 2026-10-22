@@ -235,6 +235,40 @@ class GSDTools:
                 },
             },
             {
+                "name": "catia_gsd_extract",
+                "description": (
+                    "Extract a curve or surface from existing geometry into the active "
+                    "geometrical set. Needed whenever a downstream feature demands a "
+                    "wire/surface but you only have a sketch or a solid's topology: "
+                    "catia_gsd_fill's boundaries, and loft sections that came from a "
+                    "multi-entity outline, both fail on a raw sketch reference and work "
+                    "on the Extract."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "element": {
+                            "type": "string",
+                            "description": (
+                                "Element to extract: a tree name, or 'Edge.N' / 'Face.N' "
+                                "taken from the active body (see catia_list_edges)"
+                            ),
+                        },
+                        "propagation": {
+                            "type": "integer",
+                            "enum": [1, 2, 3, 4],
+                            "default": 1,
+                            "description": (
+                                "1 = none (this element only), 2 = point, 3 = tangent "
+                                "continuity, 4 = curvature continuity"
+                            ),
+                        },
+                        "name": {"type": "string", "description": "Optional name for the result"},
+                    },
+                    "required": ["element"],
+                },
+            },
+            {
                 "name": "catia_gsd_intersection",
                 "description": "Create the intersection of two elements (e.g. surface ∩ plane).",
                 "inputSchema": {
@@ -562,6 +596,8 @@ class GSDTools:
                 return self._circle(arguments)
             case "catia_gsd_project":
                 return self._project(arguments)
+            case "catia_gsd_extract":
+                return self._extract(arguments)
             case "catia_gsd_intersection":
                 return self._intersection(arguments)
             case "catia_gsd_multi_section_surface":
@@ -925,6 +961,20 @@ class GSDTools:
         return self._finish(
             projection, args.get("name"),
             f"Projection of '{args['element']}' onto '{args['support']}' created.",
+        )
+
+    def _extract(self, args: dict[str, Any]) -> str:
+        self.conn.ensure_connected()
+        extract = self._factory().AddNewExtract(self._ref(args["element"]))
+        propagation = int(args.get("propagation", 1))
+        try:
+            # CatPropagationType: 1 none, 2 point, 3 tangent, 4 curvature.
+            extract.PropagationType = propagation
+        except Exception:
+            pass
+        return self._finish(
+            extract, args.get("name"),
+            f"Extract of '{args['element']}' (propagation {propagation}) created.",
         )
 
     def _intersection(self, args: dict[str, Any]) -> str:
