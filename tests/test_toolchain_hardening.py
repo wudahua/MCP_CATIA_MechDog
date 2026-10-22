@@ -173,3 +173,24 @@ def test_face_and_edge_listings_expose_the_element_type():
         import inspect
 
         assert 'entry["type"]' in inspect.getsource(func)
+
+
+# ─────────────────────────────────────────── visibility
+def test_set_visibility_is_registered_with_the_measured_enum_note():
+    """Hiding is not cosmetic: leftover GSD surfaces show up in STL exports."""
+    from catia_mcp.tools.part_design import PartDesignTools as PD
+
+    tool = [d for d in PD(connection=None).get_tool_definitions()
+            if d["name"] == "catia_set_visibility"][0]
+    assert "show" in tool["inputSchema"]["properties"]
+    text = tool["description"]
+    assert "STL" in text
+    assert "envelope" in text
+
+    import inspect
+
+    source = inspect.getsource(PD._set_visibility)
+    # 0 shows, 1 hides - 2 is accepted and does nothing, which is why this was
+    # silently broken for a while.
+    assert "SetShow(0 if show else 1)" in source
+    assert "HybridShapes" in source          # descend into the set

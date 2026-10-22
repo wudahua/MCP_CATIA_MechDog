@@ -546,6 +546,38 @@ class PartDesignTools:
                 },
             },
             {
+                "name": "catia_set_visibility",
+                "description": (
+                    "Show or hide a tree node: a body, a geometrical set, a single "
+                    "surface/curve inside one, or a sketch. "
+                    "GSD surfaces stay visible after catia_gsd_close_surface turns them "
+                    "into a solid, and they overlay the solid - which reads as a shape "
+                    "error rather than the drawing-bookkeeping it is. Hide the "
+                    "geometrical set before taking a screenshot or exporting an STL; "
+                    "catia_get_bounding_box's mesh method and any STL export include "
+                    "visible surfaces, so leftovers also corrupt the measured envelope."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": (
+                                "Tree name: a body ('零件几何体'), a geometrical set "
+                                "('GSD_Set'), an element inside one ('S1', 'Closed'), "
+                                "a feature, or a sketch."
+                            ),
+                        },
+                        "show": {
+                            "type": "boolean",
+                            "description": "true shows, false hides (default false).",
+                            "default": False,
+                        },
+                    },
+                    "required": ["name"],
+                },
+            },
+            {
                 "name": "catia_boolean",
                 "description": (
                     "Combine two solid bodies. The target keeps the result and the "
@@ -659,6 +691,9 @@ class PartDesignTools:
                 return self._new_body(arguments.get("name"))
             case "catia_list_bodies":
                 return self._list_bodies()
+            case "catia_set_visibility":
+                return self._set_visibility(
+                    arguments["name"], bool(arguments.get("show", False)))
             case "catia_boolean":
                 return self._boolean(arguments)
             case "catia_list_faces":
@@ -1752,6 +1787,98 @@ class PartDesignTools:
             "total_volume_mm3": round(total_volume, 1),
             "total_faces": total_faces,
         }, indent=2)
+
+    def _set_visibility(self, name: str, show: bool) -> str:
+        """Show or hide a tree node by name, searching the whole part.
+
+        Visibility is not cosmetic here: a GSD surface left visible after
+        CloseSurface overlays the solid, and an STL export or the mesh bounding
+        box then includes it - so both the picture and the measured envelope come
+        out wrong. Field case: a two-blade propeller looked like one blade had an
+        extra lobe, the envelope read 45.6 mm wide instead of 30.1, and nothing
+        was actually wrong with the geometry.
+        """
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        target = None
+        where = ""
+
+        def try_get(collection, label):
+            try:
+                return collection.Item(name), label
+            except Exception:
+                return None, ""
+
+        for i in range(1, part.Bodies.Count + 1):
+            body = part.Bodies.Item(i)
+            if str(body.Name) == name:
+                target, where = body, "body"
+                break
+            got, lbl = try_get(body.Shapes, "feature")
+            if got is not None:
+                target, where = got, lbl
+                break
+            got, lbl = try_get(body.Sketches, "sketch")
+            if got is not None:
+                target, where = got, lbl
+                break
+
+        if target is None:
+            for i in range(1, part.HybridBodies.Count + 1):
+                hb = part.HybridBodies.Item(i)
+                if str(hb.Name) == name:
+                    target, where = hb, "geometrical set"
+                    break
+                got, lbl = try_get(hb.HybridShapes, "geometrical element")
+                if got is not None:
+                    target, where = got, lbl
+                    break
+                got, lbl = try_get(hb.HybridSketches, "sketch")
+                if got is not None:
+                    target, where = got, lbl
+                    break
+
+        if target is None:
+            raise RuntimeError(
+                f"No tree node named '{name}'. Use catia_list_bodies, "
+                "catia_list_features or catia_gsd_list_elements to see names."
+            )
+
+        sel = self.conn.active_document.Selection
+
+        def apply(node):
+            sel.Clear()
+            sel.Add(node)
+            # Field-measured on V5-6R2020 B30, and not what the reference
+            # suggests: 0 shows, 1 hides, 2 is accepted and does nothing. Using
+            # 2 for "hide" is silently ignored, which is how a set of GSD
+            # surfaces stayed on screen (and in every STL export) while the tool
+            # reported it had hidden them.
+            sel.VisProperties.SetShow(0 if show else 1)
+
+        try:
+            apply(target)
+            # Hiding a geometrical set does not hide what is inside it: each
+            # element keeps its own visibility, so the surfaces stay on screen
+            # and keep poisoning STL exports. Descend one level.
+            children = 0
+            if where == "geometrical set":
+                for collection in ("HybridShapes", "HybridSketches"):
+                    try:
+                        items = getattr(target, collection)
+                    except Exception:
+                        continue
+                    for i in range(1, items.Count + 1):
+                        try:
+                            apply(items.Item(i))
+                            children += 1
+                        except Exception:
+                            pass
+        finally:
+            self._clear_selection()
+        self.conn.refresh_display()
+        extra = f" and {children} element(s) inside it" if children else ""
+        return f"'{name}' ({where}) is now {'shown' if show else 'hidden'}{extra}."
 
     def _boolean(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()

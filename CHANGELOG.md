@@ -5,6 +5,15 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- `catia_set_visibility`: show or hide a body, a geometrical set (and everything
+  inside it), a single element, a feature or a sketch. A GSD surface stays
+  visible after `catia_gsd_close_surface` turns it into a solid, and it overlays
+  that solid - so the picture, `catia_get_bounding_box(method='mesh')` and every
+  STL export describe a part that does not exist. Field case: a two-blade
+  propeller looked like one blade had an extra half attached, and the STL
+  envelope read 45.6 mm wide instead of 30.1, with the solidified geometry
+  perfectly correct all along. Note the measured enum: `SetShow(0)` shows,
+  `SetShow(1)` hides, `SetShow(2)` is accepted and does nothing.
 - `catia_fillet` and `catia_chamfer` take `edge_names` and apply several edges in
   one call. Each edge becomes its own feature, so one refusal no longer throws the
   whole batch away - the reply says "R3.81: 3/4 edge(s) done" and names what was
