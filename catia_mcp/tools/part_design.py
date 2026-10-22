@@ -1699,9 +1699,15 @@ class PartDesignTools:
                     if spa is not None:
                         # Area, so an A-list of faces can be identified without
                         # a second round trip per face. SPA returns m2.
+                        # Solids made by GSD CloseSurface are the exception: SPA
+                        # resolves their sub-element references to nothing and
+                        # hands back Area = 0 without raising (field-confirmed on
+                        # V5-6R2020 B30, 2026-10-22). Omitting the key beats
+                        # reporting a 0 that looks like a real measurement.
                         try:
-                            entry["area_mm2"] = round(
-                                spa.GetMeasurable(sel.Item(i).Reference).Area * 1e6, 3)
+                            area = spa.GetMeasurable(sel.Item(i).Reference).Area * 1e6
+                            if area > 0:
+                                entry["area_mm2"] = round(area, 3)
                         except Exception:
                             pass
                     faces.append(entry)

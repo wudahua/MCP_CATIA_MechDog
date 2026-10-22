@@ -12,6 +12,12 @@ All notable changes to this project are documented here.
   into a solid. It was simply missing from the 24 GSD tools.
 
 ### Fixed
+- `catia_list_faces` reported `"area_mm2": 0.0` for every face of a solid built by
+  `catia_gsd_close_surface`. SPA resolves sub-element references of GSD-derived
+  topology to nothing and returns `Area = 0` instead of raising, so the guard
+  never fired. The key is now omitted when the measurement comes back as zero,
+  rather than publishing a 0 that reads like a real measurement. Verified correct
+  on ordinary Part Design solids (100x100x10 pad: 2 x 10000 + 4 x 1000 mm2).
 - `catia_sketch_spline` with `closed: true` built **two** entities: the spline,
   plus a straight line from the last point back to the first. Anything that
   consumes an outline as a single curve then fails - a loft section, for
@@ -27,6 +33,12 @@ All notable changes to this project are documented here.
   A closed spline works around it, except on a long narrow cross-section where
   the spline overshoots at the sharp corners and self-intersects, which then
   breaks `catia_gsd_fill`.
+- A closed spline through the corners of a polygon **inflates its area by about
+  2%** (measured on V5-6R2020 B30: a 106.40 mm2 parallelogram came back as
+  108.61 mm2, ratio 1.0208; the same outline pre-shrunk 2% still came back at
+  1.0204, so it is a systematic bias of the B-spline, not noise). If the section
+  area matters, pre-shrink the outline by ~1/1.0206 - measured with a 1 mm pad on
+  the section and read back through `catia_get_inertia`.
 
 ## [0.3.1] — 2026-10-22 · multi-body parts, loft sections from topology, curved bounding boxes
 
