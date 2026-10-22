@@ -701,10 +701,29 @@ class PartDesignTools:
             raise RuntimeError("No features found in the active body.")
         return body
 
+    def _prepare_body(self, part: Any) -> Any:
+        """Put the solid body back in work and return it.
+
+        Every Part Design factory (AddNewPocket / AddNewFillet / ...) acts on
+        the in-work object. GSD calls leave it pointing at the geometrical set
+        (``GSD_Set``), and then those factories fail with a bare
+        "method failed" COM error that says nothing about the cause - it looks
+        like a bad sketch or a bad edge. Field-confirmed on V5-6R2020 B30,
+        2026-10-22: after catia_gsd_close_surface, pocket/fillet/chamfer all
+        failed until InWorkObject was set back to the body by hand.
+        """
+        body = self.conn.get_active_part_body()
+        try:
+            if part.InWorkObject.Name != body.Name:
+                part.InWorkObject = body
+        except Exception:
+            part.InWorkObject = body
+        return body
+
     def _pad(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
-        body = self.conn.get_active_part_body()
+        body = self._prepare_body(part)
         sf = part.ShapeFactory
 
         sketch = self._get_last_sketch(args.get("sketch_name"))
@@ -741,7 +760,7 @@ class PartDesignTools:
     def _pocket(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
-        body = self.conn.get_active_part_body()
+        body = self._prepare_body(part)
         sf = part.ShapeFactory
 
         sketch = self._get_last_sketch(args.get("sketch_name"))
@@ -879,6 +898,7 @@ class PartDesignTools:
     def _shaft(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
+        self._prepare_body(part)
         sketch = self._get_last_sketch(args.get("sketch_name"))
         angle = args.get("angle", 360)
         axis_mode = args.get("axis", "horizontal")
@@ -898,6 +918,7 @@ class PartDesignTools:
     def _groove(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
+        self._prepare_body(part)
         sketch = self._get_last_sketch(args.get("sketch_name"))
         angle = args.get("angle", 360)
         axis_mode = args.get("axis", "horizontal")
@@ -962,7 +983,7 @@ class PartDesignTools:
     def _fillet(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
-        body = self.conn.get_active_part_body()
+        body = self._prepare_body(part)
         sf = part.ShapeFactory
 
         radius = args["radius"]
@@ -989,7 +1010,7 @@ class PartDesignTools:
     def _chamfer(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
-        body = self.conn.get_active_part_body()
+        body = self._prepare_body(part)
         sf = part.ShapeFactory
 
         length = args["length"]
@@ -1020,7 +1041,7 @@ class PartDesignTools:
     def _hole(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
-        body = self.conn.get_active_part_body()
+        body = self._prepare_body(part)
         sf = part.ShapeFactory
 
         sketch = self._get_last_sketch(args.get("sketch_name"))
@@ -1091,7 +1112,7 @@ class PartDesignTools:
     def _rect_pattern(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
-        body = self.conn.get_active_part_body()
+        body = self._prepare_body(part)
         sf = part.ShapeFactory
 
         feature = self._get_last_shape(args.get("feature_name"))
@@ -1219,7 +1240,7 @@ class PartDesignTools:
     def _circ_pattern(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
-        body = self.conn.get_active_part_body()
+        body = self._prepare_body(part)
         sf = part.ShapeFactory
 
         count = int(args["count"])
@@ -1253,7 +1274,7 @@ class PartDesignTools:
         # Re-resolve after the donor round trip: the active document changed
         # and came back.
         part = self.conn.get_active_part()
-        body = self.conn.get_active_part_body()
+        body = self._prepare_body(part)
         sf = part.ShapeFactory
         feature = self._get_last_shape(args.get("feature_name"))
 
@@ -1288,7 +1309,7 @@ class PartDesignTools:
     def _user_pattern(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
-        body = self.conn.get_active_part_body()
+        body = self._prepare_body(part)
         sf = part.ShapeFactory
 
         feature = self._get_last_shape(args.get("feature_name"))
@@ -1327,7 +1348,7 @@ class PartDesignTools:
     def _mirror(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
-        body = self.conn.get_active_part_body()
+        body = self._prepare_body(part)
         sf = part.ShapeFactory
 
         plane_key = args["plane"].lower()
@@ -1353,7 +1374,7 @@ class PartDesignTools:
     def _shell(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
-        body = self.conn.get_active_part_body()
+        body = self._prepare_body(part)
         sf = part.ShapeFactory
 
         thickness = args["thickness"]
@@ -1388,7 +1409,7 @@ class PartDesignTools:
     def _draft(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
-        body = self.conn.get_active_part_body()
+        body = self._prepare_body(part)
         sf = part.ShapeFactory
 
         angle = args["angle"]
@@ -1426,7 +1447,7 @@ class PartDesignTools:
     def _thickness(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
-        body = self.conn.get_active_part_body()
+        body = self._prepare_body(part)
         sf = part.ShapeFactory
 
         offset = args["offset"]

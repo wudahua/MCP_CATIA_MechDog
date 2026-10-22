@@ -12,6 +12,15 @@ All notable changes to this project are documented here.
   into a solid. It was simply missing from the 24 GSD tools.
 
 ### Fixed
+- Part Design features now put the solid body back in work before calling the
+  factory. GSD calls leave `Part.InWorkObject` pointing at the geometrical set
+  (`GSD_Set`), and `AddNewPocket` / `AddNewFillet` / `AddNewChamfer` then fail
+  with a bare "method failed" COM error that reads like a bad sketch or a bad
+  edge. Field-confirmed on V5-6R2020 B30: after `catia_gsd_close_surface`, a
+  pocket was rejected until `InWorkObject` was set to the body by hand; with the
+  fix it cuts the expected 402.2 mm3 on the first try. `_prepare_body` is now
+  called by pad / pocket / shaft / groove / hole / fillet / chamfer / shell /
+  draft / patterns / stiffener / mirror / scaling.
 - `catia_list_faces` reported `"area_mm2": 0.0` for every face of a solid built by
   `catia_gsd_close_surface`. SPA resolves sub-element references of GSD-derived
   topology to nothing and returns `Area = 0` instead of raising, so the guard
@@ -39,6 +48,32 @@ All notable changes to this project are documented here.
   1.0204, so it is a systematic bias of the B-spline, not noise). If the section
   area matters, pre-shrink the outline by ~1/1.0206 - measured with a 1 mm pad on
   the section and read back through `catia_get_inertia`.
+- **A solid that came out of `catia_gsd_close_surface` is a dead end for
+  edge-based Part Design work, and for all sub-element measurement.** Once such a
+  solid is in the body:
+  - `catia_circ_pattern` is refused at `UpdateObject` (the factory builds the
+    feature, then CATIA rejects it) - the same 0x80020009 class the tool already
+    guards against.
+  - `catia_fillet` and `catia_chamfer` are refused at creation for **any** edge,
+    including edges of a native pad in the same body. Workaround for a second
+    instance: two `catia_gsd_symmetry` calls (about XZ then about YZ) are exactly
+    a 180 deg rotation about Y, and `catia_gsd_close_surface` on the result gives
+    a solid identical to what the pattern would have produced.
+  - `catia_list_edges` reports `length_mm` as a constant garbage value (2e7, or
+    8e7 on an extracted curve), `catia_list_faces` cannot give areas, and
+    `catia_measure_distance` throws from `GetMinimumDistance`. Circles still
+    measure correctly, so this hits B-spline and GSD-derived topology only.
+  - Profile-based features (pad, pocket) are **not** affected - a Ø6.35 pocket
+    through such a body cuts exactly as expected.
+
+  To keep the tip fillets and the array, the blade has to be a Part Design
+  multi-sections solid (`ShapeFactory.AddNewLoft`) rather than a GSD
+  loft+CloseSurface. That object can be created, but its specific interface is
+  not reachable through late-bound dispatch - the type info only exposes
+  `CATIABase` (23 members: Name, Parent, QueryInterface, Invoke, ...), and every
+  Loft-specific name (`AddSectionToLoft`, `SectionCoupling`, `Relimitation`)
+  resolves to nothing. Reaching it needs the `CATIALoft` IID and an explicit
+  `QueryInterface`.
 
 ## [0.3.1] — 2026-10-22 · multi-body parts, loft sections from topology, curved bounding boxes
 
