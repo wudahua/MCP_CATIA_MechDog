@@ -378,3 +378,21 @@ def test_a_failed_batch_rebuild_rolls_every_feature_back():
     assert "0/2" in report
     assert "would not rebuild" in report
     assert len(removed) == 2            # nothing left half-built in the tree
+
+
+def test_the_package_version_matches_pyproject():
+    """__version__ sat at 0.2.2 through two releases while pyproject said 0.3.1.
+
+    Anything that asks the package its version - a client, a bug report, a
+    release check - got an answer two versions wrong, and nothing failed.
+    """
+    import re
+    from pathlib import Path
+
+    import catia_mcp
+
+    root = Path(catia_mcp.__file__).resolve().parent.parent
+    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+    declared = re.search(r'^version = "([^"]+)"', pyproject, re.M).group(1)
+
+    assert catia_mcp.__version__ == declared

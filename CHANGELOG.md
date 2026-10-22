@@ -4,6 +4,12 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-10-22 · edge identity, batched fillets, first release
+
+Everything here came out of building two real parts from a written spec - a
+two-blade propeller (P03) and a nine-solid drone body (P01). Each entry names the
+measurement that forced it.
+
 ### Added
 - `catia_list_edges` / `catia_list_faces` report `nls` (CATIA's topology path)
   and `created_by` (the features that produced the element). This is the only
@@ -46,6 +52,10 @@ All notable changes to this project are documented here.
   into a solid. It was simply missing from the 24 GSD tools.
 
 ### Fixed
+- `catia_mcp.__version__` said `0.2.2` while `pyproject.toml` said `0.3.1` - it had
+  been stale for two releases, so anything that asked the package its version got
+  an answer two versions wrong. Both now read `0.3.2`, and a test compares them so
+  the next bump cannot leave them apart.
 - A topology search returns construction geometry alongside the solid, and it
   comes first. On the drone body the search reported 30 "faces" for a shape with
   25 real ones: the datum planes and the sketch wires were mixed in, so `Edge.1`
