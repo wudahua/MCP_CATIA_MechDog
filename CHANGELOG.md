@@ -5,6 +5,18 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- `catia_list_edges` / `catia_list_faces` report `nls` (CATIA's topology path)
+  and `created_by` (the features that produced the element). This is the only
+  handle that survives when several edges share a length: the four corners of a
+  square, the two circles on a disc and the tangent edge a fillet just created
+  can all measure the same, but their paths differ - `(Brp:(Pad.5;0:(Brp:(Sketch.23;3)))`
+  says "made by pad 5", and a spec that says "fillet the four vertical corner
+  edges" becomes a lookup instead of a guess.
+- `catia_pocket` takes `symmetric` / `direction: 'both'` for a mid-plane cut, and
+  `catia_fillet` takes `propagation` (`tangency` = CATIA's default, `none` = only
+  the edges you name). Propagation matters more than it sounds: on a smooth
+  chain, `tangency` runs the fillet along the entire boundary, so "fillet these
+  4 edges" silently becomes "fillet the whole outline".
 - `catia_set_visibility`: show or hide a body, a geometrical set (and everything
   inside it), a single element, a feature or a sketch. A GSD surface stays
   visible after `catia_gsd_close_surface` turns it into a solid, and it overlays
@@ -34,6 +46,23 @@ All notable changes to this project are documented here.
   into a solid. It was simply missing from the 24 GSD tools.
 
 ### Fixed
+- A topology search returns construction geometry alongside the solid, and it
+  comes first. On the drone body the search reported 30 "faces" for a shape with
+  25 real ones: the datum planes and the sketch wires were mixed in, so `Edge.1`
+  to `Edge.8` were plane borders with no length and every length-based edge pick
+  was reading geometry that cannot be filleted. Both the listings and the
+  `Edge.N` / `Face.N` resolution now share one filtered enumeration, so the index
+  the user sees is the index the fillet resolves.
+- A multi-edge fillet updated each feature as it was created, which invalidated
+  the references still queued behind it. Measured: 12 edges at R5.08 on the drone
+  body gave "1/12 done" and then every remaining factory call failed with a bare
+  "method failed". The batch is now built first and rebuilt once, and if that
+  rebuild fails the features are removed instead of left half-built.
+- `catia_pocket(symmetric=true)` cut one side only. `Pocket.IsSymmetric` is
+  accepted by CATIA and then ignored - measured: "mid-plane cut 38.1" passed as
+  19.05 removed 5 609.6 mm3, exactly the single-sided figure, not the 11 150.9 a
+  38.1 cut gives. The tool now builds the second side as its own cut, and drops
+  that cut when the other side is air, so the tree stays honest.
 - A multi-edge fillet resolved every edge in the batch *lazily*, one at a time,
   between factory calls. Each fillet renumbers the body's edges, so the second
   lookup landed on the tangent edge the first fillet had just created - no

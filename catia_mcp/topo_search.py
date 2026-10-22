@@ -63,6 +63,80 @@ class TopoRef(NamedTuple):
     name: str
 
 
+# A topology search on a body returns construction geometry as well as the
+# solid's own topology. Measured on V5-6R2020 B30, a part whose final shape has
+# 16 real faces exposes 30 "faces" in the search: the rest are the three datum
+# planes and the sketch wires. They have no length and cannot be filleted or
+# measured, but they occupied the low indices - so ``Edge.1`` was a datum-plane
+# border, not an edge of the model, and every length-based selection built on
+# those indices was reading construction geometry.
+_CONSTRUCTION_PREFIXES = (
+    "Selection_BorderREdge",   # datum-plane border
+    "Selection_WireREdge",     # sketch wire
+    "Selection_BorderRSur",    # datum-plane face
+)
+
+
+def nls_of(cell: Any) -> str:
+    """CATIA's NLS path for a selected topology cell ('' when unavailable).
+
+    The path names the feature that produced the element: a real edge reads
+    ``Selection_REdge:(Edge:(Face:(Brp:(Pad.5;0:...``, so it tells you *which
+    feature* an edge belongs to - the one thing length and type cannot.
+    """
+    try:
+        return str(cell.Value.Name)
+    except Exception:  # noqa: BLE001 - purely diagnostic
+        return ""
+
+
+def is_construction(nls: str) -> bool:
+    """True when the NLS path describes geometry that is not the solid."""
+    if not nls:
+        return False
+    if nls.startswith(_CONSTRUCTION_PREFIXES):
+        return True
+    # A face/edge whose defining feature is a datum plane is the plane's own
+    # border, not part of any solid.
+    return "Brp:(GSMPlane." in nls
+
+
+def nls_features(nls: str) -> list[str]:
+    """Feature names mentioned in an NLS path, in order of appearance.
+
+    ``['EdgeFillet.3', 'CloseSurface.2', 'GSMLoft.2', 'Sketch.6', ...]`` - enough
+    to answer "was this edge made by the pad or by the fillet I just added".
+    """
+    import re
+
+    seen: list[str] = []
+    for name in re.findall(r"[A-Za-z][A-Za-z0-9_]*\.\d+", nls):
+        if name not in seen:
+            seen.append(name)
+    return seen
+
+
+def topology_cells(conn: Any, body: Any, kind: str) -> list[Any]:
+    """Every *solid* cell of ``kind`` on the body's final shape, in CATIA order.
+
+    Construction geometry is filtered out so that ``<kind>.N`` means the same
+    thing to ``catia_list_edges`` / ``catia_list_faces`` and to the tools that
+    resolve ``Edge.N`` / ``Face.N`` afterwards. The search itself is left alone
+    (it is the only way to enumerate), and the selection is kept alive because
+    a Reference belongs to the selection that produced it.
+    """
+    sel = conn.hso
+    sel.Clear()
+    sel.Add(body)
+    search_topology(sel, kind)
+    cells = []
+    for i in range(1, sel.Count + 1):
+        cell = sel.Item(i)
+        if not is_construction(nls_of(cell)):
+            cells.append(cell)
+    return cells
+
+
 def topology_reference(conn: Any, body: Any, kind: str, index: int,
                        hint: str | None = None, keep: bool = True) -> TopoRef:
     """Resolve ``<kind>.<index>`` on the body's final shape to a Reference.
@@ -89,10 +163,8 @@ def topology_reference(conn: Any, body: Any, kind: str, index: int,
     if body.Shapes.Count == 0:
         raise RuntimeError("The active body has no solid shape yet.")
     sel = conn.hso
-    sel.Clear()
-    sel.Add(body)
-    search_topology(sel, kind)
-    count = sel.Count
+    cells = topology_cells(conn, body, kind)
+    count = len(cells)
     if index < 1 or index > count:
         where = hint or (
             "Use catia_list_faces / catia_list_edges to enumerate valid indices."
@@ -105,7 +177,7 @@ def topology_reference(conn: Any, body: Any, kind: str, index: int,
             f"{kind}.{index} is out of range: the final shape exposes "
             f"{count} {kind.lower()}(s). {where}"
         )
-    cell = sel.Item(index)
+    cell = cells[index - 1]
     ref = TopoRef(cell.Reference, str(cell.Name))
     if not keep:
         try:
@@ -126,19 +198,15 @@ def topology_references(conn: Any, body: Any, kind: str,
         return []
     if body.Shapes.Count == 0:
         raise RuntimeError("The active body has no solid shape yet.")
-    sel = conn.hso
-    sel.Clear()
-    sel.Add(body)
-    search_topology(sel, kind)
-    count = sel.Count
+    cells = topology_cells(conn, body, kind)
     out = []
     for index in indices:
-        if index < 1 or index > count:
+        if index < 1 or index > len(cells):
             raise RuntimeError(
                 f"{kind}.{index} is out of range: the final shape exposes "
-                f"{count} {kind.lower()}(s)."
+                f"{len(cells)} {kind.lower()}(s)."
             )
-        cell = sel.Item(index)
+        cell = cells[index - 1]
         out.append(TopoRef(cell.Reference, str(cell.Name)))
     return out
 

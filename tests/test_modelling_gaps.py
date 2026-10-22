@@ -395,7 +395,16 @@ def test_edge_and_face_indices_come_from_the_body_not_the_last_feature():
         source = inspect.getsource(func)
         assert "_topology_cells" in source
         assert "last_shape" not in source
-    assert "sel.Add(body)" in inspect.getsource(PartDesignTools._topology_cells)
+
+    # ... and both the listing and the reference resolution go through the one
+    # shared enumeration, so their indices cannot drift apart.
+    import catia_mcp.topo_search as ts
+
+    assert "topology_cells(self.conn, body, kind)" in \
+        inspect.getsource(PartDesignTools._topology_cells)
+    assert "sel.Add(body)" in inspect.getsource(ts.topology_cells)
+    assert "topology_cells(conn, body, kind)" in inspect.getsource(ts.topology_reference)
+    assert "topology_cells(conn, body, kind)" in inspect.getsource(ts.topology_references)
 
 
 

@@ -12,7 +12,10 @@ from typing import Any
 
 from catia_mcp.connection import CATIAConnection
 from catia_mcp.topo_search import (
+    nls_features,
+    nls_of,
     search_topology,
+    topology_cells,
     topology_reference,
     topology_references,
 )
@@ -89,9 +92,25 @@ class PartDesignTools:
                         },
                         "direction": {
                             "type": "string",
-                            "description": "Cut direction: 'normal' (default), 'reverse'",
-                            "enum": ["normal", "reverse"],
+                            "description": (
+                                "Cut direction: 'normal' (default), 'reverse', "
+                                "or 'both' (same as symmetric=true)."
+                            ),
+                            "enum": ["normal", "reverse", "both"],
                             "default": "normal",
+                        },
+                        "symmetric": {
+                            "type": "boolean",
+                            "description": (
+                                "Cut equally on both sides of the sketch plane - "
+                                "CATIA's 'mid-plane' cut. The documented contract is "
+                                "that the TOTAL depth is 'depth' (each side gets "
+                                "depth/2); the tool halves the dimension it hands to "
+                                "CATIA, whose IsSymmetric is a mirrored extent. This "
+                                "is how a spec's 'mid-plane cut 38.1' is meant: the "
+                                "slot ends up 38.1 long in total, not 76.2."
+                            ),
+                            "default": False,
                         },
                         "sketch_name": {
                             "type": "string",
@@ -199,6 +218,20 @@ class PartDesignTools:
                                 "Several edges at once, e.g. ['Edge.4','Edge.7']. "
                                 "Takes precedence over edge_name."
                             ),
+                        },
+                        "propagation": {
+                            "type": "string",
+                            "description": (
+                                "'tangency' (default, CATIA's own default) runs the "
+                                "fillet along every edge tangent-continuous with the "
+                                "picked one - on a smooth chain that can be the whole "
+                                "boundary, not the one edge you asked for. 'none' "
+                                "fillets exactly the edges given. Use 'none' when a "
+                                "spec says 'fillet these 4 edges' and the surface they "
+                                "belong to continues smoothly into its neighbours."
+                            ),
+                            "enum": ["tangency", "none"],
+                            "default": "tangency",
                         },
                     },
                     "required": ["radius"],
@@ -883,10 +916,21 @@ class PartDesignTools:
         through_all = bool(args.get("through_all")) and "depth" not in args
         depth = args.get("depth", 0)
         reverse = args.get("direction") == "reverse"
+        symmetric = bool(args.get("symmetric", False)) or args.get("direction") == "both"
 
         before = self._body_volume_mm3(part, body)
 
-        pocket = sf.AddNewPocket(sketch, 0 if through_all else depth)
+        # CATIA is not consistent between Pad and Pocket here, measured on
+        # V5-6R2020 B30:
+        #   Pad + IsSymmetric    -> a mirrored EXTENT, each side gets the full
+        #                           dimension (r=10, height=10 -> y -10..+10).
+        #   Pocket + IsSymmetric -> accepted and ignored, the cut stays one-sided.
+        # Measured on the drone body: a "mid-plane cut 38.1" passed as 19.05 with
+        # IsSymmetric removed 5 609.6 mm3, exactly the single-sided 19.05 figure
+        # (4 x pi x 4.826^2 x 19.05 = 5 575.4), not the 11 150.9 a 38.1 cut gives.
+        # So a mid-plane cut is built as two one-sided cuts, depth/2 each.
+        half = depth / 2.0 if symmetric else depth
+        pocket = sf.AddNewPocket(sketch, 0 if through_all else half)
         if through_all:
             # catUpToLastLimit: CATIA works out the extent itself, so the cut
             # reaches through whatever thickness the solid has.
@@ -912,7 +956,7 @@ class PartDesignTools:
                 f"coordinates. Original error: {exc}"
             ) from exc
 
-        explicit_direction = "direction" in args
+        explicit_direction = "direction" in args or symmetric
         flipped = False
         after = self._body_volume_mm3(part, body)
         if (
@@ -939,6 +983,25 @@ class PartDesignTools:
 
         self.conn.refresh_display()
 
+        mirror = None
+        if symmetric and not through_all:
+            # The other half of the mid-plane cut. Same sketch, opposite side.
+            mirror = sf.AddNewPocket(sketch, half)
+            mirror.DirectionOrientation = 0 if reverse else 1
+            part.UpdateObject(mirror)
+            new_after = self._body_volume_mm3(part, body)
+            if (
+                after is not None
+                and new_after is not None
+                and new_after >= after        # that side was air
+            ):
+                # A mid-plane cut from a face into open space removes material on
+                # one side only. Keep the tree honest: drop the empty feature.
+                self._remove_feature(part, mirror)
+                mirror = None
+            else:
+                after = new_after
+
         if before is not None and after is not None:
             removed = before - after
             if removed <= 0:
@@ -951,16 +1014,27 @@ class PartDesignTools:
                     "profile intersects the solid."
                 )
             flip_note = " (direction auto-flipped to reach material)" if flipped else ""
-            extent = "through all" if through_all else f"{depth} mm deep"
+            extent = self._pocket_extent(through_all, depth, symmetric)
+            names = f"'{pocket.Name}'" if mirror is None else \
+                f"'{pocket.Name}' + '{mirror.Name}' (two one-sided cuts)"
             return (
-                f"Pocket '{pocket.Name}' created: {extent}{flip_note}. "
+                f"Pocket {names} created: {extent}{flip_note}. "
                 f"Removed {removed:.1f} mm3 ({before:.1f} -> {after:.1f})."
             )
-        extent = "through all" if through_all else f"{depth} mm deep"
+        extent = self._pocket_extent(through_all, depth, symmetric)
         return (
             f"Pocket created: {extent}. Feature: '{pocket.Name}' "
             "(volume verification unavailable on this installation)."
         )
+
+    @staticmethod
+    def _pocket_extent(through_all: bool, depth: float, symmetric: bool) -> str:
+        """Describe the cut in the caller's terms, not CATIA's."""
+        if through_all:
+            return "through all"
+        if symmetric:
+            return "%.3f mm total, %.3f each side" % (depth, depth / 2.0)
+        return f"{depth} mm deep"
 
     @staticmethod
     def _sketch_absolute_axis(sketch: Any) -> Any:
@@ -1101,20 +1175,37 @@ class PartDesignTools:
         if isinstance(names, str):
             names = [names]
         if len(names) > 1 or (names and not args.get("edge_name")):
-            return self._fillet_many(args["radius"], list(names))
-        return self._fillet_one(args["radius"], args.get("edge_name"))
+            return self._fillet_many(args["radius"], list(names),
+                                     self._propagation(args))
+        return self._fillet_one(args["radius"], args.get("edge_name"),
+                                self._propagation(args))
 
-    def _fillet_many(self, radius: float, names: list[str]) -> str:
-        """One feature per edge, so a single refusal does not lose the batch.
+    @staticmethod
+    def _propagation(args: dict[str, Any]) -> int:
+        """CATIA edge-propagation enum: 0 = only the given edges, 1 = tangency."""
+        return 0 if args.get("propagation") == "none" else 1
 
-        Every reference is resolved BEFORE the first feature is created. That
-        ordering is the whole point: each fillet renumbers the body's edges, so
-        a loop that re-resolves "Edge.N" between cuts ends up pointing at the
-        tangent edge the previous fillet just created - which is no longer
-        sharp, and CATIA answers with an update diagnostic ("某些选定的边线不是
-        锐边") instead of an error. Measured on the drone motor disc: the two
-        Ø69.85 circles and the fillet's tangent edge are all 219.440 mm long, so
-        neither length nor type can tell them apart afterwards.
+    def _fillet_many(self, radius: float, names: list[str],
+                     propagation: int = 1) -> str:
+        """One feature per edge, built as a batch and rebuilt once.
+
+        Two measured facts drive the shape of this method.
+
+        1. Every reference is resolved BEFORE the first feature is created.
+           Each fillet renumbers the body's edges, so a loop that re-resolves
+           "Edge.N" between cuts ends up pointing at the tangent edge the
+           previous fillet just created - which is no longer sharp, and CATIA
+           answers with an update diagnostic ("某些选定的边线不是锐边") instead of
+           an error. Measured on the drone motor disc: the two Ø69.85 circles
+           and the fillet's tangent edge are all 219.440 mm long, so neither
+           length nor type can tell them apart afterwards.
+
+        2. The whole batch is rebuilt ONCE, at the end. Updating each fillet as
+           it is created invalidates the references still waiting in the queue:
+           on the drone body, 12 edges at R5.08 gave "1/12 done" and then every
+           remaining factory call failed with a bare "method failed", because
+           the first update had rebuilt the topology the other 11 referenced.
+           This is also how the CATIA UI works - select many edges, one feature.
         """
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
@@ -1127,38 +1218,50 @@ class PartDesignTools:
         refs = [r.reference for r in
                 topology_references(self.conn, body, "Edge", indices)]
 
-        def add(ref: Any) -> None:
-            fillet = sf.AddNewSolidEdgeFilletWithConstantRadius(
-                ref, 1, radius)              # catTangencyFilletEdgePropagation
-            part.UpdateObject(fillet)
+        def add(ref: Any) -> Any:
+            return sf.AddNewSolidEdgeFilletWithConstantRadius(ref, propagation, radius)
 
         try:
-            return self._apply_fillets(radius, names, refs, add)
+            return self._apply_fillets(radius, names, refs, add, part=part)
         finally:
             self._clear_selection()
             self.conn.refresh_display()
 
     def _apply_fillets(self, radius: float, names: list[str], refs: list[Any],
-                       add: Any = None) -> str:
-        """Create one fillet per (name, ref). ``add`` is injectable for tests."""
-        done, failed = [], []
+                       add: Any = None, part: Any = None,
+                       label: str = "Fillet R") -> str:
+        """Create one fillet per (name, ref), then rebuild once.
+
+        ``add`` is injectable for tests; it may return the new feature (in which
+        case a failed rebuild rolls it back) or None.
+        """
+        done, failed, created = [], [], []
         for name, ref in zip(names, refs):
             try:
-                add(ref)
+                feature = add(ref)
                 done.append(name)
+                if feature is not None:
+                    created.append(feature)
             except Exception as error:        # noqa: BLE001 - reported per edge
-                # Remove the half-built feature so a rejected edge does not
-                # leave an update error behind.
-                try:
-                    shapes = self.conn.get_active_part_body().Shapes
-                    feat = shapes.Item(shapes.Count)
-                    sel = self.conn.hso
-                    sel.Add(feat)
-                    sel.Delete()
-                except Exception:
-                    pass
                 failed.append((name, str(error).splitlines()[0][:120]))
-        head = f"Fillet R{radius}: {len(done)}/{len(names)} edge(s) done"
+
+        rebuild_error = None
+        if created and part is not None:
+            try:
+                part.Update()
+            except Exception as error:        # noqa: BLE001 - reported below
+                rebuild_error = str(error).splitlines()[0][:120]
+
+        shown = f"{label}{radius}" if label.endswith("R") else f"{label} {radius}"
+        head = f"{shown}: {len(done)}/{len(names)} edge(s) done"
+        if rebuild_error:
+            # The features exist but the body no longer rebuilds: that is a
+            # failure, not a partial success, so say so and undo it.
+            self._remove_created(created)
+            head = (f"{shown}: 0/{len(names)} edge(s) done - CATIA "
+                    f"created {len(done)} feature(s) but the body would not "
+                    f"rebuild ({rebuild_error}). They were removed.")
+            done, failed = [], failed or [(n, "batch rebuild failed") for n in names]
         if done:
             head += f" ({', '.join(done)})"
         if failed:
@@ -1170,7 +1273,8 @@ class PartDesignTools:
             )
         return head
 
-    def _fillet_one(self, radius: float, edge_name: str | None) -> str:
+    def _fillet_one(self, radius: float, edge_name: str | None,
+                    propagation: int = 1) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
         self._prepare_body(part)
@@ -1187,7 +1291,7 @@ class PartDesignTools:
 
         fillet = sf.AddNewSolidEdgeFilletWithConstantRadius(
             target,
-            1,       # catTangencyFilletEdgePropagation
+            propagation,   # 0 = only these edges, 1 = catTangencyFilletEdgePropagation
             radius,
         )
 
@@ -1210,19 +1314,47 @@ class PartDesignTools:
         return self._chamfer_one(args["length"], args.get("angle", 45), args.get("edge_name"))
 
     def _chamfer_many(self, length: float, angle: float, names: list[str]) -> str:
-        done, failed = [], []
-        for name in names:
+        """Same batching rule as ``_fillet_many``: resolve all, build all, rebuild once."""
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        body = self._prepare_body(part)
+        sf = part.ShapeFactory
+
+        indices = [self._topo_index(name, "Edge") for name in names]
+        refs = [r.reference for r in
+                topology_references(self.conn, body, "Edge", indices)]
+
+        def add(ref: Any) -> Any:
+            return sf.AddNewChamfer(
+                ref,
+                1,       # catTangencyChamferPropagation
+                0,       # catLengthAngleChamfer mode
+                0,       # catNoReverseChamfer orientation
+                length,
+                angle,
+            )
+
+        try:
+            return self._apply_fillets(length, names, refs, add, part=part,
+                                       label="Chamfer")
+        finally:
+            self._clear_selection()
+            self.conn.refresh_display()
+
+    def _remove_created(self, features: list[Any]) -> None:
+        """Delete features that were created but left the body unbuildable."""
+        sel = self.conn.hso
+        for feature in features:
             try:
-                self._chamfer_one(length, angle, name)
-                done.append(name)
-            except Exception as error:  # noqa: BLE001 - reported per edge
-                failed.append((name, str(error).splitlines()[0][:120]))
-        head = f"Chamfer {length} mm: {len(done)}/{len(names)} edge(s) done"
-        if done:
-            head += f" ({', '.join(done)})"
-        if failed:
-            head += ". Rejected: " + "; ".join(f"{n} -> {m}" for n, m in failed)
-        return head
+                sel.Clear()
+                sel.Add(feature)
+                sel.Delete()
+            except Exception:  # noqa: BLE001 - best effort cleanup
+                pass
+        try:
+            sel.Clear()
+        except Exception:
+            pass
 
     def _chamfer_one(self, length: float, angle: float, edge_name: str | None) -> str:
         self.conn.ensure_connected()
@@ -2083,25 +2215,25 @@ class PartDesignTools:
             return None
         return value
 
-    def _topology_cells(self, kind: str, body: Any = None) -> tuple[Any, int]:
-        """Search the body's final shape and return (selection, count).
+    def _topology_cells(self, kind: str, body: Any = None) -> tuple[list[Any], int]:
+        """The body's solid cells of ``kind`` and their count.
 
         The body is searched, not ``Shapes.Item(last)``: only the body resolves
         to the final solid's topology, and ``topology_reference`` - which is what
         ``Edge.N`` / ``Face.N`` mean everywhere else - searches the body too.
         Listing from the last feature instead used to hand out indices that
         pointed at a different element by the time fillet resolved them.
+
+        Construction geometry is filtered out by ``topology_cells`` so these
+        indices match the ones fillet/chamfer/measure resolve.
         """
         body = body if body is not None else self.conn.get_active_part_body()
         if body.Shapes.Count == 0:
             raise RuntimeError(
                 f"Body '{body.Name}' has no solid shape yet."
             )
-        sel = self.conn.hso
-        sel.Clear()
-        sel.Add(body)
-        search_topology(sel, kind)
-        return sel, sel.Count
+        cells = topology_cells(self.conn, body, kind)
+        return cells, len(cells)
 
     def _list_faces(self, body_name: str | None = None) -> str:
         self.conn.ensure_connected()
@@ -2123,14 +2255,17 @@ class PartDesignTools:
 
         faces = []
         try:
-            sel, count = self._topology_cells("Face", body)
-            for i in range(1, count + 1):
-                cell = sel.Item(i)
+            cells, count = self._topology_cells("Face", body)
+            for i, cell in enumerate(cells, start=1):
                 entry: dict[str, Any] = {"index": i, "name": f"Face.{i}"}
                 try:
                     entry["type"] = str(cell.Type)
                 except Exception:
                     pass
+                nls = nls_of(cell)
+                if nls:
+                    entry["nls"] = nls
+                    entry["created_by"] = nls_features(nls)
                 area = self._cell_measure(spa, cell, "Area")
                 if area is None:
                     entry["area_unknown"] = True
@@ -2154,17 +2289,23 @@ class PartDesignTools:
 
         edges = []
         try:
-            sel, count = self._topology_cells("Edge")
-            for i in range(1, count + 1):
+            cells, count = self._topology_cells("Edge")
+            for i, cell in enumerate(cells, start=1):
                 # Canonical indexed name accepted by catia_measure_distance,
                 # catia_fillet and catia_chamfer. Raw HSO names are long
                 # and unusable in searches.
-                cell = sel.Item(i)
                 entry: dict[str, Any] = {"index": i, "name": f"Edge.{i}"}
                 try:
                     entry["type"] = str(cell.Type)
                 except Exception:
                     pass
+                # Which feature produced this edge: the only reliable handle
+                # when several edges share a length (four corners of a square,
+                # two circles on one disc, ...).
+                nls = nls_of(cell)
+                if nls:
+                    entry["nls"] = nls
+                    entry["created_by"] = nls_features(nls)
                 length = self._cell_measure(spa, cell, "Length")
                 if length is None:
                     entry["length_unknown"] = True
