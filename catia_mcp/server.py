@@ -133,6 +133,46 @@ class CATIAMCPServer:
             )
             raise
 
+    def _session_state(self) -> str:
+        """A short snapshot of the document state, for failure messages.
+
+        CATIA reports automation failures as a bare "method failed" - the
+        actual cause is almost always the document state, not the arguments.
+        Three of the bugs found on 2026-10-22 were invisible for exactly this
+        reason: the in-work object sitting on a geometrical set, a topology
+        reference that had been invalidated by clearing the selection, and a
+        body whose last feature had not been rebuilt yet. None of them produced
+        a message that pointed at the state.
+        """
+        bits: list[str] = []
+        try:
+            doc = self.connection.app.ActiveDocument
+            bits.append("document=%s" % doc.Name)
+        except Exception:
+            bits.append("document=<none>")
+        try:
+            part = self.connection.get_active_part()
+        except Exception:
+            return " | ".join(bits) + " | no part document"
+        try:
+            bits.append("in_work_object=%s" % part.InWorkObject.Name)
+        except Exception:
+            bits.append("in_work_object=<unknown>")
+        try:
+            body = self.connection.get_active_part_body()
+            bits.append("body=%s(shape_count=%d)" % (body.Name, body.Shapes.Count))
+        except Exception:
+            bits.append("body=<none>")
+        try:
+            bits.append("selected=%d" % self.connection.hso.Count)
+        except Exception:
+            pass
+        try:
+            bits.append("geometrical_sets=%d" % part.HybridBodies.Count)
+        except Exception:
+            pass
+        return " | ".join(bits)
+
     def _execute_tool(self, name: str, arguments: dict[str, Any]) -> CallToolResult:
         module = self._tool_router.get(name)
         if module is None:
@@ -165,6 +205,16 @@ class CATIAMCPServer:
                     "cannot add an absent API. For a stale cache, close CATIA and the server, "
                     "delete the %TEMP%\\gen_py folder, restart and retry once. A missing "
                     "workbench licence can also lock methods. Run catia_diagnose for details."
+                )
+            elif stage == "execute":
+                message = (
+                    f"{error}\n\n"
+                    f"Session state: {self._session_state()}\n"
+                    "CATIA reports most automation failures as a bare 'method failed'. Before "
+                    "reading that as a bad sketch, bad edge or bad argument, check the state "
+                    "above: a Part Design factory called while in_work_object is a geometrical "
+                    "set fails exactly this way, and so does a topology reference whose "
+                    "selection has been cleared. catia_diagnose reports both."
                 )
             return failure(code, message, stage, False if stage == "connect" else None, name)
 

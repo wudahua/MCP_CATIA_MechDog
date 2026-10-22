@@ -109,6 +109,32 @@ class DocumentTools:
                 },
             },
             {
+                "name": "catia_save_as_copy",
+                "description": (
+                    "Save the active document, then copy the saved file to another path. "
+                    "Use this to keep a snapshot once the model already has geometry: "
+                    "catia_save_document's Save As is refused after the first solid exists "
+                    "(E_FAIL on V5-6R2020 B30), but doc.Save() followed by a file-system "
+                    "copy is not. The open document keeps its original path, so the working "
+                    "file is untouched."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "Target path for the copy (.CATPart/.CATProduct).",
+                        },
+                        "overwrite": {
+                            "type": "boolean",
+                            "description": "Replace the target if it exists (default true).",
+                            "default": True,
+                        },
+                    },
+                    "required": ["file_path"],
+                },
+            },
+            {
                 "name": "catia_close_document",
                 "description": "Close the active CATIA document.",
                 "inputSchema": {
@@ -157,6 +183,9 @@ class DocumentTools:
                 return self._open_document(arguments["file_path"])
             case "catia_save_document":
                 return self._save_document(arguments.get("file_path"))
+            case "catia_save_as_copy":
+                return self._save_as_copy(
+                    arguments["file_path"], bool(arguments.get("overwrite", True)))
             case "catia_close_document":
                 return self._close_document(arguments.get("save", False))
             case "catia_list_documents":
@@ -227,6 +256,48 @@ class DocumentTools:
             return f"Document saved as: {target}"
         name = dialogs.save(doc)
         return f"Document '{name}' saved"
+
+    def _save_as_copy(self, file_path: str, overwrite: bool = True) -> str:
+        """Save, then copy the file - the only way to snapshot a finished model.
+
+        SaveAs is refused once the document holds geometry, so copying the saved
+        file through CATIA's own FileSystem service is what is left. The open
+        document keeps its path.
+        """
+        import os
+
+        doc = self.conn.active_document
+        # A document that has never been saved has no folder, and CATIA cannot
+        # be given one once geometry exists - doc.Save() just raises the same
+        # "method failed" as SaveAs. Say so instead of failing obscurely.
+        try:
+            current = doc.FullName
+        except Exception:
+            current = ""
+        if not current or not os.path.dirname(current):
+            raise RuntimeError(
+                "This document has never been saved, so it has no path to copy from. "
+                "CATIA only accepts a path before geometry exists: create the part, "
+                "call catia_save_document(file_path=...) on the empty part, then build "
+                "and call catia_save_as_copy again."
+            )
+        dialogs.save(doc)
+        source = doc.FullName
+        target = os.path.normpath(os.path.abspath(file_path))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        try:
+            fs = self.conn.app.FileSystem
+            fs.CopyFile(os.path.normpath(source), target, bool(overwrite))
+        except Exception:
+            # Same job without the CATIA service; a plain copy of a saved
+            # document is identical.
+            import shutil
+
+            shutil.copyfile(source, target)
+        return (
+            f"Copied '{os.path.basename(source)}' -> '{target}'. "
+            f"The open document still points at '{source}'."
+        )
 
     def _close_document(self, save: bool = False) -> str:
         doc = self.conn.active_document

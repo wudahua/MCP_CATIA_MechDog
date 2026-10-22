@@ -166,7 +166,10 @@ class PartDesignTools:
                 "name": "catia_fillet",
                 "description": (
                     "Add a fillet (rounded edge) to one or more edges of the current solid. "
-                    "Specify the radius and the edge names or feature to fillet."
+                    "Specify the radius and the edge names or feature to fillet. "
+                    "Pass 'edge_names' to fillet several edges in one call: each edge "
+                    "becomes its own feature, so one bad edge does not lose the rest - "
+                    "the reply reports which ones took and why the others did not."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -181,6 +184,14 @@ class PartDesignTools:
                                 "Indexed edge to fillet ('Edge.N' from "
                                 "catia_list_edges). Omit to fillet all edges "
                                 "of the last feature."
+                            ),
+                        },
+                        "edge_names": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Several edges at once, e.g. ['Edge.4','Edge.7']. "
+                                "Takes precedence over edge_name."
                             ),
                         },
                     },
@@ -205,6 +216,11 @@ class PartDesignTools:
                         "edge_name": {
                             "type": "string",
                             "description": "Indexed edge to chamfer ('Edge.N' from catia_list_edges). Omit to chamfer all edges of the last feature.",
+                        },
+                        "edge_names": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Several edges at once, e.g. ['Edge.3','Edge.9']. Takes precedence over edge_name.",
                         },
                     },
                     "required": ["length"],
@@ -468,7 +484,10 @@ class PartDesignTools:
                 "description": (
                     "Delete a feature by name (e.g. 'Pocket.2') in any body "
                     "of the active part, then update the part. Features "
-                    "depending on it end up in error and are reported."
+                    "depending on it end up in error and are reported. "
+                    "With neither argument it deletes the last feature - the usual "
+                    "case is undoing the feature you have just created, which is "
+                    "otherwise only possible by closing the document."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -477,8 +496,14 @@ class PartDesignTools:
                             "type": "string",
                             "description": "Feature to delete (see catia_list_features)",
                         },
+                        "index": {
+                            "type": "integer",
+                            "description": (
+                                "1-based position in the active body's feature list, for when "
+                                "the name is not known. Ignored when feature_name is given."
+                            ),
+                        },
                     },
-                    "required": ["feature_name"],
                 },
             },
             {
@@ -1001,13 +1026,46 @@ class PartDesignTools:
         return int(m.group(1))
 
     def _fillet(self, args: dict[str, Any]) -> str:
+        names = args.get("edge_names") or []
+        if isinstance(names, str):
+            names = [names]
+        if len(names) > 1 or (names and not args.get("edge_name")):
+            return self._fillet_many(args["radius"], list(names))
+        return self._fillet_one(args["radius"], args.get("edge_name"))
+
+    def _fillet_many(self, radius: float, names: list[str]) -> str:
+        """One feature per edge, so a single refusal does not lose the batch.
+
+        CATIA's edge fillet takes exactly one object, and on a part whose solid
+        came from GSD some edges are refused outright. Doing them one at a time
+        turns that into "4 of 8 took" instead of an exception that leaves the
+        caller unable to tell what happened.
+        """
+        done, failed = [], []
+        for name in names:
+            try:
+                self._fillet_one(radius, name)
+                done.append(name)
+            except Exception as error:  # noqa: BLE001 - reported per edge
+                failed.append((name, str(error).splitlines()[0][:120]))
+        head = f"Fillet R{radius}: {len(done)}/{len(names)} edge(s) done"
+        if done:
+            head += f" ({', '.join(done)})"
+        if failed:
+            head += ". Rejected: " + "; ".join(f"{n} -> {m}" for n, m in failed)
+            head += (
+                ". A refusal here is usually the topology, not the argument: edges "
+                "that came out of catia_gsd_close_surface cannot take a Part Design "
+                "fillet, while edges of a pad in the same body can."
+            )
+        return head
+
+    def _fillet_one(self, radius: float, edge_name: str | None) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
-        body = self._prepare_body(part)
+        self._prepare_body(part)
         sf = part.ShapeFactory
 
-        radius = args["radius"]
-        edge_name = args.get("edge_name")
         if edge_name:
             target = self._topo_reference("Edge", self._topo_index(edge_name, "Edge"))
             scope = edge_name
@@ -1034,9 +1092,34 @@ class PartDesignTools:
         body = self._prepare_body(part)
         sf = part.ShapeFactory
 
-        length = args["length"]
-        angle = args.get("angle", 45)
-        edge_name = args.get("edge_name")
+        names = args.get("edge_names") or []
+        if isinstance(names, str):
+            names = [names]
+        if len(names) > 1 or (names and not args.get("edge_name")):
+            return self._chamfer_many(args["length"], args.get("angle", 45), list(names))
+        return self._chamfer_one(args["length"], args.get("angle", 45), args.get("edge_name"))
+
+    def _chamfer_many(self, length: float, angle: float, names: list[str]) -> str:
+        done, failed = [], []
+        for name in names:
+            try:
+                self._chamfer_one(length, angle, name)
+                done.append(name)
+            except Exception as error:  # noqa: BLE001 - reported per edge
+                failed.append((name, str(error).splitlines()[0][:120]))
+        head = f"Chamfer {length} mm: {len(done)}/{len(names)} edge(s) done"
+        if done:
+            head += f" ({', '.join(done)})"
+        if failed:
+            head += ". Rejected: " + "; ".join(f"{n} -> {m}" for n, m in failed)
+        return head
+
+    def _chamfer_one(self, length: float, angle: float, edge_name: str | None) -> str:
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        self._prepare_body(part)
+        sf = part.ShapeFactory
+
         if edge_name:
             target = self._topo_reference("Edge", self._topo_index(edge_name, "Edge"))
             scope = edge_name
@@ -1291,7 +1374,14 @@ class PartDesignTools:
                 "catia_circ_pattern cannot run on a part that contains "
                 "geometrical sets (GSD geometry): CATIA rejects the pattern "
                 "with 0x80020009 in that case. Remove the geometrical sets "
-                "or pattern a GSD-free part."
+                "or pattern a GSD-free part. "
+                "If what you need is a second instance rotated by a fixed angle, "
+                "you can get it without a pattern: a rotation of 180 deg equals "
+                "mirroring about two perpendicular planes, so two "
+                "catia_gsd_symmetry calls (about 'xy' then about 'yz') followed by "
+                "catia_gsd_close_surface reproduce the rotated solid exactly - "
+                "verified on a two-blade propeller, 0.6 mm3 off the analytic volume "
+                "with the centroid landing exactly on the axes."
             )
         self._get_last_shape(args.get("feature_name"))  # validate early
 
@@ -1499,7 +1589,23 @@ class PartDesignTools:
     def _delete_feature(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
-        target = args["feature_name"]
+        target = args.get("feature_name")
+        if not target and args.get("index") is None:
+            # Default: the feature just created. Undoing an experiment should
+            # not require knowing CATIA's localized feature names.
+            shapes = self.conn.get_active_part_body().Shapes
+            if shapes.Count == 0:
+                raise RuntimeError("The active body has no features to delete.")
+            target = str(shapes.Item(shapes.Count).Name)
+        if not target:
+            shapes = self.conn.get_active_part_body().Shapes
+            index = int(args["index"])
+            if index < 1 or index > shapes.Count:
+                raise RuntimeError(
+                    f"index {index} is out of range: the active body has "
+                    f"{shapes.Count} feature(s)."
+                )
+            target = str(shapes.Item(index).Name)
         feature = None
         bodies = part.Bodies
         for b in range(1, bodies.Count + 1):
@@ -1717,58 +1823,86 @@ class PartDesignTools:
             except Exception:
                 return None
 
+    def _cell_measure(self, spa: Any, cell: Any, prop: str) -> float | None:
+        """Read Area/Length off an HSO cell, or None when the value is not real.
+
+        SPA does not raise for topology it cannot resolve - it hands back a
+        placeholder constant (field-measured on V5-6R2020 B30: 2e7 for an edge
+        of a GSD CloseSurface solid, 8e7 for an extract of that same edge, and
+        0.0 for a face area). Publishing those numbers is worse than publishing
+        nothing: 2e7 reads like a measurement and silently poisons any
+        length-based edge selection.
+        """
+        if spa is None:
+            return None
+        try:
+            raw = getattr(spa.GetMeasurable(cell.Reference), prop)
+        except Exception:
+            return None
+        if prop == "Area":
+            value = raw * 1e6            # SPA gives m2
+            limit = 1e10                 # 100 m x 100 m
+        else:
+            value = raw                  # Length already comes back in mm
+            limit = 1e5                  # 100 m
+        if value <= 0 or value > limit:
+            return None
+        return value
+
+    def _topology_cells(self, kind: str) -> tuple[Any, int]:
+        """Search the body's final shape and return (selection, count).
+
+        The body is searched, not ``Shapes.Item(last)``: only the body resolves
+        to the final solid's topology, and ``topology_reference`` - which is what
+        ``Edge.N`` / ``Face.N`` mean everywhere else - searches the body too.
+        Listing from the last feature instead used to hand out indices that
+        pointed at a different element by the time fillet resolved them.
+        """
+        body = self.conn.get_active_part_body()
+        if body.Shapes.Count == 0:
+            raise RuntimeError("The active body has no solid shape yet.")
+        sel = self.conn.hso
+        sel.Clear()
+        sel.Add(body)
+        search_topology(sel, kind)
+        return sel, sel.Count
+
     def _list_faces(self, body_name: str | None = None) -> str:
         self.conn.ensure_connected()
         if body_name:
             part = self.conn.get_active_part()
             bodies = part.Bodies
             try:
-                body = bodies.Item(body_name)
+                bodies.Item(body_name)
             except Exception:
                 names = ", ".join(str(bodies.Item(i).Name) for i in range(1, bodies.Count + 1))
                 raise RuntimeError(
                     f"No body named '{body_name}'. Top-level bodies: {names or 'none'}."
                 )
-        else:
-            body = self.conn.get_active_part_body()
         part = self.conn.get_active_part()
+        self._prepare_body(part)
         spa = self._topo_measure(part)
 
         faces = []
         try:
-            if body.Shapes.Count == 0:
-                return "No solid shape in the active body yet"
-            # Search the body itself: only it resolves to the final solid's
-            # topology (Shapes.Item(last) is the last feature's own region).
-            sel = self.conn.hso
-            try:
-                sel.Clear()
-                sel.Add(body)
-                search_topology(sel, "Face")
-                for i in range(1, sel.Count + 1):
-                    entry: dict[str, Any] = {"index": i, "name": f"Face.{i}"}
-                    if spa is not None:
-                        # Area, so an A-list of faces can be identified without
-                        # a second round trip per face. SPA returns m2.
-                        # Solids made by GSD CloseSurface are the exception: SPA
-                        # resolves their sub-element references to nothing and
-                        # hands back Area = 0 without raising (field-confirmed on
-                        # V5-6R2020 B30, 2026-10-22). Omitting the key beats
-                        # reporting a 0 that looks like a real measurement.
-                        try:
-                            area = spa.GetMeasurable(sel.Item(i).Reference).Area * 1e6
-                            if area > 0:
-                                entry["area_mm2"] = round(area, 3)
-                        except Exception:
-                            pass
-                    faces.append(entry)
-            finally:
+            sel, count = self._topology_cells("Face")
+            for i in range(1, count + 1):
+                cell = sel.Item(i)
+                entry: dict[str, Any] = {"index": i, "name": f"Face.{i}"}
                 try:
-                    sel.Clear()
+                    entry["type"] = str(cell.Type)
                 except Exception:
                     pass
+                area = self._cell_measure(spa, cell, "Area")
+                if area is None:
+                    entry["area_unknown"] = True
+                else:
+                    entry["area_mm2"] = round(area, 3)
+                faces.append(entry)
         except Exception as e:
             return f"Could not enumerate faces: {e}"
+        finally:
+            self._clear_selection()
 
         if not faces:
             return "No faces found on the final shape"
@@ -1777,42 +1911,36 @@ class PartDesignTools:
     def _list_edges(self) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
+        self._prepare_body(part)
         spa = self._topo_measure(part)
 
-        # Get edges from the last shape
-        last_shape = self._get_last_shape()
         edges = []
         try:
-            # Access boundary representation
-            sel = self.conn.hso
-            try:
-                sel.Clear()
-                sel.Add(last_shape)
-                search_topology(sel, "Edge")
-                for i in range(1, sel.Count + 1):
-                    # Canonical indexed name accepted by catia_measure_distance,
-                    # catia_fillet and catia_chamfer. Raw HSO names are long
-                    # and unusable in searches.
-                    entry: dict[str, Any] = {"index": i, "name": f"Edge.{i}"}
-                    if spa is not None:
-                        # Without a length there is no way to pick "the edge of
-                        # the outline" for a fillet: the only other handle is a
-                        # bare index, which shifts whenever a feature is added.
-                        # SPA returns Length in the document unit (mm).
-                        try:
-                            entry["length_mm"] = round(
-                                spa.GetMeasurable(sel.Item(i).Reference).Length, 4)
-                        except Exception:
-                            pass
-                    edges.append(entry)
-            finally:
+            sel, count = self._topology_cells("Edge")
+            for i in range(1, count + 1):
+                # Canonical indexed name accepted by catia_measure_distance,
+                # catia_fillet and catia_chamfer. Raw HSO names are long
+                # and unusable in searches.
+                cell = sel.Item(i)
+                entry: dict[str, Any] = {"index": i, "name": f"Edge.{i}"}
                 try:
-                    sel.Clear()
+                    entry["type"] = str(cell.Type)
                 except Exception:
                     pass
+                length = self._cell_measure(spa, cell, "Length")
+                if length is None:
+                    entry["length_unknown"] = True
+                else:
+                    entry["length_mm"] = round(length, 4)
+                edges.append(entry)
         except Exception as e:
             return f"Could not enumerate edges: {e}. Use CATIA selection to identify edge names."
+        finally:
+            self._clear_selection()
 
+        if not edges:
+            return "No edges found on the final shape"
+        return json.dumps(edges, indent=2)
         if not edges:
             return "No edges found on the last feature"
         return json.dumps(edges, indent=2)

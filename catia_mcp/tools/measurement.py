@@ -103,6 +103,23 @@ def read_measurable_array(app: Any, measurable: Any, method: str, count: int) ->
     return values
 
 
+def _pick(arguments: dict[str, Any], *names: str) -> str:
+    """First present alias, or a message naming every accepted spelling.
+
+    Callers reach for element1 / elem1_name / element1_name interchangeably -
+    the schemas were not consistent about it - and a strict lookup then failed
+    with "is a required property", which reads like the caller passed nothing
+    at all rather than the wrong spelling.
+    """
+    for name in names:
+        if arguments.get(name) is not None:
+            return arguments[name]
+    raise ValueError(
+        "missing element argument: pass %s (aliases: %s)."
+        % (names[0], ", ".join(names[1:]))
+    )
+
+
 class MeasurementTools:
     """Tools for measurement and analysis in CATIA V5."""
 
@@ -125,14 +142,26 @@ class MeasurementTools:
                     "properties": {
                         "element1": {
                             "type": "string",
-                            "description": "Name of first element (feature, face, edge, point)",
+                            "description": (
+                                "Name of first element (feature, face, edge, point). "
+                                "Aliases accepted: elem1_name, element1_name, elem1."
+                            ),
                         },
                         "element2": {
                             "type": "string",
-                            "description": "Name of second element",
+                            "description": (
+                                "Name of second element. Aliases: elem2_name, "
+                                "element2_name, elem2."
+                            ),
                         },
+                        "elem1_name": {"type": "string", "description": "Alias of element1."},
+                        "element1_name": {"type": "string", "description": "Alias of element1."},
+                        "elem2_name": {"type": "string", "description": "Alias of element2."},
+                        "element2_name": {"type": "string", "description": "Alias of element2."},
                     },
-                    "required": ["element1", "element2"],
+                    # Deliberately not required: the aliases above are equally
+                    # valid, and jsonschema would reject them before the
+                    # resolver could accept the alternative spelling.
                 },
             },
             {
@@ -228,10 +257,14 @@ class MeasurementTools:
             },
         ]
 
+
+
     def execute(self, tool_name: str, arguments: dict[str, Any]) -> str:
         match tool_name:
             case "catia_measure_distance":
-                return self._measure_distance(arguments["element1"], arguments["element2"])
+                return self._measure_distance(
+                    _pick(arguments, "element1", "elem1_name", "element1_name", "elem1"),
+                    _pick(arguments, "element2", "elem2_name", "element2_name", "elem2"))
             case "catia_get_inertia":
                 return self._get_inertia(arguments.get("density"))
             case "catia_get_bounding_box":

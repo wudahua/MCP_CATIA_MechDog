@@ -5,6 +5,19 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- `catia_fillet` and `catia_chamfer` take `edge_names` and apply several edges in
+  one call. Each edge becomes its own feature, so one refusal no longer throws the
+  whole batch away - the reply says "R3.81: 3/4 edge(s) done" and names what was
+  rejected and why.
+- `catia_save_as_copy`: save the document, then copy the file to another path.
+  This is the only way to snapshot a model that already has geometry, because
+  Save As is refused from that point on; the open document keeps its own path.
+- `catia_delete_feature` accepts `index`, and with no argument at all deletes the
+  last feature - undoing the feature you have just created should not require
+  knowing CATIA's localized names.
+- `catia_list_edges` / `catia_list_faces` report CATIA's element `type`
+  (`RectilinearTriDimFeatEdge`, `PlanarFace`, ...). With lengths unavailable on
+  some topology, the type is often the only handle left for picking an element.
 - `catia_gsd_extract`: extract a curve or surface from existing geometry into the
   active geometrical set, with a propagation setting (none / point / tangent /
   curvature). `catia_gsd_fill` needs a boundary *curve* - a sketch reference is
@@ -12,6 +25,25 @@ All notable changes to this project are documented here.
   into a solid. It was simply missing from the 24 GSD tools.
 
 ### Fixed
+- Unmeasurable topology was published as a number. SPA does not raise for what it
+  cannot resolve - a `Length` of 2e7 mm or an `Area` of 0.0 mm2 is a placeholder,
+  not a measurement - and those values silently poisoned every length-based edge
+  selection. They are now reported as `length_unknown` / `area_unknown`, and the
+  limit is documented in the code.
+- `catia_list_edges` / `catia_list_faces` enumerated `Shapes.Item(last)` while
+  `Edge.N` / `Face.N` everywhere else resolve against the body's final shape. On
+  any part with more than one feature the indices they handed out pointed at a
+  different element by the time a fillet consumed them. Both now search the body
+  through one shared helper.
+- Automation failures now carry the session state: document, in-work object, body
+  and feature count, selection size, geometrical-set count. CATIA reports almost
+  everything as a bare "method failed", and the three bugs found in one session
+  were all state problems invisible in that message.
+- `catia_measure_distance` accepts `elem1_name` / `element1_name` / `elem1` (and
+  the `2` variants) instead of failing validation, and its missing-argument error
+  names every spelling it accepts.
+- The `catia_circ_pattern` refusal now suggests what to do instead of only saying
+  no: two `catia_gsd_symmetry` calls are exactly a 180 deg rotation.
 - Topology references were invalidated before they were used. `topology_reference`
   resolved `Edge.N` / `Face.N` through `Selection.Item(i).Reference` and then
   cleared the selection in a `finally` block - and a reference obtained that way

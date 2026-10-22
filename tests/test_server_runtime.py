@@ -18,7 +18,7 @@ def test_registered_tools_and_schemas_are_unchanged():
     # Lite fork: 98 upstream tools - 11 drafting - 5 knowledgeware + 9 new
     # (run_plan, measure_topology, get/set_component_transform,
     # rename_component, new_body, list_bodies, boolean, extract) = 91.
-    assert len(server._tool_router) == 91
+    assert len(server._tool_router) == 92
     assert not any(name.startswith("catia_caa") for name in server._tool_router)
     for schema in server._schemas.values():
         Draft202012Validator.check_schema(schema)
@@ -43,7 +43,12 @@ def test_ordinary_failure_does_not_block_connect_or_next_tool(monkeypatch, error
             failure = await server.call_tool("catia_new_part", {})
             assert failure.isError
             assert failure.structuredContent["code"] == "COM_ERROR"
-            assert failure.structuredContent["message"] == str(error)
+            message = failure.structuredContent["message"]
+            # The original error is the head of the message; the session state
+            # follows it, because CATIA's "method failed" says nothing about
+            # the cause and the state is what actually explains it.
+            assert message.startswith(str(error))
+            assert "Session state:" in message
             assert not any(
                 "Bridge" in action
                 for action in failure.structuredContent["recovery"]["next_actions"]

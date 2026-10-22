@@ -370,10 +370,33 @@ def test_list_edges_reports_lengths_so_a_fillet_can_pick_its_edge():
 
     source = inspect.getsource(PartDesignTools._list_edges)
     assert "length_mm" in source
-    assert "GetMeasurable" in source
+    # Unmeasurable topology is reported as such, never as a number: SPA hands
+    # back a placeholder (2e7 / 8e7) instead of raising, and a published 2e7
+    # silently poisons every length-based selection.
+    assert "length_unknown" in source
+    assert "GetMeasurable" in inspect.getsource(PartDesignTools._cell_measure)
 
     faces_source = inspect.getsource(PartDesignTools._list_faces)
     assert "area_mm2" in faces_source
+    assert "area_unknown" in faces_source
+
+
+def test_edge_and_face_indices_come_from_the_body_not_the_last_feature():
+    """Edge.N has to mean the same element everywhere.
+
+    topology_reference (what fillet/chamfer/measure resolve) searches the body's
+    final shape. catia_list_edges used to search Shapes.Item(last) instead, so
+    on any part with more than one feature the indices it handed out pointed at
+    a different element by the time a fillet consumed them.
+    """
+    import inspect
+
+    for func in (PartDesignTools._list_edges, PartDesignTools._list_faces):
+        source = inspect.getsource(func)
+        assert "_topology_cells" in source
+        assert "last_shape" not in source
+    assert "sel.Add(body)" in inspect.getsource(PartDesignTools._topology_cells)
+
 
 
 def test_save_as_documents_its_own_ordering_constraint():
