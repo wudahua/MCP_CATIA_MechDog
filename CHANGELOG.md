@@ -12,15 +12,25 @@ All notable changes to this project are documented here.
   into a solid. It was simply missing from the 24 GSD tools.
 
 ### Fixed
-- Part Design features now put the solid body back in work before calling the
-  factory. GSD calls leave `Part.InWorkObject` pointing at the geometrical set
-  (`GSD_Set`), and `AddNewPocket` / `AddNewFillet` / `AddNewChamfer` then fail
-  with a bare "method failed" COM error that reads like a bad sketch or a bad
-  edge. Field-confirmed on V5-6R2020 B30: after `catia_gsd_close_surface`, a
-  pocket was rejected until `InWorkObject` was set to the body by hand; with the
-  fix it cuts the expected 402.2 mm3 on the first try. `_prepare_body` is now
-  called by pad / pocket / shaft / groove / hole / fillet / chamfer / shell /
-  draft / patterns / stiffener / mirror / scaling.
+- Topology references were invalidated before they were used. `topology_reference`
+  resolved `Edge.N` / `Face.N` through `Selection.Item(i).Reference` and then
+  cleared the selection in a `finally` block - and a reference obtained that way
+  belongs to the selection and dies with it. Every factory call that consumed it
+  failed with a bare "method failed" and no explanation, which made fillet,
+  chamfer, shell and draft look like bad edges. Measured directly on
+  V5-6R2020 B30: identical `AddNewSolidEdgeFilletWithConstantRadius` call
+  succeeds with the selection alive and fails immediately after `sel.Clear()`.
+  The selection is now left holding the element (`keep=True`), multi-element
+  callers use the new `topology_references()` helper so one `Clear()` cannot
+  pull the rug from the previous reference, and each feature clears afterwards.
+- Part Design features now put the solid body back in work, and rebuild it,
+  before calling the factory. GSD calls leave `Part.InWorkObject` pointing at the
+  geometrical set (`GSD_Set`), and `AddNewPocket` / `AddNewFillet` /
+  `AddNewChamfer` then fail with the same uninformative COM error. After
+  `catia_gsd_close_surface` a pocket was rejected until `InWorkObject` was set to
+  the body by hand; with the fix it cuts the expected 402.2 mm3 on the first
+  try. `_prepare_body` also runs `part.Update()`, because a body whose last
+  feature was added in the same call hands out stale edge references.
 - `catia_list_faces` reported `"area_mm2": 0.0` for every face of a solid built by
   `catia_gsd_close_surface`. SPA resolves sub-element references of GSD-derived
   topology to nothing and returns `Area = 0` instead of raising, so the guard
@@ -54,11 +64,14 @@ All notable changes to this project are documented here.
   - `catia_circ_pattern` is refused at `UpdateObject` (the factory builds the
     feature, then CATIA rejects it) - the same 0x80020009 class the tool already
     guards against.
-  - `catia_fillet` and `catia_chamfer` are refused at creation for **any** edge,
-    including edges of a native pad in the same body. Workaround for a second
-    instance: two `catia_gsd_symmetry` calls (about XZ then about YZ) are exactly
-    a 180 deg rotation about Y, and `catia_gsd_close_surface` on the result gives
-    a solid identical to what the pattern would have produced.
+  - `catia_fillet` / `catia_chamfer` are refused for edges that came out of the
+    GSD surface - 55 of 56 edges on a two-blade part, the one that works being
+    the hub's own pad edge. Native pad edges are fine, so this is the GSD
+    topology, not the tool. Workaround for a second instance: two
+    `catia_gsd_symmetry` calls (about XZ then about YZ) are exactly a 180 deg
+    rotation about Y, and `catia_gsd_close_surface` on the result gives a solid
+    identical to what the pattern would have produced - verified to 0.6 mm3
+    against the analytic volume, with the centroid landing exactly on x = z = 0.
   - `catia_list_edges` reports `length_mm` as a constant garbage value (2e7, or
     8e7 on an extracted curve), `catia_list_faces` cannot give areas, and
     `catia_measure_distance` throws from `GetMinimumDistance`. Circles still

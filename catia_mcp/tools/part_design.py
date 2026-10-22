@@ -11,7 +11,11 @@ import re
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
-from catia_mcp.topo_search import search_topology, topology_reference
+from catia_mcp.topo_search import (
+    search_topology,
+    topology_reference,
+    topology_references,
+)
 
 
 class PartDesignTools:
@@ -701,6 +705,12 @@ class PartDesignTools:
             raise RuntimeError("No features found in the active body.")
         return body
 
+    def _clear_selection(self) -> None:
+        try:
+            self.conn.hso.Clear()
+        except Exception:
+            pass
+
     def _prepare_body(self, part: Any) -> Any:
         """Put the solid body back in work and return it.
 
@@ -718,6 +728,16 @@ class PartDesignTools:
                 part.InWorkObject = body
         except Exception:
             part.InWorkObject = body
+        # Rebuild before touching topology: a body whose last feature was added
+        # in this same call still hands out stale edge references, and
+        # AddNewSolidEdgeFilletWithConstantRadius then fails with a bare
+        # "method failed" instead of anything useful. Field-confirmed on
+        # V5-6R2020 B30: the identical fillet call succeeds once part.Update()
+        # has run.
+        try:
+            part.Update()
+        except Exception:
+            pass
         return body
 
     def _pad(self, args: dict[str, Any]) -> str:
@@ -1005,6 +1025,7 @@ class PartDesignTools:
 
         part.UpdateObject(fillet)
         self.conn.refresh_display()
+        self._clear_selection()
         return f"Fillet created: R{radius} mm on {scope}. Feature: '{fillet.Name}'"
 
     def _chamfer(self, args: dict[str, Any]) -> str:
@@ -1036,6 +1057,7 @@ class PartDesignTools:
 
         part.UpdateObject(chamfer)
         self.conn.refresh_display()
+        self._clear_selection()
         return f"Chamfer created: {length} mm at {angle} deg on {scope}. Feature: '{chamfer.Name}'"
 
     def _hole(self, args: dict[str, Any]) -> str:
@@ -1135,8 +1157,11 @@ class PartDesignTools:
                 "or neither."
             )
         if dir1_edge:
-            ref1 = self._topo_reference("Edge", self._topo_index(dir1_edge, "Edge"))
-            ref2 = self._topo_reference("Edge", self._topo_index(dir2_edge, "Edge"))
+            r1, r2 = topology_references(
+                self.conn, body, "Edge",
+                [self._topo_index(dir1_edge, "Edge"),
+                 self._topo_index(dir2_edge, "Edge")])
+            ref1, ref2 = r1.reference, r2.reference
             directions = f"{dir1_edge} -> dir1, {dir2_edge} -> dir2"
         else:
             # Field-proven default on V5R20 (measured 2x2 boss grid): the
@@ -1386,8 +1411,9 @@ class PartDesignTools:
                 "AddNewShell's first parameter is the face to remove."
             )
         refs = [
-            self._topo_reference("Face", self._topo_index(f, "Face"))
-            for f in faces
+            r.reference
+            for r in topology_references(
+                self.conn, body, "Face", [self._topo_index(f, "Face") for f in faces])
         ]
         # AddNewShell(iFaceToRemove, iInternalThickness, iExternalThickness)
         shell = sf.AddNewShell(refs[0], thickness, 0)
@@ -1400,6 +1426,10 @@ class PartDesignTools:
 
         part.UpdateObject(shell)
         self.conn.refresh_display()
+        try:
+            self.conn.hso.Clear()
+        except Exception:
+            pass
         note = f" (could not add: {', '.join(skipped)})" if skipped else ""
         return (
             f"Shell created: {thickness} mm wall, removed "

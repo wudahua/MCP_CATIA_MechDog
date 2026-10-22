@@ -64,7 +64,7 @@ class TopoRef(NamedTuple):
 
 
 def topology_reference(conn: Any, body: Any, kind: str, index: int,
-                       hint: str | None = None) -> TopoRef:
+                       hint: str | None = None, keep: bool = True) -> TopoRef:
     """Resolve ``<kind>.<index>`` on the body's final shape to a Reference.
 
     References come from the selection's ``Reference`` property because
@@ -75,27 +75,71 @@ def topology_reference(conn: Any, body: Any, kind: str, index: int,
     The body is searched rather than ``Shapes.Item(last)``: only the body
     resolves to the final solid's topology - a shape reference yields the
     region that feature itself created.
+
+    ``keep`` leaves the selection holding the element. That is not an
+    optimisation, it is required: the Reference returned by
+    ``Selection.Item(i).Reference`` belongs to the selection and is invalidated
+    the moment the selection is cleared. A factory call given a cleared
+    reference fails with "method failed" and no explanation - which is what
+    made every fillet, chamfer, shell and draft look like a bad edge on
+    V5-6R2020 B30. Callers that build a feature must therefore leave the
+    selection alone until the feature exists, then clear it themselves; pass
+    ``keep=False`` only when the reference is used for reading.
     """
     if body.Shapes.Count == 0:
         raise RuntimeError("The active body has no solid shape yet.")
     sel = conn.hso
-    try:
-        sel.Clear()
-        sel.Add(body)
-        search_topology(sel, kind)
-        count = sel.Count
-        if index < 1 or index > count:
-            where = hint or (
-                "Use catia_list_faces / catia_list_edges to enumerate valid indices."
-            )
-            raise RuntimeError(
-                f"{kind}.{index} is out of range: the final shape exposes "
-                f"{count} {kind.lower()}(s). {where}"
-            )
-        cell = sel.Item(index)
-        return TopoRef(cell.Reference, str(cell.Name))
-    finally:
+    sel.Clear()
+    sel.Add(body)
+    search_topology(sel, kind)
+    count = sel.Count
+    if index < 1 or index > count:
+        where = hint or (
+            "Use catia_list_faces / catia_list_edges to enumerate valid indices."
+        )
         try:
             sel.Clear()
         except Exception:
             pass
+        raise RuntimeError(
+            f"{kind}.{index} is out of range: the final shape exposes "
+            f"{count} {kind.lower()}(s). {where}"
+        )
+    cell = sel.Item(index)
+    ref = TopoRef(cell.Reference, str(cell.Name))
+    if not keep:
+        try:
+            sel.Clear()
+        except Exception:
+            pass
+    return ref
+
+
+def topology_references(conn: Any, body: Any, kind: str,
+                        indices: list[int]) -> list[TopoRef]:
+    """Resolve several cells of the same kind in one search.
+
+    One search, not one per index: each ``topology_reference`` call starts with
+    ``sel.Clear()``, so a second call would invalidate the first reference.
+    """
+    if not indices:
+        return []
+    if body.Shapes.Count == 0:
+        raise RuntimeError("The active body has no solid shape yet.")
+    sel = conn.hso
+    sel.Clear()
+    sel.Add(body)
+    search_topology(sel, kind)
+    count = sel.Count
+    out = []
+    for index in indices:
+        if index < 1 or index > count:
+            raise RuntimeError(
+                f"{kind}.{index} is out of range: the final shape exposes "
+                f"{count} {kind.lower()}(s)."
+            )
+        cell = sel.Item(index)
+        out.append(TopoRef(cell.Reference, str(cell.Name)))
+    return out
+
+
