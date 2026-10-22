@@ -62,24 +62,22 @@ def test_measurement_without_a_workbench_degrades_instead_of_crashing():
 def test_fillet_batch_applies_every_edge_and_says_so():
     tools = PartDesignTools(connection=None)
     applied = []
-    tools._fillet_one = lambda radius, name: applied.append((radius, name)) or "ok"
 
-    report = tools._fillet({"radius": 1.27, "edge_names": ["Edge.4", "Edge.7"]})
+    report = tools._apply_fillets(1.27, ["Edge.4", "Edge.7"], [object(), object()],
+                                 add=lambda ref: applied.append(ref))
 
-    assert applied == [(1.27, "Edge.4"), (1.27, "Edge.7")]
+    assert len(applied) == 2
     assert "2/2" in report
 
 
 def test_fillet_batch_survives_a_rejected_edge_and_names_it():
     tools = PartDesignTools(connection=None)
 
-    def flaky(radius, name):
-        if name == "Edge.9":
+    def flaky(ref):
+        if ref == "bad":
             raise RuntimeError("(-2147352567, '发生意外。', (0, 'CATIAShapeFactory', '方法失败', ...)")
-        return "ok"
 
-    tools._fillet_one = flaky
-    report = tools._fillet({"radius": 3.81, "edge_names": ["Edge.4", "Edge.9"]})
+    report = tools._apply_fillets(3.81, ["Edge.4", "Edge.9"], ["good", "bad"], add=flaky)
 
     assert "1/2" in report
     assert "Edge.9" in report
@@ -206,3 +204,44 @@ def test_set_active_body_exists_because_new_body_only_moves_forward():
     text = tool["description"]
     assert "9" in text            # names the drone body as the motivating case
     assert "catia_list_bodies" in text
+
+
+def test_symmetric_pad_halves_the_dimension_because_catia_doubles_it():
+    """CATIA's IsSymmetric is a mirrored extent, not a total.
+
+    Measured: r=10 pad, height=10 -> y -10..+10 (6283.19 mm3). The tool's
+    contract says total = height, so it must hand CATIA height/2.
+    """
+    import inspect
+
+    source = inspect.getsource(PartDesignTools._pad)
+    assert "height / 2.0 if symmetric else height" in source
+    assert "IsSymmetric = True" in source
+
+    from catia_mcp.tools.part_design import PartDesignTools as PD
+
+    tool = [d for d in PD(connection=None).get_tool_definitions()
+            if d["name"] == "catia_pad"][0]
+    text = tool["inputSchema"]["properties"]["symmetric"]["description"]
+    assert "TOTAL" in text
+    assert "mirrored extent" in text
+
+
+def test_multi_edge_fillet_resolves_all_references_before_cutting():
+    """Each fillet renumbers the body, so re-resolving Edge.N mid-batch lands
+    on the tangent edge the previous fillet just made - which CATIA reports as
+    'some selected edges are not sharp' instead of failing."""
+    import inspect
+
+    source = inspect.getsource(PartDesignTools._fillet_many)
+    assert "topology_references" in source
+    # the resolution has to happen before any AddNew call
+    assert source.index("topology_references") < source.index("AddNewSolidEdgeFillet")
+
+
+def test_list_faces_honours_the_body_name_it_was_given():
+    import inspect
+
+    source = inspect.getsource(PartDesignTools._list_faces)
+    assert 'part.Bodies.Item(body_name)' in source
+    assert '_topology_cells("Face", body)' in source

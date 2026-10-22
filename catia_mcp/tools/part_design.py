@@ -47,7 +47,13 @@ class PartDesignTools:
                         },
                         "symmetric": {
                             "type": "boolean",
-                            "description": "If true, extrude equally on both sides (total = height)",
+                            "description": (
+                                "Mirror the pad about the sketch plane. The documented "
+                                "contract is that the TOTAL thickness is 'height' "
+                                "(each side gets height/2). CATIA's own IsSymmetric is a "
+                                "mirrored extent that gives each side the full dimension; "
+                                "the tool halves it for you."
+                            ),
                             "default": False,
                         },
                         "sketch_name": {
@@ -832,20 +838,27 @@ class PartDesignTools:
         sketch = self._get_last_sketch(args.get("sketch_name"))
         height = args["height"]
         direction = args.get("direction", "normal")
-        symmetric = args.get("symmetric", False)
+        symmetric = args.get("symmetric", False) or direction == "both"
 
-        pad = sf.AddNewPad(sketch, height)
+        # CATIA's IsSymmetric is a *mirrored extent*: each side gets the full
+        # dimension, so the solid comes out 2x thick. Measured on V5-6R2020 B30
+        # (r=10 pad, height=10 -> y -10..+10, 6283.19 mm3). The documented
+        # contract here is "total = height", so halve the dimension we hand to
+        # CATIA. This bit the drone motor disc: a 31.75 mm disc became 63.5 mm,
+        # and the blind hole then fell entirely inside the material and was
+        # rejected as an enclosed void.
+        pad = sf.AddNewPad(sketch, height / 2.0 if symmetric else height)
 
         if symmetric:
             pad.IsSymmetric = True
         elif direction == "reverse":
             pad.DirectionOrientation = 1  # catReverse
-        elif direction == "both":
-            pad.IsSymmetric = True
 
         part.UpdateObject(pad)
         self.conn.refresh_display()
-        return f"Pad created: {height} mm ({direction}). Feature: '{pad.Name}'"
+        span = "total %.3f mm, %0.3f each side" % (height, height / 2.0) if symmetric \
+            else "%.3f mm" % height
+        return f"Pad created: {span} ({direction}). Feature: '{pad.Name}'"
 
     def _body_volume_mm3(self, part: Any, body: Any) -> float | None:
         """Measure the body's solid volume in mm3, or None if unavailable."""
@@ -1094,17 +1107,56 @@ class PartDesignTools:
     def _fillet_many(self, radius: float, names: list[str]) -> str:
         """One feature per edge, so a single refusal does not lose the batch.
 
-        CATIA's edge fillet takes exactly one object, and on a part whose solid
-        came from GSD some edges are refused outright. Doing them one at a time
-        turns that into "4 of 8 took" instead of an exception that leaves the
-        caller unable to tell what happened.
+        Every reference is resolved BEFORE the first feature is created. That
+        ordering is the whole point: each fillet renumbers the body's edges, so
+        a loop that re-resolves "Edge.N" between cuts ends up pointing at the
+        tangent edge the previous fillet just created - which is no longer
+        sharp, and CATIA answers with an update diagnostic ("某些选定的边线不是
+        锐边") instead of an error. Measured on the drone motor disc: the two
+        Ø69.85 circles and the fillet's tangent edge are all 219.440 mm long, so
+        neither length nor type can tell them apart afterwards.
         """
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        body = self._prepare_body(part)
+        sf = part.ShapeFactory
+
+        indices = [self._topo_index(name, "Edge") for name in names]
+        # One search, all references, selection kept alive - a reference dies
+        # with the selection that produced it.
+        refs = [r.reference for r in
+                topology_references(self.conn, body, "Edge", indices)]
+
+        def add(ref: Any) -> None:
+            fillet = sf.AddNewSolidEdgeFilletWithConstantRadius(
+                ref, 1, radius)              # catTangencyFilletEdgePropagation
+            part.UpdateObject(fillet)
+
+        try:
+            return self._apply_fillets(radius, names, refs, add)
+        finally:
+            self._clear_selection()
+            self.conn.refresh_display()
+
+    def _apply_fillets(self, radius: float, names: list[str], refs: list[Any],
+                       add: Any = None) -> str:
+        """Create one fillet per (name, ref). ``add`` is injectable for tests."""
         done, failed = [], []
-        for name in names:
+        for name, ref in zip(names, refs):
             try:
-                self._fillet_one(radius, name)
+                add(ref)
                 done.append(name)
-            except Exception as error:  # noqa: BLE001 - reported per edge
+            except Exception as error:        # noqa: BLE001 - reported per edge
+                # Remove the half-built feature so a rejected edge does not
+                # leave an update error behind.
+                try:
+                    shapes = self.conn.get_active_part_body().Shapes
+                    feat = shapes.Item(shapes.Count)
+                    sel = self.conn.hso
+                    sel.Add(feat)
+                    sel.Delete()
+                except Exception:
+                    pass
                 failed.append((name, str(error).splitlines()[0][:120]))
         head = f"Fillet R{radius}: {len(done)}/{len(names)} edge(s) done"
         if done:
@@ -2031,7 +2083,7 @@ class PartDesignTools:
             return None
         return value
 
-    def _topology_cells(self, kind: str) -> tuple[Any, int]:
+    def _topology_cells(self, kind: str, body: Any = None) -> tuple[Any, int]:
         """Search the body's final shape and return (selection, count).
 
         The body is searched, not ``Shapes.Item(last)``: only the body resolves
@@ -2040,9 +2092,11 @@ class PartDesignTools:
         Listing from the last feature instead used to hand out indices that
         pointed at a different element by the time fillet resolved them.
         """
-        body = self.conn.get_active_part_body()
+        body = body if body is not None else self.conn.get_active_part_body()
         if body.Shapes.Count == 0:
-            raise RuntimeError("The active body has no solid shape yet.")
+            raise RuntimeError(
+                f"Body '{body.Name}' has no solid shape yet."
+            )
         sel = self.conn.hso
         sel.Clear()
         sel.Add(body)
@@ -2051,23 +2105,25 @@ class PartDesignTools:
 
     def _list_faces(self, body_name: str | None = None) -> str:
         self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        body = self._prepare_body(part)
         if body_name:
-            part = self.conn.get_active_part()
-            bodies = part.Bodies
+            # The name used to be validated and then dropped, so the listing
+            # always described the ACTIVE body - silently wrong on any part with
+            # more than one solid.
             try:
-                bodies.Item(body_name)
+                body = part.Bodies.Item(body_name)
             except Exception:
-                names = ", ".join(str(bodies.Item(i).Name) for i in range(1, bodies.Count + 1))
+                names = ", ".join(str(part.Bodies.Item(i).Name)
+                                  for i in range(1, part.Bodies.Count + 1))
                 raise RuntimeError(
                     f"No body named '{body_name}'. Top-level bodies: {names or 'none'}."
                 )
-        part = self.conn.get_active_part()
-        self._prepare_body(part)
         spa = self._topo_measure(part)
 
         faces = []
         try:
-            sel, count = self._topology_cells("Face")
+            sel, count = self._topology_cells("Face", body)
             for i in range(1, count + 1):
                 cell = sel.Item(i)
                 entry: dict[str, Any] = {"index": i, "name": f"Face.{i}"}

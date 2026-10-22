@@ -34,6 +34,28 @@ All notable changes to this project are documented here.
   into a solid. It was simply missing from the 24 GSD tools.
 
 ### Fixed
+- A multi-edge fillet resolved every edge in the batch *lazily*, one at a time,
+  between factory calls. Each fillet renumbers the body's edges, so the second
+  lookup landed on the tangent edge the first fillet had just created - no
+  longer sharp, and CATIA answers that with an update diagnostic
+  ("某些选定的边线不是锐边") rather than an error, so the batch looked like it
+  half-worked. Measured on the drone motor disc: the two Ø69.85 circle edges and
+  the R12.7 tangent edge are all 219.440 mm long, so neither length nor type can
+  separate them after the fact. All references are now resolved before the first
+  feature is created, and a rejected edge has its half-built feature removed so
+  no update error is left behind.
+- `catia_list_faces(body_name=...)` validated the name and then dropped it,
+  listing the active body anyway. On a nine-body part that is silently wrong
+  every time. It now searches the body it was asked about.
+- `catia_pad(..., symmetric=true)` came out twice as thick as the schema
+  promised. CATIA's `IsSymmetric` is a *mirrored extent*: each side gets the
+  full dimension, not half of it (measured: r=10, height=10 -> y -10..+10,
+  6283.19 mm3). The tool now hands CATIA `height / 2`, says so in the schema, and
+  reports the resulting span. This turned a 31.75 mm motor disc into a 63.5 mm
+  one and pushed its Ø45.72 blind hole entirely inside the material, where CATIA
+  refused it as an enclosed void.
+- `catia_pad` accepts `direction='both'`, which the schema advertised and the
+  code silently treated as plain `normal`.
 - Unmeasurable topology was published as a number. SPA does not raise for what it
   cannot resolve - a `Length` of 2e7 mm or an `Area` of 0.0 mm2 is a placeholder,
   not a measurement - and those values silently poisoned every length-based edge
