@@ -2,10 +2,43 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.1] — 2026-10-22 · multi-body parts, loft sections from topology, curved bounding boxes
+
+Three gaps that a written specification hits as soon as it stops being a single
+solid. All measured on a live V5-6R2020 (B30) session. **90 tools** (0.3.0 had 87).
+
+### Added
+- `catia_new_body` / `catia_list_bodies` / `catia_boolean`: multi-body parts.
+  A spec that declares "Merge = false" (several solids in one part, possibly
+  interpenetrating) could not be expressed before - everything went into
+  MainBody and overlapping solids fused, losing the overlap from the volume.
+  `catia_list_bodies` reports each body's volume and face count plus the totals,
+  because a part's volume is the sum of its bodies. `catia_boolean` covers
+  add / remove / intersect / assemble.
+- A loft section may now be a **solid's own topology**: `"Edge.3"` is extracted
+  from the finished body and used as a section, so "loft from the Ø38.1 edge at
+  x=254" no longer needs that circle redrawn as a sketch. It has to be
+  extracted first - a raw topological edge is rejected by `AddSectionToLoft`
+  ("invalid number of arguments", which is CATIA's misleading way of saying the
+  type is wrong).
+- `catia_get_bounding_box` takes `method` = `auto` | `vertices` | `mesh`. A
+  fully curved solid (a cylinder is one face, zero vertices) now gets a box from
+  an exported STL instead of failing outright. The mesh chords the surface, so
+  the true face lies a fraction of a millimetre outside the reported bounds -
+  stated in the result.
+
+### Not fixed, because CATIA does not offer it
+- **No tangent / curvature condition on a loft.** `HybridShapeLoft` exposes only
+  `SectionCoupling`, `Relimitation`, `AddSectionToLoft` and `AddGuide` - verified
+  by enumerating its type information, not by guessing. Part Design's
+  `ShapeFactory.AddNewLoft()` is not automatable at all on V5-6R2020 (every
+  member lookup fails). A spec that relies on "maintain tangency, tangent
+  factor 1.0" has to be approximated with extra intermediate sections instead.
+
 ## [0.3.0] — 2026-10-20 · lite fork
 
 First public state of the fork. Based on upstream `0.2.2` plus the unreleased
-98-tool work and a zh-CN CATIA compatibility patch. **90 tools** (98 − 16 + 8).
+98-tool work and a zh-CN CATIA compatibility patch. **87 tools** (98 − 16 + 5).
 See `README.md` for the diff table and `FORK.md` for measurements.
 
 ### Removed
@@ -38,33 +71,6 @@ See `README.md` for the diff table and `FORK.md` for measurements.
 - `catia_shaft` / `catia_groove` take `axis` (`horizontal` | `vertical`). Only
   the sketch's own axes work; a construction-line reference is accepted by the
   property setter and then rejected at update time.
-- `catia_new_body` / `catia_list_bodies` / `catia_boolean`: multi-body parts.
-  A spec that declares "Merge = false" (several solids in one part, possibly
-  interpenetrating) could not be expressed before - everything went into
-  MainBody and overlapping solids fused, losing the overlap from the volume.
-  `catia_list_bodies` reports each body's volume and face count plus the totals,
-  because a part's volume is the sum of its bodies. `catia_boolean` covers
-  add / remove / intersect / assemble.
-- A loft section may now be a **solid's own topology**: `"Edge.3"` is extracted
-  from the finished body and used as a section, so "loft from the Ø38.1 edge at
-  x=254" no longer needs that circle redrawn as a sketch. It has to be
-  extracted first - a raw topological edge is rejected by `AddSectionToLoft`
-  ("invalid number of arguments", which is CATIA's misleading way of saying the
-  type is wrong).
-- `catia_get_bounding_box` takes `method` = `auto` | `vertices` | `mesh`. A
-  fully curved solid (a cylinder is one face, zero vertices) now gets a box from
-  an exported STL instead of failing outright. The mesh chords the surface, so
-  the true face lies a fraction of a millimetre outside the reported bounds -
-  stated in the result.
-
-### Not fixed, because CATIA does not offer it
-- **No tangent / curvature condition on a loft.** `HybridShapeLoft` exposes only
-  `SectionCoupling`, `Relimitation`, `AddSectionToLoft` and `AddGuide` - verified
-  by enumerating its type information, not by guessing. Part Design's
-  `ShapeFactory.AddNewLoft()` is not automatable at all on V5-6R2020 (every
-  member lookup fails). A spec that relies on "maintain tangency, tangent
-  factor 1.0" has to be approximated with extra intermediate sections instead.
-
 - `catia_rename_component`: a readable assembly tree. `Part.Name` is read-only on
   V5-6R2020 (`E_NOTIMPL`), so every part added from file shows up as `Part1.1`,
   `Part2.1`, … no matter what the file is called - nine parts of a cylinder all
