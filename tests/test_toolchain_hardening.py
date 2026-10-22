@@ -194,3 +194,15 @@ def test_set_visibility_is_registered_with_the_measured_enum_note():
     # silently broken for a while.
     assert "SetShow(0 if show else 1)" in source
     assert "HybridShapes" in source          # descend into the set
+
+
+# ─────────────────────────────────────────── multi-body round trip
+def test_set_active_body_exists_because_new_body_only_moves_forward():
+    from catia_mcp.tools.part_design import PartDesignTools as PD
+
+    tool = [d for d in PD(connection=None).get_tool_definitions()
+            if d["name"] == "catia_set_active_body"][0]
+    assert tool["inputSchema"]["required"] == ["name"]
+    text = tool["description"]
+    assert "9" in text            # names the drone body as the motivating case
+    assert "catia_list_bodies" in text

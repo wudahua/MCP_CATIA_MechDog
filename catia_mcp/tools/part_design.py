@@ -546,6 +546,27 @@ class PartDesignTools:
                 },
             },
             {
+                "name": "catia_set_active_body",
+                "description": (
+                    "Make an existing solid body the active one, so later pad / pocket / "
+                    "hole / fillet features go into it. catia_new_body can only create a "
+                    "body and make it active; without this there is no way back to a "
+                    "body you left, which makes any multi-body part unbuildable past the "
+                    "second body - the drone body is 9 solids. Use catia_list_bodies to "
+                    "see the names and which one is currently active."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Body name from catia_list_bodies, e.g. '零件几何体'.",
+                        },
+                    },
+                    "required": ["name"],
+                },
+            },
+            {
                 "name": "catia_set_visibility",
                 "description": (
                     "Show or hide a tree node: a body, a geometrical set, a single "
@@ -691,6 +712,8 @@ class PartDesignTools:
                 return self._new_body(arguments.get("name"))
             case "catia_list_bodies":
                 return self._list_bodies()
+            case "catia_set_active_body":
+                return self._set_active_body(arguments["name"])
             case "catia_set_visibility":
                 return self._set_visibility(
                     arguments["name"], bool(arguments.get("show", False)))
@@ -1726,6 +1749,38 @@ class PartDesignTools:
         return (
             f"Solid body '{body.Name}' created and made active "
             f"({before} -> {bodies.Count} bodies). Later features go into it."
+        )
+
+    def _set_active_body(self, name: str) -> str:
+        """Route later features into an existing body.
+
+        catia_new_body only ever moves forward. A part with several solids -
+        the drone body is 9 - needs to come back to a body it already left, and
+        without that the second body is the last one you can build.
+        """
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        bodies = part.Bodies
+        body = None
+        for i in range(1, bodies.Count + 1):
+            candidate = bodies.Item(i)
+            if str(candidate.Name) == name:
+                body = candidate
+                break
+        if body is None:
+            names = ", ".join(str(bodies.Item(i).Name) for i in range(1, bodies.Count + 1))
+            raise RuntimeError(
+                f"No solid body named '{name}'. Bodies: {names or 'none'}."
+            )
+        self.conn.active_body = body
+        try:
+            part.InWorkObject = body
+        except Exception:
+            pass
+        self.conn.refresh_display()
+        return (
+            f"Body '{body.Name}' is now active ({body.Shapes.Count} feature(s)). "
+            "Later pad / pocket / hole / fillet features go into it."
         )
 
     def _list_bodies(self) -> str:
