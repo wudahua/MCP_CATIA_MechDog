@@ -15,9 +15,11 @@ All dimensions are in millimeters, angles in degrees.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
+from catia_mcp.topo_search import search_topology
 
 # Origin plane aliases (same convention as sketcher.py)
 PLANE_MAP = {
@@ -253,7 +255,12 @@ class GSDTools:
                 "description": (
                     "Create a Multi-sections Surface (loft) through 2+ section curves "
                     "(sketches, circles, splines...), optionally following guide curves. "
-                    "Sections should be listed in order along the lofting direction."
+                    "Sections should be listed in order along the lofting direction. A "
+                    "section may also be a solid's own topology - 'Edge.3' takes it "
+                    "straight from the finished body (see catia_list_edges), which is "
+                    "how you loft from an existing end-face edge without redrawing it. "
+                    "Note there is no tangent/curvature condition here: CATIA's GSD "
+                    "loft does not expose one (only SectionCoupling and Relimitation)."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -658,9 +665,66 @@ class GSDTools:
             "Use catia_gsd_list_elements to see available element names."
         )
 
+    _TOPO_NAME = re.compile(r"(edge|face|vertex)\s*\.\s*(\d+)", re.I)
+
+    def _topology_reference(self, name: str) -> Any | None:
+        """Resolve 'Edge.N' / 'Face.N' / 'Vertex.N' to a usable reference.
+
+        Specs routinely loft from an existing solid's end-face edge ("loft from
+        the Ø38.1 edge at x=254"), which has no tree name - the only handle is
+        the indexed topology a search produces.
+
+        A raw topological edge cannot be consumed by a loft: AddSectionToLoft
+        rejects it ("invalid number of arguments", which is CATIA's misleading
+        way of saying the type is wrong). Extracting it into a GSD curve first
+        makes it a real section, so that happens here and the Extract lands in
+        the active geometrical set.
+        """
+        match = self._TOPO_NAME.fullmatch(name.strip())
+        if not match:
+            return None
+        kind = match.group(1).capitalize()      # Edge / Face / Vertex
+        index = int(match.group(2))
+        part = self.conn.get_active_part()
+        body = self.conn.get_active_part_body()
+        sel = self.conn.hso
+        try:
+            sel.Clear()
+            sel.Add(body)
+            search_topology(sel, kind)
+            total = sel.Count
+            if not 1 <= index <= total:
+                raise RuntimeError(
+                    f"'{name}' is out of range: the active body has {total} "
+                    f"{kind.lower()}s. Use catia_list_edges / catia_list_faces."
+                )
+            raw = sel.Item(index).Reference
+        finally:
+            try:
+                sel.Clear()
+            except Exception:
+                pass
+
+        # A vertex is already a point-like element; only edges and faces need
+        # the Extract to become a curve/surface.
+        if kind == "Vertex":
+            return raw
+        extract = self._factory().AddNewExtract(raw)
+        try:
+            # 1 = no propagation: this edge only, not the tangent chain.
+            extract.PropagationType = 1
+        except Exception:
+            pass
+        self._get_geoset().AppendHybridShape(extract)
+        part.UpdateObject(extract)
+        return part.CreateReferenceFromObject(extract)
+
     def _ref(self, name: str) -> Any:
         """Get a Reference to a named element."""
         part = self.conn.get_active_part()
+        topology = self._topology_reference(name)
+        if topology is not None:
+            return topology
         return part.CreateReferenceFromObject(self._find_element(name))
 
     def _point_ref(self, spec: Any) -> Any:

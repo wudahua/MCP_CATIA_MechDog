@@ -545,3 +545,96 @@ def test_boolean_passes_the_body_itself_not_a_reference():
     part.UpdateObject = lambda f: None
     tools._boolean({"operation": "intersect", "tool_body": "Tool"})
     assert isinstance(seen["arg"], FakeSolidBody), type(seen["arg"])
+
+
+# --------------------------------------------------------------------------
+# Bounding box on a fully curved solid, and topology as a loft section.
+# --------------------------------------------------------------------------
+
+
+def test_stl_extent_reads_ascii(tmp_path):
+    from catia_mcp.tools.measurement import _stl_extent
+
+    path = tmp_path / "a.stl"
+    path.write_text(
+        "solid t\n"
+        "facet normal 0 0 1\n outer loop\n"
+        "  vertex 0 0 0\n  vertex 10 0 0\n  vertex 0 20 5\n"
+        " endloop\nendfacet\nendsolid t\n", encoding="ascii")
+    corners, count = _stl_extent(str(path))
+    assert count == 3
+    assert corners[0] == [0.0, 0.0, 0.0]
+    assert corners[1] == [10.0, 20.0, 5.0]
+
+
+def test_stl_extent_reads_binary(tmp_path):
+    import struct
+    from catia_mcp.tools.measurement import _stl_extent
+
+    path = tmp_path / "b.stl"
+    header = b"\0" * 80 + struct.pack("<I", 1)
+    tri = struct.pack("<12fH", 0, 0, 1, -3, -4, -5, 7, 8, 9, 1, 2, 3, 0)
+    path.write_bytes(header + tri)
+    corners, count = _stl_extent(str(path))
+    assert count == 3
+    assert corners[0] == [-3.0, -4.0, -5.0]
+    assert corners[1] == [7.0, 8.0, 9.0]
+
+
+def test_stl_extent_rejects_empty_mesh(tmp_path):
+    import struct
+    from catia_mcp.tools.measurement import _stl_extent
+
+    path = tmp_path / "empty.stl"
+    path.write_bytes(b"\0" * 80 + struct.pack("<I", 0))
+    try:
+        _stl_extent(str(path))
+    except RuntimeError as e:
+        assert "no triangles" in str(e)
+    else:
+        raise AssertionError("empty STL should raise")
+
+
+def test_topology_name_is_recognised_only_for_edge_face_vertex():
+    from catia_mcp.tools.gsd import GSDTools
+
+    tools = GSDTools(connection=None)
+    # A tree element name must not be mistaken for topology.
+    assert tools._topology_reference("Sketch.1") is None
+    assert tools._topology_reference("Loft.2") is None
+
+
+def test_topology_index_out_of_range_is_a_clear_error():
+    from catia_mcp.tools.gsd import GSDTools
+
+    class Sel:
+        Count = 3
+
+        def Clear(self):
+            pass
+
+        def Add(self, _):
+            pass
+
+        def Item(self, i):
+            return type("I", (), {"Reference": None})()
+
+    conn = type("C", (), {
+        "hso": Sel(),
+        "get_active_part": lambda self: type("P", (), {"name": "p"})(),
+        "get_active_part_body": lambda self: type("B", (), {"Name": "b"})(),
+    })()
+    tools = GSDTools(connection=conn)
+
+    import catia_mcp.tools.gsd as gsd
+    original = gsd.search_topology
+    gsd.search_topology = lambda sel, kind: None
+    try:
+        try:
+            tools._topology_reference("Edge.9")
+        except RuntimeError as e:
+            assert "out of range" in str(e)
+        else:
+            raise AssertionError("should have rejected Edge.9 of 3")
+    finally:
+        gsd.search_topology = original

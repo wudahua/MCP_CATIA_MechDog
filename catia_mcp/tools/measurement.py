@@ -6,11 +6,69 @@ Distance, angle, inertia, bounding box, and part property queries.
 from __future__ import annotations
 
 import json
+import os
 import re
+import struct
+import tempfile
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
 from catia_mcp.topo_search import search_topology
+
+
+def _stl_extent(path: str) -> tuple[list[list[float]], int]:
+    """Min/max corner and vertex count from an STL (binary or ASCII).
+
+    Streams the file and only tracks extremes, because a dense part exports
+    hundreds of thousands of triangles and keeping them all buys nothing for a
+    bounding box.
+    """
+    lo = [float("inf")] * 3
+    hi = [float("-inf")] * 3
+    seen = 0
+
+    def add(x: float, y: float, z: float) -> None:
+        nonlocal seen
+        if x < lo[0]:
+            lo[0] = x
+        if y < lo[1]:
+            lo[1] = y
+        if z < lo[2]:
+            lo[2] = z
+        if x > hi[0]:
+            hi[0] = x
+        if y > hi[1]:
+            hi[1] = y
+        if z > hi[2]:
+            hi[2] = z
+        seen += 1
+
+    size = os.path.getsize(path)
+    with open(path, "rb") as handle:
+        head = handle.read(84)
+        if len(head) < 84:
+            raise RuntimeError(f"STL export produced only {size} bytes")
+        triangles = struct.unpack("<I", head[80:84])[0]
+        if triangles and size == 84 + 50 * triangles:
+            for _ in range(triangles):
+                record = handle.read(50)
+                if len(record) < 50:
+                    break
+                values = struct.unpack("<12fH", record)
+                for k in (3, 6, 9):
+                    add(values[k], values[k + 1], values[k + 2])
+        else:
+            # ASCII STL: "vertex x y z" lines.
+            handle.seek(0)
+            for raw in handle:
+                text = raw.strip()
+                if text[:6].lower() == b"vertex":
+                    parts = text.split()
+                    if len(parts) >= 4:
+                        add(float(parts[1]), float(parts[2]), float(parts[3]))
+    if not seen:
+        raise RuntimeError("STL export contained no triangles")
+    return [lo, hi], seen
 
 # CATIA V5's SPAWorkbench Measurable API returns every value in MKS units
 # (meters, m2, m3, kg.m2) regardless of the document's display units.
@@ -99,14 +157,28 @@ class MeasurementTools:
             {
                 "name": "catia_get_bounding_box",
                 "description": (
-                    "Get the bounding box of the active part from a vertex "
-                    "sweep of the final shape, in mm. Exact for planar-faced "
-                    "solids; curved faces may extend beyond the reported "
-                    "bounds (stated in the result)."
+                    "Get the bounding box of the active part in mm. 'vertices' sweeps the "
+                    "final shape's vertices (exact for planar-faced solids, but a fully "
+                    "curved solid like a cylinder has no vertices at all); 'mesh' exports "
+                    "an STL and sweeps the triangles, which works for revolved and lofted "
+                    "shapes and lands a fraction of a millimetre inside the true surface "
+                    "because the mesh chords the curve. 'auto' uses vertices when they "
+                    "exist and falls back to the mesh otherwise."
                 ),
                 "inputSchema": {
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "method": {
+                            "type": "string",
+                            "enum": ["auto", "vertices", "mesh"],
+                            "default": "auto",
+                            "description": (
+                                "auto (default) = vertices if the shape has any, else "
+                                "mesh; vertices = fail on a fully curved solid; mesh = "
+                                "always export STL"
+                            ),
+                        },
+                    },
                 },
             },
             {
@@ -163,7 +235,7 @@ class MeasurementTools:
             case "catia_get_inertia":
                 return self._get_inertia(arguments.get("density"))
             case "catia_get_bounding_box":
-                return self._get_bounding_box()
+                return self._get_bounding_box(arguments.get("method", "auto"))
             case "catia_get_parameters":
                 return self._get_parameters(arguments.get("filter"))
             case "catia_set_parameter":
@@ -351,35 +423,54 @@ class MeasurementTools:
 
         return json.dumps(result, indent=2)
 
-    def _get_bounding_box(self) -> str:
-        # Measurable has no bounding-box method in any V5 release, so the
-        # box is computed from the final shape's vertices (exact for
-        # planar-faced solids; curved faces can extend past their vertices,
-        # which the output states explicitly).
+    def _get_bounding_box(self, method: str = "auto") -> str:
+        # Measurable has no bounding-box method in any V5 release. Two sources
+        # are available instead: the final shape's vertices (exact for
+        # planar-faced solids) and an exported STL mesh (the only thing that
+        # works on a fully curved solid - a cylinder is one face, zero
+        # vertices - at the cost of chording the surface).
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
         body = self.conn.get_active_part_body()
         if body.Shapes.Count == 0:
             raise RuntimeError("The active body has no solid shape yet.")
 
-        # Search the body itself: only it resolves to the final solid's
-        # topology (Shapes.Item(last) is the last feature's own region).
+        if method in ("auto", "vertices"):
+            points, truncated, total = self._vertex_points(body)
+            if points:
+                return self._bbox_json(
+                    points,
+                    f"vertex sweep over {len(points)} of {total} vertices of the "
+                    "final shape; exact for planar-faced solids, curved faces may "
+                    "extend beyond these bounds"
+                    + (" (capped at 200)" if truncated else ""),
+                )
+            if method == "vertices":
+                raise RuntimeError(
+                    "UNSUPPORTED_CAPABILITY: the final shape exposes no vertices "
+                    "(fully curved solid), so a vertex sweep cannot bound it. "
+                    "Use method='mesh'."
+                )
+
+        corners, triangles = self._mesh_corners(part)
+        return self._bbox_json(
+            corners,
+            f"STL mesh sweep over {triangles} triangle vertices; the mesh chords "
+            "curved faces, so the true surface lies a fraction of a millimetre "
+            "outside these bounds",
+        )
+
+    def _vertex_points(self, body: Any) -> tuple[list[list[float]], bool, int]:
+        """Reference vertex coordinates, capped at 200 points."""
         sel = self.conn.hso
         refs = []
+        total = 0
         try:
             sel.Clear()
             sel.Add(body)
             search_topology(sel, "Vertex")
-            count = sel.Count
-            if count == 0:
-                raise RuntimeError(
-                    "UNSUPPORTED_CAPABILITY: the final shape exposes no "
-                    "vertices (fully curved solid); a bounding box cannot be "
-                    "derived through the V5 automation API."
-                )
-            truncated = count > 200
-            if truncated:
-                count = 200  # cap the sweep; stated in the output below
+            total = sel.Count
+            count = min(total, 200)
             for i in range(1, count + 1):
                 refs.append(sel.Item(i).Reference)
         finally:
@@ -387,16 +478,37 @@ class MeasurementTools:
                 sel.Clear()
             except Exception:
                 pass
-
+        if not refs:
+            return [], False, total
         spa = self._spa_workbench()
-        xs, ys, zs = [], [], []
-        for ref in refs:
-            # Vertex coordinates in the document's length unit (mm).
-            pt = self._read_measurable_array(spa.GetMeasurable(ref), "GetPoint", 3)
-            xs.append(pt[0])
-            ys.append(pt[1])
-            zs.append(pt[2])
+        points = [
+            self._read_measurable_array(spa.GetMeasurable(ref), "GetPoint", 3)
+            for ref in refs
+        ]
+        return points, total > 200, total
 
+    def _mesh_corners(self, part: Any) -> tuple[list[list[float]], int]:
+        """Bounding corners from an STL export of the active document."""
+        import shutil
+
+        doc = part.Parent
+        # ExportData raises an overwrite prompt when the target exists, and that
+        # dialog blocks the worker thread forever. mkstemp would create the file
+        # up front, so make a directory and hand over a name that does not exist.
+        folder = tempfile.mkdtemp(prefix="catia_bbox_")
+        path = os.path.join(folder, "part.stl")
+        try:
+            # ExportData rejects forward-slash paths (E_FAIL).
+            doc.ExportData(os.path.normpath(path), "stl")
+            return _stl_extent(path)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    @staticmethod
+    def _bbox_json(points: list[list[float]], method_note: str) -> str:
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        zs = [p[2] for p in points]
         result = {
             "min": {"x": round(min(xs), 4), "y": round(min(ys), 4), "z": round(min(zs), 4)},
             "max": {"x": round(max(xs), 4), "y": round(max(ys), 4), "z": round(max(zs), 4)},
@@ -405,12 +517,7 @@ class MeasurementTools:
                 "length_y": round(max(ys) - min(ys), 4),
                 "length_z": round(max(zs) - min(zs), 4),
             },
-            "method": (
-                f"vertex sweep over {len(refs)} vertices of the final shape; "
-                "exact for planar-faced solids, curved faces may extend "
-                "beyond these bounds"
-                + (" (vertex count capped at 200)" if truncated else "")
-            ),
+            "method": method_note,
         }
         return json.dumps(result, indent=2)
 
