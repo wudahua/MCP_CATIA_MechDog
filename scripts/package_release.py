@@ -64,7 +64,11 @@ def collect_files(root: str = ROOT) -> list[str]:
     """Every file to ship, as paths relative to ``root`` (dot-files included)."""
     files: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in EXCLUDE_DIRS)
+        # `*.egg-info` is a directory, so the suffix filter below never sees it.
+        dirnames[:] = sorted(
+            d for d in dirnames
+            if d not in EXCLUDE_DIRS and not d.endswith(".egg-info")
+        )
         for name in sorted(filenames):
             if name in EXCLUDE_FILES or name.endswith(EXCLUDE_SUFFIXES):
                 continue

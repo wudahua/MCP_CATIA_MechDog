@@ -37,6 +37,9 @@ def test_collect_files_skips_vcs_and_envs():
     assert not [f for f in files if f.startswith(".git/")]
     assert not [f for f in files if f.startswith(".venv/")]
     assert not [f for f in files if "__pycache__" in f]
+    # *.egg-info is a directory: a suffix filter on filenames never catches it,
+    # so the first cut of this script shipped MCP_CATIA_MechDog.egg-info.
+    assert not [f for f in files if ".egg-info/" in f]
 
 
 def test_required_paths_are_all_present():
