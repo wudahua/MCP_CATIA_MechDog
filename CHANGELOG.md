@@ -4,6 +4,32 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+- `tests/test_readme_tool_counts.py` compares the documentation with the code:
+  the header count, every row of the group table, the "Added" table, the
+  `serverInfo` version and `setup.sh`'s clone target. A user installing 0.3.2
+  found the README claiming 87 tools, its group table adding up to 86, and the
+  server registering 94 - three numbers for one fact, in the one project whose
+  selling point is verification.
+
+### Fixed
+- `serverInfo.version` reported the **mcp library's** version (`1.30.0`) for a
+  0.3.2 server: `Server("catia-v5-mcp")` was constructed without a version and
+  the library fills in its own. A client reading `initialize` had no way to tell
+  which build it was talking to. Now `Server("catia-v5-mcp", version=__version__)`.
+- `setup.sh` cloned **upstream** (`daiemon12/catia-v5-mcp-server`) into
+  `$HOME/catia-v5-mcp-server` - the 98-tool server with the defects this fork
+  fixes, installed by this fork's own script. It now clones this fork and uses its
+  own directory, so an existing upstream checkout is left alone.
+- The tool count in `README.md` (87 → 94, and 86 → 94 in the group table, whose
+  Assembly row had said 11 when it was 12), in `FORK.md` and in `PUBLISH.md`.
+  The count had been wrong in the table since the fork was cut; the header went
+  stale as tools were added in 0.3.1 and 0.3.2.
+- `setup.sh` lost its line endings on the way to a Windows user: with the default
+  `core.autocrlf=true` a clone turns it into CRLF and `bash setup.sh` dies on the
+  first line with `$'\r': command not found`. Added `.gitattributes` pinning
+  `*.sh` to LF.
+
 ## [0.3.2] — 2026-10-22 · edge identity, batched fillets, first release
 
 Everything here came out of building two real parts from a written spec - a

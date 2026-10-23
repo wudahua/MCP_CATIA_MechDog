@@ -3,6 +3,12 @@
 #  CATIA V5 MCP Server - Auto Setup Script
 #  Run this script on Windows (Git Bash, WSL, or MSYS2)
 #  Or run with: bash setup.sh
+#
+#  This installs THIS fork - wudahua/MCP_CATIA_MechDog (the lite fork) - not
+#  upstream daiemon12/catia-v5-mcp-server. It clones into its own directory so
+#  an existing upstream checkout is left alone; running an older version of this
+#  script used to clone upstream into $HOME/catia-v5-mcp-server and silently
+#  install the 98-tool server with the defects this fork fixes.
 # ============================================================================
 
 set -e
@@ -64,7 +70,7 @@ fi
 
 # ── Step 3: Clone or update repo ──
 echo -e "${YELLOW}[3/6] Setting up repository...${NC}"
-INSTALL_DIR="$HOME/catia-v5-mcp-server"
+INSTALL_DIR="$HOME/MCP_CATIA_MechDog"
 
 if [[ -d "$INSTALL_DIR/.git" ]]; then
     echo -e "${GREEN}  Repository already exists at $INSTALL_DIR${NC}"
@@ -77,7 +83,7 @@ else
         mv "$INSTALL_DIR" "${INSTALL_DIR}.bak.$(date +%s)"
     fi
     echo "  Cloning from GitHub..."
-    git clone https://github.com/daiemon12/catia-v5-mcp-server.git "$INSTALL_DIR"
+    git clone https://github.com/wudahua/MCP_CATIA_MechDog.git "$INSTALL_DIR"
     cd "$INSTALL_DIR"
 fi
 

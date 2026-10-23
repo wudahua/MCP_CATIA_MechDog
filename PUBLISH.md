@@ -149,7 +149,7 @@ git push -u origin main --force
 | `CHANGELOG.md` | 只有上游的 `[Unreleased]` | 顶部加了 `[0.3.0] — lite fork`，并记录本轮全部修复 |
 | **提交署名** | 混着 `WorkBuddy <workbuddy@local>` | 全部改写为 `wudahua`；上游 113 个提交的历史一个字节没动 |
 | **远端** | `origin` 指向上游（你无写权限） | `origin` → `wudahua/MCP_CATIA_MechDog`，上游保留为 `upstream` |
-| **工具数断言** | 两处还写着上游的 98 | 已同步为 87 |
+| **工具数断言** | 两处还写着上游的 98 | 已同步为实际值（现在 94，由 `tests/test_readme_tool_counts.py` 断言） |
 | **建模能力** | `catia_shaft` 建不出实体；草图只能落在 3 张主基准面；画不出构造线；贯通切除只能猜深度 | 四项全补齐并真机验证；另修了「pad/pocket 拿错草图」这个会静默切错轮廓的 bug |
 | **装配可读性** | 9 个组件全叫 `Part1.1 / Part2.1 / …` | 新增 `catia_rename_component`，树里显示 `Part1 (P01_CylinderBlock)` |
 | **CI 阻塞项** | `test_server.py` import 已删除的模块 | 见上一节 |
@@ -171,12 +171,18 @@ git push -u origin main --force
 ## 四、工具数怎么来的
 
 ```
-GSD 24 + PartDesign 18 + Assembly 12 + Sketcher 11 + Document 9
-+ Measurement 6 + Export 4 + Planner 2 + Diagnostics 1 = 87
+GSD 25 + PartDesign 23 + Assembly 12 + Sketcher 11 + Document 10
++ Measurement 6 + Export 4 + Planner 2 + Diagnostics 1 = 94
 ```
 
 相对上游 98 的变化：−11（`drawing.py`，需要 Drafting 许可）、−5（`knowledge.py`）、
-+5（`run_plan`、`measure_topology`、`get/set_component_transform`、`rename_component`）。
++12（fork 原创 5：`run_plan`、`measure_topology`、`get/set_component_transform`、
+`rename_component`；0.3.1 三个：`new_body`、`list_bodies`、`boolean`；0.3.2 四个：
+`set_active_body`、`set_visibility`、`save_as_copy`、`gsd_extract`）。
+
+这几个数不是手写的：`tests/test_readme_tool_counts.py` 会把 README 的头部数字、
+分组表逐行、以及本节加总三处，全部与 `get_tool_definitions()` 的实际结果比对，
+任一处对不上 CI 就红。
 
 ---
 

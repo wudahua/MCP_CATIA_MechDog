@@ -16,6 +16,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import CallToolResult, TextContent, Tool
 
+from catia_mcp import __version__
 from catia_mcp.connection import CATIAConnection
 from catia_mcp.results import operation_result
 from catia_mcp.tools.assembly import AssemblyTools
@@ -71,7 +72,11 @@ def failure(
 
 class CATIAMCPServer:
     def __init__(self) -> None:
-        self.server = Server("catia-v5-mcp")
+        # Pass the project version explicitly. Without it the mcp library fills
+        # in ITS OWN version, so a client doing initialize saw
+        # serverInfo.version = "1.30.0" - the version of the dependency - for a
+        # 0.3.2 server. Reported by a user installing v0.3.2 on V5-6R2022.
+        self.server = Server("catia-v5-mcp", version=__version__)
         self.connection = CATIAConnection()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="catia-sta")
         self.document_tools = DocumentTools(self.connection)

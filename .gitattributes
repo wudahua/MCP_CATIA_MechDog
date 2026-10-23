@@ -1,0 +1,7 @@
+# Shell scripts must keep LF on every checkout.
+#
+# This project is Windows-only, and Windows users get core.autocrlf=true by
+# default, so a cloned setup.sh arrives with CRLF line endings and `bash setup.sh`
+# fails on the first line with "$'\r': command not found" - the one script whose
+# whole job is to make the install painless.
+*.sh text eol=lf

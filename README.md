@@ -6,9 +6,10 @@ A trimmed, verification-first fork of
 only what builds and checks a **solid from a written spec**, and fixes four
 defects that make that loop unreliable.
 
-**87 tools** (upstream: 98). Nothing in the COM layer was rewritten — the value
-of upstream is the field-verified knowledge in its comments, so this fork is
-strictly add / subtract / patch.
+**94 tools** (upstream: 98 — 16 dropped, 12 added). Nothing in the COM layer was
+rewritten — the value of upstream is the field-verified knowledge in its
+comments, so this fork is strictly add / subtract / patch. The count is asserted
+by `tests/test_readme_tool_counts.py`, so it cannot drift from the code again.
 
 ---
 
@@ -24,7 +25,10 @@ strictly add / subtract / patch.
 `export` (STEP/STL hand-off) and `http_transport` (remote agent) are kept: they
 are domain-neutral and cheap. See `FORK.md` §8 if you want to cut further.
 
-### Added (5 tools)
+### Added (12 tools over upstream)
+
+Five of them came with the fork, seven were added while building parts from a
+spec (0.3.1: three, 0.3.2: four). Upstream 98 − 16 dropped + 12 added = 94.
 
 | Tool | What it gives you |
 |---|---|
@@ -33,6 +37,18 @@ are domain-neutral and cheap. See `FORK.md` §8 if you want to cut further.
 | `catia_set_component_transform` | Absolute placement from a **row-major 3×3** (transposed server-side) or CATIA's native 12 numbers; reads back and reports deviation, det, orthogonality |
 | `catia_get_component_transform` | The same placement in both conventions, plus where local X/Y/Z point in the assembly |
 | `catia_rename_component` | A readable assembly tree. `Part.Name` is read-only on V5-6R2020, so every part arrives as `Part1.1 / Part2.1 / …`; the instance name is writable |
+
+#### Added while building parts from a spec (7 tools)
+
+| Tool | Version | Why it exists |
+|---|---|---|
+| `catia_new_body` | 0.3.1 | A spec's part is often several solids. `catia_pad` used to always land in the body that was already in work, and there was no way back once work had moved past the second body |
+| `catia_list_bodies` | 0.3.1 | Per-body volume and face count — the only way to check a nine-solid part body by body, since `catia_get_inertia` reports just the one in work |
+| `catia_boolean` | 0.3.1 | Join / cut / intersect two bodies, for the cases where the spec merges what the source kept separate |
+| `catia_set_active_body` | 0.3.2 | `catia_new_body` only moves forward; this is the way back to the main body |
+| `catia_set_visibility` | 0.3.2 | A GSD surface stays visible after `close_surface` and overlays the solid, so screenshots and the STL envelope describe a part that does not exist. Measured enum: `SetShow(0)` shows, `(1)` hides, `(2)` is accepted and does nothing |
+| `catia_save_as_copy` | 0.3.2 | `SaveAs` is refused once a model has geometry; this saves and then copies, which is the only way to snapshot such a model |
+| `catia_gsd_extract` | 0.3.2 | `catia_gsd_fill` needs a boundary *curve*, and a sketch reference is rejected — without an extract there was no way to cap a lofted surface into a solid |
 
 ### Fixed (latent upstream bugs, reproduced on a live V5-6R2020 B30 session)
 
@@ -154,11 +170,11 @@ why checking handedness alone never catches it.
 
 | Group | Tools | Notes |
 |---|---|---|
-| Document | 9 | new/open/save/close/list; `catia_save_document` retries around dialogs |
+| Document | 10 | new/open/save/close/list + `catia_save_as_copy`; `catia_save_document` retries around dialogs |
 | Sketcher | 11 | lines, rectangles, circles, constraints |
-| Part Design | 18 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell… |
-| Generative Shape Design | 24 | wireframe and surfaces, revolve + close surface |
-| Assembly | **11** | upstream 9 + get/set component transform |
+| Part Design | 23 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, bodies… |
+| Generative Shape Design | 25 | wireframe and surfaces, extract, revolve + close surface |
+| Assembly | **12** | upstream 9 + get/set component transform, rename, list constraints |
 | Measurement | 6 | inertia, distance, bounding box\*, parameters |
 | Export | 4 | STEP / STL / IGES hand-off |
 | Planner | **2** | `run_plan`, `measure_topology` |
