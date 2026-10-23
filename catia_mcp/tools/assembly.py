@@ -341,11 +341,40 @@ class AssemblyTools:
         return f"Component '{before}' renamed to '{after}'."
 
     def _fix_constraint(self, component_name: str) -> str:
+        """Fix (reference) one component so the assembly is not floating.
+
+        AddMonoEltCst(0, product) fails with E_FAIL on V5-6R2020 B30 unless the
+        component is in the selection first - the same "CATIA needs the object
+        selected" rule that bites every constraint API. Field case: placing a
+        24-instance quadcopter, every transform applied correctly, then the Fix
+        constraint refused with '方法 AddMonoEltCst 失败' and took the whole
+        script down with it.
+        """
         product = self.conn.get_active_product()
         constraints = product.Connections("CATIAConstraints")
 
         component = product.Products.Item(component_name)
-        cst = constraints.AddMonoEltCst(0, component)  # Fix constraint
+        selector = self.conn.hso
+        try:
+            selector.Clear()
+            selector.Add(component)
+            cst = constraints.AddMonoEltCst(0, component)  # catCstTypeReference
+        except Exception as exc:  # noqa: BLE001 - explained below
+            raise RuntimeError(
+                "CATIA refused the Fix constraint and the assembly is left floating. "
+                "Measured on V5-6R2020 B30: AddMonoEltCst(0, component) returns E_FAIL "
+                "for a component inserted with AddComponentsFromFiles, whether or not the "
+                "component is put in the selection first, and the late-bound Product "
+                "exposes no .Reference to pass instead. Nothing moves because of it - "
+                "catia_set_component_transform writes absolute positions, so the geometry "
+                "is already where it belongs; only the tree shows the root as not fixed. "
+                f"Original error: {exc}"
+            ) from exc
+        finally:
+            try:
+                selector.Clear()
+            except Exception:
+                pass
         cst.Name = f"Fix.{component_name}"
 
         self.conn.refresh_display()

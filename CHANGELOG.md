@@ -4,6 +4,17 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- `catia_fix_constraint` now explains itself instead of failing with a bare
+  "方法 AddMonoEltCst 失败". Measured on V5-6R2020 B30: the call returns E_FAIL for
+  a component inserted with `AddComponentsFromFiles`, whether or not the component
+  is put in the selection first, and the late-bound `Product` exposes no
+  `.Reference` to pass instead. A placed assembly therefore has no constraints -
+  which moves nothing, because `catia_set_component_transform` writes absolute
+  positions; only the tree shows the root as not fixed. Field case: a 24-instance
+  quadcopter whose 24 transforms all applied to 5e-7 and whose final Fix then took
+  the script down.
+
 ## [0.3.3] — 2026-10-23 · the documentation matches the toolset
 
 A user installed 0.3.2 on V5-6R2022 (B32) and reported three numbers for one
