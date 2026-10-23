@@ -4,6 +4,60 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+The 0.3.5 acceptance report found one real regression (the volume gate had made
+0.3.3's pocket auto-flip unreachable) plus four smaller items; the second report
+is about a launcher `.exe` being locked by a running client during `pip install`.
+
+### Fixed
+- `catia_pocket` flips to the side that has material again. 0.3.4 started
+  judging every cut by the volume delta, and the new "removed nothing" branch
+  **raised before** the old flip-and-retry block could run, which left that
+  block unreachable dead code. Measured on V5-6R2022 (B32): a profile sketched
+  on the top face, `pocket(depth=5)` → "removed no material, rolled back", the
+  same call with `direction="reverse"` → 251.3 mm3. The flip now runs before the
+  rollback, the retry is judged by the same volume gate, and the caller is only
+  told it failed when *both* sides are air. An explicit `direction` is still
+  never second-guessed. Pinned by `tests/test_reported_issues_2026_10_23_v035.py`
+  (five stub-driven cases: flip, air-both-sides, explicit reverse, unverified,
+  probe reason).
+- An unmeasurable body is no longer reported as "volume verification unavailable
+  on this installation". That wording blamed the installation for a cut the same
+  session verified 754.0 mm3 thirty seconds later, and said nothing about what
+  actually failed. `_volume_probe` now returns the failure reason — SPAWorkbench
+  would not open / no reference to the body / `GetMeasurable.Volume` raised /
+  measurable returned no volume — and `catia_pocket` and `catia_hole` print it
+  under a leading `UNVERIFIED:` instead of burying it in a success message.
+- `catia_activate_document` matches case-insensitively. `new_part(name="CaseTest")`
+  + `save_document("casetest.CATPart")` leaves a document whose only name is the
+  file's, so the string the caller still holds failed. Four tiers now: name,
+  stem, then both again case-folded.
+
+### Diagnostics
+- A missing GSD element names the document that does hold it. Reported as
+  intermittent after three `new_part`/`close_document` rounds in one session;
+  the message was a flat "Element 'CA' not found", which pointed at nothing. The
+  resolver now reports which document it searched, how many tree names that
+  document has (previewed), and — if the name exists in another open document —
+  which one, with the `catia_activate_document` call that fixes it. The
+  remembered geometrical set is also invalidated when the active document
+  changes, instead of being re-matched by a name CATIA reuses in every new part
+  (`几何图形集.1`).
+
+### Documented
+- `catia_gsd_multi_section_surface` is marked build-sensitive: it works on
+  V5-6R2020 (B30) and fails on V5-6R2022 (B32) with `UpdateObject failed` even
+  for two coaxial equal-radius circles whose pair `catia_gsd_blend` accepts in
+  the same session. Not reproducible here (no B32), so the tool description and
+  the failure message now say so and point at blend for B32.
+
+### Changed (docs only)
+- README leads with `python -m catia_mcp` as the client entry point and keeps
+  `catia-mcp.exe` as the equivalent alternative with its caveat: a running
+  executable is locked on Windows, so `pip install -e .` under a live client
+  fails at the launcher swap (`safe-delete` / `trash-failed` /
+  `Device or resource busy`) and can leave a `~cp_catia_mechdog-*.dist-info`
+  husk. Reported 2026-10-23 from a machine where exactly that happened.
+
 ## [0.3.5] — 2026-10-23 · the hole finally takes a depth
 
 ### Fixed

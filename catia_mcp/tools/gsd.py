@@ -53,6 +53,10 @@ class GSDTools:
     def __init__(self, connection: CATIAConnection) -> None:
         self.conn = connection
         self._active_geoset_name: str | None = None
+        # Which document the remembered geoset belongs to. CATIA reuses the
+        # auto-name 几何图形集.1 / Part1 in every new part, so a name alone
+        # cannot tell a fresh document from the one that is gone.
+        self._active_geoset_doc: str | None = None
 
     # ────────────────────────────────────────────────────────────
     # Tool definitions
@@ -294,7 +298,13 @@ class GSDTools:
                     "straight from the finished body (see catia_list_edges), which is "
                     "how you loft from an existing end-face edge without redrawing it. "
                     "Note there is no tangent/curvature condition here: CATIA's GSD "
-                    "loft does not expose one (only SectionCoupling and Relimitation)."
+                    "loft does not expose one (only SectionCoupling and Relimitation). "
+                    "BUILD SENSITIVITY: this is the one GSD tool whose result depends on "
+                    "the CATIA build. It works on V5-6R2020 (B30) and fails on "
+                    "V5-6R2022 (B32) with 'UpdateObject failed' even for two coaxial "
+                    "equal-radius circles whose pair catia_gsd_blend accepts in the same "
+                    "session - the automation entry point differs, not the geometry. On "
+                    "B32 build the transition by hand or use catia_gsd_blend."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -652,22 +662,36 @@ class GSDTools:
         part = self.conn.get_active_part()
         hbs = part.HybridBodies
 
+        if self._active_geoset_name and self._active_geoset_doc != self._doc_name():
+            # Another document is active: the remembered set belongs to the
+            # previous one, and its name very likely exists here too. Keeping
+            # the name would silently retarget the next GSD element.
+            self._active_geoset_name = None
+            self._active_geoset_doc = None
+
         if self._active_geoset_name:
             for hb in self._iter_geosets(hbs):
                 if hb.Name == self._active_geoset_name:
                     return hb
             # The remembered geoset is gone (document changed) — fall through
             self._active_geoset_name = None
+            self._active_geoset_doc = None
 
         if hbs.Count > 0:
             hb = hbs.Item(1)
-            self._active_geoset_name = hb.Name
-            return hb
-
-        hb = hbs.Add()
-        hb.Name = self.DEFAULT_GEOSET
+        else:
+            hb = hbs.Add()
+            hb.Name = self.DEFAULT_GEOSET
         self._active_geoset_name = hb.Name
+        self._active_geoset_doc = self._doc_name()
         return hb
+
+    def _doc_name(self) -> str | None:
+        """Name of the active document, or None if there is not one yet."""
+        try:
+            return self.conn.active_document.Name
+        except Exception:  # noqa: BLE001 - only used to invalidate a cache
+            return None
 
     def _find_element(self, name: str) -> Any:
         """Find a wireframe/surface element or sketch by its tree name.
@@ -696,10 +720,78 @@ class GSDTools:
             except Exception:
                 pass
 
-        raise RuntimeError(
-            f"Element '{name}' not found in geometrical sets or body sketches. "
-            "Use catia_gsd_list_elements to see available element names."
+        # Not found. A bare "not found" was a lie often enough (a 2026-10-23
+        # report: after three new_part/close_document rounds in one session,
+        # elements that catia_gsd_list_elements could see became unreachable
+        # here) that the failure has to carry its own evidence: which document
+        # was searched, what it holds, and whether the name is sitting in a
+        # different open document.
+        searched = self._element_names(part)
+        active = self._doc_name() or "the active document"
+        message = (
+            f"Element '{name}' not found in '{active}'. Searched "
+            f"{len(searched)} tree name(s)"
+            + (f": {self._name_preview(searched)}" if searched else " (none)")
+            + ". If the element is on screen, the call may be running against a "
+            "document that is no longer active."
         )
+        elsewhere = self._documents_holding(name)
+        if elsewhere:
+            message = (
+                f"Element '{name}' is not in '{active}'; it is in "
+                f"{', '.join(elsewhere)}. Bring that document to the front with "
+                "catia_activate_document and retry. "
+            ) + message
+        else:
+            message += " Use catia_gsd_list_elements to see available names."
+        raise RuntimeError(message)
+
+    def _element_names(self, part: Any) -> list[str]:
+        """Every name the resolver can see in this part, for error messages."""
+        names: list[str] = []
+        for hb in self._iter_geosets(part.HybridBodies):
+            for collection in ("HybridShapes", "HybridSketches"):
+                try:
+                    shapes = getattr(hb, collection)
+                    for i in range(1, shapes.Count + 1):
+                        names.append(shapes.Item(i).Name)
+                except Exception:  # noqa: BLE001 - diagnostics only
+                    continue
+        try:
+            bodies = part.Bodies
+            for i in range(1, bodies.Count + 1):
+                sketches = bodies.Item(i).Sketches
+                for j in range(1, sketches.Count + 1):
+                    names.append(sketches.Item(j).Name)
+        except Exception:  # noqa: BLE001
+            pass
+        return names
+
+    @staticmethod
+    def _name_preview(names: list[str], limit: int = 12) -> str:
+        shown = ", ".join(repr(n) for n in names[:limit])
+        return shown + (f" (+{len(names) - limit} more)" if len(names) > limit else "")
+
+    def _documents_holding(self, name: str) -> list[str]:
+        """Names of the other open documents that do hold this element."""
+        hits: list[str] = []
+        try:
+            docs = self.conn.documents
+            active = self._doc_name()
+            count = docs.Count
+        except Exception:  # noqa: BLE001
+            return hits
+        for i in range(1, count + 1):
+            try:
+                doc = docs.Item(i)
+                if doc.Name == active:
+                    continue
+                part = self.conn.part_of(doc)
+                if name in self._element_names(part):
+                    hits.append(doc.Name)
+            except Exception:  # noqa: BLE001 - a Product document has no Part
+                continue
+        return hits
 
     _TOPO_NAME = re.compile(r"(edge|face|vertex)\s*\.\s*(\d+)", re.I)
 
@@ -821,6 +913,7 @@ class GSDTools:
         hb = part.HybridBodies.Add()
         hb.Name = name
         self._active_geoset_name = hb.Name
+        self._active_geoset_doc = self._doc_name()
         try:
             part.Update()
         except Exception:
@@ -835,6 +928,7 @@ class GSDTools:
         for hb in self._iter_geosets(part.HybridBodies):
             if hb.Name == name:
                 self._active_geoset_name = name
+                self._active_geoset_doc = self._doc_name()
                 return f"Active geometrical set: '{name}'"
 
         available = [hb.Name for hb in self._iter_geosets(part.HybridBodies)]
@@ -1023,7 +1117,11 @@ class GSDTools:
             raise RuntimeError(
                 f"{e} Common causes: a guide that does not intersect every section "
                 f"(check with measurements), or a section whose curve direction "
-                f"opposes the others (flip it with orientations=-1)."
+                f"opposes the others (flip it with orientations=-1). If neither "
+                f"applies and the sections are plainly lofts-able, this is the "
+                f"known B30/B32 split: reported 2026-10-23 on V5-6R2022 (B32), "
+                f"where every loft fails while catia_gsd_blend accepts the same "
+                f"curve pair. Build the transition with two blends there."
             ) from e
 
     def _sweep(self, args: dict[str, Any]) -> str:

@@ -173,8 +173,9 @@ class DocumentTools:
                     "Bring an already-open document to the front so the other tools act "
                     "on it. With a Part and a Product open at once there was no way back "
                     "to the Part except closing the Product (reported 2026-10-23). "
-                    "Matches the document name exactly first, then as a suffix, so both "
-                    "'P05_stand.CATPart' and 'P05_stand' work."
+                    "Matches the document name exactly first, then as a stem, then both "
+                    "again ignoring case, so 'P05_stand.CATPart', 'P05_stand' and "
+                    "'p05_STAND' all work."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -426,19 +427,32 @@ class DocumentTools:
         return json.dumps(result, indent=2, ensure_ascii=False)
 
     def _activate_document(self, name: str) -> str:
-        """Activate an open document by name so later calls act on it."""
+        """Activate an open document by name so later calls act on it.
+
+        Four tiers, tried in order: the document name as given, the same name
+        without its extension, then both again case-folded. The last tier is
+        not decoration: ``catia_new_part(name="CaseTest")`` followed by a save
+        to ``casetest.CATPart`` gives a document whose only name is the file's,
+        and the string the caller still holds is the one they created.
+        """
         self.conn.ensure_connected()
         docs = self.conn.documents
         names = []
-        exact = suffix = None
+        key = (name or "").casefold()
+        tiers: list[Any] = [None, None, None, None]
         for i in range(1, docs.Count + 1):
             doc = docs.Item(i)
             names.append(doc.Name)
-            if doc.Name == name:
-                exact = doc
-            elif suffix is None and doc.Name.split(".")[0] == name:
-                suffix = doc
-        target = exact or suffix
+            stem = doc.Name.split(".")[0]
+            if tiers[0] is None and doc.Name == name:
+                tiers[0] = doc
+            if tiers[1] is None and stem == name:
+                tiers[1] = doc
+            if tiers[2] is None and doc.Name.casefold() == key:
+                tiers[2] = doc
+            if tiers[3] is None and stem.casefold() == key:
+                tiers[3] = doc
+        target = next((doc for doc in tiers if doc is not None), None)
         if target is None:
             raise ValueError(
                 f"No open document named '{name}'. Open: {', '.join(names) or 'none'}."

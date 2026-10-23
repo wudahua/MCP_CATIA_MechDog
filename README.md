@@ -89,7 +89,10 @@ Details, measurements and caveats: **[`FORK.md`](FORK.md)** (Chinese).
 
 * Windows (COM automation; `pywin32` is a hard dependency)
 * CATIA V5 installed and licensed — verified on **V5-6R2020 (B30)**, Simplified
-  Chinese build
+  Chinese build. One known build difference: `catia_gsd_multi_section_surface`
+  fails on **V5-6R2022 (B32)** for every configuration (reported 2026-10-23),
+  while the rest of GSD — including `catia_gsd_blend` on the same curves — works.
+  Everything else in the tool list is B30/B32-agnostic as far as is known.
 * Python 3.10+
 
 ## Install
@@ -133,7 +136,36 @@ cp -r src/. dst/                           # the "/." is what keeps dot-files
 `tests/test_release_archive.py` fails if the packaging script ever stops
 including them.
 
+Neither route touches a file that a running server holds — which the launcher
+`.exe` cannot say for itself: if `pip install -e .` dies on `Device or resource
+busy` / `safe-delete`, the client has the old `catia-mcp.exe` open. Close it
+first, or switch the client to the `python -m catia_mcp` form below.
+
 ## Connect your MCP client
+
+`python -m catia_mcp` is the recommended entry point: it runs the package and
+never touches a launcher `.exe`:
+
+```json
+{
+  "mcpServers": {
+    "MCP_CATIA_MechDog": {
+      "command": "C:\\path\\to\\MCP_CATIA_MechDog\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "catia_mcp"]
+    }
+  }
+}
+```
+
+The installed `catia-mcp.exe` is equivalent and works too, with one caveat: on
+Windows a running executable is locked, so **upgrading the package while a client
+holds the server open fails** — `pip` deletes the old launcher before writing the
+new one, and the delete is refused (`safe-delete` / `trash-failed` /
+`Device or resource busy`), which aborts the whole transaction and can leave a
+`~cp_catia_mechdog-*.dist-info` husk behind. Reported 2026-10-23. Either point
+the client at `python -m catia_mcp` (the `.py` files are read into memory at
+import, so replacing them under a live process is fine) or close the client
+before upgrading:
 
 ```json
 {

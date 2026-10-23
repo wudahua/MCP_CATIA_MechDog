@@ -949,18 +949,39 @@ class PartDesignTools:
                     f"{before:.1f} -> {after:.1f} mm3, so the feature is kept)")
         return f"Pad created: {span} ({direction}). Feature: '{pad.Name}'{note}"
 
-    def _body_volume_mm3(self, part: Any, body: Any) -> float | None:
-        """Measure the body's solid volume in mm3, or None if unavailable."""
+    def _volume_probe(self, part: Any, body: Any) -> tuple[float | None, str | None]:
+        """Measure the body's volume in mm3, or explain why it cannot be.
+
+        ``_body_volume_mm3`` is the terse form for callers that only need the
+        number. A caller that has to tell the user "not verified" owes them the
+        reason: a 2026-10-23 report got "volume verification unavailable on this
+        installation" for a cut that the same installation verified fine one
+        turn later, and had no way to tell whether the installation, the
+        document or the solid was at fault.
+        """
         try:
             doc = part.Parent
             try:
                 spa = doc.GetWorkbench("SPAWorkbench")
             except AttributeError:
                 spa = self.conn.app.GetWorkbench("SPAWorkbench")
+        except Exception as exc:  # noqa: BLE001 - the reason is the payload
+            return None, f"the SPAWorkbench (space analysis) would not open: {exc}"
+        try:
             ref = part.CreateReferenceFromObject(body)
-            return spa.GetMeasurable(ref).Volume * 1e9  # m3 -> mm3
-        except Exception:
-            return None
+        except Exception as exc:  # noqa: BLE001
+            return None, f"no reference could be made to the body: {exc}"
+        try:
+            volume = spa.GetMeasurable(ref).Volume
+        except Exception as exc:  # noqa: BLE001
+            return None, f"the measurable's Volume failed: {exc}"
+        if volume is None:
+            return None, "the measurable returned no volume"
+        return volume * 1e9, None  # m3 -> mm3
+
+    def _body_volume_mm3(self, part: Any, body: Any) -> float | None:
+        """Measure the body's solid volume in mm3, or None if unavailable."""
+        return self._volume_probe(part, body)[0]
 
     def _pocket(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
@@ -974,7 +995,7 @@ class PartDesignTools:
         reverse = args.get("direction") == "reverse"
         symmetric = bool(args.get("symmetric", False)) or args.get("direction") == "both"
 
-        before = self._body_volume_mm3(part, body)
+        before, volume_note = self._volume_probe(part, body)
 
         # CATIA is not consistent between Pad and Pocket here, measured on
         # V5-6R2020 B30:
@@ -997,14 +1018,43 @@ class PartDesignTools:
         pocket.DirectionOrientation = 1 if reverse else 0
         update_error = self._try_update(part, pocket)
         after, took = self._settle(part, body, before, expect="subtract")
+
+        explicit_direction = "direction" in args or symmetric
+        flipped = False
+        if took is False and not explicit_direction:
+            # Nothing was removed and the caller did not pin the side. A
+            # profile sketched on a solid face lands on the air side often
+            # enough that 0.3.3 flipped here automatically, and that is what
+            # makes "pocket from the top face" work on the first call. 0.3.4's
+            # volume gate raised before this block could run, which handed the
+            # choice of direction back to the caller as a guaranteed failed
+            # round trip. Flip, measure again, and only call it a failure when
+            # the other side is air too.
+            pocket.DirectionOrientation = 0 if reverse else 1
+            retry_error = self._try_update(part, pocket)
+            after, retook = self._settle(part, body, before, expect="subtract")
+            if retook:
+                flipped = True
+                took = True
+                update_error = retry_error
+            else:
+                # Air on both sides: put the requested orientation back so the
+                # tree reflects the original intent, then roll back below.
+                pocket.DirectionOrientation = 1 if reverse else 0
+                self._try_update(part, pocket)
+                after = self._body_volume_mm3(part, body)
+                took = False
+
         if took is False:
             # Nothing was removed. Two different stories used to be told here,
             # and one of them was a lie: UpdateObject can raise *after* the cut
             # is already in the geometry. Deciding on the volume keeps the
             # message and the model in agreement whichever way CATIA behaved.
             gone = self._remove_feature(part, pocket)
+            side = ("the requested direction" if explicit_direction
+                    else "either direction")
             raise RuntimeError(
-                "The pocket removed no material, so it was "
+                f"The pocket removed no material in {side}, so it was "
                 + ("rolled back" if gone else
                    "left in the tree (the dead feature could NOT be deleted - "
                    "close the document without saving)")
@@ -1015,35 +1065,6 @@ class PartDesignTools:
                 "not closed"
                 + (f". Original error: {update_error}" if update_error else ".")
             ) from (update_error or None)
-        if update_error is not None:
-            # Geometry landed anyway; keep it and say so instead of reporting a
-            # failure for a cut that exists.
-            pass
-
-        explicit_direction = "direction" in args or symmetric
-        flipped = False
-        after = self._body_volume_mm3(part, body)
-        if (
-            before is not None
-            and after is not None
-            and after >= before
-            and not explicit_direction
-        ):
-            # No material removed and the caller did not pin the side: flip
-            # and re-verify instead of reporting a false success. An explicit
-            # 'direction' is honored as-is and reported honestly below.
-            pocket.DirectionOrientation = 0 if reverse else 1
-            self._try_update(part, pocket)
-            new_after = self._body_volume_mm3(part, body)
-            if new_after is not None and new_after < before:
-                after = new_after
-                flipped = True
-            else:
-                # The flip did not help either: restore the requested
-                # orientation so the tree reflects the original intent.
-                pocket.DirectionOrientation = 1 if reverse else 0
-                self._try_update(part, pocket)
-                after = self._body_volume_mm3(part, body)
 
         self.conn.refresh_display()
 
@@ -1069,6 +1090,9 @@ class PartDesignTools:
         if before is not None and after is not None:
             removed = before - after
             if removed <= 0:
+                # Unreachable while _settle and this measurement agree, but a
+                # race between them would otherwise report a success for a cut
+                # that did nothing.
                 return (
                     f"FEATURE_NO_EFFECT: pocket '{pocket.Name}' was created in "
                     f"the tree but removed no material"
@@ -1088,10 +1112,18 @@ class PartDesignTools:
                 f"Pocket {names} created: {extent}{flip_note}. "
                 f"Removed {removed:.1f} mm3 ({before:.1f} -> {after:.1f})."
             )
+        # No volume, no verdict: say which measurement failed rather than
+        # blaming "this installation" for a cut the same session may verify on
+        # the next call.
         extent = self._pocket_extent(through_all, depth, symmetric)
+        why = f" ({volume_note})" if volume_note else ""
+        raised = (f" CATIA also raised during the update: {update_error}."
+                  if update_error is not None else "")
         return (
-            f"Pocket created: {extent}. Feature: '{pocket.Name}' "
-            "(volume verification unavailable on this installation)."
+            f"UNVERIFIED: pocket '{pocket.Name}' was created: {extent}. The cut "
+            f"could not be checked against the body volume{why}, so it is "
+            f"reported on CATIA's return alone - check the geometry before "
+            f"relying on it.{raised}"
         )
 
     @staticmethod
@@ -1516,7 +1548,7 @@ class PartDesignTools:
         diameter = args["diameter"]
         through_all = bool(args.get("through_all")) and "depth" not in args
         depth = args.get("depth", 0)
-        before = self._body_volume_mm3(part, body)
+        before, volume_note = self._volume_probe(part, body)
 
         # AddNewHole takes a support FACE reference; the sketch-positioned
         # form is AddNewHoleFromSketch. Diameter is a read-only Length
@@ -1587,7 +1619,11 @@ class PartDesignTools:
                 f"({before:.1f} -> {after:.1f}). Feature: '{hole.Name}'."
                 f"{type_note}{note}"
             )
-        return f"Hole created: D{diameter} mm, {extent}. Feature: '{hole.Name}'.{type_note}"
+        why = f" ({volume_note})" if volume_note else ""
+        return (
+            f"UNVERIFIED: hole '{hole.Name}' created: D{diameter} mm, {extent}, "
+            f"but the bore was not checked against the body volume{why}.{type_note}"
+        )
 
     def _rect_pattern(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
