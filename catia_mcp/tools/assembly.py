@@ -356,6 +356,29 @@ class AssemblyTools:
             )
         return f"Component '{before}' renamed to '{after}'."
 
+    _CONSTRAINT_EXPLAIN = (
+        "CATIA refused the constraint. Measured on V5-6R2020 B30 (2026-10-23), "
+        "constraints cannot be created through this automation surface at all://n"
+        "  · AddMonoEltCst (Fix) returns E_FAIL for a component whether it came "
+        "from AddComponentsFromFiles or from add_new_part, and whether or not it "
+        "is put in the selection first - five argument forms tried, including "
+        "the component's ReferenceProduct and the root product;\n"
+        "  · AddBiEltCst (Coincidence/Offset/Angle) returns E_FAIL with any "
+        "pair of operands, because an assembly constraint needs a Reference into "
+        "each component's geometry, and the late-bound Product exposes neither "
+        "a .Reference nor a Part document to build one from (in-memory parts "
+        "have no PartDocument at all).\n"
+        "What to do instead: place components with absolute transforms. "
+        "catia_set_component_transform writes the position directly, which is "
+        "how a 24-instance quadcopter assembly was placed with a 5e-7 mm "
+        "residual; the tree then shows the root as not fixed, and nothing moves "
+        "because of it. If you need a parameterised assembly, build it from a "
+        "spec table of transforms rather than from constraints."
+    )
+
+    def _constraint_failed(self, kind: str, exc: Exception) -> RuntimeError:
+        return RuntimeError(f"{kind}: {self._CONSTRAINT_EXPLAIN} Original error: {exc}")
+
     def _fix_constraint(self, component_name: str) -> str:
         """Fix (reference) one component so the assembly is not floating.
 
@@ -376,16 +399,8 @@ class AssemblyTools:
             selector.Add(component)
             cst = constraints.AddMonoEltCst(0, component)  # catCstTypeReference
         except Exception as exc:  # noqa: BLE001 - explained below
-            raise RuntimeError(
-                "CATIA refused the Fix constraint and the assembly is left floating. "
-                "Measured on V5-6R2020 B30: AddMonoEltCst(0, component) returns E_FAIL "
-                "for a component inserted with AddComponentsFromFiles, whether or not the "
-                "component is put in the selection first, and the late-bound Product "
-                "exposes no .Reference to pass instead. Nothing moves because of it - "
-                "catia_set_component_transform writes absolute positions, so the geometry "
-                "is already where it belongs; only the tree shows the root as not fixed. "
-                f"Original error: {exc}"
-            ) from exc
+            raise self._constraint_failed(
+                f"Fix constraint on '{component_name}'", exc) from exc
         finally:
             try:
                 selector.Clear()
@@ -403,7 +418,10 @@ class AssemblyTools:
         comp1 = product.Products.Item(args["component1"])
         comp2 = product.Products.Item(args["component2"])
 
-        cst = constraints.AddBiEltCst(0, comp1, comp2)  # Coincidence
+        try:
+            cst = constraints.AddBiEltCst(0, comp1, comp2)  # Coincidence
+        except Exception as exc:  # noqa: BLE001 - explained by _constraint_failed
+            raise self._constraint_failed("Coincidence constraint", exc) from exc
         self.conn.refresh_display()
         return (
             f"Coincidence constraint created between "
@@ -417,8 +435,11 @@ class AssemblyTools:
         comp1 = product.Products.Item(args["component1"])
         comp2 = product.Products.Item(args["component2"])
 
-        cst = constraints.AddBiEltCst(1, comp1, comp2)  # Offset
-        cst.Dimension.Value = args["offset"]
+        try:
+            cst = constraints.AddBiEltCst(1, comp1, comp2)  # Offset
+            cst.Dimension.Value = args["offset"]
+        except Exception as exc:  # noqa: BLE001 - explained by _constraint_failed
+            raise self._constraint_failed("Offset constraint", exc) from exc
 
         self.conn.refresh_display()
         return (
@@ -433,8 +454,11 @@ class AssemblyTools:
         comp1 = product.Products.Item(args["component1"])
         comp2 = product.Products.Item(args["component2"])
 
-        cst = constraints.AddBiEltCst(2, comp1, comp2)  # Angle
-        cst.Dimension.Value = args["angle"]
+        try:
+            cst = constraints.AddBiEltCst(2, comp1, comp2)  # Angle
+            cst.Dimension.Value = args["angle"]
+        except Exception as exc:  # noqa: BLE001 - explained by _constraint_failed
+            raise self._constraint_failed("Angle constraint", exc) from exc
 
         self.conn.refresh_display()
         return (

@@ -236,15 +236,29 @@ class DocumentTools:
         self.conn.last_sketch = None
         self.conn.active_body = None
         part = self.conn.part_of(doc)
-        rename_note = ""
+        # Part.Name is read-only on V5-6R2020/B32 (measured: "方法 Name 失败"), so
+        # `name` cannot rename the part. What it CAN do is set 零件编号 - the field
+        # the BOM and every assembly tree actually show - so do that instead of
+        # reporting a half-success.
+        note = ""
+        part_number = None
         if name:
             try:
-                part.Name = name
-            except Exception as e:
-                rename_note = f" (rename to '{name}' not supported by this CATIA version: {e})"
+                product = doc.Product
+                product.PartNumber = name
+                part_number = name
+                note = (f" Part number set to '{name}' (Part.Name is read-only on "
+                        "V5, so this is what the tree and the BOM will show).")
+            except Exception as exc:  # noqa: BLE001
+                note = (f" Could not set the part number either ({exc}); rename "
+                        "the instance later with catia_rename_component.")
         part_name = part.Name
         self.conn.refresh_display()
-        return f"Created new Part document: '{part_name}'{rename_note}"
+        hint = (" Save it now - catia_save_document(file_path='...') - because a "
+                "part that has geometry but no path cannot be saved later.")
+        return (f"Created new Part document: '{part_name}'"
+                + (f" [{part_number}]" if part_number else "")
+                + f".{note}{hint}")
 
     def _new_product(self, name: str | None = None) -> str:
         self.conn.ensure_connected()
@@ -279,6 +293,15 @@ class DocumentTools:
         self.conn.active_body = None
         return f"Opened document: '{doc.Name}' from {file_path}"
 
+    @staticmethod
+    def _document_has_path(doc: Any) -> bool:
+        """True when the document already lives in a file (Save has a target)."""
+        try:
+            full = doc.FullName or ""
+        except Exception:  # noqa: BLE001 - unsaved docs may have no FullName
+            return False
+        return bool(full) and os.path.isabs(full)
+
     def _save_document(self, file_path: str | None = None) -> str:
         doc = self.conn.active_document
         if file_path:
@@ -286,6 +309,20 @@ class DocumentTools:
             # modal prompt when the target exists, which freezes the STA worker.
             target = dialogs.save_as(doc, file_path)
             return f"Document saved as: {target}"
+        if not self._document_has_path(doc):
+            # doc.Save() on a never-saved document raises E_FAIL and retrying it
+            # is pure delay: there is no path to write to, and SaveAs is refused
+            # once the part carries geometry. Say that instead of burning three
+            # attempts and reporting "Save failed after 3 attempts".
+            raise RuntimeError(
+                f"'{doc.Name}' has never been saved, so there is no file for Save "
+                "to overwrite. CATIA will not accept a SaveAs for a part that "
+                "already has geometry, which means a new part must be given a "
+                "path BEFORE it is modelled: call catia_new_part, then "
+                "catia_save_document(file_path=...), then build. Everything "
+                "built so far is still in memory - save it now by passing "
+                "file_path to this same call."
+            )
         name = dialogs.save(doc)
         return f"Document '{name}' saved"
 

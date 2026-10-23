@@ -469,14 +469,16 @@ class MeasurementTools:
             raise RuntimeError("The active body has no solid shape yet.")
 
         if method in ("auto", "vertices"):
-            points, truncated, total = self._vertex_points(body)
+            points, truncated, total, dropped = self._vertex_points(body)
             if points:
                 return self._bbox_json(
                     points,
                     f"vertex sweep over {len(points)} of {total} vertices of the "
                     "final shape; exact for planar-faced solids, curved faces may "
                     "extend beyond these bounds"
-                    + (" (capped at 200)" if truncated else ""),
+                    + (" (capped at 200)" if truncated else "")
+                    + (f"; {dropped} unbounded wireframe point(s) ignored "
+                       "(construction geometry drawn at 1e7 mm)" if dropped else ""),
                 )
             if method == "vertices":
                 raise RuntimeError(
@@ -493,8 +495,19 @@ class MeasurementTools:
             "outside these bounds",
         )
 
-    def _vertex_points(self, body: Any) -> tuple[list[list[float]], bool, int]:
-        """Reference vertex coordinates, capped at 200 points."""
+    # A wireframe element's "infinite" end point is stored as 1e7 mm. Sweeping
+    # the body's vertices therefore picks up coordinates that belong to an axis
+    # or a datum line, not to the solid, and the bounding box comes back as
+    # +-10 000 000 mm (reported 2026-10-23). Anything with a coordinate at or
+    # beyond this limit is construction geometry, not a vertex of the shape.
+    _UNBOUNDED = 1.0e6
+
+    def _vertex_points(self, body: Any) -> tuple[list[list[float]], bool, int, int]:
+        """Reference vertex coordinates, capped at 200 points.
+
+        Returns ``(points, capped, total, dropped)`` where ``dropped`` counts the
+        unbounded wireframe points that were filtered out.
+        """
         sel = self.conn.hso
         refs = []
         total = 0
@@ -512,13 +525,23 @@ class MeasurementTools:
             except Exception:
                 pass
         if not refs:
-            return [], False, total
+            return [], False, total, 0
         spa = self._spa_workbench()
-        points = [
-            self._read_measurable_array(spa.GetMeasurable(ref), "GetPoint", 3)
-            for ref in refs
-        ]
-        return points, total > 200, total
+        raw = [self._read_measurable_array(spa.GetMeasurable(ref), "GetPoint", 3)
+               for ref in refs]
+        points, dropped = self._bounded(raw)
+        return points, total > 200, total, dropped
+
+    @classmethod
+    def _bounded(cls, points: list[list[float]]) -> tuple[list[list[float]], int]:
+        """Drop points that belong to construction geometry, not to the solid."""
+        kept, dropped = [], 0
+        for point in points:
+            if any(abs(c) >= cls._UNBOUNDED or c != c for c in point):
+                dropped += 1
+                continue
+            kept.append(point)
+        return kept, dropped
 
     def _mesh_corners(self, part: Any) -> tuple[list[list[float]], int]:
         """Bounding corners from an STL export of the active document."""

@@ -106,6 +106,32 @@ python -m venv .venv
 > **Do not install this into the same virtualenv as upstream.** Both provide the
 > `catia_mcp` import package, so one silently shadows the other.
 
+### Updating an existing checkout
+
+`git pull` is the safe route. If you update from a downloaded archive instead,
+**do not copy it over the old directory with `cp -r src/* dst/`** — a shell glob
+(and Windows Explorer) skips every dot-prefixed entry, and four of them carry
+things nothing warns you about:
+
+| Path | What its loss costs |
+|---|---|
+| `.gitattributes` | `setup.sh` is delivered CRLF and dies on line 1 |
+| `.github/workflows/ci.yml` | the only CI, i.e. the tool-count consistency tests |
+| `.claude/skills/**` | the maintainer / production-operator skill packs |
+| `.gitignore` | build output starts showing up as untracked |
+
+Two ways to stay safe:
+
+```bash
+# 1. the packaged release (dot-files included, sha256 next to it)
+python scripts/package_release.py          # -> dist/MCP_CATIA_MechDog-<ver>.zip[.sha256]
+# 2. or copy correctly, from inside the extracted folder
+cp -r src/. dst/                           # the "/." is what keeps dot-files
+```
+
+`tests/test_release_archive.py` fails if the packaging script ever stops
+including them.
+
 ## Connect your MCP client
 
 ```json

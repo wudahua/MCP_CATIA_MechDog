@@ -4,7 +4,11 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
-## [0.3.4] — 2026-10-23 · say which rotation convention you mean
+## [0.3.4] — 2026-10-23 · conventions said out loud, failures that roll back
+
+Three themes: an ambiguous parameter made explicit (rotation convention), every
+feature judged by the volume it moves instead of by the COM exception, and two
+tools fixed by measuring their arguments rather than reading the docs.
 
 Two 3x3 spellings of the same placement are in circulation, and they are
 transposes of each other:
@@ -39,6 +43,100 @@ word — the read-back only proves CATIA stored what it was given.
   (`A·Rᵀ` instead of `R·A`), so an incremental `rx/ry/rz` rotated about the
   assembly axes the wrong way round. It now post-multiplies per column, which is
   what CATIA's column layout calls for.
+
+### Fixed — field report 2026-10-23 (B32): hole / loft / constraints / dirty state
+
+A second user (V5-6R2022 B32) filed a full test report. Everything below was
+re-measured on V5-6R2020 B30 before changing anything; where the two builds
+disagree, the note says so.
+
+**A failed feature no longer poisons the document.** The one that mattered most:
+`pad` called `part.UpdateObject` unguarded, so a pad on an open profile raised
+and left `凸台.N` in the tree, after which *every* later update failed - the
+whole part was lost. `pad`, `pocket`, `hole`, `chamfer` and `draft` now go
+through one rule: catch the update, then **decide by measuring the volume**
+(`_settle`) instead of trusting the COM result. If nothing changed, the dead
+feature is deleted and the error says so; if the geometry did change, the
+feature is kept and the reply says CATIA raised anyway. Verified: after a failed
+hole the tree still reads `凸台.1 / 孔.1` and the next hole can be built.
+
+This also settles the report's "reported an error, but the cut was there": the
+exception and the geometry disagree in both directions, and only the volume is
+honest.
+
+**chamfer: the mode argument was wrong.** `AddNewChamfer(..., iMode, ...)` was
+called with 0 (catLengthLength), so the 45 that the caller passed as an angle was
+read as a *second length* - CATIA was asked for a 2 x 45 mm bevel, which cannot
+build, hence "UpdateObject failed" on every chamfer. Mode 1 (catLengthAngle)
+works: 2 mm / 45 deg on a 10 mm edge removes exactly 20.00 mm3.
+
+**draft: the neutral element must be a face.** It passed a datum plane and an
+empty `CreateReferenceFromName("")` parting. Four variants measured; the one that
+builds is `(face, neutral_face, 0, None, dx, dy, dz, 0, angle, 0)` with the
+angle in degrees (3 deg gave a 52.41 mm3 wedge; 3 *radians* gave 0.91). The tool
+gained `neutral_face` and, when it is omitted, picks the largest remaining face
+and says which one in the reply.
+
+**hole: two measured limits, documented instead of guessed.** `depth` is not
+honoured - AddNewHoleFromSketch accepts it and the bore runs through the wall
+anyway (D4 depth 4 in a 10 mm block removed 125.7 mm3 = pi*2^2*10), so the
+description now says every hole behaves as through-all and blind holes belong to
+`catia_pocket`. The feature is also state-dependent: a second hole in the same
+body failed at update with a perfectly valid sketch. The tool now reports the
+volume it actually removed instead of claiming success. The old schema note
+("through_all is the only depth mode that works") was wrong and is gone.
+
+**Constraints: one honest answer instead of four bare COM errors.** All four
+tools were re-probed: `AddMonoEltCst` fails in five argument forms (component,
+ReferenceProduct, root product, selection value, `CreateReferenceFromName("")`),
+and `AddBiEltCst` fails for every operand pair - an assembly constraint needs a
+Reference into each component's geometry and the late-bound Product exposes
+neither one nor a Part document to build one from (parts created by
+`add_new_part` have no PartDocument at all). They now all raise the same
+explanation with the recommended pattern: absolute transforms.
+
+**Saving a never-saved document.** `catia_save_document()` without a path used to
+call `doc.Save()`, fail, and retry three times before saying "Save failed after 3
+attempts". It now detects that the document has no file, explains that a part
+with geometry cannot be SaveAs'd, and tells you to pass `file_path` in the same
+call. `catia_new_part` also ends with "save it now", and its `name` argument now
+sets 零件编号 (which works) instead of attempting `Part.Name` (read-only on both
+builds) and reporting a half-success.
+
+**Bounding box: unbounded wireframe points are dropped.** A body that carries a
+GSD line or a shaft's axis exposed vertices at +-1e7 mm, so the box came back as
+20 000 km wide. Points at or beyond 1e6 mm (and NaNs) are now filtered, and the
+`method` text reports how many were ignored.
+
+**Smaller ones from the same report.** `catia_list_features` reported `"unknown"`
+for pads and `0` for holes because `Shape.Type` is not usable on this API; the
+type now comes from the NLS name prefix (`凸台.1` -> `pad`) with the raw value
+kept as `catia_type`. `catia_screenshot` said nothing when it wrote a `.jpg` for a
+`.png` request; it now says so (V5 can only capture TIFF/BMP/JPEG). `pocket`
+already compared volumes but reported the exception ahead of the measurement; it
+now reports what the volume says and keeps a cut that landed.
+
+Not reproduced on B30: `catia_gsd_multi_section_surface` worked in both
+configurations tried (coaxial equal-radius and coaxial unequal-radius circles, 2
+sections each), so the report's 7/7 failures look build- or curve-specific. The
+tool is unchanged; the report's `spline.closed` duplicate-point note is left open.
+
+### Fixed — field report 2026-10-23: dot-files vanish on a zipball update
+
+Updating by extracting the GitHub zipball over a checkout loses every
+dot-prefixed path, because `cp -r src/* dst/` and Explorer both skip them: no
+`.gitattributes` (so `setup.sh` arrives CRLF and dies on line 1), no
+`.github/workflows/ci.yml` (the only CI), no `.claude/skills/**`. Nothing fails
+at import time, which is what makes it dangerous.
+
+- `scripts/package_release.py` builds `dist/MCP_CATIA_MechDog-<ver>.zip` from an
+  `os.walk` that sees dot-files, writes a `.sha256` next to it, and refuses to
+  package if any required dot-path is missing.
+- `tests/test_release_archive.py` (5 tests) pins that: the collector sees
+  `.gitattributes`, `.github/workflows/ci.yml` and `.claude/skills/**`, skips
+  `.git/`, `.venv/` and `__pycache__`, and the built zip really contains them.
+- README "Updating an existing checkout": `git pull`, or `cp -r src/. dst/`
+  (the `/.` is the whole point), or use the packaged release.
 
 ### Added (tree hygiene)
 - `catia_set_visibility(kind=...)` hides a whole class of tree bookkeeping in one

@@ -189,14 +189,23 @@ class ExportTools:
         capture_formats = {".jpg": 5, ".jpeg": 5, ".bmp": 4, ".tif": 2, ".tiff": 2}
         ext = os.path.splitext(file_path)[1].lower()
         capture_format = capture_formats.get(ext)
+        swapped_from = None
         if capture_format is None:
+            # CATIA V5 has no PNG capture API (enum 2 = TIFF, 4 = BMP, 5 = JPEG),
+            # so a .png request lands on JPEG. Say so instead of quietly writing
+            # a file with a different extension than the caller asked for.
+            swapped_from = ext or "(no extension)"
             file_path = os.path.splitext(file_path)[0] + ".jpg"
             capture_format = 5
 
         viewer = self.conn.active_window.ActiveViewer
         viewer.CaptureToFile(capture_format, os.path.normpath(file_path))
 
-        return f"Screenshot saved to {file_path} ({width}x{height})"
+        note = ""
+        if swapped_from:
+            note = (f" [asked for '{swapped_from}', wrote JPEG: CATIA V5 can only "
+                    "capture TIFF, BMP or JPEG]")
+        return f"Screenshot saved to {file_path} ({width}x{height}){note}"
 
     def _set_view(self, view: str) -> str:
         self.conn.ensure_connected()

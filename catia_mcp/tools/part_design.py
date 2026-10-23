@@ -268,11 +268,17 @@ class PartDesignTools:
             {
                 "name": "catia_hole",
                 "description": (
-                    "Create a Hole feature at a point in the active sketch. "
-                    "Supports simple, tapered, counterbored, and countersunk holes. "
-                    "Give either `depth` or `through_all`. Note: on V5-6R2020 B30 a "
-                    "finite depth does not cut through automation (verified), so for a "
-                    "blind cylindrical hole prefer catia_pocket with a circle sketch."
+                    "Create a Hole feature on the active sketch. Supports simple, "
+                    "tapered, counterbored and countersunk holes. Two measured limits "
+                    "(V5-6R2020 B30, 2026-10-23) matter more than the parameters: "
+                    "(1) `depth` is NOT honoured - AddNewHoleFromSketch takes the value "
+                    "but the bore runs through the wall regardless (D4 depth 4 in a "
+                    "10 mm block removed 125.7 mm3 = pi*2^2*10), so treat every hole as "
+                    "through-all and use catia_pocket with a circle sketch for a blind "
+                    "hole; (2) the feature is state-dependent - a second hole in the "
+                    "same body can fail at update even with a valid sketch, and it is "
+                    "then rolled back, so check the volume the reply reports rather "
+                    "than assuming success."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -289,8 +295,8 @@ class PartDesignTools:
                             "type": "boolean",
                             "description": (
                                 "Drill through the whole solid (CATIA 'up to last'). "
-                                "This is the only depth mode that works through "
-                                "automation on this CATIA build."
+                                "Use it when the wall is thinner than the depth you "
+                                "want, or when the sketch sits on a face."
                             ),
                             "default": False,
                         },
@@ -473,8 +479,13 @@ class PartDesignTools:
             {
                 "name": "catia_draft",
                 "description": (
-                    "Add a Draft Angle to faces for mold-release purposes. "
-                    "Tapers faces by a given angle relative to a pulling direction."
+                    "Add a Draft Angle to a face for mold-release purposes. Tapers "
+                    "the face by a given angle about a neutral face along a pulling "
+                    "direction. CATIA wants the neutral as a real FACE reference - a "
+                    "datum plane is rejected outright (AddNewDraft fails, measured). "
+                    "Omit `neutral_face` to have the largest remaining face picked "
+                    "for you; the reply always says which face was used, because the "
+                    "hinge determines whether the wall thickens or thins."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -486,6 +497,14 @@ class PartDesignTools:
                         "face_name": {
                             "type": "string",
                             "description": "REQUIRED: indexed face to draft ('Face.N' from catia_list_faces)",
+                        },
+                        "neutral_face": {
+                            "type": "string",
+                            "description": (
+                                "Face the draft hinges on ('Face.N'). It must touch "
+                                "the drafted face. Omit to auto-pick the largest "
+                                "remaining face."
+                            ),
                         },
                         "pulling_direction": {
                             "type": "string",
@@ -902,11 +921,35 @@ class PartDesignTools:
         elif direction == "reverse":
             pad.DirectionOrientation = 1  # catReverse
 
-        part.UpdateObject(pad)
+        before = self._body_volume_mm3(part, body)
+        update_error = None
+        try:
+            part.UpdateObject(pad)
+        except Exception as exc:  # noqa: BLE001 - judged by volume below
+            update_error = exc
+        after, took = self._settle(part, body, before, expect="add")
+        if took is False:
+            # Nothing grew: drop the dead node so the document stays usable.
+            # This is the case that used to poison the whole part - a pad on an
+            # open profile left '凸台.N' behind and every later update failed.
+            gone = self._remove_feature(part, pad)
+            raise RuntimeError(
+                "CATIA built no material for this pad, so it was rolled back"
+                + ("" if gone else " (the dead feature could NOT be deleted - "
+                                    "close the document without saving)")
+                + f". Volume stayed {before:.1f} mm3. A pad needs a CLOSED "
+                "profile on the sketch; an open polyline (or an arc chain with "
+                "a gap) updates to an empty feature"
+                + (f". Original error: {update_error}" if update_error else ".")
+            )
         self.conn.refresh_display()
         span = "total %.3f mm, %0.3f each side" % (height, height / 2.0) if symmetric \
             else "%.3f mm" % height
-        return f"Pad created: {span} ({direction}). Feature: '{pad.Name}'"
+        note = ""
+        if update_error is not None:
+            note = (" (CATIA raised during the update, but the solid did grow "
+                    f"{before:.1f} -> {after:.1f} mm3, so the feature is kept)")
+        return f"Pad created: {span} ({direction}). Feature: '{pad.Name}'{note}"
 
     def _body_volume_mm3(self, part: Any, body: Any) -> float | None:
         """Measure the body's solid volume in mm3, or None if unavailable."""
@@ -954,22 +997,30 @@ class PartDesignTools:
         # the orientation is set explicitly in both cases (field-verified:
         # the wrong side produces a tree feature that removes nothing).
         pocket.DirectionOrientation = 1 if reverse else 0
-        try:
-            part.UpdateObject(pocket)
-        except Exception as exc:
-            # A through-all cut from a sketch that sits on a solid face can be
-            # rejected outright rather than removing nothing (measured: 1 of 6
-            # faces of a plain box). Roll the dead feature back and point at the
-            # route that does not depend on the face frame.
-            self._remove_feature(part, pocket)
+        update_error = self._try_update(part, pocket)
+        after, took = self._settle(part, body, before, expect="subtract")
+        if took is False:
+            # Nothing was removed. Two different stories used to be told here,
+            # and one of them was a lie: UpdateObject can raise *after* the cut
+            # is already in the geometry. Deciding on the volume keeps the
+            # message and the model in agreement whichever way CATIA behaved.
+            gone = self._remove_feature(part, pocket)
             raise RuntimeError(
-                "CATIA rejected the pocket and it was removed from the tree. "
-                "When through_all is set, this usually means the sketch sits on "
-                "a face it cannot cut from - most often a face sketch whose "
-                "local coordinates do not land on the material. Put the sketch "
-                "on a datum plane with an offset instead, which uses global "
-                f"coordinates. Original error: {exc}"
-            ) from exc
+                "The pocket removed no material, so it was "
+                + ("rolled back" if gone else
+                   "left in the tree (the dead feature could NOT be deleted - "
+                   "close the document without saving)")
+                + f" (volume stayed {before:.1f} mm3). Two usual causes: the "
+                "profile does not intersect the solid (a face sketch whose "
+                "local coordinates do not land on the material - put the sketch "
+                "on a datum plane with an offset instead), or the profile is "
+                "not closed"
+                + (f". Original error: {update_error}" if update_error else ".")
+            ) from (update_error or None)
+        if update_error is not None:
+            # Geometry landed anyway; keep it and say so instead of reporting a
+            # failure for a cut that exists.
+            pass
 
         explicit_direction = "direction" in args or symmetric
         flipped = False
@@ -984,7 +1035,7 @@ class PartDesignTools:
             # and re-verify instead of reporting a false success. An explicit
             # 'direction' is honored as-is and reported honestly below.
             pocket.DirectionOrientation = 0 if reverse else 1
-            part.UpdateObject(pocket)
+            self._try_update(part, pocket)
             new_after = self._body_volume_mm3(part, body)
             if new_after is not None and new_after < before:
                 after = new_after
@@ -993,7 +1044,7 @@ class PartDesignTools:
                 # The flip did not help either: restore the requested
                 # orientation so the tree reflects the original intent.
                 pocket.DirectionOrientation = 1 if reverse else 0
-                part.UpdateObject(pocket)
+                self._try_update(part, pocket)
                 after = self._body_volume_mm3(part, body)
 
         self.conn.refresh_display()
@@ -1003,7 +1054,7 @@ class PartDesignTools:
             # The other half of the mid-plane cut. Same sketch, opposite side.
             mirror = sf.AddNewPocket(sketch, half)
             mirror.DirectionOrientation = 0 if reverse else 1
-            part.UpdateObject(mirror)
+            self._try_update(part, mirror)
             new_after = self._body_volume_mm3(part, body)
             if (
                 after is not None
@@ -1029,6 +1080,9 @@ class PartDesignTools:
                     "profile intersects the solid."
                 )
             flip_note = " (direction auto-flipped to reach material)" if flipped else ""
+            if update_error is not None:
+                flip_note += (" (CATIA raised during the update, but the cut is "
+                              "in the geometry - kept)")
             extent = self._pocket_extent(through_all, depth, symmetric)
             names = f"'{pocket.Name}'" if mirror is None else \
                 f"'{pocket.Name}' + '{mirror.Name}' (two one-sided cuts)"
@@ -1143,15 +1197,54 @@ class PartDesignTools:
             f"{detail} Feature: '{groove.Name}'"
         )
 
-    def _remove_feature(self, part: Any, feature: Any) -> None:
-        """Remove a feature from the tree, best effort."""
+    def _remove_feature(self, part: Any, feature: Any) -> bool:
+        """Remove a feature from the tree; True if the call went through.
+
+        A silent failure here is how a document ends up "dirty": the caller is
+        told the feature was rolled back while the dead node stays in the tree
+        and poisons every later update. Return the outcome so the message can
+        stay honest.
+        """
         try:
             selection = self.conn.hso
             selection.Clear()
             selection.Add(feature)
             selection.Delete()
+            return True
         except Exception:  # noqa: BLE001 - nothing better to do than carry on
-            pass
+            return False
+        finally:
+            try:
+                self.conn.hso.Clear()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _try_update(part: Any, feature: Any) -> Exception | None:
+        """Call UpdateObject, returning the exception instead of raising it."""
+        try:
+            part.UpdateObject(feature)
+            return None
+        except Exception as exc:  # noqa: BLE001 - the caller measures instead
+            return exc
+
+    def _settle(self, part: Any, body: Any, before: float | None,
+                expect: str = "subtract") -> tuple[float | None, bool | None]:
+        """Measure what a feature actually did: ``(after_volume, took_effect)``.
+
+        CATIA reports failures two ways that both lie: an update that raises
+        after the geometry was already computed, and an update that "succeeds"
+        while removing nothing. The volume delta is the only honest witness, so
+        every additive/subtractive feature goes through here instead of
+        trusting the COM result.
+        """
+        after = self._body_volume_mm3(part, body)
+        if before is None or after is None:
+            return after, None
+        delta = after - before
+        if expect == "add":
+            return after, delta > 1e-6
+        return after, delta < -1e-6
 
     def _safe_update(self, part: Any, feature: Any) -> None:
         """Update a feature; if CATIA rejects it, remove the broken feature
@@ -1343,10 +1436,10 @@ class PartDesignTools:
             return sf.AddNewChamfer(
                 ref,
                 1,       # catTangencyChamferPropagation
-                0,       # catLengthAngleChamfer mode
+                1,       # catLengthAngleChamfer mode (0 = length-length)
                 0,       # catNoReverseChamfer orientation
                 length,
-                angle,
+                angle,   # degrees
             )
 
         try:
@@ -1386,18 +1479,33 @@ class PartDesignTools:
 
         # AddNewChamfer(iObjectToChamfer, iPropagation, iMode, iOrientation,
         #               iLength1, iLength2OrAngle) - 6 parameters.
+        # iMode matters: 0 is catLengthLength, so the 6th argument is read as a
+        # second length. Passing 45 there asked CATIA for a 2 x 45 mm bevel,
+        # which can never build - every chamfer failed at UpdateObject until
+        # this was measured (2026-10-23). Mode 1 is catLengthAngle.
         chamfer = sf.AddNewChamfer(
             target,
             1,       # catTangencyChamferPropagation
-            0,       # catLengthAngleChamfer mode
+            1,       # catLengthAngleChamfer mode
             0,       # catNoReverseChamfer orientation
             length,
-            angle,
+            angle,   # degrees, verified: 2 mm / 45 deg removes 20.00 mm3 on a 10 mm edge
         )
 
-        part.UpdateObject(chamfer)
+        update_error = self._try_update(part, chamfer)
         self.conn.refresh_display()
         self._clear_selection()
+        if update_error is not None:
+            gone = self._remove_feature(part, chamfer)
+            raise RuntimeError(
+                "CATIA rejected the chamfer"
+                + (" and it was removed from the tree" if gone else
+                   " (the dead feature could NOT be deleted - close the document "
+                   "without saving)")
+                + f". {length} mm at {angle} deg on {scope}. A chamfer longer "
+                "than the adjacent face, or an edge shared with an existing "
+                f"fillet, cannot build. Original error: {update_error}"
+            ) from update_error
         return f"Chamfer created: {length} mm at {angle} deg on {scope}. Feature: '{chamfer.Name}'"
 
     def _hole(self, args: dict[str, Any]) -> str:
@@ -1439,35 +1547,36 @@ class PartDesignTools:
         if args.get("threaded", False):
             hole.ThreadingMode = 1  # catThreaded
 
-        part.UpdateObject(hole)
+        update_error = self._try_update(part, hole)
         self.conn.refresh_display()
 
-        after = self._body_volume_mm3(part, body)
+        after, took = self._settle(part, body, before, expect="subtract")
         extent = "through all" if through_all else f"depth {depth} mm"
+        if took is False:
+            gone = self._remove_feature(part, hole)
+            raise RuntimeError(
+                "The hole removed no material, so it was "
+                + ("rolled back" if gone else
+                   "left in the tree (the dead feature could NOT be deleted - "
+                   "close the document without saving)")
+                + f" (volume stayed {before:.1f} mm3). The sketch has to hold a "
+                "closed CIRCLE - the Hole feature takes the bore from the "
+                "profile, so a bare point produces a feature that cannot "
+                "update." + ("" if through_all else
+                             " A depth deeper than the local wall also fails; "
+                             "pass through_all for that case.")
+                + (f" Original error: {update_error}" if update_error else "")
+            ) from (update_error or None)
         if before is not None and after is not None:
             removed = before - after
-            if removed <= 0:
-                # A tree feature that removes nothing is worse than an error:
-                # it looks like success and poisons every later measurement.
-                # Roll it back and say what actually happened.
-                self._remove_feature(part, hole)
-                if through_all:
-                    raise RuntimeError(
-                        f"The hole D{diameter} removed no material even with "
-                        f"through_all. Check that the sketch point sits inside the "
-                        f"solid and that its plane faces the material."
-                    )
-                raise RuntimeError(
-                    f"A finite-depth hole D{diameter} x {depth} mm cuts nothing on "
-                    f"this CATIA build (V5-6R2020 B30): the depth is stored but not "
-                    f"applied by the Hole feature through automation. The hole was "
-                    f"rolled back. Use catia_pocket with a circle sketch of the same "
-                    f"diameter instead - that is how the spec itself builds these "
-                    f"holes, and it can be patterned afterwards."
-                )
+            note = ""
+            if update_error is not None:
+                note = (" (CATIA raised during the update, but the bore is in the "
+                        "geometry - kept)")
             return (
                 f"Hole created: D{diameter} mm, {extent}. Removed {removed:.1f} mm3 "
-                f"({before:.1f} -> {after:.1f}). Feature: '{hole.Name}'.{type_note}"
+                f"({before:.1f} -> {after:.1f}). Feature: '{hole.Name}'."
+                f"{type_note}{note}"
             )
         return f"Hole created: D{diameter} mm, {extent}. Feature: '{hole.Name}'.{type_note}"
 
@@ -1800,26 +1909,59 @@ class PartDesignTools:
 
         plane_key = args.get("pulling_direction", "xy").lower()
         planes = self.conn.get_origin_elements()
-        neutral = planes.get(plane_key)
-        if not neutral:
+        if plane_key not in ("xy", "yz", "zx") or not planes.get(plane_key):
             raise ValueError(f"Unknown pulling direction plane: {plane_key}")
-        neutral_ref = part.CreateReferenceFromObject(neutral)
+
+        # The neutral element has to be a face of the solid, not a datum plane:
+        # AddNewDraft rejects the datum and fails before it even gets to the
+        # update (measured 2026-10-23, four variants, only a face worked).
+        neutral_name = args.get("neutral_face")
+        if neutral_name:
+            neutral_ref = self._topo_reference(
+                "Face", self._topo_index(neutral_name, "Face"))
+            neutral_note = f"neutral {neutral_name}"
+        else:
+            faces = json.loads(self._list_faces({}))
+            others = [f for f in faces if f.get("name") != face_name]
+            others.sort(key=lambda f: -(f.get("area_mm2") or 0))
+            if not others:
+                raise RuntimeError(
+                    "catia_draft needs a neutral face, and this body reports only "
+                    "the face being drafted. Pass neutral_face explicitly.")
+            neutral_name = others[0]["name"]
+            neutral_ref = self._topo_reference(
+                "Face", self._topo_index(neutral_name, "Face"))
+            neutral_note = (f"neutral auto-picked: {neutral_name} "
+                            f"(largest remaining face, {others[0].get('area_mm2', 0):.0f} mm2)")
 
         # Pulling direction = the selected plane's normal.
         direction = {"xy": (0, 0, 1), "yz": (1, 0, 0), "zx": (0, 1, 0)}[plane_key]
-        parting_ref = part.CreateReferenceFromName("")
 
         # AddNewDraft(iFaceToDraft, iNeutral, iNeutralMode, iParting,
         #             iDirX, iDirY, iDirZ, iMode, iAngle, iMultiselectionMode)
+        # iParting may be None - an empty Reference (CreateReferenceFromName(""))
+        # is accepted by COM and then rejected by the factory.
         draft = sf.AddNewDraft(
-            face_ref, neutral_ref, 0, parting_ref,
+            face_ref, neutral_ref, 0, None,
             direction[0], direction[1], direction[2],
             0, angle, 0,
         )
 
-        part.UpdateObject(draft)
+        update_error = self._try_update(part, draft)
         self.conn.refresh_display()
-        return f"Draft created: {angle} deg on {face_name}. Feature: '{draft.Name}'"
+        if update_error is not None:
+            gone = self._remove_feature(part, draft)
+            raise RuntimeError(
+                "CATIA rejected the draft"
+                + (" and it was removed from the tree" if gone else
+                   " (the dead feature could NOT be deleted - close the document "
+                   "without saving)")
+                + f". {angle} deg on {face_name}, {neutral_note}. The neutral "
+                "face has to touch the drafted face and be perpendicular to the "
+                f"pulling direction. Original error: {update_error}"
+            ) from update_error
+        return (f"Draft created: {angle} deg on {face_name}, {neutral_note}. "
+                f"Feature: '{draft.Name}'")
 
     def _thickness(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
@@ -1901,6 +2043,36 @@ class PartDesignTools:
         self.conn.refresh_display()
         return f"Feature '{target}' deleted."
 
+    # `Shape.Type` is not usable on this API: the late-bound object either has no
+    # Type attribute at all ("unknown") or exposes a raw CATIA id (a hole came
+    # back as 0). The NLS name prefix is reliable, so canonicalise from there and
+    # keep the raw value as `catia_type` for anyone who wants it.
+    _FEATURE_PREFIXES = (
+        ("凸台", "pad"), ("Pad", "pad"),
+        ("凹槽", "pocket"), ("Pocket", "pocket"),
+        ("旋转体", "shaft"), ("Shaft", "shaft"),
+        ("沟槽", "groove"), ("Groove", "groove"),
+        ("孔", "hole"), ("Hole", "hole"),
+        ("倒圆角", "fillet"), ("EdgeFillet", "fillet"), ("Fillet", "fillet"),
+        ("倒角", "chamfer"), ("Chamfer", "chamfer"),
+        ("拔模", "draft"), ("Draft", "draft"),
+        ("抽壳", "shell"), ("Shell", "shell"),
+        ("加厚", "thickness"), ("Thickness", "thickness"),
+        ("矩形阵列", "rect_pattern"), ("RectPattern", "rect_pattern"),
+        ("圆周阵列", "circ_pattern"), ("CircPattern", "circ_pattern"),
+        ("镜像", "mirror"), ("Mirror", "mirror"),
+        ("多截面实体", "loft"), ("MultiSection", "loft"),
+        ("接合", "join"), ("分割", "split"), ("修剪", "trim"),
+    )
+
+    @classmethod
+    def _feature_kind(cls, name: str) -> str:
+        """Canonical feature type from the NLS name prefix ('凸台.3' -> 'pad')."""
+        for prefix, kind in cls._FEATURE_PREFIXES:
+            if name.startswith(prefix):
+                return kind
+        return "unknown"
+
     def _list_features(self) -> str:
         self.conn.ensure_connected()
         body = self.conn.get_active_part_body()
@@ -1912,7 +2084,8 @@ class PartDesignTools:
             features.append({
                 "index": i,
                 "name": shape.Name,
-                "type": shape.Type if hasattr(shape, "Type") else "unknown",
+                "type": self._feature_kind(shape.Name),
+                "catia_type": shape.Type if hasattr(shape, "Type") else None,
             })
 
         if not features:
