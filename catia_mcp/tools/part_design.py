@@ -269,16 +269,14 @@ class PartDesignTools:
                 "name": "catia_hole",
                 "description": (
                     "Create a Hole feature on the active sketch. Supports simple, "
-                    "tapered, counterbored and countersunk holes. Two measured limits "
-                    "(V5-6R2020 B30, 2026-10-23) matter more than the parameters: "
-                    "(1) `depth` is NOT honoured - AddNewHoleFromSketch takes the value "
-                    "but the bore runs through the wall regardless (D4 depth 4 in a "
-                    "10 mm block removed 125.7 mm3 = pi*2^2*10), so treat every hole as "
-                    "through-all and use catia_pocket with a circle sketch for a blind "
-                    "hole; (2) the feature is state-dependent - a second hole in the "
-                    "same body can fail at update even with a valid sketch, and it is "
-                    "then rolled back, so check the volume the reply reports rather "
-                    "than assuming success."
+                    "tapered, counterbored and countersunk holes. `depth` is applied "
+                    "through the hole's bottom limit (LimitMode 0 + Dimension), not "
+                    "through AddNewHoleFromSketch's second argument, which CATIA "
+                    "ignores - measured 2026-10-23: D4 x 4 in a 10 mm block removes "
+                    "50.3 mm3 and D4 x 6 removes 75.4 mm3, both exactly pi*r^2*d. The "
+                    "bottom is flat, so a blind hole has no drill point. The sketch "
+                    "supplies the bore's position; the reply reports the volume "
+                    "actually removed, which is the only trustworthy signal."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1523,13 +1521,24 @@ class PartDesignTools:
         # AddNewHole takes a support FACE reference; the sketch-positioned
         # form is AddNewHoleFromSketch. Diameter is a read-only Length
         # parameter object whose .Value is assigned.
+        # The second argument of AddNewHoleFromSketch is NOT the depth: measured
+        # 2026-10-23 on V5-6R2020 B30, a D4 hole asked for depth 4 in a 10 mm
+        # block removed 125.7 mm3 = pi*2^2*10, i.e. straight through. The real
+        # control is the bottom limit:
+        #   BottomLimit.Dimension.Value holds the depth and defaults to the wall
+        #   thickness; LimitMode 0 is an offset limit, 2 is up-to-last.
+        # With LimitMode 0 + Dimension = depth + a flat bottom, D4 x 4 removes
+        # exactly 50.3 mm3 and D4 x 6 removes 75.4 mm3 - both match pi*r^2*d.
         hole = sf.AddNewHoleFromSketch(sketch, 0 if through_all else depth)
         hole.Diameter.Value = diameter
-        hole.BottomType = 0  # catFlatBottom
+        hole.BottomType = 0  # catFlatBottom; a V bottom adds the conical tip
         if through_all:
             # BottomLimit is the hole's depth control (FirstLimit is the
             # pocket's). LimitMode 2 = catUpToLastLimit.
             hole.BottomLimit.LimitMode = 2
+        else:
+            hole.BottomLimit.LimitMode = 0          # catOffsetLimit
+            hole.BottomLimit.Dimension.Value = depth
 
         hole_type = args.get("type", "simple")
         type_map = {"simple": 0, "tapered": 1, "counterbored": 2, "countersunk": 3}

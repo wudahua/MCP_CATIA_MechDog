@@ -296,7 +296,7 @@ class SketcherTools:
                 "description": "List all geometry elements in the active sketch with their indices and types.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {},
+                    "properties": {"sketch_name": {"type": "string", "description": "Sketch to inspect (e.g. '草图.1'). Omit for the open sketch."}},
                 },
             },
         ]
@@ -344,7 +344,7 @@ class SketcherTools:
             case "catia_sketch_constraint":
                 return self._add_constraint(arguments)
             case "catia_sketch_get_geometry":
-                return self._get_geometry()
+                return self._get_geometry(arguments.get("sketch_name"))
             case _:
                 raise ValueError(f"Unknown sketcher tool: {tool_name}")
 
@@ -692,9 +692,29 @@ class SketcherTools:
 
         return f"{constraint_type.capitalize()} constraint '{cst.Name}' added"
 
-    def _get_geometry(self) -> str:
-        self._ensure_sketch_open()
-        sketch = self._active_sketch
+    def _get_geometry(self, sketch_name: str | None = None) -> str:
+        """List a sketch's geometric elements.
+
+        ``GeometricElements`` is readable without opening the sketch editor, so a
+        named sketch can be inspected while another one is open - the tool used
+        to demand the sketch be open, and its schema had no properties at all.
+        """
+        if sketch_name:
+            body = self.conn.get_active_part_body()
+            try:
+                sketch = body.Sketches.Item(sketch_name)
+            except Exception:
+                names = ", ".join(
+                    str(body.Sketches.Item(i).Name)
+                    for i in range(1, body.Sketches.Count + 1)
+                )
+                raise RuntimeError(
+                    f"No sketch named '{sketch_name}' in the active body. "
+                    f"Available: {names or 'none'}."
+                ) from None
+        else:
+            self._ensure_sketch_open()
+            sketch = self._active_sketch
         geom = sketch.GeometricElements
 
         elements = []
@@ -712,5 +732,5 @@ class SketcherTools:
             elements.append(info)
 
         if not elements:
-            return "No geometry elements in the active sketch"
+            return f"No geometry elements in sketch '{sketch.Name}'"
         return json.dumps(elements, indent=2)

@@ -4,6 +4,55 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.5] — 2026-10-23 · the hole finally takes a depth
+
+### Fixed
+- `catia_hole`'s `depth` now does what it says. The value passed to
+  `AddNewHoleFromSketch` is ignored by CATIA: measured on V5-6R2020 B30, a D4 hole
+  asked for depth 4 in a 10 mm block removed **125.7 mm3 = pi*2^2*10**, i.e.
+  straight through. The depth actually lives on the bottom limit, which defaults
+  to the wall thickness. Setting `BottomLimit.LimitMode = 0` and
+  `BottomLimit.Dimension.Value = depth` (with `BottomType = 0`, a flat bottom)
+  makes it exact: D4 x 4 removes 50.3 mm3, D4 x 6 removes 75.4 mm3, both
+  `pi*r^2*d` to the decimal. A V bottom adds the drill point (55.1 instead of
+  50.3), so the flat bottom is part of the fix, not decoration.
+
+  This also explains the reporter's "a second hole in the same body fails": with
+  the depth ignored, the first hole went through the wall and the follow-up
+  sketch no longer sat on material the way CATIA expected. Two holes in a row now
+  both land (verified: 8000 -> 7949.7 -> 7899.5).
+
+### Added
+- `catia_activate_document(name)` — bring an open document to the front. With a
+  Part and a Product open at once there was no way back to the Part except
+  closing the Product. Matches the name exactly, then as a stem, so both
+  `P05_stand.CATPart` and `P05_stand` work. 96 tools now.
+
+### Changed
+- `catia_sketch_get_geometry` accepts an optional `sketch_name` and reads that
+  sketch's `GeometricElements` without opening its editor. Its schema used to be
+  `{"properties": {}}` with `additionalProperties: false`, so the documented
+  "inspect a sketch" could only ever mean "the one that is open" - the reporter's
+  P2-9. Omitting the argument keeps the old behaviour.
+
+### Investigated, not shipped: assembly constraints
+Probed properly this time and the report is worth recording, because it narrows
+the problem a lot. References into a component's geometry **can** be built: for a
+file-backed component, `comp.ReferenceProduct.Parent` is its PartDocument, and
+with that document activated, `HSO.Add(part.MainBody)` + `Search("Face")` +
+`Item(n).Reference` yields a usable Reference. With those, `AddBiEltCst` really
+does create constraints: `type 2 -> 相合`, `type 1 -> 偏移`, `type 6 -> 角度`
+(thirteen face pairs succeeded in one sweep). What blocks shipping it is
+stability: the same pair that builds in a fresh product fails in another
+configuration with "运算不支持作为第参数给出的子元素 Face 的类型", and datum-plane
+references (`CreateReferenceFromObject(OriginElements.PlaneXY)`) are rejected for
+every type. `AddMonoEltCst` (Fix) never succeeds, whatever it is handed.
+
+So 0.3.4's honest error stays, and the recipe above is what the next attempt
+should start from. Anyone who needs a parameterised assembly today should place
+parts with `catia_set_component_transform`.
+
+
 ## [0.3.4] — 2026-10-23 · conventions said out loud, failures that roll back
 
 Three themes: an ambiguous parameter made explicit (rotation convention), every

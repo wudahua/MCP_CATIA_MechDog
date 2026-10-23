@@ -168,6 +168,26 @@ class DocumentTools:
                 },
             },
             {
+                "name": "catia_activate_document",
+                "description": (
+                    "Bring an already-open document to the front so the other tools act "
+                    "on it. With a Part and a Product open at once there was no way back "
+                    "to the Part except closing the Product (reported 2026-10-23). "
+                    "Matches the document name exactly first, then as a suffix, so both "
+                    "'P05_stand.CATPart' and 'P05_stand' work."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Document name, as listed by catia_list_documents",
+                        },
+                    },
+                    "required": ["name"],
+                },
+            },
+            {
                 "name": "catia_set_part_number",
                 "description": (
                     "Set the part number (零件编号) of the active part document, or of one "
@@ -221,6 +241,8 @@ class DocumentTools:
                 return self._list_documents()
             case "catia_get_active_document_info":
                 return self._get_active_document_info()
+            case "catia_activate_document":
+                return self._activate_document(arguments["name"])
             case "catia_set_part_number":
                 return self._set_part_number(
                     arguments["part_number"], arguments.get("component_name"))
@@ -402,6 +424,28 @@ class DocumentTools:
         if not result:
             return "No documents open in CATIA"
         return json.dumps(result, indent=2, ensure_ascii=False)
+
+    def _activate_document(self, name: str) -> str:
+        """Activate an open document by name so later calls act on it."""
+        self.conn.ensure_connected()
+        docs = self.conn.documents
+        names = []
+        exact = suffix = None
+        for i in range(1, docs.Count + 1):
+            doc = docs.Item(i)
+            names.append(doc.Name)
+            if doc.Name == name:
+                exact = doc
+            elif suffix is None and doc.Name.split(".")[0] == name:
+                suffix = doc
+        target = exact or suffix
+        if target is None:
+            raise ValueError(
+                f"No open document named '{name}'. Open: {', '.join(names) or 'none'}."
+            )
+        target.Activate()
+        self.conn.refresh_display()
+        return f"Activated document: '{target.Name}'"
 
     def _set_part_number(self, part_number: str, component_name: str | None = None) -> str:
         """Set 零件编号 on the active part, or on one component of the active product."""
