@@ -6,7 +6,7 @@ A trimmed, verification-first fork of
 only what builds and checks a **solid from a written spec**, and fixes four
 defects that make that loop unreliable.
 
-**94 tools** (upstream: 98 — 16 dropped, 12 added). Nothing in the COM layer was
+**95 tools** (upstream: 98 — 16 dropped, 13 added). Nothing in the COM layer was
 rewritten — the value of upstream is the field-verified knowledge in its
 comments, so this fork is strictly add / subtract / patch. The count is asserted
 by `tests/test_readme_tool_counts.py`, so it cannot drift from the code again.
@@ -25,20 +25,20 @@ by `tests/test_readme_tool_counts.py`, so it cannot drift from the code again.
 `export` (STEP/STL hand-off) and `http_transport` (remote agent) are kept: they
 are domain-neutral and cheap. See `FORK.md` §8 if you want to cut further.
 
-### Added (12 tools over upstream)
+### Added (13 tools over upstream)
 
-Five of them came with the fork, seven were added while building parts from a
-spec (0.3.1: three, 0.3.2: four). Upstream 98 − 16 dropped + 12 added = 94.
+Five of them came with the fork, eight were added while building parts from a
+spec (0.3.1: three, 0.3.2: four, 0.3.4: one). Upstream 98 − 16 dropped + 13 added = 95.
 
 | Tool | What it gives you |
 |---|---|
 | `catia_run_plan` | Runs an ordered `{tool, args}` recipe in **one** call, then asserts volume / area / face / edge / vertex counts / centre of gravity |
 | `catia_measure_topology` | Face, edge and vertex counts — the cheapest guard against a part with the right volume and the wrong shape |
-| `catia_set_component_transform` | Absolute placement from a **row-major 3×3** (transposed server-side) or CATIA's native 12 numbers; reads back and reports deviation, det, orthogonality |
+| `catia_set_component_transform` | Absolute placement from a 3×3 in either convention (`matrix` = `P = A·p + T`, `basis` = row i is where local axis i points) or CATIA's native 12 numbers; reads back and reports deviation, det, orthogonality **and where each local axis ended up** |
 | `catia_get_component_transform` | The same placement in both conventions, plus where local X/Y/Z point in the assembly |
 | `catia_rename_component` | A readable assembly tree. `Part.Name` is read-only on V5-6R2020, so every part arrives as `Part1.1 / Part2.1 / …`; the instance name is writable |
 
-#### Added while building parts from a spec (7 tools)
+#### Added while building parts from a spec (8 tools)
 
 | Tool | Version | Why it exists |
 |---|---|---|
@@ -48,6 +48,7 @@ spec (0.3.1: three, 0.3.2: four). Upstream 98 − 16 dropped + 12 added = 94.
 | `catia_set_active_body` | 0.3.2 | `catia_new_body` only moves forward; this is the way back to the main body |
 | `catia_set_visibility` | 0.3.2 | A GSD surface stays visible after `close_surface` and overlays the solid, so screenshots and the STL envelope describe a part that does not exist. Measured enum: `SetShow(0)` shows, `(1)` hides, `(2)` is accepted and does nothing |
 | `catia_save_as_copy` | 0.3.2 | `SaveAs` is refused once a model has geometry; this saves and then copies, which is the only way to snapshot such a model |
+| `catia_set_part_number` | 0.3.4 | Every part cloned from a template carries `Part1`, so a 24-instance assembly of 24 distinct parts reports 24 identical part numbers and CATIA fills the screen with “零件编号 Part1 已存在”. The number, not the instance name, is what the BOM reads |
 | `catia_gsd_extract` | 0.3.2 | `catia_gsd_fill` needs a boundary *curve*, and a sketch reference is rejected — without an extract there was no way to cap a lofted surface into a solid |
 
 ### Fixed (latent upstream bugs, reproduced on a live V5-6R2020 B30 session)
@@ -150,8 +151,8 @@ The asymmetry is deliberate: a volume-only judge passes a part that grew an
 isolated boss, cut a pocket the wrong way, or drilled a hole into air — one
 field case missed a wrong part by −0.24 % while the face count was 30 instead of 26.
 
-Placement from a spec that quotes `P_asm = R · P_local + T` — pass the matrix the
-way the spec writes it, row by row:
+Placement from a spec that quotes `P_asm = A · P_local + T` — pass A row by row,
+with the default `rotation_convention`:
 
 ```jsonc
 {"tool": "catia_set_component_transform",
@@ -162,15 +163,30 @@ way the spec writes it, row by row:
           "translation": [0, 0, 402.5]}}
 ```
 
-The reply includes `max_deviation`, `det` and orthogonality, so a transposed
-matrix cannot pass unnoticed — note that a transpose keeps `det = +1`, which is
-why checking handedness alone never catches it.
+Specs that instead say *"R's three rows are the direction cosines of local X/Y/Z
+in global"* — the form CATIA's own position dialog shows — are `P_asm = Rᵀ·p + T`,
+so say so and copy the table verbatim:
+
+```jsonc
+{"tool": "catia_set_component_transform",
+ "args": {"component_name": "drone stand I015",
+          "rotation_rows": [[0, 0, 1], [1, 0, 0], [0, 1, 0]],
+          "rotation_convention": "basis",
+          "translation": [46.551, 388.598, 543.367]}}
+```
+
+The reply includes `max_deviation`, `det`, orthogonality **and `basis_rows`** — the
+last one is the only field that can catch a wrong convention: the two spellings
+are transposes of each other, both keep `det = +1` and both are orthonormal, so a
+transposed placement passes every other check (`max_deviation` only proves CATIA
+stored what you sent). One field case: a quadcopter's landing stands came out
+lying flat and its motors tilted 60° while every self-check reported success.
 
 ## Tool reference
 
 | Group | Tools | Notes |
 |---|---|---|
-| Document | 10 | new/open/save/close/list + `catia_save_as_copy`; `catia_save_document` retries around dialogs |
+| Document | 11 | new/open/save/close/list + `catia_save_as_copy`; `catia_save_document` retries around dialogs |
 | Sketcher | 11 | lines, rectangles, circles, constraints |
 | Part Design | 23 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, bodies… |
 | Generative Shape Design | 25 | wireframe and surfaces, extract, revolve + close surface |

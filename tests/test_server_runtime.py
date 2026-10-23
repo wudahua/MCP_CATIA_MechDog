@@ -18,7 +18,7 @@ def test_registered_tools_and_schemas_are_unchanged():
     # Lite fork: 98 upstream tools - 11 drafting - 5 knowledgeware + 9 new
     # (run_plan, measure_topology, get/set_component_transform,
     # rename_component, new_body, list_bodies, boolean, extract) = 91.
-    assert len(server._tool_router) == 94
+    assert len(server._tool_router) == 95
     assert not any(name.startswith("catia_caa") for name in server._tool_router)
     for schema in server._schemas.values():
         Draft202012Validator.check_schema(schema)

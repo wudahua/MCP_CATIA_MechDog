@@ -153,6 +153,52 @@ def test_mirrored_matrix_is_flagged():
     assert report["checks"]["right_handed"] is False
 
 
+# ---- rotation_rows conventions (0.3.4) -------------------------------------
+# Two 3x3 spellings of the same placement are in circulation. A spec that says
+# "P_asm = Rᵀ·P_local + T, R's rows are the local axes in global" lists one form;
+# the maths form P_asm = A·P_local + T is the other. They are transposes of each
+# other and both keep det = +1, so picking the wrong one yields a placement that
+# passes every sanity check and is still wrong. Field case: a quadcopter landing
+# stand meant to rise 189 mm (local Z → global +Y) came out lying on its side,
+# and the four motors tilted 60° instead of pointing down.
+
+SPEC_ROWS = [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]  # local X→+Z, Y→+X, Z→+Y
+
+
+def test_matrix_convention_is_unchanged():
+    """Default stays the pre-0.3.4 behaviour: row-major A, transposed on the way in."""
+    assert AssemblyTools._rotation_components(SPEC_ROWS) == [
+        0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0,
+    ]
+    assert AssemblyTools._rotation_components(SPEC_ROWS, "matrix") == [
+        0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0,
+    ]
+
+
+def test_basis_convention_writes_the_rows_verbatim():
+    assert AssemblyTools._rotation_components(SPEC_ROWS, "basis") == [
+        0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+    ]
+
+
+def test_basis_convention_round_trips_through_the_report():
+    flat = AssemblyTools._rotation_components(SPEC_ROWS, "basis")
+    report = AssemblyTools._matrix_report(flat)
+    assert report["basis_rows"] == SPEC_ROWS
+    # local Z is the stand's 189 mm axis and must end up pointing at global +Y
+    assert report["basis_columns"]["local_z_maps_to"] == [0.0, 1.0, 0.0]
+    assert report["basis_columns"]["local_x_maps_to"] == [0.0, 0.0, 1.0]
+
+
+def test_matrix_convention_round_trips_through_the_report():
+    flat = AssemblyTools._rotation_components(SPEC_ROWS, "matrix")
+    report = AssemblyTools._matrix_report(flat)
+    assert report["rotation_rows"] == SPEC_ROWS
+    assert report["matrix_a"] == SPEC_ROWS
+    # the same placement seen as basis vectors is the transpose
+    assert report["basis_rows"] == [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]]
+
+
 def test_wireframe_geometry_is_ignored_in_counts():
     """Sketch lines come back as Selection_WireREdge; solid ones as Selection_REdge."""
 

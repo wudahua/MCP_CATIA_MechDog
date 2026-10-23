@@ -3,7 +3,7 @@
 上游：[daiemon12/catia-v5-mcp-server](https://github.com/daiemon12/catia-v5-mcp-server)（MIT，作者 Adam M'HAMDI）
 本 fork 保留上游全部 COM 现场知识，砍掉与实体建模无关的模块，补上"建模—验收"闭环最缺的四件事。
 
-**工具数：98 → 94**（−11 绘图、−5 知识工程，+12 新增：fork 原创 5 个、0.3.1 加 3 个、0.3.2 加 4 个）
+**工具数：98 → 95**（−11 绘图、−5 知识工程，+13 新增：fork 原创 5 个、0.3.1 加 3 个、0.3.2 加 4 个、0.3.4 加 1 个）
 
 ---
 
@@ -81,15 +81,26 @@ P05_CylinderCap position_components =
 
 **再说新接口。**
 
-* `catia_get_component_transform(component_name)` —— 同时给两种约定：
-  `position_components`（CATIA 原生顺序 = R 的三列 + 原点）和 `rotation_rows`
-  （行主序，即 `P_asm = R·P_local + T` 里那个 R），外加 `det`、正交误差、
-  以及"局部 X/Y/Z 各自映射到装配的哪个方向"。
-* `catia_set_component_transform(component_name, rotation_rows | position_components,
-  translation)` —— **可以直接照抄规范里的行主序 R**，服务端负责转置；写完回读并报
-  `max_deviation`、`det`、是否右手系。det ≠ +1 会直接给 warning（镜像了）。
+* `catia_get_component_transform(component_name)` —— 一次把同一个位姿的两种写法都给出来：
+  `position_components`（CATIA 原生顺序 = 三根基向量 + 原点）、
+  `basis_rows`（3×3，`rows[i]` = 局部轴 i 指向全局哪里）、
+  `rotation_rows` / `matrix_a`（行优先数学矩阵，即 `P_asm = A·P_local + T` 里那个 A，
+  等于 `basis_rows` 的转置），外加 `det`、正交误差和"局部 X/Y/Z 各自映射到哪"。
+* `catia_set_component_transform(component_name, rotation_rows, rotation_convention,
+  translation)` —— 两种约定必须说清：
 
-实测：用行主序 R 回写 P05，`max_deviation = 8.7e-11`，`det = +1.0`。
+  | `rotation_convention` | `rotation_rows` 的含义 | 数学式 |
+  |---|---|---|
+  | `"matrix"`（默认） | 行优先的 A | `P_asm = A · P_local + T` |
+  | `"basis"` | 第 i 行 = 局部轴 i 指向全局哪里 | `P_asm = Rᵀ · P_local + T` |
+
+  规范写"R 的三行是局部 X/Y/Z 在全局的方向余弦"的（CATIA 自己报位姿也是这个形式），
+  用 `"basis"` 原样抄；规范写 `P_asm = R·P_local + T` 的，用默认值。**两者互为转置，
+  det 都是 +1、正交误差都是 0，抄错不会报错，只会整体转过去**（实测踩过，见
+  CHANGELOG 0.3.4）。写完回读并报 `max_deviation`、`det`、是否右手系，
+  以及 `basis_rows` 供逐元素比对。
+
+实测：用 `"basis"` 回写 P05，`max_deviation = 8.7e-11`、`det = +1.0`、`basis_rows` 与输入逐元素相同。
 
 > 为什么要专门做这个：转置错误 det 检查**抓不到**（转置后 det 仍是 +1），
 > 6/9 件 R 恰好对称，只有 3 件会暴露。把"按列读"这件事固化进工具，比写在文档里靠人记更可靠。

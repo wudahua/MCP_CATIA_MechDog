@@ -167,6 +167,35 @@ class DocumentTools:
                     "properties": {},
                 },
             },
+            {
+                "name": "catia_set_part_number",
+                "description": (
+                    "Set the part number (零件编号) of the active part document, or of one "
+                    "component when component_name is given. Every part built from the "
+                    "same template carries the template's number, so an assembly of 24 "
+                    "distinct parts can end up with 24 items all called 'Part1' — CATIA "
+                    "then reports '零件编号 Part1 已存在。在装配中，零件编号必须是唯一的'. "
+                    "The number, not the instance name, is what the BOM and "
+                    "catia_list_components report."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "part_number": {
+                            "type": "string",
+                            "description": "New part number, e.g. 'drone stand'",
+                        },
+                        "component_name": {
+                            "type": "string",
+                            "description": (
+                                "Optional: set this component's number inside the active "
+                                "product instead of the whole document's"
+                            ),
+                        },
+                    },
+                    "required": ["part_number"],
+                },
+            },
         ]
 
     def execute(self, tool_name: str, arguments: dict[str, Any]) -> str:
@@ -192,6 +221,9 @@ class DocumentTools:
                 return self._list_documents()
             case "catia_get_active_document_info":
                 return self._get_active_document_info()
+            case "catia_set_part_number":
+                return self._set_part_number(
+                    arguments["part_number"], arguments.get("component_name"))
             case _:
                 raise ValueError(f"Unknown document tool: {tool_name}")
 
@@ -334,6 +366,58 @@ class DocumentTools:
             return "No documents open in CATIA"
         return json.dumps(result, indent=2, ensure_ascii=False)
 
+    def _set_part_number(self, part_number: str, component_name: str | None = None) -> str:
+        """Set 零件编号 on the active part, or on one component of the active product."""
+        self.conn.ensure_connected()
+        part_number = (part_number or "").strip()
+        if not part_number:
+            raise ValueError("part_number must not be empty")
+        doc = self.conn.active_document
+
+        if component_name:
+            product = self.conn.product_of(doc)
+            products = product.Products
+            target, index = None, 0
+            for i in range(1, products.Count + 1):
+                if products.Item(i).Name == component_name:
+                    target, index = products.Item(i), i
+                    break
+            if target is None:
+                available = [products.Item(i).Name for i in range(1, products.Count + 1)]
+                raise ValueError(f"No component '{component_name}'. Available: {available}")
+            old = target.PartNumber
+            target.PartNumber = part_number
+            note = ""
+            if old != part_number:
+                note = (
+                    " A component's number lives in the part it references, so every "
+                    "instance of that file now reports the same new number."
+                )
+            clashes = [
+                products.Item(i).Name
+                for i in range(1, products.Count + 1)
+                if i != index and products.Item(i).PartNumber == part_number
+            ]
+            if clashes:
+                note += f" Still duplicated with: {', '.join(clashes)}."
+            self.conn.refresh_display()
+            return f"'{component_name}' part number: '{old}' -> '{part_number}'.{note}"
+
+        # The late-bound Part exposes no PartNumber, so a part's 零件编号 lives on
+        # the implicit product every PartDocument carries.
+        try:
+            product = doc.Product
+            old = product.PartNumber
+            product.PartNumber = part_number
+            kind = "part number (on the part document's implicit product)"
+        except Exception:
+            product = self.conn.product_of(doc)
+            old = product.PartNumber
+            product.PartNumber = part_number
+            kind = "product number"
+        self.conn.refresh_display()
+        return f"Document {kind}: '{old}' -> '{part_number}'"
+
     def _get_active_document_info(self) -> str:
         doc = self.conn.active_document
         info: dict[str, Any] = {
@@ -346,6 +430,10 @@ class DocumentTools:
             part = self.conn.part_of(doc)
             info["type"] = "CATPart"
             info["part_name"] = part.Name
+            try:
+                info["part_number"] = doc.Product.PartNumber
+            except Exception:
+                pass
 
             # List bodies
             bodies = part.Bodies

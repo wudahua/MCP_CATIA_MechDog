@@ -4,7 +4,43 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.4] — 2026-10-23 · say which rotation convention you mean
+
+Two 3x3 spellings of the same placement are in circulation, and they are
+transposes of each other:
+
+- **matrix** — `P_asm = A · P_local + T`, `rotation_rows` is A row-major. The
+  maths form, and what this server has meant since 0.3.0.
+- **basis** — `P_asm = Rᵀ · P_local + T`, and `rows[i]` is *where local axis i
+  points in global*. This is what CATIA itself prints, and what a
+  reverse-engineered spec table lists when it says "R 的三行是局部 X/Y/Z 在全局中
+  的方向余弦".
+
+Both keep `det = +1` and both are orthonormal, so a wrong choice passes every
+sanity check and is still wrong. Field case: a quadcopter's 24-component assembly
+was placed from a spec table of the second kind; the server read it as the first,
+so the two landing-gear stands that should have risen 189 mm (local Z → global
++Y, the highest points of the machine) lay flat, and the four motors tilted 60°
+instead of pointing down. Neither the read-back deviation (5e-7) nor `det` said a
+word — the read-back only proves CATIA stored what it was given.
+
 ### Added
+- `catia_set_component_transform(rotation_convention="matrix" | "basis")` makes the
+  choice explicit. Default stays `"matrix"`, so nothing that worked before changes
+  meaning; a spec table of the second kind is now passed verbatim with
+  `"basis"`.
+- `catia_get_component_transform` reports both spellings — `basis_rows` (3x3, local
+  axes in global) and `rotation_rows` / `matrix_a` (the maths form) — so a caller
+  can copy the one its input format wants. `basis_rows` round-trips through
+  `rotation_convention="basis"`.
+
+### Fixed
+- `catia_move_component` composed the incremental rotation on the wrong side
+  (`A·Rᵀ` instead of `R·A`), so an incremental `rx/ry/rz` rotated about the
+  assembly axes the wrong way round. It now post-multiplies per column, which is
+  what CATIA's column layout calls for.
+
+### Added (tree hygiene)
 - `catia_set_visibility(kind=...)` hides a whole class of tree bookkeeping in one
   call: `sketch` (every sketch in every body, including those inside geometrical
   sets), `datum_plane`, or `construction` (both). Hiding them one name at a time
@@ -18,7 +54,7 @@ All notable changes to this project are documented here.
   `part.OriginElements.PlaneXY` is accepted by `Selection.Add` + `SetShow(1)` and
   then does nothing, so the datum planes still have to be hidden from the tree.
 
-### Fixed
+### Fixed (diagnostics)
 - `catia_fix_constraint` now explains itself instead of failing with a bare
   "方法 AddMonoEltCst 失败". Measured on V5-6R2020 B30: the call returns E_FAIL for
   a component inserted with `AddComponentsFromFiles`, whether or not the component

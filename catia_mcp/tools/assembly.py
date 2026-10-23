@@ -234,12 +234,16 @@ class AssemblyTools:
                 "name": "catia_set_component_transform",
                 "description": (
                     "Set a component's absolute placement from a rotation matrix and a "
-                    "translation. Accepts `rotation_rows` (3x3 row-major, the way specs and "
-                    "papers write P_asm = R * P_local + T — the server transposes it for you) "
-                    "or `position_components` (12 numbers in CATIA's native order: three "
-                    "basis vectors then the origin). Reads the placement back and reports the "
-                    "deviation, det and orthogonality, so a wrong handedness or a stray "
-                    "transpose cannot pass silently."
+                    "translation. `rotation_rows` is 3x3; say with `rotation_convention` "
+                    "which form it is: 'matrix' (default) reads it row-major as A in "
+                    "P_asm = A·P_local + T, while 'basis' reads row i as 'where does local "
+                    "axis i point in global' — CATIA's own form, the form reverse-engineered "
+                    "spec tables list, and the form whose maths is P_asm = Rᵀ·P_local + T. "
+                    "Pass either screenshot-verified form verbatim; picking the wrong one "
+                    "yields a valid-looking placement that is the transpose of what you "
+                    "asked for. `position_components` takes CATIA's raw 12 numbers instead. "
+                    "Reads the placement back and reports deviation, det, orthogonality and "
+                    "where each local axis actually ended up."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -250,8 +254,20 @@ class AssemblyTools:
                         },
                         "rotation_rows": {
                             "type": "array",
-                            "description": "3x3 rotation, ROW-major: [[R00,R01,R02],[R10,...],[...]]",
+                            "description": (
+                                "3x3 rotation; see rotation_convention. With 'basis' each "
+                                "row is where one local axis points in global."
+                            ),
                             "items": {"type": "array", "items": {"type": "number"}},
+                        },
+                        "rotation_convention": {
+                            "type": "string",
+                            "enum": ["matrix", "basis"],
+                            "description": (
+                                "'matrix' (default): rotation_rows is row-major A in "
+                                "P_asm = A·P_local + T. 'basis': row i = where local axis i "
+                                "points in global, i.e. P_asm = Rᵀ·P_local + T."
+                            ),
                         },
                         "position_components": {
                             "type": "array",
@@ -463,9 +479,35 @@ class AssemblyTools:
         raise ValueError(f"No component '{name}'. Available: {available}")
 
     @staticmethod
+    def _rotation_components(rows: list[list[float]],
+                             convention: str = "matrix") -> list[float]:
+        """Flatten `rotation_rows` into CATIA's nine placement numbers.
+
+        CATIA keeps the placement as the three basis vectors: the first three
+        numbers are where local X points in global, then Y, then Z. Those vectors
+        are the *columns* of A in ``P_asm = A · P_local + T``.
+
+        Two ways of writing the same 3x3 are in circulation, so the caller says
+        which one it means:
+
+        ``convention="matrix"`` (default, unchanged since 0.3.0)
+            ``rows`` is A read row-major, i.e. the maths form
+            ``P_asm = A · P_local + T``.
+        ``convention="basis"``
+            ``rows[i]`` is where local axis i points in global — the form CATIA
+            prints, and the form a spec table gives when it says
+            ``P_asm = Rᵀ · P_local + T`` with R's rows being those axes. The nine
+            numbers then go in verbatim and ``get → set`` round-trips.
+        """
+        if convention == "basis":
+            return [float(value) for row in rows for value in row]
+        return [float(rows[r][c]) for c in range(3) for r in range(3)]
+
+    @staticmethod
     def _matrix_report(components9: list[float]) -> dict[str, Any]:
-        """Describe nine rotation values read in CATIA's own (column) order."""
+        """Describe nine placement values in both conventions."""
         i_vec, j_vec, k_vec = components9[0:3], components9[3:6], components9[6:9]
+        # rows = A (P_asm = A · P_local + T), whose columns are the three axes.
         rows = [[components9[0], components9[3], components9[6]],
                 [components9[1], components9[4], components9[7]],
                 [components9[2], components9[5], components9[8]]]
@@ -485,7 +527,9 @@ class AssemblyTools:
                 "local_y_maps_to": [round(v, 9) for v in j_vec],
                 "local_z_maps_to": [round(v, 9) for v in k_vec],
             },
+            "basis_rows": [[round(v, 9) for v in vec] for vec in (i_vec, j_vec, k_vec)],
             "rotation_rows": [[round(v, 9) for v in row] for row in rows],
+            "matrix_a": [[round(v, 9) for v in row] for row in rows],
             "checks": {
                 "det": round(det, 9),
                 "right_handed": abs(det - 1.0) < 1e-6,
@@ -504,9 +548,12 @@ class AssemblyTools:
             "translation": [round(v, 6) for v in values[9:12]],
             **self._matrix_report(values[:9]),
             "note": (
-                "position_components is CATIA's native order: the three basis vectors "
-                "(columns of R) then the origin. rotation_rows is the same matrix written "
-                "row-major, i.e. the form P_asm = R * P_local + T assumes."
+                "position_components is CATIA's native order: the three basis vectors — "
+                "where local X, then Y, then Z point in global — followed by the origin. "
+                "`basis_rows` repeats them as a 3x3 and is what a spec table lists when it "
+                "writes P_asm = Rᵀ·P_local + T; pass that back with "
+                "rotation_convention='basis'. `rotation_rows` is the maths matrix A of "
+                "P_asm = A·P_local + T (the default convention), i.e. basis_rowsᵀ."
             ),
         }
         return json.dumps(report, indent=2, ensure_ascii=False)
@@ -530,9 +577,20 @@ class AssemblyTools:
         elif rows is not None:
             if len(rows) != 3 or any(len(row) != 3 for row in rows):
                 raise ValueError("rotation_rows must be a 3x3 array")
-            # R is given row-major; CATIA wants the columns, so flatten per column.
-            values = [float(rows[r][c]) for c in range(3) for r in range(3)] + translation
-            source = "rotation_rows (transposed into CATIA's column order)"
+            convention = args.get("rotation_convention", "matrix")
+            if convention not in ("matrix", "basis"):
+                raise ValueError(
+                    "rotation_convention must be 'matrix' (P_asm = A·P_local + T, the "
+                    "default) or 'basis' (row i = where local axis i points in global)"
+                )
+            values = self._rotation_components(rows, convention) + translation
+            source = (
+                "rotation_rows, convention=basis (row i = where local axis i points "
+                "in global)"
+                if convention == "basis"
+                else "rotation_rows, convention=matrix (row-major A with "
+                     "P_asm = A·P_local + T)"
+            )
         elif translation != [0.0, 0.0, 0.0]:
             # Translation-only move: keep the existing orientation.
             current = self._position_components(component.Position)
@@ -602,27 +660,18 @@ class AssemblyTools:
             cz, sz = math.cos(rz), math.sin(rz)
 
             # Rotation matrix components
-            r00 = cy * cz
-            r01 = cz * sx * sy - cx * sz
-            r02 = sx * sz + cx * cz * sy
-            r10 = cy * sz
-            r11 = cx * cz + sx * sy * sz
-            r12 = cx * sy * sz - cz * sx
-            r20 = -sy
-            r21 = cy * sx
-            r22 = cx * cy
+            rot = [
+                [cy * cz, cz * sx * sy - cx * sz, sx * sz + cx * cz * sy],
+                [cy * sz, cx * cz + sx * sy * sz, cx * sy * sz - cz * sx],
+                [-sy, cy * sx, cx * cy],
+            ]
 
-            # Apply to current rotation (first 9 elements)
+            # Apply to the current orientation. In CATIA's layout index 3*j + i is
+            # A[i][j], so column j of the new matrix is rot · (column j of the old).
             old = matrix[:9]
-            matrix[0] = r00 * old[0] + r01 * old[3] + r02 * old[6]
-            matrix[1] = r00 * old[1] + r01 * old[4] + r02 * old[7]
-            matrix[2] = r00 * old[2] + r01 * old[5] + r02 * old[8]
-            matrix[3] = r10 * old[0] + r11 * old[3] + r12 * old[6]
-            matrix[4] = r10 * old[1] + r11 * old[4] + r12 * old[7]
-            matrix[5] = r10 * old[2] + r11 * old[5] + r12 * old[8]
-            matrix[6] = r20 * old[0] + r21 * old[3] + r22 * old[6]
-            matrix[7] = r20 * old[1] + r21 * old[4] + r22 * old[7]
-            matrix[8] = r20 * old[2] + r21 * old[5] + r22 * old[8]
+            for j in range(3):
+                for i in range(3):
+                    matrix[3 * j + i] = sum(rot[i][k] * old[3 * j + k] for k in range(3))
 
         position.SetComponents(matrix)
         self.conn.refresh_display()
