@@ -628,13 +628,25 @@ class PartDesignTools:
                                 "a feature, or a sketch."
                             ),
                         },
+                        "kind": {
+                            "type": "string",
+                            "description": (
+                                "Hide a whole class of tree bookkeeping in one call, "
+                                "instead of naming each one: 'sketch' (every sketch in "
+                                "every body), 'datum_plane' (the three reference "
+                                "planes), or 'construction' (both). These are the "
+                                "white frames that clutter a screenshot - a sketch "
+                                "outline is not solid geometry, but it is drawn on top "
+                                "of the solid and reads as a defect."
+                            ),
+                            "enum": ["sketch", "datum_plane", "construction"],
+                        },
                         "show": {
                             "type": "boolean",
                             "description": "true shows, false hides (default false).",
                             "default": False,
                         },
                     },
-                    "required": ["name"],
                 },
             },
             {
@@ -754,6 +766,9 @@ class PartDesignTools:
             case "catia_set_active_body":
                 return self._set_active_body(arguments["name"])
             case "catia_set_visibility":
+                if arguments.get("kind"):
+                    return self._set_visibility_kind(
+                        str(arguments["kind"]), bool(arguments.get("show", False)))
                 return self._set_visibility(
                     arguments["name"], bool(arguments.get("show", False)))
             case "catia_boolean":
@@ -2118,6 +2133,76 @@ class PartDesignTools:
         self.conn.refresh_display()
         extra = f" and {children} element(s) inside it" if children else ""
         return f"'{name}' ({where}) is now {'shown' if show else 'hidden'}{extra}."
+
+    def _set_visibility_kind(self, kind: str, show: bool) -> str:
+        """Show or hide a whole class of tree bookkeeping at once.
+
+        A screenshot of a finished part is covered in white frames that are not
+        geometry: every sketch keeps its profile curves on screen, and the three
+        reference planes keep their borders. They are drawn over the solid, so
+        they read as surface defects rather than as the drawing bookkeeping they
+        are - the drone assembly looked like it had comb-shaped artefacts at each
+        motor until they were hidden.
+
+        CATIA has no "hide all sketches" switch in the automation API, and the
+        sketches are not selectable by name through the HSO, so this walks the
+        tree the way the UI's Ctrl+F search would.
+        """
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        sel = self.conn.active_document.Selection
+        counts = {"sketch": 0, "datum_plane": 0}
+
+        def apply(node) -> None:
+            sel.Clear()
+            sel.Add(node)
+            sel.VisProperties.SetShow(0 if show else 1)
+
+        want_sketch = kind in ("sketch", "construction")
+        want_plane = kind in ("datum_plane", "construction")
+
+        try:
+            if want_sketch:
+                for i in range(1, part.Bodies.Count + 1):
+                    sketches = part.Bodies.Item(i).Sketches
+                    for j in range(1, sketches.Count + 1):
+                        try:
+                            apply(sketches.Item(j))
+                            counts["sketch"] += 1
+                        except Exception:      # noqa: BLE001 - per sketch
+                            pass
+                for i in range(1, part.HybridBodies.Count + 1):
+                    sketches = part.HybridBodies.Item(i).HybridSketches
+                    for j in range(1, sketches.Count + 1):
+                        try:
+                            apply(sketches.Item(j))
+                            counts["sketch"] += 1
+                        except Exception:      # noqa: BLE001 - per sketch
+                            pass
+            if want_plane:
+                origin = part.OriginElements
+                for name in ("PlaneXY", "PlaneYZ", "PlaneZX"):
+                    try:
+                        apply(getattr(origin, name))
+                        counts["datum_plane"] += 1
+                    except Exception:          # noqa: BLE001 - per plane
+                        pass
+        finally:
+            self._clear_selection()
+        self.conn.refresh_display()
+
+        if not counts["sketch"] and not counts["datum_plane"]:
+            raise RuntimeError(
+                f"Nothing of kind '{kind}' found to {'show' if show else 'hide'}: "
+                "the part has no sketches (or no datum planes). Use "
+                "catia_list_features to see what the tree holds."
+            )
+        parts = []
+        if counts["sketch"]:
+            parts.append(f"{counts['sketch']} sketch(es)")
+        if counts["datum_plane"]:
+            parts.append(f"{counts['datum_plane']} datum plane(s)")
+        return "%s now %s." % (" and ".join(parts), "shown" if show else "hidden")
 
     def _boolean(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()

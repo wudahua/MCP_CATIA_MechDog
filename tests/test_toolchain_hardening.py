@@ -396,3 +396,22 @@ def test_the_package_version_matches_pyproject():
     declared = re.search(r'^version = "([^"]+)"', pyproject, re.M).group(1)
 
     assert catia_mcp.__version__ == declared
+
+
+def test_visibility_can_hide_a_whole_class_of_bookkeeping():
+    """Hiding sketches one name at a time is not usable: a part has a dozen, and
+    the HSO cannot resolve them by name. The kind= form walks the tree instead."""
+    import inspect
+
+    from catia_mcp.tools.part_design import PartDesignTools as PD
+
+    tool = [d for d in PD(connection=None).get_tool_definitions()
+            if d["name"] == "catia_set_visibility"][0]
+    props = tool["inputSchema"]["properties"]
+    assert props["kind"]["enum"] == ["sketch", "datum_plane", "construction"]
+    assert "required" not in tool["inputSchema"]      # name is optional now
+
+    source = inspect.getsource(PD._set_visibility_kind)
+    assert "Sketches" in source and "HybridSketches" in source
+    assert "PlaneXY" in source
+    assert "SetShow(0 if show else 1)" in source      # the measured enum

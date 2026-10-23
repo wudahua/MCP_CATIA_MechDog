@@ -4,6 +4,20 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+- `catia_set_visibility(kind=...)` hides a whole class of tree bookkeeping in one
+  call: `sketch` (every sketch in every body, including those inside geometrical
+  sets), `datum_plane`, or `construction` (both). Hiding them one name at a time
+  is not usable - a part carries a dozen or more, and the HSO cannot resolve a
+  sketch by name. Field case: a drone assembly looked like it had comb-shaped
+  surface artefacts at each motor; they were sketch profiles and reference-plane
+  borders drawn over the solids.
+
+  Note two things measured while doing it: hiding a geometrical set does NOT hide
+  the elements inside it (each keeps its own visibility), and
+  `part.OriginElements.PlaneXY` is accepted by `Selection.Add` + `SetShow(1)` and
+  then does nothing, so the datum planes still have to be hidden from the tree.
+
 ### Fixed
 - `catia_fix_constraint` now explains itself instead of failing with a bare
   "方法 AddMonoEltCst 失败". Measured on V5-6R2020 B30: the call returns E_FAIL for
