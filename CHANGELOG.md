@@ -4,6 +4,19 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-10-23 · the documentation matches the toolset
+
+A user installed 0.3.2 on V5-6R2022 (B32) and reported three numbers for one
+fact: the README header said 87 tools, its group table added up to 86, and the
+server registered 94. Two of the three were stale documentation and one was a
+real bug in what the server reports about itself.
+
+The history, measured at each tag: v0.3.0 shipped 87 tools (the header was right;
+the table's Assembly row said 11 when it was 12, so it had summed to 86 from the
+day the fork was cut), v0.3.1 shipped 90, v0.3.2 94. Upstream 98 − 16 dropped
++ 12 added = 94. No tool was added or removed here — only the numbers describing
+them, and one of those numbers was the server's own version.
+
 ### Added
 - `tests/test_readme_tool_counts.py` compares the documentation with the code:
   the header count, every row of the group table, the "Added" table, the
