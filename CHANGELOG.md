@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.6] — 2026-10-23 · the pocket gets its flip back
+
 The 0.3.5 acceptance report found one real regression (the volume gate had made
 0.3.3's pocket auto-flip unreachable) plus four smaller items; the second report
 is about a launcher `.exe` being locked by a running client during `pip install`.
