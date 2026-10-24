@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.10] — 2026-10-24 · measurements that can be trusted, crashes that say why
+
 ### Fixed
 - A surface-only part no longer produces a payload full of `"unavailable: ..."`
   strings from `catia_get_inertia`. Volume, area and centroid are undefined
