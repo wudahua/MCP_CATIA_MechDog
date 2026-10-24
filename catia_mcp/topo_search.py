@@ -20,6 +20,7 @@ runs on both.
 
 from __future__ import annotations
 
+import re
 from typing import Any, NamedTuple
 
 # Verified localized type names (Simplified Chinese CATIA V5).
@@ -114,6 +115,36 @@ def nls_features(nls: str) -> list[str]:
         if name not in seen:
             seen.append(name)
     return seen
+
+
+# A topology cell's NLS names the faces it is built from, as
+# ``Brp:(Pad.6;2)`` - feature name plus face index. Those pairs are the only
+# handle that survives renumbering, because they belong to the *feature*, not to
+# the enumeration order. Measured 2026-10-23 by the reporter: after one fillet
+# the same edge moved from Edge.30 to Edge.34 and its length changed from
+# 17.6112 to 9.8429 mm, while the pair of faces that bound it did not change.
+_BRP = re.compile(r"Brp:\(([A-Za-z][A-Za-z0-9_]*\.\d+);(\d+)\)")
+
+
+def face_keys(nls: str) -> list[str]:
+    """``['Pad.6;2', 'Sketch.7;2']`` - the faces a cell is bounded by."""
+    seen: list[str] = []
+    for feature, index in _BRP.findall(nls or ""):
+        key = f"{feature};{index}"
+        if key not in seen:
+            seen.append(key)
+    return seen
+
+
+def edge_fingerprint(faces: list[str], length: float | None) -> str:
+    """A paste-back-able description of one edge: ``L17.6112|Pad.6;2|Sketch.7;2``.
+
+    This is what ``catia_fillet`` accepts in place of ``Edge.N``. The index is
+    an enumeration position and drifts after every feature; the bounding faces
+    and the length do not.
+    """
+    stamp = "?" if length is None else "%.4f" % length
+    return "L" + stamp + "|" + "|".join(faces)
 
 
 def topology_cells(conn: Any, body: Any, kind: str) -> list[Any]:

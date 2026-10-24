@@ -460,7 +460,11 @@ class GSDTools:
             },
             {
                 "name": "catia_gsd_join",
-                "description": "Join (assemble) two or more curves or surfaces into one element.",
+                "description": (
+                    "Join (assemble) two or more curves or surfaces into one element. "
+                    "The list argument is 'elements'; 'surfaces' is accepted as a "
+                    "synonym because every other GSD tool names it after its content."
+                ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -470,9 +474,14 @@ class GSDTools:
                             "minItems": 2,
                             "description": "Element names to join",
                         },
+                        "surfaces": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "description": "Synonym for 'elements'",
+                        },
                         "name": {"type": "string", "description": "Optional name for the result"},
                     },
-                    "required": ["elements"],
                 },
             },
             {
@@ -1199,8 +1208,23 @@ class GSDTools:
     # ────────────────────────────────────────────────────────────
 
     def _join(self, args: dict[str, Any]) -> str:
+        # 'elements' everywhere else is 'sections' / 'boundaries' / 'edges'; the
+        # bare KeyError this used to raise said none of that (reported
+        # 2026-10-23). Accept 'surfaces' as a synonym and explain the shape.
+        # Arguments are validated before CATIA is even touched.
+        elements = args.get("elements") or args.get("surfaces") or args.get("curves")
+        if not elements:
+            raise ValueError(
+                "catia_gsd_join needs 'elements': the list of curves/surfaces to "
+                "join, in order, e.g. {\"elements\": [\"C1\", \"C2\", \"Shell\"]}. "
+                "('surfaces' is accepted as a synonym.)"
+            )
+        if not isinstance(elements, list) or len(elements) < 2:
+            raise ValueError(
+                "catia_gsd_join needs at least two elements; got "
+                f"{elements!r}. Joining one element is a no-op in CATIA."
+            )
         self.conn.ensure_connected()
-        elements = args["elements"]
         refs = [self._ref(name) for name in elements]
 
         join = self._factory().AddNewJoin(refs[0], refs[1])

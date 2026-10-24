@@ -4,6 +4,93 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+The 2026-10-23 topology report (a 11-part quadcopter rebuilt from a written spec)
+named one thing above all: "`Edge.N` is not a stable id". That is now true in the
+tools instead of only in the report.
+
+### Added
+- **Edge fingerprints.** `catia_list_edges` returns, per edge, the faces that
+  bound it and a paste-back-able `fingerprint` (`L17.6112|Pad.6;2|Sketch.7;2`).
+  `catia_fillet` and `catia_chamfer` accept it - also as
+  `{"length_mm": 17.6112, "faces": ["Pad.6;2"]}` - and resolve it against the
+  body *at call time*. That removes the "fillet one edge, re-list all 67 edges,
+  fillet the next" loop: the reporter measured 7 full listings (~50 000
+  characters each) and 34 calls for 17 fillets on one part. Matching is by
+  bounding faces, with the length only breaking ties, because a neighbouring
+  fillet legitimately shortens an edge (17.6112 -> 9.8429 mm in their case).
+  Verified on B30: a fingerprint captured before a topology change still resolves
+  and fillets the intended edge after it.
+- `catia_list_edges` filters and pages: `min_length`, `max_length`, `faces`,
+  `offset`, `limit`, `include_nls`. The reply also carries `count` / `matched` /
+  `total` / `raw_total`, so a shortfall is visible instead of silent.
+- `catia_list_faces` reports `count`, `raw_total` and - when they differ - how
+  many searched cells were construction geometry. The report counted 14 faces on
+  a solid and got 10 listed; on B30 a plain block lists 6 of 6 with
+  `raw_total` 6, so the numbers now disagree out loud if they ever do.
+
+### Fixed
+- `through_all` + `direction="both"` cut one way only. Measured on B30,
+  40 x 20 x 10 block, Ø10 from a mid-plane sketch: 392.7 mm3 instead of 785.4.
+  It is built as two up-to-last cuts now, and the reply says
+  "through all, both directions". (The reporter's Ø12.7 x 25.4 read 1608.8
+  instead of 3217.6 - exactly the same factor of two.)
+- `catia_delete_feature` could not delete a sketch: `_delete_feature` only
+  walked `body.Shapes`, and sketches live in `body.Sketches`. A wrong profile
+  was therefore permanent (reported 2026-10-23). It now finds sketches, and its
+  reply says what it found: "Deleted sketch '草图.2'."
+- Deleting a feature that takes its support sketch with it now says so:
+  "CATIA also removed 1 sketch(es) that belonged to it: 草图.3". The cascade is
+  conditional - a pad + pocket test on B30 kept the pocket's sketch - so the
+  message is built from a before/after comparison rather than assumed.
+- `catia_get_bounding_box` mixed sketch vertices into the vertex sweep: a wire
+  vertex that lies outside the solid stretched the envelope (reported as
+  unusable for acceptance). Construction cells are filtered with the same rule
+  the edge/face listings use, and the count of ignored points is reported.
+- A failed pad no longer dies formatting an unknown volume ("unsupported format
+  string passed to NoneType"). The volume was measured *after* the factory call,
+  where the measurable can fail because the new feature is not updated yet; it
+  is measured before, and an empty body counts as 0 rather than "unknown".
+  Pad, pocket and hole all report `UNVERIFIED:` when the volume really is
+  unavailable, instead of claiming success.
+- `catia_measure_distance` returning 0.0000 for "parallel" faces is explained
+  instead of left ambiguous: two parallel non-adjacent faces of a 10 mm block do
+  measure 10.0000 here, so 0 means the elements touch, overlap, or both names
+  resolved to the same element - which is what a stale `Face.N` does.
+
+### Changed
+- `catia_fillet`'s `propagation` default is now `"none"`. With `"tangency"` a
+  single picked edge fillets its whole tangent chain - reported as the cause of
+  a non-target edge being rounded and the part losing its symmetry. Pass
+  `"propagation": "tangency"` to get the old behaviour back.
+- A batch fillet that cannot rebuild falls back to one edge at a time instead of
+  losing the batch. The report's numbers: three edges of one face answered
+  "0/3 done ... would not rebuild" as a batch and all three took one by one.
+- `catia_create_sketch`'s reply names the sketch axes: `zx` is H = Z, V = X,
+  normal = Y (measured), not the "H = X" a spec author assumes. A 90-degree
+  wrong barrel came out of exactly that.
+
+### Diagnostics
+- `catia_close_sketch` warns when the profile it just closed has a near-miss
+  endpoint pair, with both coordinates and the gap: "(10.2390, 5.0835) and
+  (10.2390, 5.0800) are 0.0035 mm apart". The coordinates are the ones the
+  sketch tools were given - CATIA's own `Point2D` cannot be read back through
+  automation on this build (`GetCoordinates` needs a by-ref array it never
+  fills), so this is computed on our side. A 3.5 um gap is enough to make Pad
+  fail with "open polyline or an arc chain with a gap", which named no vertex.
+- `catia_gsd_join` validates its argument instead of raising `KeyError`:
+  `'surfaces'` is accepted as a synonym for `'elements'`, and a missing/too-short
+  list is explained.
+
+### Known limits (unchanged, honestly)
+- There is no solid loft. GSD's multi-sections surface exists (B30 only, see
+  0.3.6) and exposes no end-tangency condition through automation, so a part
+  whose main feature is "three sections held tangent at both ends" cannot be
+  rebuilt faithfully; blend and two-section lofts are the available approximations.
+- `catia_run_plan` cannot interpolate one step's `list_edges` result into the
+  next step's arguments. With fingerprinted edge references a plan can now carry
+  the fillets directly, which covers the reported case, but there is no general
+  `$ref` expression language.
+
 ## [0.3.6] — 2026-10-23 · the pocket gets its flip back
 
 The 0.3.5 acceptance report found one real regression (the volume gate had made

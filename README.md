@@ -83,6 +83,34 @@ through `AddNewShaftFromRef` + `SetProfileElement` + `RevoluteAxis` with
 
 Details, measurements and caveats: **[`FORK.md`](FORK.md)** (Chinese).
 
+### Fillets on a real part: the edges move
+
+`Edge.N` is an enumeration position, not an identity — every feature that
+changes the topology renumbers it. A part with 17 fillets therefore used to need
+"fillet one, re-list all 67 edges, fillet the next": 7 listings of ~50 000
+characters and 34 calls.
+
+`catia_list_edges` now hands out a **fingerprint** instead, built from the faces
+that bound the edge and its length, and `catia_fillet` / `catia_chamfer` resolve
+it when the call runs:
+
+```jsonc
+{"tool": "catia_fillet", "args": {"radius": 2.54, "edge_names": [
+  "L39.8982|Pad.6;1|Pad.6;0",        // paste back what the listing printed
+  {"length_mm": 17.6112, "faces": ["Pad.6;2", "Sketch.7;2"]}
+]}}
+```
+
+Faces decide the match and the length only breaks ties, because a neighbouring
+fillet legitimately shortens an edge (measured: 17.6112 → 9.8429 mm while the
+bounding faces stayed the same). The listing also filters (`min_length`,
+`max_length`, `faces`) and pages (`offset`, `limit`), and `include_nls: false`
+keeps the reply small.
+
+Two related defaults: `propagation` defaults to `none`, so one picked edge is one
+fillet instead of its whole tangent chain, and a batch whose rebuild fails is
+retried one edge at a time rather than lost.
+
 ---
 
 ## Requirements

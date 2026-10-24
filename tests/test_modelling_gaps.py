@@ -391,9 +391,10 @@ def test_edge_and_face_indices_come_from_the_body_not_the_last_feature():
     """
     import inspect
 
-    for func in (PartDesignTools._list_edges, PartDesignTools._list_faces):
+    for func in (PartDesignTools._edge_table, PartDesignTools._list_faces):
         source = inspect.getsource(func)
-        assert "_topology_cells" in source
+        assert ("_topology_cells" in source or "topology_cells(self.conn" in source
+                or "topology_cells(self.conn, body" in source)
         assert "last_shape" not in source
 
     # ... and both the listing and the reference resolution go through the one

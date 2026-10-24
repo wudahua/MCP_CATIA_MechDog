@@ -12,6 +12,8 @@ from typing import Any
 
 from catia_mcp.connection import CATIAConnection
 from catia_mcp.topo_search import (
+    edge_fingerprint,
+    face_keys,
     nls_features,
     nls_of,
     search_topology,
@@ -86,7 +88,11 @@ class PartDesignTools:
                             "type": "boolean",
                             "description": (
                                 "Cut through the whole solid (CATIA 'up to last'), "
-                                "whatever its thickness. Ignored if depth is given."
+                                "whatever its thickness. Ignored if depth is given. "
+                                "Combine with direction='both' to reach through from "
+                                "a mid-plane sketch: that is built as two up-to-last "
+                                "cuts, because one 'through all' only goes one way "
+                                "(measured 2026-10-23: half the expected volume)."
                             ),
                             "default": False,
                         },
@@ -193,8 +199,12 @@ class PartDesignTools:
                     "Add a fillet (rounded edge) to one or more edges of the current solid. "
                     "Specify the radius and the edge names or feature to fillet. "
                     "Pass 'edge_names' to fillet several edges in one call: each edge "
-                    "becomes its own feature, so one bad edge does not lose the rest - "
-                    "the reply reports which ones took and why the others did not."
+                    "becomes its own feature, and if the single batch rebuild fails "
+                    "they are retried one at a time - the reply reports which ones "
+                    "took and why the others did not. Prefer the 'fingerprint' from "
+                    "catia_list_edges ('L17.6112|Pad.6;2|Sketch.7;2') over 'Edge.N': "
+                    "the index is renumbered by every feature, the fingerprint is "
+                    "re-resolved when the call runs."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -204,34 +214,33 @@ class PartDesignTools:
                             "description": "Fillet radius in mm",
                         },
                         "edge_name": {
-                            "type": "string",
+                            "anyOf": [{"type": "string"}, {"type": "object"}],
                             "description": (
-                                "Indexed edge to fillet ('Edge.N' from "
-                                "catia_list_edges). Omit to fillet all edges "
-                                "of the last feature."
+                                "'Edge.N' or a fingerprint from catia_list_edges, or "
+                                "{\"length_mm\": 17.6112, \"faces\": [\"Pad.6;2\"]}. "
+                                "Omit to fillet all edges of the last feature."
                             ),
                         },
                         "edge_names": {
                             "type": "array",
-                            "items": {"type": "string"},
+                            "items": {"anyOf": [{"type": "string"}, {"type": "object"}]},
                             "description": (
-                                "Several edges at once, e.g. ['Edge.4','Edge.7']. "
-                                "Takes precedence over edge_name."
+                                "Several edges at once, e.g. ['Edge.4','Edge.7'] or a "
+                                "list of fingerprints. Takes precedence over edge_name."
                             ),
                         },
                         "propagation": {
                             "type": "string",
                             "description": (
-                                "'tangency' (default, CATIA's own default) runs the "
-                                "fillet along every edge tangent-continuous with the "
-                                "picked one - on a smooth chain that can be the whole "
-                                "boundary, not the one edge you asked for. 'none' "
-                                "fillets exactly the edges given. Use 'none' when a "
-                                "spec says 'fillet these 4 edges' and the surface they "
-                                "belong to continues smoothly into its neighbours."
+                                "'none' (default since 0.3.7) fillets exactly the edges "
+                                "given. 'tangency' is CATIA's own default and runs the "
+                                "fillet along every tangent-continuous edge - on a "
+                                "smooth chain that is the whole boundary, not the edge "
+                                "you asked for. It is still right when the spec really "
+                                "means 'round this whole lip'."
                             ),
                             "enum": ["tangency", "none"],
-                            "default": "tangency",
+                            "default": "none",
                         },
                     },
                     "required": ["radius"],
@@ -253,13 +262,13 @@ class PartDesignTools:
                             "default": 45,
                         },
                         "edge_name": {
-                            "type": "string",
-                            "description": "Indexed edge to chamfer ('Edge.N' from catia_list_edges). Omit to chamfer all edges of the last feature.",
+                            "anyOf": [{"type": "string"}, {"type": "object"}],
+                            "description": "Edge to chamfer: 'Edge.N' or a fingerprint from catia_list_edges. Omit to chamfer all edges of the last feature.",
                         },
                         "edge_names": {
                             "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Several edges at once, e.g. ['Edge.3','Edge.9']. Takes precedence over edge_name.",
+                            "items": {"anyOf": [{"type": "string"}, {"type": "object"}]},
+                            "description": "Several edges at once, e.g. ['Edge.3','Edge.9'] or a list of fingerprints. Takes precedence over edge_name.",
                         },
                     },
                     "required": ["length"],
@@ -712,13 +721,38 @@ class PartDesignTools:
             {
                 "name": "catia_list_edges",
                 "description": (
-                    "List the edges of the final solid shape as indexed names "
-                    "(Edge.N). These indices feed catia_measure_distance; for "
-                    "fillet/chamfer targeting see each tool's own contract."
+                    "List the edges of the final solid shape with three handles: "
+                    "'Edge.N' (an enumeration position - it is renumbered by every "
+                    "feature that changes the topology), the length, and a "
+                    "'fingerprint' such as 'L17.6112|Pad.6;2|Sketch.7;2' built from "
+                    "the faces that bound the edge. Pass the fingerprint back to "
+                    "catia_fillet / catia_chamfer and the reference is re-resolved "
+                    "at call time, which is what makes a multi-fillet script "
+                    "survive its own edits. Filter by length or by bounding face "
+                    "and page the result: a 67-edge part otherwise returns tens of "
+                    "thousands of characters of NLS text."
                 ),
                 "inputSchema": {
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "min_length": {"type": "number",
+                                       "description": "Only edges at least this long (mm)"},
+                        "max_length": {"type": "number",
+                                       "description": "Only edges at most this long (mm)"},
+                        "faces": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": ("Only edges bounded by all of these, e.g. "
+                                            "['Pad.6;2'] or ['Face.3','Face.7']. Face "
+                                            "keys come from 'bounded_by'."),
+                        },
+                        "offset": {"type": "integer", "default": 0,
+                                   "description": "Skip this many matches"},
+                        "limit": {"type": "integer", "default": 0,
+                                  "description": "Return at most this many (0 = all)"},
+                        "include_nls": {"type": "boolean", "default": True,
+                                        "description": "Include each edge's NLS path"},
+                    },
                 },
             },
             {
@@ -793,7 +827,11 @@ class PartDesignTools:
             case "catia_list_faces":
                 return self._list_faces(arguments.get("body_name"))
             case "catia_list_edges":
-                return self._list_edges()
+                return self._list_edges(
+                    arguments.get("min_length"), arguments.get("max_length"),
+                    arguments.get("faces"), int(arguments.get("offset", 0) or 0),
+                    int(arguments.get("limit", 0) or 0),
+                    bool(arguments.get("include_nls", True)))
             case _:
                 raise ValueError(f"Unknown part design tool: {tool_name}")
 
@@ -912,6 +950,17 @@ class PartDesignTools:
         # CATIA. This bit the drone motor disc: a 31.75 mm disc became 63.5 mm,
         # and the blind hole then fell entirely inside the material and was
         # rejected as an enclosed void.
+        # Measured BEFORE the factory call: the moment a feature exists but has
+        # not been updated, the body's measurable can fail, which left `before`
+        # as None and the failure message then died formatting it ("unsupported
+        # format string passed to NoneType") instead of naming the open profile.
+        before, volume_note = self._volume_probe(part, body)
+        if before is None and self._body_is_empty(body):
+            # The very first pad: an empty body has volume 0 by definition, and
+            # its measurable cannot answer. Reporting that as "unverified" would
+            # make every new part look doubtful.
+            before, volume_note = 0.0, None
+
         pad = sf.AddNewPad(sketch, height / 2.0 if symmetric else height)
 
         if symmetric:
@@ -919,7 +968,6 @@ class PartDesignTools:
         elif direction == "reverse":
             pad.DirectionOrientation = 1  # catReverse
 
-        before = self._body_volume_mm3(part, body)
         update_error = None
         try:
             part.UpdateObject(pad)
@@ -931,18 +979,30 @@ class PartDesignTools:
             # This is the case that used to poison the whole part - a pad on an
             # open profile left '凸台.N' behind and every later update failed.
             gone = self._remove_feature(part, pad)
+            stayed = (f"Volume stayed {before:.1f} mm3." if before is not None
+                      else f"The volume could not be measured ({volume_note}).")
             raise RuntimeError(
                 "CATIA built no material for this pad, so it was rolled back"
                 + ("" if gone else " (the dead feature could NOT be deleted - "
                                     "close the document without saving)")
-                + f". Volume stayed {before:.1f} mm3. A pad needs a CLOSED "
-                "profile on the sketch; an open polyline (or an arc chain with "
-                "a gap) updates to an empty feature"
+                + f" {stayed} A pad needs a CLOSED profile on the sketch; an open "
+                "polyline (or an arc chain with a gap) updates to an empty feature. "
+                "catia_close_sketch reports the two endpoints and the gap when it "
+                "can see one - a 0.0035 mm gap is enough to land here."
                 + (f". Original error: {update_error}" if update_error else ".")
             )
         self.conn.refresh_display()
         span = "total %.3f mm, %0.3f each side" % (height, height / 2.0) if symmetric \
             else "%.3f mm" % height
+        if took is None:
+            # No volume, no verdict - same rule as pocket and hole.
+            return (
+                f"UNVERIFIED: pad '{pad.Name}' was created: {span} ({direction}). "
+                f"The solid growth could not be measured ({volume_note})"
+                + (f"; CATIA also raised during the update: {update_error}"
+                   if update_error is not None else "")
+                + ", so this is reported on CATIA's return alone."
+            )
         note = ""
         if update_error is not None:
             note = (" (CATIA raised during the update, but the solid did grow "
@@ -982,6 +1042,14 @@ class PartDesignTools:
     def _body_volume_mm3(self, part: Any, body: Any) -> float | None:
         """Measure the body's solid volume in mm3, or None if unavailable."""
         return self._volume_probe(part, body)[0]
+
+    @staticmethod
+    def _body_is_empty(body: Any) -> bool:
+        """True when the body has no solid yet - so its volume is 0, not unknown."""
+        try:
+            return body.Shapes.Count == 0
+        except Exception:  # noqa: BLE001 - unresolved counts as "not known to be empty"
+            return False
 
     def _pocket(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
@@ -1069,9 +1137,16 @@ class PartDesignTools:
         self.conn.refresh_display()
 
         mirror = None
-        if symmetric and not through_all:
-            # The other half of the mid-plane cut. Same sketch, opposite side.
-            mirror = sf.AddNewPocket(sketch, half)
+        if symmetric:
+            # The other half of the cut. Same sketch, opposite side.
+            mirror = sf.AddNewPocket(sketch, 0 if through_all else half)
+            if through_all:
+                # 'through all' reaches only one way from the sketch plane, so
+                # a "both directions" through-cut came back at exactly half the
+                # expected volume (measured 2026-10-23: Ø12.7 x 25.4 read
+                # 1608.8 mm3 instead of 3217.6). Two up-to-last cuts is what
+                # "through, both ways" means.
+                mirror.FirstLimit.LimitMode = 2
             mirror.DirectionOrientation = 0 if reverse else 1
             self._try_update(part, mirror)
             new_after = self._body_volume_mm3(part, body)
@@ -1130,7 +1205,7 @@ class PartDesignTools:
     def _pocket_extent(through_all: bool, depth: float, symmetric: bool) -> str:
         """Describe the cut in the caller's terms, not CATIA's."""
         if through_all:
-            return "through all"
+            return "through all, both directions" if symmetric else "through all"
         if symmetric:
             return "%.3f mm total, %.3f each side" % (depth, depth / 2.0)
         return f"{depth} mm deep"
@@ -1308,6 +1383,129 @@ class PartDesignTools:
             )
         return int(m.group(1))
 
+    # ── stable edge references ──────────────────────────────────────────
+    #
+    # ``Edge.N`` is an enumeration position, not an identity: it is renumbered
+    # by every feature that changes the topology. Reported 2026-10-23 with the
+    # numbers - the same edge went from Edge.30 to Edge.34 and from 17.6112 to
+    # 9.8429 mm long after one neighbouring fillet, and a script that reused
+    # the old index filleted a concave edge instead (volume went UP by 49.1
+    # mm3). The bounding faces (``Pad.6;2``, ``Sketch.7;2``) and the edge's own
+    # length do not drift, so those are what the tools take now.
+
+    def _edge_table(self, body: Any) -> list[dict[str, Any]]:
+        """Every solid edge, with the handles that survive a rebuild."""
+        part = self.conn.get_active_part()
+        spa = self._topo_measure(part)
+        cells = topology_cells(self.conn, body, "Edge")
+        table: list[dict[str, Any]] = []
+        for index, cell in enumerate(cells, start=1):
+            nls = nls_of(cell)
+            faces = face_keys(nls)
+            length = self._cell_measure(spa, cell, "Length")
+            table.append({
+                "index": index,
+                "name": f"Edge.{index}",
+                "cell": cell,
+                "nls": nls,
+                "bounded_by": faces,
+                "length": length,
+                "fingerprint": edge_fingerprint(faces, length),
+            })
+        return table
+
+    @staticmethod
+    def _parse_edge_spec(spec: Any) -> tuple[int | None, list[str], float | None]:
+        """``Edge.N`` | ``L17.6112|Pad.6;2|Sketch.7;2`` | dict -> (index, faces, length)."""
+        if isinstance(spec, int):
+            return spec, [], None
+        if isinstance(spec, dict):
+            index = spec.get("index")
+            faces = spec.get("faces") or spec.get("bounded_by") or []
+            if isinstance(faces, str):
+                faces = [f.strip() for f in faces.split("|") if f.strip()]
+            length = spec.get("length_mm", spec.get("length"))
+            return (int(index) if index is not None else None), list(faces), (
+                float(length) if length is not None else None)
+        text = str(spec).strip()
+        m = re.fullmatch(r"[Ee]dge\.(\d+)", text)
+        if m:
+            return int(m.group(1)), [], None
+        stamp, _, rest = text.partition("|")
+        m = re.fullmatch(r"[Ll](-?\d+(?:\.\d+)?|\?)", stamp.strip())
+        if m:
+            length = None if m.group(1) == "?" else float(m.group(1))
+            faces = [f for f in rest.split("|") if f.strip()]
+            return None, faces, length
+        raise ValueError(
+            f"Edge reference '{spec}' is neither 'Edge.N' nor a fingerprint from "
+            "catia_list_edges ('L17.6112|Pad.6;2|Sketch.7;2'), nor an object "
+            "like {\"length_mm\": 17.6112, \"faces\": [\"Pad.6;2\"]}."
+        )
+
+    def _resolve_edge_specs(self, body: Any, specs: list[Any]
+                            ) -> tuple[list[str], list[Any]]:
+        """Resolve edge references against the body as it is *now*.
+
+        Returns ``(labels, references)``. The labels keep both handles
+        (``Edge.30 (L17.6112|Pad.6;2|...)``) so the caller can see what was
+        matched. Faces decide the match; the length only breaks a tie, because
+        a neighbouring fillet legitimately shortens an edge.
+        """
+        table = self._edge_table(body)
+        if not table:
+            raise RuntimeError("The active body has no edges to fillet yet.")
+        labels: list[str] = []
+        refs: list[Any] = []
+        for spec in specs:
+            index, faces, length = self._parse_edge_spec(spec)
+            if index is not None:
+                if not 1 <= index <= len(table):
+                    raise RuntimeError(
+                        f"Edge.{index} is out of range: the final shape exposes "
+                        f"{len(table)} edge(s).")
+                entry = table[index - 1]
+            else:
+                entry = self._match_edge(table, faces, length, spec)
+            labels.append(f"{entry['name']} ({entry['fingerprint']})")
+            refs.append(entry["cell"].Reference)
+        return labels, refs
+
+    @classmethod
+    def _match_edge(cls, table: list[dict[str, Any]], faces: list[str],
+                    length: float | None, spec: Any) -> dict[str, Any]:
+        wanted = set(faces)
+        candidates = [e for e in table if wanted and set(e["bounded_by"]) == wanted]
+        if not candidates and wanted:
+            candidates = [e for e in table if wanted <= set(e["bounded_by"])]
+        if not candidates and not wanted:
+            candidates = list(table)
+        if length is not None and candidates:
+            close = [e for e in candidates if e["length"] is not None
+                     and abs(e["length"] - length) <= 0.01]
+            if close:
+                candidates = close
+            elif len(candidates) > 1:
+                candidates = sorted(
+                    candidates,
+                    key=lambda e: abs((e["length"] or 0.0) - length))[:1]
+        if len(candidates) == 1:
+            return candidates[0]
+        if not candidates:
+            near = sorted(table, key=lambda e: abs((e["length"] or 0.0) - (length or 0.0)))[:5]
+            raise RuntimeError(
+                f"No edge matches '{spec}'. The body's edges are (nearest first): "
+                + "; ".join(f"{e['fingerprint']}" for e in near)
+                + ". Fingerprints come from catia_list_edges and are re-resolved "
+                "on every call, so they survive renumbering - an Edge.N does not."
+            )
+        raise RuntimeError(
+            f"'{spec}' matches {len(candidates)} edges: "
+            + "; ".join(f"{e['name']} len={e['length']} {e['fingerprint']}"
+                        for e in candidates[:6])
+            + ". Add length_mm, or pass one fingerprint per edge."
+        )
+
     def _fillet(self, args: dict[str, Any]) -> str:
         names = args.get("edge_names") or []
         if isinstance(names, str):
@@ -1315,16 +1513,24 @@ class PartDesignTools:
         if len(names) > 1 or (names and not args.get("edge_name")):
             return self._fillet_many(args["radius"], list(names),
                                      self._propagation(args))
-        return self._fillet_one(args["radius"], args.get("edge_name"),
+        target = args.get("edge_name")
+        return self._fillet_one(args["radius"], target,
                                 self._propagation(args))
 
     @staticmethod
     def _propagation(args: dict[str, Any]) -> int:
-        """CATIA edge-propagation enum: 0 = only the given edges, 1 = tangency."""
-        return 0 if args.get("propagation") == "none" else 1
+        """CATIA edge-propagation enum: 0 = only the given edges, 1 = tangency.
 
-    def _fillet_many(self, radius: float, names: list[str],
-                     propagation: int = 1) -> str:
+        The default is 0 (off) since 0.3.7: with tangency on, selecting one edge
+        of a tangent chain fillets the whole chain, which is a silent way to cut
+        geometry nobody asked for - reported 2026-10-23 from a part where a
+        10-edge batch reached a non-target edge and broke the part's symmetry.
+        Pass ``"propagation": "tangency"`` to get the old behaviour.
+        """
+        return 1 if args.get("propagation") == "tangency" else 0
+
+    def _fillet_many(self, radius: float, specs: list[Any],
+                     propagation: int = 0) -> str:
         """One feature per edge, built as a batch and rebuilt once.
 
         Two measured facts drive the shape of this method.
@@ -1344,34 +1550,40 @@ class PartDesignTools:
            remaining factory call failed with a bare "method failed", because
            the first update had rebuilt the topology the other 11 referenced.
            This is also how the CATIA UI works - select many edges, one feature.
+           When that single rebuild fails, the batch falls back to one edge at a
+           time (``_apply_fillets``), because separate updates are what actually
+           works for adjacent edges - measured by the reporter: three edges of
+           one face fail as a batch and succeed one by one.
         """
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
         body = self._prepare_body(part)
         sf = part.ShapeFactory
 
-        indices = [self._topo_index(name, "Edge") for name in names]
-        # One search, all references, selection kept alive - a reference dies
-        # with the selection that produced it.
-        refs = [r.reference for r in
-                topology_references(self.conn, body, "Edge", indices)]
+        names, refs = self._resolve_edge_specs(body, specs)
 
         def add(ref: Any) -> Any:
             return sf.AddNewSolidEdgeFilletWithConstantRadius(ref, propagation, radius)
 
         try:
-            return self._apply_fillets(radius, names, refs, add, part=part)
+            return self._apply_fillets(
+                radius, names, refs, add, part=part,
+                resolve=lambda: self._resolve_edge_specs(body, specs))
         finally:
             self._clear_selection()
             self.conn.refresh_display()
 
     def _apply_fillets(self, radius: float, names: list[str], refs: list[Any],
                        add: Any = None, part: Any = None,
-                       label: str = "Fillet R") -> str:
+                       label: str = "Fillet R",
+                       resolve: Any = None) -> str:
         """Create one fillet per (name, ref), then rebuild once.
 
         ``add`` is injectable for tests; it may return the new feature (in which
-        case a failed rebuild rolls it back) or None.
+        case a failed rebuild rolls it back) or None. ``resolve`` re-reads the
+        edge references from scratch and is what makes the sequential retry
+        possible: deleting the batch rebuilds the topology, so the references
+        that were resolved for it are dead by the time the retry needs them.
         """
         done, failed, created = [], [], []
         for name, ref in zip(names, refs):
@@ -1393,13 +1605,37 @@ class PartDesignTools:
         shown = f"{label}{radius}" if label.endswith("R") else f"{label} {radius}"
         head = f"{shown}: {len(done)}/{len(names)} edge(s) done"
         if rebuild_error:
-            # The features exist but the body no longer rebuilds: that is a
-            # failure, not a partial success, so say so and undo it.
+            # One edge that cannot rebuild used to lose the whole batch: "0/3
+            # done" for three edges of which two were fine (reported 2026-10-23).
+            # Separate updates are what actually works for adjacent edges, so
+            # fall back to one edge at a time - the batch was only ever an
+            # optimisation.
             self._remove_created(created)
-            head = (f"{shown}: 0/{len(names)} edge(s) done - CATIA "
-                    f"created {len(done)} feature(s) but the body would not "
-                    f"rebuild ({rebuild_error}). They were removed.")
-            done, failed = [], failed or [(n, "batch rebuild failed") for n in names]
+            done, failed, created = [], [], []
+            fresh_names, fresh_refs = (resolve() if resolve is not None
+                                       else (names, refs))
+            for name, ref in zip(fresh_names, fresh_refs):
+                try:
+                    feature = add(ref)
+                except Exception as error:    # noqa: BLE001 - reported per edge
+                    failed.append((name, str(error).splitlines()[0][:120]))
+                    continue
+                try:
+                    if feature is not None:
+                        part.UpdateObject(feature)
+                    else:
+                        part.Update()
+                except Exception as error:    # noqa: BLE001 - roll this one back
+                    if feature is not None:
+                        self._remove_created([feature])
+                    failed.append((name, "rebuild failed: "
+                                        + str(error).splitlines()[0][:110]))
+                    continue
+                done.append(name)
+                if feature is not None:
+                    created.append(feature)
+            head = (f"{shown}: {len(done)}/{len(names)} edge(s) done after a "
+                    f"one-at-a-time retry (the batch rebuild failed: {rebuild_error})")
         if done:
             head += f" ({', '.join(done)})"
         if failed:
@@ -1411,16 +1647,16 @@ class PartDesignTools:
             )
         return head
 
-    def _fillet_one(self, radius: float, edge_name: str | None,
-                    propagation: int = 1) -> str:
+    def _fillet_one(self, radius: float, edge_name: Any,
+                    propagation: int = 0) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
-        self._prepare_body(part)
+        body = self._prepare_body(part)
         sf = part.ShapeFactory
 
         if edge_name:
-            target = self._topo_reference("Edge", self._topo_index(edge_name, "Edge"))
-            scope = edge_name
+            labels, refs = self._resolve_edge_specs(body, [edge_name])
+            target, scope = refs[0], labels[0]
         else:
             # Whole-feature fallback: a Reference to the feature fillets its
             # edges with tangency propagation.
@@ -1451,16 +1687,14 @@ class PartDesignTools:
             return self._chamfer_many(args["length"], args.get("angle", 45), list(names))
         return self._chamfer_one(args["length"], args.get("angle", 45), args.get("edge_name"))
 
-    def _chamfer_many(self, length: float, angle: float, names: list[str]) -> str:
+    def _chamfer_many(self, length: float, angle: float, specs: list[Any]) -> str:
         """Same batching rule as ``_fillet_many``: resolve all, build all, rebuild once."""
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
         body = self._prepare_body(part)
         sf = part.ShapeFactory
 
-        indices = [self._topo_index(name, "Edge") for name in names]
-        refs = [r.reference for r in
-                topology_references(self.conn, body, "Edge", indices)]
+        names, refs = self._resolve_edge_specs(body, specs)
 
         def add(ref: Any) -> Any:
             return sf.AddNewChamfer(
@@ -1474,7 +1708,8 @@ class PartDesignTools:
 
         try:
             return self._apply_fillets(length, names, refs, add, part=part,
-                                       label="Chamfer")
+                                       label="Chamfer",
+                                       resolve=lambda: self._resolve_edge_specs(body, specs))
         finally:
             self._clear_selection()
             self.conn.refresh_display()
@@ -1494,15 +1729,15 @@ class PartDesignTools:
         except Exception:
             pass
 
-    def _chamfer_one(self, length: float, angle: float, edge_name: str | None) -> str:
+    def _chamfer_one(self, length: float, angle: float, edge_name: Any) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
-        self._prepare_body(part)
+        body = self._prepare_body(part)
         sf = part.ShapeFactory
 
         if edge_name:
-            target = self._topo_reference("Edge", self._topo_index(edge_name, "Edge"))
-            scope = edge_name
+            labels, refs = self._resolve_edge_specs(body, [edge_name])
+            target, scope = refs[0], labels[0]
         else:
             target = part.CreateReferenceFromObject(self._get_last_shape())
             scope = "all edges of the last feature"
@@ -2051,9 +2286,11 @@ class PartDesignTools:
                 )
             target = str(shapes.Item(index).Name)
         feature = None
+        kind = "feature"
         bodies = part.Bodies
         for b in range(1, bodies.Count + 1):
-            shapes = bodies.Item(b).Shapes
+            body = bodies.Item(b)
+            shapes = body.Shapes
             for i in range(1, shapes.Count + 1):
                 shape = shapes.Item(i)
                 if str(shape.Name) == target:
@@ -2061,11 +2298,28 @@ class PartDesignTools:
                     break
             if feature is not None:
                 break
+            # Sketches live in body.Sketches, not in body.Shapes: the tool used
+            # to answer "No feature named '草图.3'" for a sketch sitting right
+            # there in the tree (reported 2026-10-23), so a wrong profile could
+            # never be removed - only worked around by rebuilding the part.
+            sketches = body.Sketches
+            for i in range(1, sketches.Count + 1):
+                sketch = sketches.Item(i)
+                if str(sketch.Name) == target:
+                    feature, kind = sketch, "sketch"
+                    break
+            if feature is not None:
+                break
         if feature is None:
             raise RuntimeError(
-                f"No feature named '{target}' in any body of the active part. "
-                "Use catia_list_features to see names."
+                f"No feature or sketch named '{target}' in any body of the active "
+                "part. Use catia_list_features to see feature names; sketches are "
+                "reported by catia_list_sketches."
             )
+        # Deleting a solid feature takes its support sketch with it (CATIA
+        # cascades), and the old reply said nothing about it - the reporter lost
+        # 草图.3 with 凹槽.1 and only found out on the next pocket call.
+        before = self._sketch_names()
         sel = self.conn.hso
         try:
             sel.Clear()
@@ -2080,13 +2334,37 @@ class PartDesignTools:
             part.Update()
         except Exception as e:
             self.conn.refresh_display()
+            lost = [n for n in before
+                    if n not in self._sketch_names() and n != target]
             return (
                 f"Feature '{target}' deleted, but the part update failed "
                 f"afterwards ({e}): features that depended on it are now "
                 "in error. Fix or delete them too."
+                + (f" Sketches removed with it: {', '.join(lost)}." if lost else "")
             )
         self.conn.refresh_display()
-        return f"Feature '{target}' deleted."
+        # A sketch deleted on purpose is not a casualty of the delete.
+        lost = [n for n in before
+                if n not in self._sketch_names() and n != target]
+        message = f"Deleted {kind} '{target}'."
+        if lost:
+            message += (f" CATIA also removed {len(lost)} sketch(es) that belonged "
+                        f"to it: {', '.join(lost)}. Re-create the profile before "
+                        "cutting with it again.")
+        return message
+
+    def _sketch_names(self) -> list[str]:
+        """Every sketch name in the active part, for before/after comparisons."""
+        names: list[str] = []
+        try:
+            bodies = self.conn.get_active_part().Bodies
+            for b in range(1, bodies.Count + 1):
+                sketches = bodies.Item(b).Sketches
+                for i in range(1, sketches.Count + 1):
+                    names.append(str(sketches.Item(i).Name))
+        except Exception:  # noqa: BLE001 - diagnostics only
+            pass
+        return names
 
     # `Shape.Type` is not usable on this API: the late-bound object either has no
     # Type attribute at all ("unknown") or exposes a raw CATIA id (a hole came
@@ -2557,6 +2835,7 @@ class PartDesignTools:
         spa = self._topo_measure(part)
 
         faces = []
+        raw_total = None
         try:
             cells, count = self._topology_cells("Face", body)
             for i, cell in enumerate(cells, start=1):
@@ -2569,6 +2848,7 @@ class PartDesignTools:
                 if nls:
                     entry["nls"] = nls
                     entry["created_by"] = nls_features(nls)
+                    entry["bounded_by"] = face_keys(nls)
                 area = self._cell_measure(spa, cell, "Area")
                 if area is None:
                     entry["area_unknown"] = True
@@ -2579,50 +2859,128 @@ class PartDesignTools:
             return f"Could not enumerate faces: {e}"
         finally:
             self._clear_selection()
+        raw_total = self._raw_topology_count(body, "Face")
 
         if not faces:
             return "No faces found on the final shape"
-        return json.dumps(faces, indent=2)
+        payload: dict[str, Any] = {
+            "count": len(faces),
+            "raw_total": raw_total,
+            "faces": faces,
+        }
+        # Publising both numbers is how a shortfall stops being invisible: the
+        # report of 2026-10-23 counted 14 faces on a solid and got 10 here, and
+        # nothing in the old payload made the difference visible. total_raw is
+        # every cell CATIA's search returns; the gap is construction geometry
+        # (datum-plane borders, sketch wires) that has no area.
+        if raw_total is not None and raw_total != len(faces):
+            payload["note"] = (
+                f"{raw_total - len(faces)} of {raw_total} searched cell(s) are "
+                "construction geometry (datum planes, sketch wires) and are not "
+                "part of the solid. Neither count can be independently wrong: "
+                "if these do not add up to what the solid really has, report "
+                "both numbers with the part."
+            )
+        return json.dumps(payload, indent=2)
 
-    def _list_edges(self) -> str:
+    def _raw_topology_count(self, body: Any, kind: str) -> int | None:
+        """Cells CATIA's search returns, construction geometry included."""
+        sel = self.conn.hso
+        try:
+            sel.Clear()
+            sel.Add(body)
+            search_topology(sel, kind)
+            return sel.Count
+        except Exception:  # noqa: BLE001 - reported as null
+            return None
+        finally:
+            try:
+                sel.Clear()
+            except Exception:
+                pass
+
+    def _list_edges(self, min_length: float | None = None,
+                    max_length: float | None = None,
+                    faces: list[str] | None = None,
+                    offset: int = 0, limit: int = 0,
+                    include_nls: bool = True) -> str:
+        """List solid edges, filterable and pageable, with a stable fingerprint.
+
+        The fingerprint is the point: ``Edge.N`` moves when the topology changes,
+        the pair of bounding faces plus the length does not. Feed it back to
+        catia_fillet / catia_chamfer instead of an index and the "fillet one,
+        re-list everything, fillet the next" loop disappears.
+
+        A part with 67 edges produced ~50 000 characters of NLS text per call
+        (reported 2026-10-23), so ``include_nls=False`` and the paging arguments
+        exist for exactly that case.
+        """
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
-        self._prepare_body(part)
-        spa = self._topo_measure(part)
+        body = self._prepare_body(part)
 
-        edges = []
         try:
-            cells, count = self._topology_cells("Edge")
-            for i, cell in enumerate(cells, start=1):
-                # Canonical indexed name accepted by catia_measure_distance,
-                # catia_fillet and catia_chamfer. Raw HSO names are long
-                # and unusable in searches.
-                entry: dict[str, Any] = {"index": i, "name": f"Edge.{i}"}
-                try:
-                    entry["type"] = str(cell.Type)
-                except Exception:
-                    pass
-                # Which feature produced this edge: the only reliable handle
-                # when several edges share a length (four corners of a square,
-                # two circles on one disc, ...).
-                nls = nls_of(cell)
-                if nls:
-                    entry["nls"] = nls
-                    entry["created_by"] = nls_features(nls)
-                length = self._cell_measure(spa, cell, "Length")
-                if length is None:
-                    entry["length_unknown"] = True
-                else:
-                    entry["length_mm"] = round(length, 4)
-                edges.append(entry)
+            table = self._edge_table(body)
         except Exception as e:
             return f"Could not enumerate edges: {e}. Use CATIA selection to identify edge names."
         finally:
             self._clear_selection()
 
+        total = len(table)
+        raw_total = self._raw_topology_count(body, "Edge")
+        wanted = [f for f in (faces or []) if f]
+        rows = table
+        if wanted:
+            rows = [e for e in rows if set(wanted) <= set(e["bounded_by"])]
+        if min_length is not None:
+            rows = [e for e in rows if e["length"] is None or e["length"] >= min_length]
+        if max_length is not None:
+            rows = [e for e in rows if e["length"] is None or e["length"] <= max_length]
+        matched = len(rows)
+        if offset:
+            rows = rows[offset:]
+        if limit and limit > 0:
+            rows = rows[:limit]
+
+        edges = []
+        for entry in rows:
+            item: dict[str, Any] = {
+                "index": entry["index"],
+                "name": entry["name"],
+                "fingerprint": entry["fingerprint"],
+                "bounded_by": entry["bounded_by"],
+            }
+            try:
+                item["type"] = str(entry["cell"].Type)
+            except Exception:
+                pass
+            if entry["length"] is None:
+                # SPA hands back a placeholder rather than raising for topology
+                # it cannot resolve, so "unknown" has to be said out loud.
+                item["length_unknown"] = True
+            else:
+                item["length_mm"] = round(entry["length"], 4)
+            if include_nls and entry.get("nls"):
+                item["nls"] = entry["nls"]
+                item["created_by"] = nls_features(entry["nls"])
+            edges.append(item)
+
         if not edges:
-            return "No edges found on the final shape"
-        return json.dumps(edges, indent=2)
-        if not edges:
-            return "No edges found on the last feature"
-        return json.dumps(edges, indent=2)
+            return json.dumps({
+                "count": 0, "total": total,
+                "hint": "No edge matched the filter.",
+                "edges": [],
+            }, indent=2)
+        return json.dumps({
+            "count": len(edges),
+            "matched": matched,
+            "total": total,
+            "raw_total": raw_total,
+            "offset": offset,
+            # The fingerprint survives renumbering; 'name' does not. Say it in
+            # the payload, because that is where the caller will look.
+            "note": ("Pass 'fingerprint' (or {\"length_mm\":..., \"faces\":[...]}) to "
+                     "catia_fillet / catia_chamfer instead of 'name': Edge.N is "
+                     "renumbered by every feature that changes the topology."),
+            "edges": edges,
+        }, indent=2)

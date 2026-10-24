@@ -28,6 +28,9 @@ class SketcherTools:
         self.conn = connection
         self._active_sketch: Any | None = None
         self._active_factory: Any | None = None
+        # Endpoints of the profile as drawn, in sketch coordinates. Kept
+        # because the COM API will not give them back: see _draw_arc.
+        self._profile_ends: list[tuple[float, float]] = []
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         return [
@@ -380,6 +383,31 @@ class SketcherTools:
 
     _PLANE_LABELS = {"xy": "XY (front)", "yz": "YZ (right)", "zx": "ZX (top)"}
 
+    # Which global axis each sketch axis is. Measured on V5-6R2020 B30: on zx
+    # the H axis runs along global Z and V along X, so a profile drawn "x by z"
+    # comes out rotated 90 degrees - reported 2026-10-23 after a barrel built
+    # with x=63.42 / z=60.96 instead of x=60.96. Sketch axis names are not
+    # negotiable, but they are worth saying out loud in the reply.
+    _AXES = {
+        "xy": "H = X, V = Y, normal = Z",
+        "yz": "H = Y, V = Z, normal = X",
+        "zx": "H = Z, V = X, normal = Y",
+    }
+
+    @classmethod
+    def _axis_note(cls, plane: Any) -> str:
+        if isinstance(plane, str) and plane.lower() in cls._AXES:
+            return "H/V/normal: " + cls._AXES[plane.lower()]
+        if isinstance(plane, dict):
+            kind = str(plane.get("type", "")).lower()
+            if kind == "face":
+                return ("H/V/normal: the face's own frame, which automation cannot "
+                        "read back - prefer an offset datum plane")
+            base = str(plane.get("base", "")).lower()
+            if base in cls._AXES:
+                return "H/V/normal: " + cls._AXES[base]
+        return "H/V/normal: unknown for this support (see catia_sketch_get_geometry)"
+
     def _describe_plane(self, plane_key: str, offset: float | None) -> str:
         where = self._PLANE_LABELS.get(plane_key, plane_key)
         if offset is not None and abs(offset) > 1e-9:
@@ -477,8 +505,65 @@ class SketcherTools:
         # made" by index. Recording it here is what makes pad/pocket/shallow
         # features land on the intended profile in a multi-sketch part.
         self.conn.last_sketch = sketch
+        self._profile_ends = []
 
-        return f"Sketch '{sketch.Name}' created on {where}. Ready for geometry."
+        return (f"Sketch '{sketch.Name}' created on {where}. "
+                f"{self._axis_note(plane)}. Ready for geometry.")
+
+    # What counts as "the same endpoint" and what counts as a gap that will
+    # still break a pad. A 3.5 um gap did (reported 2026-10-23), so the second
+    # number is deliberately generous.
+    _END_TOL = 1e-4
+    _NEAR_TOL = 0.05
+
+    def _note_ends(self, *points: tuple[float, float]) -> None:
+        self._profile_ends.extend((float(x), float(y)) for x, y in points)
+
+    def _profile_warning(self) -> str:
+        """Name the near-miss endpoints that will make pad/pocket fail.
+
+        The gap itself is invisible in CATIA's error ("open polyline or an arc
+        chain with a gap"), and the coordinates cannot be read back afterwards,
+        so the warning is computed from the numbers the sketch tools were given.
+        Only near misses are reported: a genuinely open profile (a sweep guide,
+        say) is not a mistake and would otherwise generate noise on every close.
+        """
+        import math
+
+        ends = self._profile_ends
+        if len(ends) < 2:
+            return ""
+        used = [False] * len(ends)
+        loose: list[tuple[float, float]] = []
+        for i, (x, y) in enumerate(ends):
+            if used[i]:
+                continue
+            for j in range(i + 1, len(ends)):
+                if used[j]:
+                    continue
+                if math.hypot(x - ends[j][0], y - ends[j][1]) <= self._END_TOL:
+                    used[i] = used[j] = True
+                    break
+            else:
+                used[i] = True
+                loose.append((x, y))
+        best: tuple[float, tuple[float, float], tuple[float, float]] | None = None
+        for i in range(len(loose)):
+            for j in range(i + 1, len(loose)):
+                gap = math.hypot(loose[i][0] - loose[j][0], loose[i][1] - loose[j][1])
+                if best is None or gap < best[0]:
+                    best = (gap, loose[i], loose[j])
+        if best is None or best[0] > self._NEAR_TOL:
+            return ""
+        gap, a, b = best
+        return (
+            f" WARNING: the profile is not closed - ({a[0]:.4f}, {a[1]:.4f}) and "
+            f"({b[0]:.4f}, {b[1]:.4f}) are {gap:.4f} mm apart. A gap this small "
+            "still makes pad/pocket fail with 'open polyline or an arc chain with "
+            "a gap'; make the two coordinates identical. (Computed from the "
+            "coordinates passed to the sketch tools; CATIA's own points cannot be "
+            "read back through automation, so a constraint may have moved them.)"
+        )
 
     def _close_sketch(self) -> str:
         if self._active_sketch is None:
@@ -508,9 +593,11 @@ class SketcherTools:
             self._active_sketch = None
             self._active_factory = None
         self.conn.refresh_display()
+        warning = self._profile_warning()
+        self._profile_ends = []
         return (
             f"Sketch '{name}' closed. You can now apply Part Design features "
-            "(pad, pocket, user pattern on its points, etc.)."
+            "(pad, pocket, user pattern on its points, etc.)." + warning
         )
 
     def _draw_line(self, x1: float, y1: float, x2: float, y2: float,
@@ -520,6 +607,8 @@ class SketcherTools:
         line = factory.CreateLine(x1, y1, x2, y2)
         if construction:
             line.Construction = True
+        else:
+            self._note_ends((x1, y1), (x2, y2))
         kind = "Construction line" if construction else "Line"
         return f"{kind} created from ({x1}, {y1}) to ({x2}, {y2}) mm"
 
@@ -532,6 +621,9 @@ class SketcherTools:
         factory.CreateLine(x2, y1, x2, y2)  # right
         factory.CreateLine(x2, y2, x1, y2)  # top
         factory.CreateLine(x1, y2, x1, y1)  # left
+        for a, b in (((x1, y1), (x2, y1)), ((x2, y1), (x2, y2)),
+                     ((x2, y2), (x1, y2)), ((x1, y2), (x1, y1))):
+            self._note_ends(a, b)
 
         return (
             f"Rectangle created from ({x1}, {y1}) to ({x2}, {y2}) mm "
@@ -567,6 +659,15 @@ class SketcherTools:
         while end_rad <= start_rad:
             end_rad += 2 * math.pi
         factory.CreateCircle(cx, cy, radius, start_rad, end_rad)
+        # Remember the arc's own ends, computed from the numbers we were given.
+        # Automation cannot read a Point2D's coordinates back on this build
+        # (GetCoordinates needs a by-ref array it never fills), so this is the
+        # only place the exact endpoint survives - and it is the number that
+        # explains a pad failure caused by a 3.5 um gap.
+        self._note_ends(
+            (cx + radius * math.cos(start_rad), cy + radius * math.sin(start_rad)),
+            (cx + radius * math.cos(end_rad), cy + radius * math.sin(end_rad)),
+        )
         return (
             f"Arc created at ({cx}, {cy}), radius={radius} mm, "
             f"from {start_angle}° to {end_angle}°"

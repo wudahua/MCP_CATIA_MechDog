@@ -13,7 +13,7 @@ import tempfile
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
-from catia_mcp.topo_search import search_topology
+from catia_mcp.topo_search import is_construction, nls_of, search_topology
 
 
 def _stl_extent(path: str) -> tuple[list[list[float]], int]:
@@ -394,6 +394,22 @@ class MeasurementTools:
         measurable = spa.GetMeasurable(ref1)
         distance = measurable.GetMinimumDistance(ref2)
 
+        if abs(distance) < 1e-9:
+            # 0 is a legitimate answer for touching faces, and 0 is also what you
+            # get when both names resolve to the same element - which happens as
+            # soon as an Edge.N / Face.N index has been renumbered by a feature.
+            # Reported 2026-10-23 as "parallel faces always read 0.0000": the two
+            # parallel faces of a plain block measure 10.0000 mm here, so the
+            # number was not the bug, the stale index was.
+            return (
+                f"'{elem1_name}' and '{elem2_name}' are 0.0000 mm apart: they touch "
+                "or overlap, or both names resolved to the same element. If a gap "
+                "was expected, the names are stale - Face.N / Edge.N are "
+                "enumeration positions, renumbered by every feature that changes "
+                "the topology. Re-list with catia_list_faces / catia_list_edges and "
+                "retry. (Parallel non-adjacent faces do measure: 10.0000 mm on a "
+                "10 mm block.)"
+            )
         return f"Minimum distance between '{elem1_name}' and '{elem2_name}': {distance:.4f} mm"
 
     def _get_inertia(self, density: float | None = None) -> str:
@@ -477,8 +493,8 @@ class MeasurementTools:
                     "final shape; exact for planar-faced solids, curved faces may "
                     "extend beyond these bounds"
                     + (" (capped at 200)" if truncated else "")
-                    + (f"; {dropped} unbounded wireframe point(s) ignored "
-                       "(construction geometry drawn at 1e7 mm)" if dropped else ""),
+                    + (f"; {dropped} construction point(s) ignored (sketch wires "
+                       f"and wireframe ends at 1e7 mm are not the solid)" if dropped else ""),
                 )
             if method == "vertices":
                 raise RuntimeError(
@@ -506,11 +522,21 @@ class MeasurementTools:
         """Reference vertex coordinates, capped at 200 points.
 
         Returns ``(points, capped, total, dropped)`` where ``dropped`` counts the
-        unbounded wireframe points that were filtered out.
+        points that were filtered out - two kinds of them: unbounded wireframe
+        ends (1e7 mm) and construction geometry.
+
+        Construction vertices matter here, not just in the listings: a body's
+        vertex search also returns the vertices of every sketch wire, and a
+        profile whose drawn geometry runs past the solid (a construction line, a
+        helper arc) then stretches the bounding box well beyond the part.
+        Reported 2026-10-23: the envelope of a 60.96 x 81.20 x 63.34 part came
+        back too large and could not be used for acceptance. Filtering by
+        ``is_construction`` is the same rule the edge/face listings use.
         """
         sel = self.conn.hso
         refs = []
         total = 0
+        construction = 0
         try:
             sel.Clear()
             sel.Add(body)
@@ -518,19 +544,23 @@ class MeasurementTools:
             total = sel.Count
             count = min(total, 200)
             for i in range(1, count + 1):
-                refs.append(sel.Item(i).Reference)
+                cell = sel.Item(i)
+                if is_construction(nls_of(cell)):
+                    construction += 1
+                    continue
+                refs.append(cell.Reference)
         finally:
             try:
                 sel.Clear()
             except Exception:
                 pass
         if not refs:
-            return [], False, total, 0
+            return [], False, total, construction
         spa = self._spa_workbench()
         raw = [self._read_measurable_array(spa.GetMeasurable(ref), "GetPoint", 3)
                for ref in refs]
         points, dropped = self._bounded(raw)
-        return points, total > 200, total, dropped
+        return points, total > 200, total, dropped + construction
 
     @classmethod
     def _bounded(cls, points: list[list[float]]) -> tuple[list[list[float]], int]:

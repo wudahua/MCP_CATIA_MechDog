@@ -92,9 +92,11 @@ def test_single_fillet_still_takes_the_plain_edge_name():
         seen.append((name, propagation)) or "ok")
 
     tools._fillet({"radius": 2.0, "edge_name": "Edge.1"})
-    tools._fillet({"radius": 2.0, "edge_name": "Edge.1", "propagation": "none"})
+    tools._fillet({"radius": 2.0, "edge_name": "Edge.1", "propagation": "tangency"})
 
-    assert seen == [("Edge.1", 1), ("Edge.1", 0)]
+    # 0.3.7 flipped the default to 'none': tangency silently fillets the whole
+    # tangent chain, which is how a 10-edge batch reached a non-target edge.
+    assert seen == [("Edge.1", 0), ("Edge.1", 1)]
 
 
 # ─────────────────────────────────────────── measurement argument aliases
@@ -172,7 +174,7 @@ def test_face_and_edge_listings_expose_the_element_type():
     for func in (PartDesignTools._list_edges, PartDesignTools._list_faces):
         import inspect
 
-        assert 'entry["type"]' in inspect.getsource(func)
+        assert '["type"]' in inspect.getsource(func)
 
 
 # ─────────────────────────────────────────── visibility
@@ -236,9 +238,9 @@ def test_multi_edge_fillet_resolves_all_references_before_cutting():
     import inspect
 
     source = inspect.getsource(PartDesignTools._fillet_many)
-    assert "topology_references" in source
+    assert "_resolve_edge_specs" in source
     # the resolution has to happen before any AddNew call
-    assert source.index("topology_references") < source.index("AddNewSolidEdgeFillet")
+    assert source.index("_resolve_edge_specs") < source.index("AddNewSolidEdgeFillet")
 
 
 def test_list_faces_honours_the_body_name_it_was_given():
@@ -264,7 +266,7 @@ def test_symmetric_pocket_is_two_one_sided_cuts_because_IsSymmetric_is_ignored()
     assert "pocket.IsSymmetric" not in source          # measured no-op, never used
     assert "depth / 2.0 if symmetric else depth" in source
     assert 'explicit_direction = "direction" in args or symmetric' in source
-    assert "mirror = sf.AddNewPocket(sketch, half)" in source
+    assert "mirror = sf.AddNewPocket(sketch, 0 if through_all else half)" in source
 
     from catia_mcp.tools.part_design import PartDesignTools as PD
 
@@ -276,6 +278,10 @@ def test_symmetric_pocket_is_two_one_sided_cuts_because_IsSymmetric_is_ignored()
     assert PD._pocket_extent(False, 38.1, True) == "38.100 mm total, 19.050 each side"
     assert PD._pocket_extent(False, 12.7, False) == "12.7 mm deep"   # unchanged for a one-sided cut
     assert PD._pocket_extent(True, 0, False) == "through all"
+    # through-all reaches one way only, so "both" needs a second up-to-last cut
+    # (measured 2026-10-23: exactly half the expected volume).
+    assert PD._pocket_extent(True, 0, True) == "through all, both directions"
+    assert "mirror.FirstLimit.LimitMode = 2" in source
 
 
 def test_construction_geometry_does_not_occupy_edge_indices():
@@ -324,10 +330,11 @@ def test_edge_listing_reports_the_feature_that_made_each_edge():
 
     from catia_mcp.tools.part_design import PartDesignTools as PD
 
-    for func in (PD._list_edges, PD._list_faces):
+    for func in (PD._edge_table, PD._list_faces):
         source = inspect.getsource(func)
         assert "nls_of(cell)" in source
-        assert '"created_by"' in source
+    for func in (PD._list_edges, PD._list_faces):
+        assert '"created_by"' in inspect.getsource(func)
 
 
 def test_multi_edge_fillet_builds_the_whole_batch_then_rebuilds_once():
@@ -376,8 +383,46 @@ def test_a_failed_batch_rebuild_rolls_every_feature_back():
                                   add=lambda ref: object(), part=FakePart())
 
     assert "0/2" in report
-    assert "would not rebuild" in report
-    assert len(removed) == 2            # nothing left half-built in the tree
+    assert "one-at-a-time retry" in report   # the batch is only an optimisation
+    # 2 batch features rolled back + the 2 the retry built and rejected
+    assert len(removed) == 4            # nothing left half-built in the tree
+
+
+def test_a_failed_batch_rebuild_is_retried_one_edge_at_a_time():
+    """Three edges of one face failed as a batch and worked one by one.
+
+    Reported 2026-10-23 with the numbers: catia_fillet(radius=2.54,
+    edge_names=['Edge.5','Edge.10','Edge.13'], propagation='none') answered
+    "0/3 edge(s) done ... would not rebuild", while the same three edges
+    filleted one at a time all took. Separate updates are what CATIA wants for
+    adjacent edges, so a failed batch now degrades to exactly that.
+    """
+    from catia_mcp.tools.part_design import PartDesignTools as PD
+
+    tools = PD(connection=None)
+    removed = []
+    tools._remove_created = lambda feats: removed.extend(feats)
+    updates = {"batch": 0, "single": 0}
+
+    class FakePart:
+        def Update(self):
+            updates["batch"] += 1
+            raise RuntimeError("(0, 'CATIPrtPart', '更新失败', None, 0, ...)")
+
+        def UpdateObject(self, feature):
+            updates["single"] += 1
+
+    # resolve() hands back fresh references, as the real one does after the
+    # topology was rebuilt by the rollback.
+    report = tools._apply_fillets(
+        2.54, ["Edge.5", "Edge.10", "Edge.13"], [1, 2, 3],
+        add=lambda ref: object(), part=FakePart(),
+        resolve=lambda: (["Edge.5", "Edge.10", "Edge.13"], [4, 5, 6]))
+
+    assert "3/3" in report
+    assert "one-at-a-time retry" in report
+    assert updates == {"batch": 1, "single": 3}
+    assert len(removed) == 3            # the batch really was rolled back first
 
 
 def test_the_package_version_matches_pyproject():
