@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.7] — 2026-10-24 · edges stop being indices
+
 The 2026-10-23 topology report (a 11-part quadcopter rebuilt from a written spec)
 named one thing above all: "`Edge.N` is not a stable id". That is now true in the
 tools instead of only in the report.
