@@ -378,8 +378,15 @@ class PartDesignTools:
             {
                 "name": "catia_circ_pattern",
                 "description": (
-                    "Create a Circular Pattern of the last feature. "
-                    "Duplicates a feature around a central axis."
+                    "Create a Circular Pattern of the last feature around a main "
+                    "axis through 'center'. 'count' includes the original, so "
+                    "count=12 adds 11 instances. The rotation axis is built as a "
+                    "line in the part's own 'PatternAxis' geometrical set and kept "
+                    "there - a Reference to another document's geometry dies when "
+                    "that document closes, which is why this tool used to fail "
+                    "100% of the time at update. The reply reports the volume "
+                    "change, which is the only trustworthy signal that the "
+                    "instances were actually built."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1089,6 +1096,20 @@ class PartDesignTools:
 
         explicit_direction = "direction" in args or symmetric
         flipped = False
+        single_sided = False
+        if took is False and symmetric:
+            # A mid-plane cut where one half is air: the primary side removed
+            # nothing, but the other side has material. Honor the half that
+            # exists and say so - failing the whole feature (which is what
+            # happened to the reporter) leaves a 2-feature hole to patch by hand.
+            pocket.DirectionOrientation = 0 if reverse else 1
+            retry_error = self._try_update(part, pocket)
+            after, retook = self._settle(part, body, before, expect="subtract")
+            if retook:
+                flipped = True
+                took = True
+                single_sided = True
+                update_error = retry_error
         if took is False and not explicit_direction:
             # Nothing was removed and the caller did not pin the side. A
             # profile sketched on a solid face lands on the air side often
@@ -1137,7 +1158,7 @@ class PartDesignTools:
         self.conn.refresh_display()
 
         mirror = None
-        if symmetric:
+        if symmetric and not single_sided:
             # The other half of the cut. Same sketch, opposite side.
             mirror = sf.AddNewPocket(sketch, 0 if through_all else half)
             if through_all:
@@ -1177,6 +1198,9 @@ class PartDesignTools:
                     "profile intersects the solid."
                 )
             flip_note = " (direction auto-flipped to reach material)" if flipped else ""
+            if single_sided:
+                flip_note = (" (only one side of the sketch plane had material, so "
+                             "this is a single-sided cut despite symmetric=true)")
             if update_error is not None:
                 flip_note += (" (CATIA raised during the update, but the cut is "
                               "in the geometry - kept)")
@@ -1925,71 +1949,79 @@ class PartDesignTools:
             + effect
         )
 
-    def _mint_axis_reference(self, axis: str, center: list[float]) -> Any:
-        """Build a rotation-axis Reference from a GSD line in a throwaway
-        donor document.
+    # Measured on V5-6R2020 B30, 2026-10-24: the old recipe minted the axis line
+    # in a throwaway part document and closed it before building the pattern.
+    # Every AddNewCircPattern then failed at UpdateObject - the Reference belongs
+    # to the document that owns the geometry, and closing that document kills it
+    # (the "survives closing" note in the old comment was wrong). A line in the
+    # part's own geometrical set works, and so does patterning a part that has a
+    # geometrical set (the earlier "GSD geometry in the part fails with
+    # 0x80020009" guard was a misdiagnosis of the same closed-document problem:
+    # with a live axis, pad + pocket + geoset + pattern all succeed).
+    _PATTERN_GEOSET = "PatternAxis"
 
-        Field-proven on V5R20: AddNewCircPattern fails with 0x80020009 when
-        the patterned document itself contains GSD geometry, but a Reference
-        minted from a line in a separate document is accepted and survives
-        closing that document.
-        """
-        app = self.conn.app
-        target_doc = app.ActiveDocument
-        target_name = str(target_doc.Name)
-        previous_alerts = None
+    def _pattern_axis_reference(self, part: Any, axis: str,
+                                center: list[float]) -> Any:
+        """A line through ``center`` along ``axis``, inside the part itself."""
+        hsf = part.HybridShapeFactory
+        geoset = self._pattern_geoset(part)
+        d = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}[axis]
+        cx, cy, cz = center
+        p1 = hsf.AddNewPointCoord(cx - 60 * d[0], cy - 60 * d[1], cz - 60 * d[2])
+        p2 = hsf.AddNewPointCoord(cx + 60 * d[0], cy + 60 * d[1], cz + 60 * d[2])
+        geoset.AppendHybridShape(p1)
+        geoset.AppendHybridShape(p2)
+        line = hsf.AddNewLinePtPt(part.CreateReferenceFromObject(p1),
+                                  part.CreateReferenceFromObject(p2))
         try:
-            previous_alerts = app.DisplayFileAlerts
-            app.DisplayFileAlerts = False
-        except Exception:
+            line.Name = f"PatternAxis_{axis.upper()}"
+        except Exception:  # noqa: BLE001 - a default name is fine
             pass
-        donor_doc = app.Documents.Add("Part")
+        geoset.AppendHybridShape(line)
+        # A full Update, not UpdateObject(line): measured 2026-10-24, the
+        # pattern still failed at UpdateObject when only the line had been
+        # updated, and succeeded once the whole part was rebuilt here.
+        part.Update()
+        return part.CreateReferenceFromObject(line)
+
+    def _pattern_geoset(self, part: Any) -> Any:
+        """The geometrical set that holds pattern axis lines (created on demand)."""
         try:
-            donor = self.conn.part_of(donor_doc)
-            hsf = donor.HybridShapeFactory
-            geoset = donor.HybridBodies.Add()
-            dx, dy, dz = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}[axis]
-            cx, cy, cz = center
-            p1 = hsf.AddNewPointCoord(cx - 50 * dx, cy - 50 * dy, cz - 50 * dz)
-            geoset.AppendHybridShape(p1)
-            p2 = hsf.AddNewPointCoord(cx + 50 * dx, cy + 50 * dy, cz + 50 * dz)
-            geoset.AppendHybridShape(p2)
-            line = hsf.AddNewLinePtPt(
-                donor.CreateReferenceFromObject(p1),
-                donor.CreateReferenceFromObject(p2),
-            )
-            geoset.AppendHybridShape(line)
-            donor.Update()
-            # Both references are minted from the donor, exactly as the
-            # validated recipe does.
-            axis_ref = donor.CreateReferenceFromObject(line)
-            center_ref = donor.CreateReferenceFromName("")
-            return axis_ref, center_ref
-        finally:
+            bodies = part.HybridBodies
+            for i in range(1, bodies.Count + 1):
+                hb = bodies.Item(i)
+                if str(hb.Name) == self._PATTERN_GEOSET:
+                    return hb
+            hb = bodies.Add()
+            hb.Name = self._PATTERN_GEOSET
+            return hb
+        except Exception as exc:  # noqa: BLE001 - reported by the caller
+            raise RuntimeError(
+                f"Could not create the '{self._PATTERN_GEOSET}' geometrical set "
+                f"that holds the pattern axis: {exc}"
+            ) from exc
+
+    @staticmethod
+    def _pattern_seed(body: Any, feature_name: str | None) -> Any:
+        """The feature a pattern duplicates: the named one, or the last one.
+
+        Not ``_get_last_shape(None)``: that returns the body (which is right for
+        topology searches) and patterning the body fails at UpdateObject.
+        """
+        shapes = body.Shapes
+        if shapes.Count == 0:
+            raise RuntimeError("No features to pattern in the active body.")
+        if feature_name:
             try:
-                donor_doc.Close()
+                return shapes.Item(feature_name)
             except Exception:
-                pass
-            try:
-                target_doc.Activate()
-            except Exception:
-                pass
-            if previous_alerts is not None:
-                try:
-                    app.DisplayFileAlerts = previous_alerts
-                except Exception:
-                    pass
-            try:
-                if str(app.ActiveDocument.Name) != target_name:
-                    raise RuntimeError(
-                        f"Could not re-activate '{target_name}' after the "
-                        "donor round trip; aborting before patterning the "
-                        "wrong document."
-                    )
-            except RuntimeError:
-                raise
-            except Exception:
-                pass
+                names = ", ".join(str(shapes.Item(i).Name)
+                                  for i in range(1, shapes.Count + 1))
+                raise RuntimeError(
+                    f"No feature named '{feature_name}' in the active body. "
+                    f"Available: {names or 'none'}."
+                ) from None
+        return shapes.Item(shapes.Count)
 
     def _circ_pattern(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
@@ -2009,37 +2041,20 @@ class PartDesignTools:
         center = args.get("center") or [0.0, 0.0, 0.0]
         if len(center) != 3:
             raise ValueError("center must be [x, y, z] in mm")
-        # Field-proven precondition: AddNewCircPattern fails with 0x80020009
-        # when the patterned document itself contains GSD geometry.
-        try:
-            geosets = part.HybridBodies.Count
-        except Exception:
-            geosets = 0
-        if geosets:
-            raise RuntimeError(
-                "catia_circ_pattern cannot run on a part that contains "
-                "geometrical sets (GSD geometry): CATIA rejects the pattern "
-                "with 0x80020009 in that case. Remove the geometrical sets "
-                "or pattern a GSD-free part. "
-                "If what you need is a second instance rotated by a fixed angle, "
-                "you can get it without a pattern: a rotation of 180 deg equals "
-                "mirroring about two perpendicular planes, so two "
-                "catia_gsd_symmetry calls (about 'xy' then about 'yz') followed by "
-                "catia_gsd_close_surface reproduce the rotated solid exactly - "
-                "verified on a two-blade propeller, 0.6 mm3 off the analytic volume "
-                "with the centroid landing exactly on the axes."
-            )
-        self._get_last_shape(args.get("feature_name"))  # validate early
+        # The seed must be a FEATURE, not the body: _get_last_shape(None) returns
+        # the body on purpose (topology searches want it), but patterning the
+        # body is what made every circular pattern fail at update - the pattern
+        # has to duplicate one feature.
+        self._pattern_seed(body, args.get("feature_name"))
 
-        axis_ref, center_ref = self._mint_axis_reference(axis, center)
-        # Re-resolve after the donor round trip: the active document changed
-        # and came back.
-        part = self.conn.get_active_part()
-        body = self._prepare_body(part)
-        sf = part.ShapeFactory
-        feature = self._get_last_shape(args.get("feature_name"))
+        # The axis lives in the part itself, and stays there: a Reference to
+        # geometry in a document that gets closed dies with it, which is exactly
+        # how this tool used to fail every time (see _pattern_axis_reference).
+        axis_ref = self._pattern_axis_reference(part, axis, center)
+        center_ref = part.CreateReferenceFromName("")
+        feature = self._pattern_seed(body, args.get("feature_name"))
 
-        before = self._body_volume_mm3(part, body)
+        before, volume_note = self._volume_probe(part, body)
         part.InWorkObject = body
         # AddNewCircPattern takes 12 parameters; instances around the axis
         # belong in the ANGULAR slot (3rd). Flags as field-validated
@@ -2055,16 +2070,46 @@ class PartDesignTools:
             False,                 # radius aligned
         )
 
-        self._safe_update(part, pattern)
+        update_error = self._try_update(part, pattern)
         self.conn.refresh_display()
         after = self._body_volume_mm3(part, body)
-        effect = ""
+
+        moved = None
         if before is not None and after is not None:
-            effect = f" Volume {before:.1f} -> {after:.1f} mm3."
+            moved = after - before
+        if update_error is not None and not moved:
+            # Nothing changed and CATIA refused: this really is a failure, so
+            # take the dead node out - but the seed feature is NOT touched, and
+            # that is worth saying because the old failure mode looked like the
+            # seed had vanished (it had not; a dead 圆形阵列.1 was in the tree).
+            gone = self._remove_feature(part, pattern)
+            raise RuntimeError(
+                "CATIA rejected the circular pattern"
+                + (" and it was removed from the tree" if gone else
+                   " (the dead feature could NOT be deleted - close the document "
+                   "without saving)")
+                + f". The seed feature and the axis line '{self._PATTERN_GEOSET}' "
+                "are untouched. Usual cause: the instance would overlap material "
+                "the seed already removed, or 'count' exceeds what fits in "
+                f"angular_spacing ({angular_spacing} deg). Original error: "
+                f"{update_error}"
+            ) from update_error
+
+        detail = ""
+        if moved is not None and abs(moved) > 1e-6:
+            detail = (f" Volume {before:.1f} -> {after:.1f} mm3 "
+                      f"(delta {moved:+.1f}).")
+        elif volume_note:
+            detail = f" Volume not verified ({volume_note})."
+        else:
+            detail = " WARNING: the pattern changed no material - check the count and the axis."
+        if update_error is not None:
+            detail += (" (CATIA raised during the update, but the volume did "
+                       "change, so the feature is kept.)")
         return (
-            f"Circular pattern '{pattern.Name}' created: {count} instances, "
-            f"{angular_spacing} deg spacing around the {axis.upper()} axis "
-            f"through {center}." + effect
+            f"Circular pattern '{pattern.Name}' created: {count} instances "
+            f"({count - 1} added), {angular_spacing} deg spacing around the "
+            f"{axis.upper()} axis through {center}.{detail}"
         )
 
     def _user_pattern(self, args: dict[str, Any]) -> str:
@@ -2073,7 +2118,7 @@ class PartDesignTools:
         body = self._prepare_body(part)
         sf = part.ShapeFactory
 
-        feature = self._get_last_shape(args.get("feature_name"))
+        feature = self._pattern_seed(body, args.get("feature_name"))
         count = int(args["count"])
         if count < 1:
             raise ValueError("count must be at least 1")

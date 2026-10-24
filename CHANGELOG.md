@@ -4,6 +4,51 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+The 2026-10-24 report rebuilt a 9-part hydraulic cylinder and named its top pain:
+"a closed sketch can never be read or changed again, so one wrong profile means
+rebuilding the part". Three of its items were P0.
+
+### Added
+- `catia_sketch_edit(sketch_name)` reopens a **closed** sketch: `OpenEdition`
+  on a closed sketch works (measured on B30), existing elements stay, new ones
+  are appended, and the consuming feature rebuilds on close.
+- `catia_sketch_delete_element(index, sketch_name)` deletes ONE element - the
+  wrong third line - and leaves the rest of the profile and the features built
+  on it alone. Index 1 (the absolute axis) is refused.
+- `catia_get_bounding_box` and `catia_get_inertia` now work on a **Product**:
+  each component's local values are moved into world space by its placement and
+  aggregated. Verified on B30 with two blocks at a known offset: volume 16000,
+  COG (50, 0, 7.5) exactly. `component=` returns a single instance's world box.
+  `catia_list_components` also publishes the rotation and reports broken links
+  per component instead of aborting the listing.
+
+### Fixed
+- `catia_circ_pattern` failed 100 % of the time at `UpdateObject`, for two
+  independent reasons: the rotation axis was minted in a throwaway document that
+  was **closed before** the pattern was built (a Reference dies with its
+  document), and the seed passed to `AddNewCircPattern` was the **body**, not
+  the last feature. Now the axis lives in the part's own `PatternAxis` set and
+  the seed is `body.Shapes.Item(last)`. Measured: 6 instances of a Ø6 hole in a
+  Ø80 disc remove 1131.0 mm3, exactly 5 x pi*9*8. `user_pattern` had the same
+  seed bug.
+- `catia_close_document` no longer reports "closed" for a document CATIA kept:
+  it counts the document before and after and, when it is still there, says
+  `CLOSE NOT CONFIRMED` and points at the assembly that references it - that
+  lock is what made the next `SaveAs` fail with a message about nothing.
+- A `symmetric` pocket whose primary half is air now keeps the half that has
+  material and says so, instead of rolling the whole feature back.
+- `catia_sketch_get_geometry` works on any sketch by name, defaults to the last
+  sketch created, and reports each element's type and construction flag.
+
+### Diagnostics
+- `catia_close_sketch` echoes the drawn profile: element counts by kind, the
+  bounding box of its endpoints and the total outline length
+  (`Profile: 4 line(s); bbox (-20.0000, -10.0000) .. (20.0000, 10.0000); outline 120.000 mm`).
+  The coordinates come from the drawing calls because CATIA's Point2D cannot be
+  read back, and the reply says that rather than promising more.
+- `catia_create_sketch`'s description spells out the plane -> world axis table
+  (zx is H = Z / V = X, not H = X) and the SolidWorks-vs-CATIA "Top plane" trap.
+
 ## [0.3.7] — 2026-10-24 · edges stop being indices
 
 The 2026-10-23 topology report (a 11-part quadcopter rebuilt from a written spec)

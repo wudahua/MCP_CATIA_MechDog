@@ -192,7 +192,14 @@ class MeasurementTools:
                     "an STL and sweeps the triangles, which works for revolved and lofted "
                     "shapes and lands a fraction of a millimetre inside the true surface "
                     "because the mesh chords the curve. 'auto' uses vertices when they "
-                    "exist and falls back to the mesh otherwise."
+                    "exist and falls back to the mesh otherwise. "
+                    "With an assembly active it returns the WORLD box: each "
+                    "component's local box is transformed by its placement and the "
+                    "results are aggregated, per component as well as overall. Pass "
+                    "'component' for one instance only. Note that a component's local "
+                    "box still comes from a vertex sweep, so a revolved part's "
+                    "diameter is under-reported there - the mesh method cannot be "
+                    "applied to a non-active document."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -205,6 +212,13 @@ class MeasurementTools:
                                 "auto (default) = vertices if the shape has any, else "
                                 "mesh; vertices = fail on a fully curved solid; mesh = "
                                 "always export STL"
+                            ),
+                        },
+                        "component": {
+                            "type": "string",
+                            "description": (
+                                "Name of one instance in the active assembly "
+                                "(see catia_list_components). Omit for all of them."
                             ),
                         },
                     },
@@ -268,7 +282,8 @@ class MeasurementTools:
             case "catia_get_inertia":
                 return self._get_inertia(arguments.get("density"))
             case "catia_get_bounding_box":
-                return self._get_bounding_box(arguments.get("method", "auto"))
+                return self._get_bounding_box(arguments.get("method", "auto"),
+                                              arguments.get("component"))
             case "catia_get_parameters":
                 return self._get_parameters(arguments.get("filter"))
             case "catia_set_parameter":
@@ -414,6 +429,8 @@ class MeasurementTools:
 
     def _get_inertia(self, density: float | None = None) -> str:
         self.conn.ensure_connected()
+        if self._document_kind() == "assembly":
+            return self._assembly_inertia(density)
         spa = self._spa_workbench()
         part = self.conn.get_active_part()
         body = self.conn.get_active_part_body()
@@ -472,13 +489,249 @@ class MeasurementTools:
 
         return json.dumps(result, indent=2)
 
-    def _get_bounding_box(self, method: str = "auto") -> str:
+    # ── assembly-side measurement ───────────────────────────────────────
+    #
+    # A Product document has no Part, so get_inertia / get_bounding_box used to
+    # fail outright on an assembly - and an assembly's acceptance is exactly the
+    # thing a placement script needs to check (reported 2026-10-24). The world
+    # box of a component is its local box transformed by Position.GetComponents;
+    # CATIA stores the three axis images first, then the translation:
+    #   [ix,iy,iz, jx,jy,jz, kx,ky,kz, Tx,Ty,Tz]  ->  world = A*p + T
+    # with A's COLUMNS being i, j, k.
+
+    def _placement(self, child: Any) -> tuple[list[list[float]], list[float]]:
+        # GetComponents needs the Evaluate route - the direct call fails with
+        # "方法 GetComponents 失败" (12 by-ref slots).
+        from catia_mcp.tools.assembly import position_components
+
+        vals = position_components(self.conn.app, child.Position)
+        if len(vals) < 12:
+            raise RuntimeError(f"Position.GetComponents returned {len(vals)} values")
+        matrix = [[vals[0], vals[3], vals[6]],
+                  [vals[1], vals[4], vals[7]],
+                  [vals[2], vals[5], vals[8]]]
+        return matrix, [vals[9], vals[10], vals[11]]
+
+    @staticmethod
+    def _to_world(matrix: list[list[float]], translation: list[float],
+                  point: list[float]) -> list[float]:
+        return [sum(matrix[i][j] * point[j] for j in range(3)) + translation[i]
+                for i in range(3)]
+
+    def _components_doc(self, doc: Any) -> list[dict[str, Any]]:
+        """Every child of the assembly with placement, part and problems."""
+        product = self.conn.product_of(doc)
+        rows: list[dict[str, Any]] = []
+        products = product.Products
+        for i in range(1, products.Count + 1):
+            child = products.Item(i)
+            row: dict[str, Any] = {"index": i, "name": None, "part_number": None,
+                                   "matrix": None, "translation": None,
+                                   "part": None, "problems": []}
+            for key, getter in (("name", lambda c: str(c.Name)),
+                                ("part_number", lambda c: str(c.PartNumber))):
+                try:
+                    row[key] = getter(child)
+                except Exception as exc:  # noqa: BLE001
+                    row["problems"].append(f"{key}: {str(exc).splitlines()[0][:70]}")
+            try:
+                row["matrix"], row["translation"] = self._placement(child)
+            except Exception as exc:  # noqa: BLE001
+                row["problems"].append(f"placement: {str(exc).splitlines()[0][:70]}")
+            try:
+                row["part"] = self.conn.part_of(child.ReferenceProduct.Parent)
+            except Exception as exc:  # noqa: BLE001 - the classic dead link
+                row["problems"].append(f"part not loaded: {str(exc).splitlines()[0][:70]}")
+            rows.append(row)
+        return rows
+
+    def _local_box(self, part: Any, body: Any) -> tuple[list[list[float]], int]:
+        """The part's own bounding corners and the number of points used.
+
+        Uses that document's selection (not the active one) and skips
+        construction geometry, which otherwise drags sketch wires into the box.
+        """
+        doc = part.Parent
+        sel = doc.Selection
+        refs = []
+        try:
+            sel.Clear()
+            sel.Add(body)
+            search_topology(sel, "Vertex")
+            for i in range(1, sel.Count + 1):
+                cell = sel.Item(i)
+                if is_construction(nls_of(cell)):
+                    continue
+                refs.append(cell.Reference)
+            spa = doc.GetWorkbench("SPAWorkbench")
+            raw = [self._read_measurable_array(spa.GetMeasurable(ref), "GetPoint", 3)
+                   for ref in refs]
+        finally:
+            try:
+                sel.Clear()
+            except Exception:
+                pass
+        points, _dropped = self._bounded(raw)
+        return points, len(points)
+
+    def _assembly_box(self, doc: Any, method: str,
+                      only: str | None = None) -> str:
+        rows = self._components_doc(doc)
+        if only:
+            rows = [r for r in rows if (r["name"] or "").lower() == only.lower()
+                    or (r["part_number"] or "").lower() == only.lower()]
+            if not rows:
+                names = ", ".join(str(r["name"]) for r in self._components_doc(doc))
+                raise RuntimeError(
+                    f"No component matches '{only}'. Components: {names or 'none'}."
+                )
+
+        entries, corners, skipped = [], [], []
+        for row in rows:
+            label = row["part_number"] or row["name"] or f"#{row['index']}"
+            if row["part"] is None or row["matrix"] is None:
+                skipped.append({"component": label, "error": "; ".join(row["problems"])})
+                continue
+            body = row["part"].MainBody
+            try:
+                points, used = self._local_box(row["part"], body)
+            except Exception as exc:  # noqa: BLE001
+                skipped.append({"component": label,
+                                "error": f"local box: {str(exc).splitlines()[0][:80]}"})
+                continue
+            if not points:
+                skipped.append({"component": label,
+                                "error": "no vertices (fully curved part); the mesh "
+                                         "method needs that document active"})
+                continue
+            world = [self._to_world(row["matrix"], row["translation"], p)
+                     for p in points]
+            xs = [p[0] for p in world]
+            ys = [p[1] for p in world]
+            zs = [p[2] for p in world]
+            entry_min = [min(xs), min(ys), min(zs)]
+            entry_max = [max(xs), max(ys), max(zs)]
+            entries.append({
+                "component": label,
+                "name": row["name"],
+                "min": {k: round(v, 4) for k, v in zip("xyz", entry_min)},
+                "max": {k: round(v, 4) for k, v in zip("xyz", entry_max)},
+                "dimensions": {f"length_{k}": round(mx - mn, 4)
+                               for k, mn, mx in zip("xyz", entry_min, entry_max)},
+                "vertices_used": used,
+            })
+            corners.extend(world)
+
+        if not corners:
+            raise RuntimeError(
+                "Could not measure any component of this assembly: "
+                + ("; ".join(f"{s['component']}: {s['error']}" for s in skipped)
+                   or "no components")
+            )
+        note = ("world coordinates: each component's local vertex box transformed "
+                "by its placement, then aggregated; a revolved part's diameter is "
+                "under-reported because a vertex sweep has no vertex at the "
+                "extremum (activate that part and use method='mesh' for the true "
+                "value)")
+        payload = json.loads(self._bbox_json(corners, note))
+        payload["components"] = entries
+        if skipped:
+            payload["skipped"] = skipped
+        return json.dumps(payload, indent=2)
+
+    def _document_kind(self) -> str:
+        """'part', 'assembly' or 'other' for the active document."""
+        doc = self.conn.active_document
+        try:
+            self.conn.part_of(doc)
+            return "part"
+        except Exception:  # noqa: BLE001 - not a PartDocument
+            pass
+        try:
+            self.conn.product_of(doc)
+            return "assembly"
+        except Exception:  # noqa: BLE001
+            return "other"
+
+    def _assembly_inertia(self, density: float | None = None) -> str:
+        """Volume and centre of gravity of an assembly, weighted per component.
+
+        Each component's own volume and COG are read from its part document and
+        moved into world space by its placement; the totals are the volume-
+        weighted sums. That is the number a placement script has to hit, and on
+        a Product document it used to be unavailable (get_inertia required a
+        Part).
+        """
+        doc = self.conn.active_document
+        rows = self._components_doc(doc)
+        entries, skipped = [], []
+        total = 0.0
+        acc = [0.0, 0.0, 0.0]
+        for row in rows:
+            label = row["part_number"] or row["name"] or f"#{row['index']}"
+            if row["part"] is None or row["matrix"] is None:
+                skipped.append({"component": label, "error": "; ".join(row["problems"])})
+                continue
+            part = row["part"]
+            try:
+                body = part.MainBody
+                if body.Shapes.Count == 0:
+                    raise RuntimeError("no solid in the main body")
+                doc_i = part.Parent
+                spa = doc_i.GetWorkbench("SPAWorkbench")
+                measurable = spa.GetMeasurable(part.CreateReferenceFromObject(body))
+                volume = measurable.Volume * _M3_TO_MM3
+                cog = self._read_measurable_array(measurable, "GetCOG", 3)
+            except Exception as exc:  # noqa: BLE001 - reported per component
+                skipped.append({"component": label,
+                                "error": str(exc).splitlines()[0][:90]})
+                continue
+            world = self._to_world(row["matrix"], row["translation"], cog)
+            entries.append({
+                "component": label,
+                "name": row["name"],
+                "volume_mm3": round(volume, 4),
+                "center_of_gravity_mm": {k: round(v, 4)
+                                        for k, v in zip("xyz", world)},
+            })
+            total += volume
+            for i in range(3):
+                acc[i] += volume * world[i]
+
+        if total <= 0:
+            raise RuntimeError(
+                "Could not measure any component of this assembly: "
+                + ("; ".join(f"{s['component']}: {s['error']}" for s in skipped)
+                   or "no components")
+            )
+        payload: dict[str, Any] = {
+            "volume_mm3": round(total, 4),
+            "volume_cm3": round(total / 1000.0, 4),
+            "center_of_gravity_mm": {k: round(acc[i] / total, 4)
+                                     for i, k in enumerate("xyz")},
+            "components": entries,
+            "note": ("volume-weighted aggregation of the components' own volumes "
+                     "and centres of gravity, moved into world space by each "
+                     "component's placement; the inertia matrix is not aggregated "
+                     "(it would need each part's tensor rotated by its placement)"),
+        }
+        if density:
+            payload["mass_kg"] = round(density * total / 1e9, 6)
+            payload["density_kg_m3"] = density
+        if skipped:
+            payload["skipped"] = skipped
+        return json.dumps(payload, indent=2)
+
+    def _get_bounding_box(self, method: str = "auto",
+                          component: str | None = None) -> str:
         # Measurable has no bounding-box method in any V5 release. Two sources
         # are available instead: the final shape's vertices (exact for
         # planar-faced solids) and an exported STL mesh (the only thing that
         # works on a fully curved solid - a cylinder is one face, zero
         # vertices - at the cost of chording the surface).
         self.conn.ensure_connected()
+        if self._document_kind() == "assembly":
+            return self._assembly_box(self.conn.active_document, method, component)
         part = self.conn.get_active_part()
         body = self.conn.get_active_part_body()
         if body.Shapes.Count == 0:

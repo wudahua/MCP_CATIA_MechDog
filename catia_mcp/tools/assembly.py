@@ -12,6 +12,25 @@ from typing import Any
 from catia_mcp.connection import CATIAConnection
 
 
+# `Position.GetComponents` fills 12 by-ref slots; pywin32 cannot call that
+# directly (it fails with "方法 GetComponents 失败"), so it goes through
+# SystemService.Evaluate, which is also how the other array reads work here.
+POSITION_SCRIPT = (
+    "Public Function position_components(p)\n"
+    "    Dim a(11)\n"
+    "    p.GetComponents a\n"
+    "    position_components = a\n"
+    "End Function\n"
+)
+
+
+def position_components(app: Any, position: Any) -> list[float]:
+    """CATIA's 12 placement numbers: three basis vectors, then the origin."""
+    raw = app.SystemService.Evaluate(POSITION_SCRIPT, 0, "position_components",
+                                     [position])
+    return [float(value) for value in raw]
+
+
 class AssemblyTools:
     """Tools for assembly (Product) operations in CATIA V5."""
 
@@ -473,19 +492,10 @@ class AssemblyTools:
     # straight back with SetComponents — which erases the component's rotation —
     # and reported every component at (0, 0, 0). Same root cause as the GetCOG
     # bug fixed in 0.2.2, same fix: fill the array inside CATIA.
-    _POSITION_SCRIPT = (
-        "Public Function position_components(p)\n"
-        "    Dim a(11)\n"
-        "    p.GetComponents a\n"
-        "    position_components = a\n"
-        "End Function\n"
-    )
+    _POSITION_SCRIPT = POSITION_SCRIPT
 
     def _position_components(self, position: Any) -> list[float]:
-        raw = self.conn.app.SystemService.Evaluate(
-            self._POSITION_SCRIPT, 0, "position_components", [position]
-        )
-        return [float(value) for value in raw]
+        return position_components(self.conn.app, position)
 
     @staticmethod
     def _resolve_component(product: Any, name: str) -> Any:
@@ -707,30 +717,71 @@ class AssemblyTools:
         )
 
     def _list_components(self) -> str:
+        """Every component with its placement, surviving broken links.
+
+        One dead link used to abort the whole listing (reported 2026-10-24:
+        "方法 PartNumber 失败" on a component whose part had been rebuilt), so a
+        bad instance made the assembly impossible to diagnose AND impossible to
+        fix. Each component is now read in its own try/except and reported as
+        broken with the reason, and the rotation is published next to the
+        translation - a placement is not a translation.
+        """
         product = self.conn.get_active_product()
         products = product.Products
 
         components = []
+        broken = 0
         for i in range(1, products.Count + 1):
             comp = products.Item(i)
-            pos = comp.Position
+            entry: dict[str, Any] = {"index": i}
+            problems = []
+            for key, getter in (("name", lambda c: str(c.Name)),
+                                ("part_number", lambda c: str(c.PartNumber))):
+                try:
+                    entry[key] = getter(comp)
+                except Exception as exc:  # noqa: BLE001 - reported per field
+                    entry[key] = None
+                    problems.append(f"{key}: {str(exc).splitlines()[0][:80]}")
             try:
-                matrix = self._position_components(pos)
-            except Exception:
-                matrix = [0.0] * 12
-            components.append({
-                "index": i,
-                "name": comp.Name,
-                "part_number": comp.PartNumber,
-                "position": {
+                matrix = self._position_components(comp.Position)
+                entry["position"] = {
                     "x": round(matrix[9], 3),
                     "y": round(matrix[10], 3),
                     "z": round(matrix[11], 3),
-                },
-            })
+                }
+                # A = the three axis images: columns 0/3/6, 1/4/7, 2/5/8.
+                entry["rotation"] = [
+                    [round(matrix[0], 6), round(matrix[3], 6), round(matrix[6], 6)],
+                    [round(matrix[1], 6), round(matrix[4], 6), round(matrix[7], 6)],
+                    [round(matrix[2], 6), round(matrix[5], 6), round(matrix[8], 6)],
+                ]
+            except Exception as exc:  # noqa: BLE001
+                entry["position"] = None
+                entry["rotation"] = None
+                problems.append(f"position: {str(exc).splitlines()[0][:80]}")
+            try:
+                ref = comp.ReferenceProduct
+                _ = ref.Parent
+            except Exception as exc:  # noqa: BLE001 - the classic dead link
+                problems.append(f"reference: {str(exc).splitlines()[0][:80]}")
+            if problems:
+                entry["broken"] = True
+                entry["error"] = "; ".join(problems)
+                broken += 1
+            components.append(entry)
 
         if not components:
             return "No components in the active assembly"
+        if broken:
+            return json.dumps({
+                "components": components,
+                "count": len(components),
+                "broken": broken,
+                "note": ("Components marked broken cannot resolve their part "
+                         "(the file was moved, or rebuilt and re-referenced). "
+                         "Replace them with catia_add_component, or re-create the "
+                         "assembly - the good components listed here are intact."),
+            }, indent=2, ensure_ascii=False)
         return json.dumps(components, indent=2, ensure_ascii=False)
 
     def _list_constraints(self) -> str:

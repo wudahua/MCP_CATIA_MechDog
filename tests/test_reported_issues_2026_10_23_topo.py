@@ -175,5 +175,5 @@ def test_pocket_through_all_both_directions_is_two_cuts() -> None:
     source = inspect.getsource(PartDesignTools._pocket)
     # The mirror used to be skipped for through_all, which silently removed half
     # the material (reported 2026-10-23: 1608.8 mm3 instead of 3217.6).
-    assert "if symmetric:" in source
+    assert "if symmetric and not single_sided:" in source
     assert "mirror.FirstLimit.LimitMode = 2" in source

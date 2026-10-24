@@ -31,13 +31,25 @@ class SketcherTools:
         # Endpoints of the profile as drawn, in sketch coordinates. Kept
         # because the COM API will not give them back: see _draw_arc.
         self._profile_ends: list[tuple[float, float]] = []
+        # What this session drew into each sketch, by sketch name. The only
+        # read-back that survives closing a sketch, because it comes from the
+        # arguments rather than from CATIA (see the note in _get_geometry).
+        self._drawn: dict[str, list[dict[str, Any]]] = {}
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         return [
             {
                 "name": "catia_create_sketch",
                 "description": (
-                    "Create a new 2D sketch and open it for editing. The support "
+                    "Create a new 2D sketch and open it for editing. The reply names "
+                    "the axes, because they are NOT the intuitive ones: xy is "
+                    "H = X / V = Y / normal = Z, yz is H = Y / V = Z / normal = X, and "
+                    "zx is H = Z / V = X / normal = Y. So a shaft revolved about the "
+                    "sketch's V axis spins about world Y, Z and X respectively; put a "
+                    "revolved part on the plane whose V axis is the world axis the "
+                    "spec names. Note also that CATIA's 'top' plane is zx (normal Y) "
+                    "while SolidWorks' Top is XZ - the same words point at different "
+                    "planes. The support "
                     "is a main datum plane ('xy', 'yz', 'zx'), optionally offset "
                     "along its normal, or a planar face of the solid that already "
                     "exists. Close the sketch with catia_close_sketch before "
@@ -296,10 +308,54 @@ class SketcherTools:
             },
             {
                 "name": "catia_sketch_get_geometry",
-                "description": "List all geometry elements in the active sketch with their indices and types.",
+                "description": (
+                    "List a sketch's geometry elements - index, name, type, "
+                    "construction flag - whether or not the sketch is open. "
+                    "Omitting sketch_name falls back to the open sketch, then to "
+                    "the last sketch created in this session. Coordinates are NOT "
+                    "returned: a CATIA Point2D exposes no readable X/Y through "
+                    "automation on this build, so 'what did I draw' is answered by "
+                    "the element list plus the profile summary that "
+                    "catia_close_sketch echoes."
+                ),
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"sketch_name": {"type": "string", "description": "Sketch to inspect (e.g. '草图.1'). Omit for the open sketch."}},
+                    "properties": {"sketch_name": {"type": "string", "description": "Sketch to inspect (e.g. '草图.1'). Omit for the open or last-created sketch."}},
+                },
+            },
+            {
+                "name": "catia_sketch_edit",
+                "description": (
+                    "Reopen a CLOSED sketch for editing so geometry tools append to "
+                    "it, instead of deleting the sketch and drawing it again. "
+                    "OpenEdition on a closed sketch is verified on V5-6R2020 B30 "
+                    "(measured 2026-10-24): existing elements stay, new ones are "
+                    "appended, and closing the sketch updates the feature that "
+                    "consumes it."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "sketch_name": {"type": "string", "description": "Sketch to reopen (e.g. '草图.1'). Omit for the open or last-created sketch."},
+                    },
+                },
+            },
+            {
+                "name": "catia_sketch_delete_element",
+                "description": (
+                    "Delete ONE geometry element from a sketch, by index from "
+                    "catia_sketch_get_geometry. This is the tool for 'the third line "
+                    "is wrong': the sketch stays, the rest of the profile stays, and "
+                    "a pad/pocket built on it survives the repair. Index 1 is the "
+                    "absolute axis and cannot be deleted."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "index": {"type": "integer", "description": "Element index from catia_sketch_get_geometry"},
+                        "sketch_name": {"type": "string", "description": "Sketch to modify. Omit for the open or last-created sketch."},
+                    },
+                    "required": ["index"],
                 },
             },
         ]
@@ -348,6 +404,11 @@ class SketcherTools:
                 return self._add_constraint(arguments)
             case "catia_sketch_get_geometry":
                 return self._get_geometry(arguments.get("sketch_name"))
+            case "catia_sketch_edit":
+                return self._edit_sketch(arguments.get("sketch_name"))
+            case "catia_sketch_delete_element":
+                return self._delete_element(arguments["index"],
+                                            arguments.get("sketch_name"))
             case _:
                 raise ValueError(f"Unknown sketcher tool: {tool_name}")
 
@@ -519,6 +580,57 @@ class SketcherTools:
     def _note_ends(self, *points: tuple[float, float]) -> None:
         self._profile_ends.extend((float(x), float(y)) for x, y in points)
 
+    def _note_element(self, kind: str, **params: Any) -> None:
+        """Remember what was drawn, for the profile echo at close time."""
+        try:
+            name = str(self._active_sketch.Name)
+        except Exception:  # noqa: BLE001 - the record is still useful
+            name = "?"
+        self._drawn.setdefault(name, []).append({"kind": kind, **params})
+
+    def _profile_summary(self) -> str:
+        """Echo the drawn profile: element counts, size, total outline length.
+
+        This is the counter to "the profile was wrong and nothing said so": the
+        2026-10-24 report lost two segments of a revolved profile and saw it only
+        as a 32 % volume error after 14 more features. The numbers come from the
+        drawing calls, because CATIA's own coordinates cannot be read back.
+        """
+        import math
+
+        ends = self._profile_ends
+        try:
+            drawn = self._drawn.get(str(self._active_sketch.Name), [])
+        except Exception:  # noqa: BLE001
+            drawn = []
+        if not ends and not drawn:
+            return ""
+        counts: dict[str, int] = {}
+        length = 0.0
+        for item in drawn:
+            counts[item["kind"]] = counts.get(item["kind"], 0) + 1
+            if item["kind"] == "line":
+                length += math.hypot(item["x2"] - item["x1"], item["y2"] - item["y1"])
+            elif item["kind"] in ("arc", "circle"):
+                length += item["radius"] * abs(item["sweep_rad"])
+            elif item["kind"] == "rectangle":
+                length += 2 * (abs(item["x2"] - item["x1"])
+                               + abs(item["y2"] - item["y1"]))
+            elif item["kind"] == "spline":
+                length += item.get("chord", 0.0)
+        parts = []
+        if counts:
+            parts.append(", ".join(f"{n} {kind}(s)"
+                                   for kind, n in sorted(counts.items())))
+        if ends:
+            xs = [p[0] for p in ends]
+            ys = [p[1] for p in ends]
+            parts.append("bbox (%.4f, %.4f) .. (%.4f, %.4f)"
+                         % (min(xs), min(ys), max(xs), max(ys)))
+        if length:
+            parts.append("outline %.3f mm" % length)
+        return " Profile: " + "; ".join(parts) + "." if parts else ""
+
     def _profile_warning(self) -> str:
         """Name the near-miss endpoints that will make pad/pocket fail.
 
@@ -593,11 +705,13 @@ class SketcherTools:
             self._active_sketch = None
             self._active_factory = None
         self.conn.refresh_display()
+        summary = self._profile_summary()
         warning = self._profile_warning()
         self._profile_ends = []
         return (
             f"Sketch '{name}' closed. You can now apply Part Design features "
-            "(pad, pocket, user pattern on its points, etc.)." + warning
+            "(pad, pocket, user pattern on its points, etc.)."
+            + summary + warning
         )
 
     def _draw_line(self, x1: float, y1: float, x2: float, y2: float,
@@ -609,6 +723,7 @@ class SketcherTools:
             line.Construction = True
         else:
             self._note_ends((x1, y1), (x2, y2))
+            self._note_element("line", x1=x1, y1=y1, x2=x2, y2=y2)
         kind = "Construction line" if construction else "Line"
         return f"{kind} created from ({x1}, {y1}) to ({x2}, {y2}) mm"
 
@@ -624,6 +739,7 @@ class SketcherTools:
         for a, b in (((x1, y1), (x2, y1)), ((x2, y1), (x2, y2)),
                      ((x2, y2), (x1, y2)), ((x1, y2), (x1, y1))):
             self._note_ends(a, b)
+        self._note_element("rectangle", x1=x1, y1=y1, x2=x2, y2=y2)
 
         return (
             f"Rectangle created from ({x1}, {y1}) to ({x2}, {y2}) mm "
@@ -640,6 +756,9 @@ class SketcherTools:
         self._ensure_sketch_open()
         factory = self._active_factory
         factory.CreateClosedCircle(cx, cy, radius)
+        import math
+        self._note_element("circle", cx=cx, cy=cy, radius=radius,
+                           sweep_rad=2 * math.pi)
         return f"Circle created at ({cx}, {cy}) with radius {radius} mm"
 
     def _draw_arc(
@@ -668,6 +787,8 @@ class SketcherTools:
             (cx + radius * math.cos(start_rad), cy + radius * math.sin(start_rad)),
             (cx + radius * math.cos(end_rad), cy + radius * math.sin(end_rad)),
         )
+        self._note_element("arc", cx=cx, cy=cy, radius=radius,
+                           sweep_rad=end_rad - start_rad)
         return (
             f"Arc created at ({cx}, {cy}), radius={radius} mm, "
             f"from {start_angle}° to {end_angle}°"
@@ -690,6 +811,11 @@ class SketcherTools:
         spline_pts = [factory.CreatePoint(p[0], p[1]) for p in control]
         spline = factory.CreateSpline(spline_pts)
 
+        import math
+        chord = sum(math.hypot(points[i + 1][0] - points[i][0],
+                               points[i + 1][1] - points[i][1])
+                    for i in range(len(points) - 1))
+        self._note_element("spline", points=len(points), chord=chord)
         pts_str = ", ".join(f"({p[0]}, {p[1]})" for p in points)
         return f"Spline created through {len(points)} points: {pts_str}" + (
             " (closed into a single curve)" if closed and len(control) > len(points)
@@ -700,6 +826,7 @@ class SketcherTools:
         self._ensure_sketch_open()
         factory = self._active_factory
         point = factory.CreatePoint(x, y)
+        self._note_element("point", x=x, y=y)
         # CreatePoint defaults to construction geometry, which user patterns
         # (AddFeatureToLocatePositions) ignore. Field-validated on V5R20.
         try:
@@ -793,45 +920,165 @@ class SketcherTools:
 
         return f"{constraint_type.capitalize()} constraint '{cst.Name}' added"
 
-    def _get_geometry(self, sketch_name: str | None = None) -> str:
-        """List a sketch's geometric elements.
+    def _locate_sketch(self, sketch_name: str | None) -> tuple[Any, str]:
+        """(sketch, how-it-was-found) for the read/edit tools.
 
-        ``GeometricElements`` is readable without opening the sketch editor, so a
-        named sketch can be inspected while another one is open - the tool used
-        to demand the sketch be open, and its schema had no properties at all.
+        Three sources, in order: the name given, the sketch currently open in the
+        editor, the last sketch this session created. The old code only knew the
+        open one, so a closed sketch - which is every sketch a feature has
+        consumed - answered "No active sketch. Use catia_create_sketch first" and
+        there was no way back (reported 2026-10-24).
         """
+        body = self.conn.get_active_part_body()
         if sketch_name:
-            body = self.conn.get_active_part_body()
             try:
-                sketch = body.Sketches.Item(sketch_name)
+                return body.Sketches.Item(sketch_name), "by name"
             except Exception:
-                names = ", ".join(
-                    str(body.Sketches.Item(i).Name)
-                    for i in range(1, body.Sketches.Count + 1)
-                )
+                names = ", ".join(str(body.Sketches.Item(i).Name)
+                                  for i in range(1, body.Sketches.Count + 1))
                 raise RuntimeError(
                     f"No sketch named '{sketch_name}' in the active body. "
-                    f"Available: {names or 'none'}."
+                    f"Sketches: {names or 'none'}."
                 ) from None
-        else:
-            self._ensure_sketch_open()
-            sketch = self._active_sketch
+        if self._active_sketch is not None:
+            return self._active_sketch, "open in the editor"
+        remembered = getattr(self.conn, "last_sketch", None)
+        if remembered is not None:
+            try:
+                _ = remembered.Name
+                return remembered, "last sketch created in this session"
+            except Exception:
+                self.conn.last_sketch = None
+        names = ", ".join(str(body.Sketches.Item(i).Name)
+                          for i in range(1, body.Sketches.Count + 1))
+        raise RuntimeError(
+            "No sketch is open and none was created in this session, so there is "
+            "nothing to default to. Pass sketch_name explicitly. Sketches in the "
+            f"active body: {names or 'none'}."
+        )
+
+    def _get_geometry(self, sketch_name: str | None = None) -> str:
+        """List a sketch's elements, open or closed.
+
+        Coordinates are deliberately absent: a CATIA Point2D exposes no readable
+        X/Y through automation on this build (GetCoordinates needs a by-ref array
+        it never fills), so promising them would be a lie. The element list plus
+        the profile echo at close time is what can actually be checked.
+        """
+        sketch, how = self._locate_sketch(sketch_name)
         geom = sketch.GeometricElements
 
         elements = []
         for i in range(1, geom.Count + 1):
             elem = geom.Item(i)
-            info = {
-                "index": i,
-                "name": elem.Name,
-            }
-            # Try to get the geometry type
+            info: dict[str, Any] = {"index": i, "name": str(elem.Name)}
             try:
-                info["type"] = elem.GeometricType
+                info["type"] = str(elem.GeometricType)
+            except Exception:
+                pass
+            try:
+                info["construction"] = bool(elem.Construction)
             except Exception:
                 pass
             elements.append(info)
 
-        if not elements:
-            return f"No geometry elements in sketch '{sketch.Name}'"
-        return json.dumps(elements, indent=2)
+        payload: dict[str, Any] = {
+            "sketch": str(sketch.Name),
+            "found": how,
+            "count": len(elements),
+            "elements": elements,
+            "note": (
+                "Coordinates cannot be read back from a closed sketch: CATIA's "
+                "Point2D exposes no readable X/Y through automation on this build. "
+                "Use catia_sketch_edit to reopen it and append, or "
+                "catia_sketch_delete_element to remove one element."
+            ),
+        }
+        drawn = self._drawn.get(str(sketch.Name))
+        if drawn:
+            payload["drawn_this_session"] = drawn
+        return json.dumps(payload, indent=2)
+
+    def _edit_sketch(self, sketch_name: str | None = None) -> str:
+        """Reopen a closed sketch for editing; later draws append to it."""
+        self.conn.ensure_connected()
+        sketch, how = self._locate_sketch(sketch_name)
+        name = str(sketch.Name)
+        try:
+            factory = sketch.OpenEdition()
+        except Exception as exc:  # noqa: BLE001 - reported with context
+            raise RuntimeError(
+                f"CATIA refused to reopen sketch '{name}' ({how}): {exc}. The "
+                "sketch may be consumed by a feature that is currently in error - "
+                "fix or delete that feature first."
+            ) from exc
+        self._active_sketch = sketch
+        self._active_factory = factory
+        self._sketch_part = self.conn.get_active_part()
+        self.conn.last_sketch = sketch
+        self._profile_ends = []
+        count = 0
+        try:
+            count = sketch.GeometricElements.Count
+        except Exception:
+            pass
+        return (
+            f"Sketch '{name}' reopened for editing ({how}) - it holds {count} "
+            "element(s), and geometry added now is appended to it. Call "
+            "catia_close_sketch when done."
+        )
+
+    def _delete_element(self, index: int, sketch_name: str | None = None) -> str:
+        """Delete one geometric element from a sketch, keeping everything else."""
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        sketch, how = self._locate_sketch(sketch_name)
+        name = str(sketch.Name)
+        was_open = self._active_sketch is sketch
+        if not was_open:
+            sketch.OpenEdition()
+        try:
+            geom = sketch.GeometricElements
+            if index < 1 or index > geom.Count:
+                raise RuntimeError(
+                    f"Element index {index} is out of range: sketch '{name}' has "
+                    f"{geom.Count} element(s). Use catia_sketch_get_geometry."
+                )
+            if index == 1:
+                raise RuntimeError(
+                    "Element 1 is the sketch's absolute axis, not a profile "
+                    "element - deleting it would break the sketch. Pick another "
+                    "index from catia_sketch_get_geometry."
+                )
+            element_name = str(geom.Item(index).Name)
+            sel = self.conn.hso
+            try:
+                sel.Clear()
+                sel.Add(geom.Item(index))
+                sel.Delete()
+            finally:
+                try:
+                    sel.Clear()
+                except Exception:
+                    pass
+            left = sketch.GeometricElements.Count
+        finally:
+            if not was_open:
+                try:
+                    sketch.CloseEdition()
+                except Exception:  # noqa: BLE001 - best effort
+                    pass
+        try:
+            part.UpdateObject(sketch)
+        except Exception as exc:  # noqa: BLE001 - the delete itself worked
+            return (
+                f"Deleted element {index} ('{element_name}') from sketch '{name}', "
+                f"{left} element(s) left, but the update afterwards failed ({exc}) "
+                "- features built on this sketch may be in error; fix them next."
+            )
+        self.conn.refresh_display()
+        return (
+            f"Deleted element {index} ('{element_name}') from sketch '{name}': "
+            f"{left} element(s) left. Features that consume this sketch were "
+            "rebuilt with the new profile."
+        )

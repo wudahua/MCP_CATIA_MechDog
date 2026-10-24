@@ -6,7 +6,7 @@ A trimmed, verification-first fork of
 only what builds and checks a **solid from a written spec**, and fixes four
 defects that make that loop unreliable.
 
-**96 tools** (upstream: 98 — 16 dropped, 14 added). Nothing in the COM layer was
+**98 tools** (upstream: 98 — 16 dropped, 16 added). Nothing in the COM layer was
 rewritten — the value of upstream is the field-verified knowledge in its
 comments, so this fork is strictly add / subtract / patch. The count is asserted
 by `tests/test_readme_tool_counts.py`, so it cannot drift from the code again.
@@ -25,10 +25,11 @@ by `tests/test_readme_tool_counts.py`, so it cannot drift from the code again.
 `export` (STEP/STL hand-off) and `http_transport` (remote agent) are kept: they
 are domain-neutral and cheap. See `FORK.md` §8 if you want to cut further.
 
-### Added (14 tools over upstream)
+### Added (16 tools over upstream)
 
-Five of them came with the fork, nine were added while building parts from a
-spec (0.3.1: three, 0.3.2: four, 0.3.4: one, 0.3.5: one). Upstream 98 − 16 dropped + 14 added = 96.
+Five of them came with the fork, eleven were added while building parts from a
+spec (0.3.1: three, 0.3.2: four, 0.3.4: one, 0.3.5: one, 0.3.8: two).
+Upstream 98 − 16 dropped + 16 added = 98.
 
 | Tool | What it gives you |
 |---|---|
@@ -49,6 +50,8 @@ spec (0.3.1: three, 0.3.2: four, 0.3.4: one, 0.3.5: one). Upstream 98 − 16 dro
 | `catia_set_visibility` | 0.3.2 | A GSD surface stays visible after `close_surface` and overlays the solid, so screenshots and the STL envelope describe a part that does not exist. Measured enum: `SetShow(0)` shows, `(1)` hides, `(2)` is accepted and does nothing |
 | `catia_save_as_copy` | 0.3.2 | `SaveAs` is refused once a model has geometry; this saves and then copies, which is the only way to snapshot such a model |
 | `catia_activate_document` | 0.3.5 | With a Part and a Product open there was no way back to the Part except closing the Product; this activates by name |
+| `catia_sketch_edit` | 0.3.8 | A closed sketch was unreachable: `OpenEdition` on it works, so a wrong profile can be repaired instead of deleting the sketch and rebuilding the part |
+| `catia_sketch_delete_element` | 0.3.8 | Removes one element (the wrong third line) and keeps the rest of the profile and the features built on it |
 | `catia_set_part_number` | 0.3.4 | Every part cloned from a template carries `Part1`, so a 24-instance assembly of 24 distinct parts reports 24 identical part numbers and CATIA fills the screen with “零件编号 Part1 已存在”. The number, not the instance name, is what the BOM reads |
 | `catia_gsd_extract` | 0.3.2 | `catia_gsd_fill` needs a boundary *curve*, and a sketch reference is rejected — without an extract there was no way to cap a lofted surface into a solid |
 
@@ -274,7 +277,7 @@ lying flat and its motors tilted 60° while every self-check reported success.
 | Group | Tools | Notes |
 |---|---|---|
 | Document | 12 | new/open/save/close/list + `catia_save_as_copy`; `catia_save_document` retries around dialogs |
-| Sketcher | 11 | lines, rectangles, circles, constraints |
+| Sketcher | 13 | lines, rectangles, circles, constraints; reopen a closed sketch and delete one element |
 | Part Design | 23 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, bodies… |
 | Generative Shape Design | 25 | wireframe and surfaces, extract, revolve + close surface |
 | Assembly | **12** | upstream 9 + get/set component transform, rename, list constraints |

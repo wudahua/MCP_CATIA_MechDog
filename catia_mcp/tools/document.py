@@ -391,12 +391,41 @@ class DocumentTools:
             f"The open document still points at '{source}'."
         )
 
+    def _document_names(self) -> list[str]:
+        """Every open document name, read defensively."""
+        try:
+            docs = self.conn.documents
+            return [str(docs.Item(i).Name) for i in range(1, docs.Count + 1)]
+        except Exception:  # noqa: BLE001 - diagnostics only
+            return []
+
     def _close_document(self, save: bool = False) -> str:
+        """Close the active document, and check that it actually closed.
+
+        ``doc.Close()`` returning without an exception is not evidence: CATIA
+        silently keeps a document that another open document still references,
+        and the old reply said "closed" anyway. The reporter then hit the same
+        locked part again on the next SaveAs and spent a long time on it
+        (2026-10-24). The count before/after is the only honest check.
+        """
         doc = self.conn.active_document
         name = doc.Name
         if save:
             dialogs.save(doc)
+        before = self._document_names()
         doc.Close()
+        after = self._document_names()
+        still = after.count(name) >= max(1, before.count(name))
+        if still:
+            return (
+                f"CLOSE NOT CONFIRMED: '{name}' is still open after Close() "
+                f"({before.count(name)} entry/entries before, {after.count(name)} "
+                "after). CATIA keeps a document that an open assembly references, "
+                "so close the referencing assembly first "
+                "(catia_activate_document, then close), then close this one. "
+                "Until then a save of this part fails with '方法 SaveAs 失败' and "
+                "the reason looks unrelated to the assembly."
+            )
         return f"Document '{name}' closed" + (" (saved)" if save else "")
 
     def _list_documents(self) -> str:

@@ -162,12 +162,28 @@ def test_delete_feature_can_target_the_last_one_without_a_name():
     assert "index" in tool["inputSchema"]["properties"]
 
 
-def test_circ_pattern_refusal_suggests_the_symmetry_route():
+def test_circ_pattern_takes_its_axis_from_the_part_itself():
+    """The axis Reference used to be minted in a donor document that was closed
+    before the pattern was built, so every AddNewCircPattern failed at update.
+
+    Measured on V5-6R2020 B30, 2026-10-24: with the axis line living in the
+    part's own 'PatternAxis' geometrical set the pattern builds, and the volume
+    lands on the analytic value (delta 1131.0 mm3 for 5 added Ø6 holes).
+    """
+    import inspect
+
     from catia_mcp.tools.part_design import PartDesignTools as PD
 
-    source = PD._circ_pattern.__code__.co_consts
-    joined = " ".join(str(c) for c in source if isinstance(c, str))
-    assert "catia_gsd_symmetry" in joined
+    source = inspect.getsource(PD._pattern_axis_reference)
+    assert "HybridShapeFactory" in source
+    assert "AppendHybridShape" in source
+    assert "part.Update()" in source          # not just UpdateObject(line)
+
+    listing = inspect.getsource(PD._circ_pattern)
+    assert "_pattern_axis_reference" in listing
+    assert "_mint_axis_reference" not in listing
+    # The seed must be a feature; patterning the body always failed.
+    assert "_pattern_seed" in listing
 
 
 def test_face_and_edge_listings_expose_the_element_type():
