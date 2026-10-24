@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.9] — 2026-10-24 · two regressions fixed, and a named document can be measured
+
 Third round of 2026-10-24 reports (three at once). Two of them are regressions this
 fork introduced, which is the honest headline.
 
