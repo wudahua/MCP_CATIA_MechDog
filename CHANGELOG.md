@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.8] — 2026-10-24 · a wrong sketch can be repaired
+
 The 2026-10-24 report rebuilt a 9-part hydraulic cylinder and named its top pain:
 "a closed sketch can never be read or changed again, so one wrong profile means
 rebuilding the part". Three of its items were P0.
