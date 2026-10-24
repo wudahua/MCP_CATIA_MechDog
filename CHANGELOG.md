@@ -4,6 +4,58 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.12] — 2026-10-24 · a dialog can no longer take the session hostage
+
+`catia_add_component` was the one call that could still kill a session: a CATIA
+file prompt on the automation thread blocks the serial STA worker, and the thread
+that would answer it is the blocked one (one reporter sat there for **2 h 14
+min**). The dialog watchdog answers `#32770` message boxes but deliberately leaves
+CATIA's own `CATDlgDialog` panels alone, because a human may have opened one on
+purpose - so widening it was not an option.
+
+### Changed
+
+- **`catia_add_component` now runs in a separate process** (`catia_mcp.guard`).
+  CATIA is an out-of-process COM server, so a second client attaches to the same
+  running instance, makes the one call, writes its result to a file and exits. If
+  it does not come back within `CATIA_MCP_GUARD_TIMEOUT` (default 60 s) it is
+  killed - which releases the server - and the recovery sweep cancels the dialog
+  it left behind (the only place that clicks `CATDlgDialog`): the reply then says
+  how many components the assembly holds, so you can tell whether the insert
+  happened anyway, and points at `catia_list_components` before retrying.
+  Measured on B30 with a child that never returns: the tool answered in **4.6 s**
+  (3 s timeout + 1.6 s sweep), reported `0 more than before`, and the next tool
+  call worked - the same failure used to be indistinguishable from a dead server.
+
+- The child attaches with `GetActiveObject` only - a `Dispatch` there would launch
+  a second CATIA when none is running - and gets `stdin`/`stdout` on `DEVNULL`,
+  because a chatty child would corrupt the JSON-RPC framing of a stdio transport.
+
+- The in-process path is kept, and is used automatically when the child cannot
+  start or cannot attach; the reply says which path ran, since that is the
+  difference between "protected" and "not protected" for the next call.
+
+- Cost, measured on B30: a guarded call takes **0.46-0.53 s** more than an
+  in-process one (Python startup plus the COM attach), so a 24-instance assembly
+  pays about 12 s in total. That is the price of not being able to lose the
+  session to a dialog.
+
+### Configuration
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CATIA_MCP_GUARD` | `1` | `0` puts the insert back in-process, with no protection |
+| `CATIA_MCP_GUARD_TIMEOUT` | `60` | seconds before the isolated process is killed |
+| `CATIA_MCP_GUARD_CMD` | - | override the child command (used by the tests) |
+
+### Still open
+
+- Killing the child frees the server, not CATIA: if CATIA itself is wedged behind
+  a native dialog that no button answers, a human still has to look at it. What is
+  fixed is that the *server* survives and says what it found.
+- Only the insert is isolated. Everything else stays in-process, because a COM
+  attach per call would cost seconds on every measurement.
+
 ## [0.3.11] — 2026-10-24 · numbers that were quietly wrong, and a route that only worked if you already knew the rule
 
 Three reports against 0.3.10, all reproduced on V5-6R2020 B30 before they were

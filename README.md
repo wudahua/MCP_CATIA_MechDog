@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.11** · [what changed](CHANGELOG.md) ·
+**0.3.12** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -334,11 +334,15 @@ is a modal dialog, and reads as a bare `[WinError 2]`). Place the result with
   of its own) cannot be exported to STL. The mesh box falls back to a copy of the
   saved file, so it measures the file, not unsaved edits; the reply says when that
   happened.
-* `catia_add_component` on a B32 build rejects forward-slash paths and can then
-  put up a modal dialog, which blocks the COM worker. The path is normalised and
-  a missing component is reported instead of claimed, but a dialog that is already
-  open still needs a human - no in-process timeout can interrupt a blocked COM
-  call.
+* `catia_add_component` runs the insert in a **separate process** attached to the
+  same CATIA. It is the one call that can raise CATIA's own file prompt on the
+  automation thread, and that prompt is not a `#32770` message box the watchdog
+  may answer - one reporter's session sat there for 2 h 14 min. The child is
+  killed after `CATIA_MCP_GUARD_TIMEOUT` (default 60 s), the prompt is cancelled,
+  and the reply reports the component count so you can see whether the insert
+  happened anyway. `CATIA_MCP_GUARD=0` turns the isolation off. Killing the child
+  frees the *server*; if CATIA itself is wedged behind a native dialog that no
+  button answers, a human still has to look at it.
 * The watchdog answers `#32770` message boxes only; CATIA's own `CATDlgDialog`
   panels are left alone so a human working alongside the agent is not interrupted.
 

@@ -42,8 +42,14 @@ class AssemblyTools:
             {
                 "name": "catia_add_component",
                 "description": (
-                    "Add an existing CATPart or CATProduct file as a component in the active assembly. "
-                    "The component is inserted at the origin."
+                    "Add an existing CATPart or CATProduct file as a component in the "
+                    "active assembly. The component is inserted at the origin. The "
+                    "insert runs in a separate process attached to the same CATIA, "
+                    "because this is the one call that can raise a file dialog on the "
+                    "automation thread and freeze the whole server; if it does not "
+                    "come back within CATIA_MCP_GUARD_TIMEOUT (60 s) it is killed, "
+                    "the dialog is cancelled, and the reply says how many components "
+                    "the assembly holds so you can tell whether it happened anyway."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -342,7 +348,7 @@ class AssemblyTools:
                 raise ValueError(f"Unknown assembly tool: {tool_name}")
 
     def _add_component(self, file_path: str) -> str:
-        """Insert a part file, with the two traps that hang a whole session fixed.
+        """Insert a part file, in a process that a dialog cannot take hostage.
 
         Measured by the reporter on V5-6R2020 B32 (2026-10-24): this API rejects
         FORWARD-slash paths (``AddComponentsFromFiles`` answers E_FAIL and then
@@ -352,8 +358,18 @@ class AssemblyTools:
         path to backslashes for this call only (every other tool is fine with
         forward slashes), silence file alerts, and check that a component
         actually appeared before saying so.
+
+        The count check catches the quiet version of the failure. It cannot catch
+        the loud one - a dialog that is up keeps the worker blocked, so no check
+        ever runs. That is why the call itself happens in a separate process
+        (:mod:`catia_mcp.guard`): CATIA is an out-of-process server, a second
+        client can attach to the same instance, and a client that does not come
+        back can be killed. The dialog is then answered by the recovery sweep,
+        and the reply says the call was abandoned instead of the session dying.
         """
         import os
+
+        from catia_mcp import dialogs, guard
 
         product = self.conn.get_active_product()
         products = product.Products
@@ -365,6 +381,57 @@ class AssemblyTools:
             before = products.Count
         except Exception:  # noqa: BLE001 - the comparison is best-effort
             pass
+
+        if guard.enabled():
+            try:
+                active_name = str(self.conn.active_document.Name)
+            except Exception:  # noqa: BLE001
+                active_name = None
+            outcome = guard.run("add_components",
+                                {"path": native_path,
+                                 "active_document": active_name},
+                                seconds=guard.timeout())
+            if outcome.timed_out:
+                # The child was killed, so CATIA is ours again; the dialog it
+                # raised is not. Cancel it, then look at what actually happened.
+                clicks = guard.cleanup()
+                after = before
+                try:
+                    after = products.Count
+                except Exception:  # noqa: BLE001
+                    pass
+                added = after - before
+                raise RuntimeError(
+                    f"catia_add_component was abandoned after "
+                    f"{outcome.data.get('seconds', guard.timeout()):.0f} s: CATIA put up "
+                    "a modal dialog and never returned, so the call was run in a "
+                    "separate process and that process was killed. The dialog has "
+                    f"been cancelled ({clicks} button(s) pressed). The assembly now "
+                    f"holds {after} component(s) - {added} more than before, so the "
+                    f"insert {'DID happen' if added > 0 else 'did not happen'}; "
+                    "verify with catia_list_components before retrying. Path used: "
+                    f"'{native_path}'. If it was a file prompt, the file may not be "
+                    "a saved .CATPart, or another application holds it open."
+                )
+            if not outcome.unavailable:
+                if not outcome.ok:
+                    raise RuntimeError(
+                        f"CATIA did not add the component ({outcome.code}): "
+                        f"{outcome.message}. Path used: '{native_path}'."
+                    )
+                after = int(outcome.data.get("after") or before)
+                added = outcome.data.get("added") or []
+                self.conn.refresh_display()
+                return (f"Component added from: {native_path} "
+                        f"({after - before} instance(s), assembly now holds {after})"
+                        + (f" - {', '.join(added)}" if added else "")
+                        + ". The insert ran in an isolated process, so a CATIA "
+                          "dialog could not block the session.")
+            # The child could not start or could not attach (different desktop,
+            # COM not registered for a second client...). Falling back keeps the
+            # tool working; it only loses the protection, so say so once the
+            # in-process call has run.
+
         alerts = None
         try:
             alerts = self.conn.app.DisplayFileAlerts
@@ -372,7 +439,8 @@ class AssemblyTools:
         except Exception:  # noqa: BLE001 - not every build exposes it
             alerts = None
         try:
-            products.AddComponentsFromFiles([native_path], "All")
+            with dialogs.watch():
+                products.AddComponentsFromFiles([native_path], "All")
         finally:
             if alerts is not None:
                 try:
@@ -390,8 +458,12 @@ class AssemblyTools:
                 "a saved .CATPart, save it first - or build it in place with "
                 "catia_add_new_part."
             )
+        note = ""
+        if guard.enabled():
+            note = (" (ran in-process: the isolated worker could not attach to "
+                    "CATIA, so a dialog would have blocked this call)")
         return (f"Component added from: {native_path} "
-                f"({after - before} instance(s), assembly now holds {after}).")
+                f"({after - before} instance(s), assembly now holds {after}).{note}")
 
     def _add_new_part(self, name: str | None = None) -> str:
         product = self.conn.get_active_product()
