@@ -4,6 +4,44 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+Third round of 2026-10-24 reports (three at once). Two of them are regressions this
+fork introduced, which is the honest headline.
+
+### Fixed
+- `catia_draft` without `neutral_face` crashed with "'str' object has no attribute
+  'get'": the auto-pick iterated `catia_list_faces`'s reply as if it were still
+  the bare array it was before 0.3.7 (it is `{count, raw_total, faces}` now). Four
+  sessions, 100 % reproducible, and the failure was mislabelled
+  `UNSUPPORTED_CAPABILITY`, which sends the user off to clear a gen_py cache.
+- `catia_close_sketch` after `catia_sketch_edit` left the consuming feature stale:
+  the part is rebuilt now, so an edited profile shows up without a separate
+  `update_part` (the reporter measured 12000.0 instead of 11214.6 and concluded
+  the edit had been ignored).
+- The profile echo lost its counts and its bbox when the sketch was closed, and
+  reported only the elements drawn after a reopen. The summary is now built from
+  the sketch name captured before closing, counts circles too, and covers what
+  this session drew (it says so, since pre-existing geometry's coordinates cannot
+  be read back).
+- `catia_pad` now reports the volume delta like pocket/hole/shaft.
+
+### Added
+- `catia_get_inertia` / `catia_get_bounding_box` take `document=` (alias
+  `document_name`): measure a named open document instead of the active one. On
+  this build activating a component's part does not change `ActiveDocument`, so
+  with an assembly open the part-level measurement was unreachable - the reporter
+  had to close the assembly (which unloads all nine parts) and reopen them one at
+  a time. The reply carries `document`.
+- `catia_sketch_get_geometry` takes `hide_construction` (default true): the two
+  construction points every line creates collapse into a count instead of
+  tripling the element list.
+
+### Refused instead of wrong
+- Product-mode `get_bounding_box(method="mesh")` now errors instead of silently
+  returning vertex-sweep numbers: an STL export only works for the active
+  document. The message names the per-part call that does give a true box. The
+  per-component world boxes remain vertex-based (revolved parts under-report);
+  that is stated in the reply, and `document=` is the way to get a correct one.
+
 ## [0.3.8] — 2026-10-24 · a wrong sketch can be repaired
 
 The 2026-10-24 report rebuilt a 9-part hydraulic cylinder and named its top pain:

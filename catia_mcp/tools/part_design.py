@@ -1011,9 +1011,13 @@ class PartDesignTools:
                 + ", so this is reported on CATIA's return alone."
             )
         note = ""
+        if before is not None and after is not None:
+            gain = after - before
+            note = (f" Volume {before:.1f} -> {after:.1f} mm3 "
+                    f"(delta {gain:+.1f}).")
         if update_error is not None:
-            note = (" (CATIA raised during the update, but the solid did grow "
-                    f"{before:.1f} -> {after:.1f} mm3, so the feature is kept)")
+            note += (" (CATIA raised during the update, but the solid did grow "
+                     "and the feature is kept.)")
         return f"Pad created: {span} ({direction}). Feature: '{pad.Name}'{note}"
 
     def _volume_probe(self, part: Any, body: Any) -> tuple[float | None, str | None]:
@@ -2246,7 +2250,12 @@ class PartDesignTools:
                 "Face", self._topo_index(neutral_name, "Face"))
             neutral_note = f"neutral {neutral_name}"
         else:
-            faces = json.loads(self._list_faces({}))
+            # _list_faces returns {"count": ..., "faces": [...]} since 0.3.7;
+            # iterating the object yielded its keys (strings) and every draft
+            # without an explicit neutral face died with "'str' object has no
+            # attribute 'get'" - reported 2026-10-24 as a regression.
+            payload = json.loads(self._list_faces())
+            faces = payload["faces"] if isinstance(payload, dict) else payload
             others = [f for f in faces if f.get("name") != face_name]
             others.sort(key=lambda f: -(f.get("area_mm2") or 0))
             if not others:

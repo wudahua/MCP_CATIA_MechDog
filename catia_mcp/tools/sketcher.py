@@ -320,7 +320,11 @@ class SketcherTools:
                 ),
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"sketch_name": {"type": "string", "description": "Sketch to inspect (e.g. '草图.1'). Omit for the open or last-created sketch."}},
+                    "properties": {
+                        "sketch_name": {"type": "string", "description": "Sketch to inspect (e.g. '草图.1'). Omit for the open or last-created sketch."},
+                        "hide_construction": {"type": "boolean", "default": True,
+                                              "description": "Collapse construction geometry (the two construction points every line creates) into a count"},
+                    },
                 },
             },
             {
@@ -403,7 +407,8 @@ class SketcherTools:
             case "catia_sketch_constraint":
                 return self._add_constraint(arguments)
             case "catia_sketch_get_geometry":
-                return self._get_geometry(arguments.get("sketch_name"))
+                return self._get_geometry(arguments.get("sketch_name"),
+                                          bool(arguments.get("hide_construction", True)))
             case "catia_sketch_edit":
                 return self._edit_sketch(arguments.get("sketch_name"))
             case "catia_sketch_delete_element":
@@ -588,7 +593,7 @@ class SketcherTools:
             name = "?"
         self._drawn.setdefault(name, []).append({"kind": kind, **params})
 
-    def _profile_summary(self) -> str:
+    def _profile_summary(self, sketch_name: str | None = None) -> str:
         """Echo the drawn profile: element counts, size, total outline length.
 
         This is the counter to "the profile was wrong and nothing said so": the
@@ -599,10 +604,12 @@ class SketcherTools:
         import math
 
         ends = self._profile_ends
-        try:
-            drawn = self._drawn.get(str(self._active_sketch.Name), [])
-        except Exception:  # noqa: BLE001
-            drawn = []
+        if sketch_name is None:
+            try:
+                sketch_name = str(self._active_sketch.Name)
+            except Exception:  # noqa: BLE001
+                sketch_name = None
+        drawn = self._drawn.get(sketch_name, []) if sketch_name else []
         if not ends and not drawn:
             return ""
         counts: dict[str, int] = {}
@@ -699,13 +706,20 @@ class SketcherTools:
             sketch.CloseEdition()
             owner = getattr(self, "_sketch_part", None) or self.conn.get_active_part()
             owner.UpdateObject(sketch)
+            # A reopened sketch that gained geometry leaves the features built on
+            # it stale until the part rebuilds - the reporter saw 12000.0 instead
+            # of 11214.6 and concluded the edit had not taken (2026-10-24).
+            try:
+                owner.Update()
+            except Exception:  # noqa: BLE001 - the sketch itself is closed
+                pass
         finally:
             # Clear cached state even when the close fails, so a broken
             # handle cannot poison subsequent calls.
             self._active_sketch = None
             self._active_factory = None
         self.conn.refresh_display()
-        summary = self._profile_summary()
+        summary = self._profile_summary(name)
         warning = self._profile_warning()
         self._profile_ends = []
         return (
@@ -957,7 +971,8 @@ class SketcherTools:
             f"active body: {names or 'none'}."
         )
 
-    def _get_geometry(self, sketch_name: str | None = None) -> str:
+    def _get_geometry(self, sketch_name: str | None = None,
+                      hide_construction: bool = True) -> str:
         """List a sketch's elements, open or closed.
 
         Coordinates are deliberately absent: a CATIA Point2D exposes no readable
@@ -968,7 +983,8 @@ class SketcherTools:
         sketch, how = self._locate_sketch(sketch_name)
         geom = sketch.GeometricElements
 
-        elements = []
+        elements: list[dict[str, Any]] = []
+        construction_count = 0
         for i in range(1, geom.Count + 1):
             elem = geom.Item(i)
             info: dict[str, Any] = {"index": i, "name": str(elem.Name)}
@@ -976,16 +992,30 @@ class SketcherTools:
                 info["type"] = str(elem.GeometricType)
             except Exception:
                 pass
+            is_construction = False
             try:
-                info["construction"] = bool(elem.Construction)
+                is_construction = bool(elem.Construction)
             except Exception:
                 pass
+            info["construction"] = is_construction
+            if is_construction:
+                construction_count += 1
+                if hide_construction:
+                    continue
             elements.append(info)
+
+        # A sketch reopened and edited can enumerate fewer elements right after
+        # the rebuild than this session drew into it (reported 2026-10-24: 14
+        # drawn, 13 listed). The live enumeration is the truth for indices, so
+        # the drawn record travels beside it under its own key rather than being
+        # spliced in and shifting indices.
 
         payload: dict[str, Any] = {
             "sketch": str(sketch.Name),
+            "document": str(getattr(self.conn.active_document, "Name", "")),
             "found": how,
             "count": len(elements),
+            "construction_collapsed": construction_count if hide_construction else 0,
             "elements": elements,
             "note": (
                 "Coordinates cannot be read back from a closed sketch: CATIA's "

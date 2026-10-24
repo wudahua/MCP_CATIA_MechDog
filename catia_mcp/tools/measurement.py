@@ -221,6 +221,15 @@ class MeasurementTools:
                                 "(see catia_list_components). Omit for all of them."
                             ),
                         },
+                        "document": {
+                            "type": "string",
+                            "description": (
+                                "Measure THIS open document instead of the active "
+                                "one - the only way to measure a part while its "
+                                "assembly is open (activating it does not change "
+                                "ActiveDocument on this build). Alias: document_name."
+                            ),
+                        },
                     },
                 },
             },
@@ -280,10 +289,14 @@ class MeasurementTools:
                     _pick(arguments, "element1", "elem1_name", "element1_name", "elem1"),
                     _pick(arguments, "element2", "elem2_name", "element2_name", "elem2"))
             case "catia_get_inertia":
-                return self._get_inertia(arguments.get("density"))
+                return self._get_inertia(arguments.get("density"),
+                                         arguments.get("document")
+                                         or arguments.get("document_name"))
             case "catia_get_bounding_box":
                 return self._get_bounding_box(arguments.get("method", "auto"),
-                                              arguments.get("component"))
+                                              arguments.get("component"),
+                                              arguments.get("document")
+                                              or arguments.get("document_name"))
             case "catia_get_parameters":
                 return self._get_parameters(arguments.get("filter"))
             case "catia_set_parameter":
@@ -427,8 +440,70 @@ class MeasurementTools:
             )
         return f"Minimum distance between '{elem1_name}' and '{elem2_name}': {distance:.4f} mm"
 
-    def _get_inertia(self, density: float | None = None) -> str:
+    def _resolve_open_document(self, name: str) -> Any:
+        """An open document by name - the assembly cannot steal this one.
+
+        Activating a component's part inside an open product does not change
+        what ``ActiveDocument`` returns on this build, so a measurement aimed at
+        "the part I just activated" silently measured the assembly (reported
+        2026-10-24). A name is unambiguous; matching is case-insensitive on the
+        full name and on the stem, like catia_activate_document.
+        """
+        docs = self.conn.documents
+        key = name.strip().casefold()
+        for i in range(1, docs.Count + 1):
+            doc = docs.Item(i)
+            try:
+                full = str(doc.Name)
+            except Exception:  # noqa: BLE001
+                continue
+            if full.casefold() == key or full.split(".")[0].casefold() == key:
+                return doc
+        names = ", ".join(str(docs.Item(i).Name) for i in range(1, docs.Count + 1))
+        raise RuntimeError(
+            f"No open document matches '{name}'. Open: {names or 'none'}. Pass the "
+            "full name from catia_list_documents."
+        )
+
+    def _part_inertia(self, part: Any, density: float | None,
+                      label: str) -> str:
+        """Volume / area / centroid of a specific Part, by name or object."""
+        doc = part.Parent
+        body = part.MainBody
+        if body.Shapes.Count == 0:
+            raise RuntimeError(f"'{label}' has no solid in its main body yet.")
+        spa = doc.GetWorkbench("SPAWorkbench")
+        measurable = spa.GetMeasurable(part.CreateReferenceFromObject(body))
+        payload: dict[str, Any] = {"document": label}
+        try:
+            payload["volume_mm3"] = round(measurable.Volume * _M3_TO_MM3, 4)
+        except Exception as exc:  # noqa: BLE001
+            payload["volume_mm3"] = None
+            payload["volume_error"] = str(exc).splitlines()[0][:90]
+        try:
+            payload["area_mm2"] = round(measurable.Area * _M2_TO_MM2, 4)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            cog = self._read_measurable_array(measurable, "GetCOG", 3)
+            payload["center_of_gravity_mm"] = {k: round(v, 4)
+                                              for k, v in zip("xyz", cog)}
+        except Exception:  # noqa: BLE001
+            pass
+        if density and payload.get("volume_mm3"):
+            payload["mass_kg"] = round(density * payload["volume_mm3"] / 1e9, 6)
+        payload["note"] = ("measured on this document's own Part, independent of "
+                           "which document CATIA reports as active; the inertia "
+                           "matrix is only computed for the active document")
+        return json.dumps(payload, indent=2)
+
+    def _get_inertia(self, density: float | None = None,
+                     document: str | None = None) -> str:
         self.conn.ensure_connected()
+        if document:
+            doc = self._resolve_open_document(document)
+            return self._part_inertia(self.conn.part_of(doc), density,
+                                      str(doc.Name))
         if self._document_kind() == "assembly":
             return self._assembly_inertia(density)
         spa = self._spa_workbench()
@@ -722,15 +797,68 @@ class MeasurementTools:
             payload["skipped"] = skipped
         return json.dumps(payload, indent=2)
 
+    def _part_bbox(self, part: Any, method: str) -> str:
+        """Bounding box of a named Part document (no reliance on ActiveDocument)."""
+        body = part.MainBody
+        if body.Shapes.Count == 0:
+            raise RuntimeError("That part has no solid shape yet.")
+        if method in ("auto", "vertices"):
+            points, truncated, total, dropped = self._vertex_points(body)
+            if points:
+                return self._bbox_json(
+                    points,
+                    f"vertex sweep over {len(points)} of {total} vertices of "
+                    f"'{part.Parent.Name}'; exact for planar-faced solids, curved "
+                    "faces may extend beyond these bounds"
+                    + (" (capped at 200)" if truncated else "")
+                    + (f"; {dropped} construction point(s) ignored" if dropped else ""),
+                )
+            if method == "vertices":
+                raise RuntimeError(
+                    "UNSUPPORTED_CAPABILITY: that part exposes no vertices (fully "
+                    "curved solid), so a vertex sweep cannot bound it. Use "
+                    "method='mesh'."
+                )
+        corners, triangles = self._mesh_corners(part)
+        return self._bbox_json(
+            corners,
+            f"STL mesh sweep of '{part.Parent.Name}' over {triangles} triangle "
+            "vertices; the mesh chords curved faces, so the true surface lies a "
+            "fraction of a millimetre outside these bounds",
+        )
+
     def _get_bounding_box(self, method: str = "auto",
-                          component: str | None = None) -> str:
+                          component: str | None = None,
+                          document: str | None = None) -> str:
         # Measurable has no bounding-box method in any V5 release. Two sources
         # are available instead: the final shape's vertices (exact for
         # planar-faced solids) and an exported STL mesh (the only thing that
         # works on a fully curved solid - a cylinder is one face, zero
         # vertices - at the cost of chording the surface).
         self.conn.ensure_connected()
+        if document:
+            doc = self._resolve_open_document(document)
+            try:
+                part = self.conn.part_of(doc)
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    f"'{document}' is not a Part document ({exc}); a Product can "
+                    "only be measured without 'document' (world aggregation)."
+                ) from exc
+            return self._part_bbox(part, method)
         if self._document_kind() == "assembly":
+            if method == "mesh":
+                # Refuse instead of silently returning vertex-sweep numbers:
+                # a wrong number that looks plausible is worse than an error.
+                raise RuntimeError(
+                    "method='mesh' is not available in Product mode: an STL "
+                    "export only works for the active document, and a component's "
+                    "part cannot be activated while its product is open. Call "
+                    "get_bounding_box(document='<the part>.CATPart', method='mesh') "
+                    "for a true per-part box, or omit method for the world "
+                    "aggregation (vertex-based, so a revolved part's diameter is "
+                    "under-reported - that is stated in the reply)."
+                )
             return self._assembly_box(self.conn.active_document, method, component)
         part = self.conn.get_active_part()
         body = self.conn.get_active_part_body()
