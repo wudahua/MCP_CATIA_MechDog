@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.10** · [what changed](CHANGELOG.md) ·
+**0.3.11** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -313,16 +313,27 @@ lying flat and its motors tilted 60° while every self-check reported success.
 exact on planar-faced solids, a **lower bound ~0.5-0.7 % small** on curved ones.
 `method="vertices"` is the cheap sweep, exact only when every face is planar (a
 revolved face has no vertex at its extremum, which is how an `auto` box once came
-out 37.5 % small). On an assembly the per-component world boxes are vertex-based;
-`document="<part>.CATPart", method="mesh"` gives a true per-part box, and
-`catia_get_component_transform` supplies the placement to combine them.
+out 37.5 % small). On an assembly the per-component world boxes are vertex-based,
+so any part whose extremum lies on a curved face is under-reported there;
+`document="<part>.CATPart", method="mesh"` gives a true per-part box - the part is
+opened by path if it exists only as a component, and exported from a temporary
+copy when CATIA refuses to export it while it is edited in context (that refusal
+is a modal dialog, and reads as a bare `[WinError 2]`). Place the result with
+`catia_get_component_transform`.
 
 ## Known limits
 
 * No lump-count check (upstream has none either) — the only reliable detector for
   an isolated floating boss.
 * Assembly **inertia tensors** are not aggregated (volumes and centroids are); a
-  tensor would have to be rotated into world space per component.
+  tensor would have to be rotated into world space per component. The tensor is
+  also only computed for the ACTIVE document, and with the part's material density
+  - `get_inertia(density=...)` does not change it, which is why the reply reports
+  both masses.
+* A part that CATIA is editing **in context** (loaded inside an assembly, no window
+  of its own) cannot be exported to STL. The mesh box falls back to a copy of the
+  saved file, so it measures the file, not unsaved edits; the reply says when that
+  happened.
 * `catia_add_component` on a B32 build rejects forward-slash paths and can then
   put up a modal dialog, which blocks the COM worker. The path is normalised and
   a missing component is reported instead of claimed, but a dialog that is already

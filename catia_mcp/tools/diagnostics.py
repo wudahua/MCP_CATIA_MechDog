@@ -311,10 +311,16 @@ class DiagnosticsTools:
         if meas.get("missing_methods"):
             missing = ", ".join(meas["missing_methods"])
             notes.append(
-                "The Measurable API lacks " + missing + " on this release "
-                "(known on V5R20). The corresponding measurement tools "
-                "will return UNSUPPORTED_CAPABILITY; volume, area and "
-                "center of gravity still work."
+                "The Measurable API lacks " + missing + " on this release. That is "
+                "expected and does NOT disable any tool: neither method is used "
+                "here - volume / area / centre of gravity come from "
+                "Measurable.Volume / .Area / GetCOG, bounding boxes from the final "
+                "shape's vertices or an exported STL mesh, and the inertia tensor "
+                "from SPAWorkbench.Inertias. catia_get_inertia and "
+                "catia_get_bounding_box work normally without GetInertia / "
+                "GetBoundingBox. (This note used to say the opposite and talked "
+                "callers out of two working tools - reported 2026-10-24, third "
+                "release running.)"
             )
         wb = report.get("workbenches", {})
         for wb_name, status in wb.items():

@@ -69,6 +69,10 @@ def test_auto_takes_the_mesh_and_says_why() -> None:
 def test_a_surface_only_part_says_why_it_cannot_be_measured() -> None:
     """SPA answers an empty body with placeholder strings; a caller then treats
     one as a dict - that is where "'str' object has no attribute 'get'" came from.
+
+    v0.3.10 called every empty main body "surface-only", which is wrong advice for
+    a brand-new part (reported 2026-10-24); the reason now comes from a helper
+    that checks whether there is any surface geometry at all.
     """
     import inspect
 
@@ -76,7 +80,11 @@ def test_a_surface_only_part_says_why_it_cannot_be_measured() -> None:
 
     source = inspect.getsource(MT._get_inertia)
     assert "Shapes.Count == 0" in source
-    assert "surface-only" in source
+    assert "_no_solid_reason" in source
+
+    reason = inspect.getsource(MT._no_solid_reason)
+    assert "is empty" in reason and "no surface geometry" in reason
+    assert "catia_gsd_close_surface" in reason
 
 
 def test_the_planner_does_not_assume_a_dict_centroid() -> None:

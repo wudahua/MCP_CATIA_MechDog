@@ -306,12 +306,15 @@ class GSDTools:
                     "Note there is no tangent/curvature condition here: CATIA's GSD "
                     "loft does not expose one (only SectionCoupling and Relimitation, "
                     "and measured SectionCoupling 0/1/2/3 all give the same volume). "
-                    "BUILD SENSITIVITY: this is the one GSD tool whose result depends on "
-                    "the CATIA build. It works on V5-6R2020 (B30) and fails on "
-                    "V5-6R2022 (B32) with 'UpdateObject failed' even for two coaxial "
-                    "equal-radius circles whose pair catia_gsd_blend accepts in the same "
-                    "session - the automation entry point differs, not the geometry. On "
-                    "B32 build the transition by hand or use catia_gsd_blend."
+                    "BUILD SENSITIVITY: reported failing on V5-6R2022 (B32) with "
+                    "'UpdateObject failed' even for two coaxial equal-radius circles "
+                    "whose pair catia_gsd_blend accepts in the same session "
+                    "(reported 2026-10-23, 7 configurations, one B32 SP6 session). "
+                    "Two later B32 SP6 sessions built both the smooth and the ruled "
+                    "loft and matched B30 to 0.02 mm3 (2026-10-24), so treat this as "
+                    "SESSION-sensitive, not build-determined: if it fails, retry once "
+                    "in a fresh session before working around it, and prefer "
+                    "catia_gsd_blend for the same section pair in the meantime."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1148,10 +1151,12 @@ class GSDTools:
                 f"{e} Common causes: a guide that does not intersect every section "
                 f"(check with measurements), or a section whose curve direction "
                 f"opposes the others (flip it with orientations=-1). If neither "
-                f"applies and the sections are plainly lofts-able, this is the "
-                f"known B30/B32 split: reported 2026-10-23 on V5-6R2022 (B32), "
-                f"where every loft fails while catia_gsd_blend accepts the same "
-                f"curve pair. Build the transition with two blends there."
+                f"applies and the sections are plainly lofts-able, retry once in a "
+                f"fresh session: one B32 SP6 session reported every loft failing "
+                f"while catia_gsd_blend accepted the same curve pair (2026-10-23), "
+                f"and two other B32 SP6 sessions then built both the smooth and the "
+                f"ruled loft and matched B30 to 0.02 mm3 (2026-10-24). If it still "
+                f"fails, build the transition with two blends."
             ) from e
 
     def _ruled_loft(self, sections: list[str], name: str | None) -> str:

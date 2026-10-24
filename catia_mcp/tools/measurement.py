@@ -80,6 +80,19 @@ _M2_TO_MM2 = 1e6
 _M3_TO_MM3 = 1e9
 
 
+def _sig(value: float, digits: int = 6) -> float:
+    """Round to significant digits, not decimal places.
+
+    Quantities that span many orders of magnitude - inertia in kg.m2 goes from
+    1e-9 (a 2 g screw) to 1e2 (a jig) - cannot be rounded to a fixed number of
+    decimals without either losing the small ones or padding the large ones.
+    """
+    try:
+        return float(f"{float(value):.{digits}g}")
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def read_measurable_array(app: Any, measurable: Any, method: str, count: int) -> list[float]:
     """Run `measurable.<method> a` inside CATIA via SystemService.Evaluate and
     return the filled array (field-proven on V5R20 for GetCOG/GetPlane).
@@ -125,6 +138,9 @@ class MeasurementTools:
 
     def __init__(self, connection: CATIAConnection) -> None:
         self.conn = connection
+        # Set when a measurement had to open a component's part to reach it, so
+        # the reply can say the session gained a document.
+        self.opened_for_measurement: str | None = None
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         return [
@@ -183,11 +199,17 @@ class MeasurementTools:
                         "document": {
                             "type": "string",
                             "description": (
-                                "Measure THIS open document instead of the active "
-                                "one (alias: document_name). Activating a "
-                                "component's part does switch ActiveDocument on "
-                                "B32, but the switch is easy to lose track of - "
-                                "naming the document is unambiguous."
+                                "Measure THIS document's own Part instead of the "
+                                "active one (alias: document_name). This is the "
+                                "reliable route on an assembly: whether activating a "
+                                "component's part really changes ActiveDocument "
+                                "depends on whether that part has a window of its "
+                                "own (reported both ways on B32), while naming the "
+                                "document is unambiguous. A part that exists only as "
+                                "a component is opened by path here. Note that the "
+                                "inertia TENSOR is only computed for the active "
+                                "document, so this route returns volume / area / "
+                                "centroid without a matrix."
                             ),
                         },
                     },
@@ -196,20 +218,24 @@ class MeasurementTools:
             {
                 "name": "catia_get_bounding_box",
                 "description": (
-                    "Get the bounding box of the active part in mm. 'vertices' sweeps the "
-                    "final shape's vertices (exact for planar-faced solids, but a fully "
-                    "curved solid like a cylinder has no vertices at all); 'mesh' exports "
-                    "an STL and sweeps the triangles, which works for revolved and lofted "
-                    "shapes and lands a fraction of a millimetre inside the true surface "
-                    "because the mesh chords the curve. 'auto' uses vertices when they "
-                    "exist and falls back to the mesh otherwise. "
+                    "Get the bounding box of the active part in mm. 'auto' (the "
+                    "default) ALWAYS takes the STL mesh: exact for a solid whose "
+                    "faces are all planar, a LOWER bound of about 0.5-0.7 % for one "
+                    "with curved faces, because the mesh chords the curve. "
+                    "'vertices' is the cheap sweep of the final shape's vertices - "
+                    "exact only when every face is planar, and wrong by however much "
+                    "the extremum sticks out when it does not (a cylinder has no "
+                    "vertex at its diameter at all). 'mesh' is the same route as "
+                    "'auto', stated explicitly. "
                     "With an assembly active it returns the WORLD box: each "
                     "component's local box is transformed by its placement and the "
                     "results are aggregated, per component as well as overall. Pass "
-                    "'component' for one instance only. Note that a component's local "
-                    "box still comes from a vertex sweep, so a revolved part's "
-                    "diameter is under-reported there - the mesh method cannot be "
-                    "applied to a non-active document."
+                    "'component' for one instance only. Those per-component boxes "
+                    "are still vertex sweeps, so ANY part whose extremum lies on a "
+                    "curved face is under-reported there - revolved or not. The true "
+                    "per-part box comes from get_bounding_box(document='<part>"
+                    ".CATPart', method='mesh'), which opens the part by path when it "
+                    "exists only as a component."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -219,9 +245,11 @@ class MeasurementTools:
                             "enum": ["auto", "vertices", "mesh"],
                             "default": "auto",
                             "description": (
-                                "auto (default) = vertices if the shape has any, else "
-                                "mesh; vertices = fail on a fully curved solid; mesh = "
-                                "always export STL"
+                                "auto (default) = always the STL mesh, exact for "
+                                "planar-faced solids and a lower bound for curved "
+                                "ones; vertices = cheap vertex sweep, exact only when "
+                                "every face is planar (fails on a fully curved solid); "
+                                "mesh = the same as auto, named explicitly"
                             ),
                         },
                         "component": {
@@ -234,12 +262,13 @@ class MeasurementTools:
                         "document": {
                             "type": "string",
                             "description": (
-                                "Measure THIS open document instead of the active "
-                                "one - a shortcut that does not depend on which "
-                                "document CATIA reports as active. Note that a "
-                                "method='mesh' measurement switches the active "
-                                "document to the measured one; the tool switches it "
-                                "back. Alias: document_name."
+                                "Measure THIS document instead of the active one - "
+                                "the unambiguous route, and the only way to get a "
+                                "true mesh box for a part that lives inside an open "
+                                "assembly. A part that exists only as a component is "
+                                "not in the Documents collection, so it is opened by "
+                                "path here (it stays open; the reply says so). "
+                                "Alias: document_name."
                             ),
                         },
                     },
@@ -455,11 +484,20 @@ class MeasurementTools:
     def _resolve_open_document(self, name: str) -> Any:
         """An open document by name - the assembly cannot steal this one.
 
-        Activating a component's part inside an open product does not change
-        what ``ActiveDocument`` returns on this build, so a measurement aimed at
-        "the part I just activated" silently measured the assembly (reported
-        2026-10-24). A name is unambiguous; matching is case-insensitive on the
-        full name and on the stem, like catia_activate_document.
+        Activating a component's part inside an open product does not reliably
+        change what ``ActiveDocument`` returns on every build, so a measurement
+        aimed at "the part I just activated" silently measured the assembly
+        (reported 2026-10-24). A name is unambiguous; matching is
+        case-insensitive on the full name and on the stem, like
+        catia_activate_document.
+
+        A part that exists only as a component of an open product is NOT in
+        ``Documents`` at all (measured on B30 2026-10-24: opening a product that
+        references two parts leaves Documents holding just the product), which is
+        why ``document='<part>.CATPart'`` used to answer "No open document
+        matches" in exactly the case the argument was added for. The component's
+        own file is located by path and opened, so the call works without the
+        caller knowing this rule.
         """
         docs = self.conn.documents
         key = name.strip().casefold()
@@ -471,11 +509,61 @@ class MeasurementTools:
                 continue
             if full.casefold() == key or full.split(".")[0].casefold() == key:
                 return doc
+        opened = self._open_component_part(name)
+        if opened is not None:
+            return opened
         names = ", ".join(str(docs.Item(i).Name) for i in range(1, docs.Count + 1))
         raise RuntimeError(
-            f"No open document matches '{name}'. Open: {names or 'none'}. Pass the "
-            "full name from catia_list_documents."
+            f"No open document matches '{name}', and no component of an open "
+            f"assembly references a part by that name either. Open: "
+            f"{names or 'none'}. Pass the full name from catia_list_documents, or "
+            "open the part first with catia_open_document."
         )
+
+    def _open_component_part(self, name: str) -> Any:
+        """Open a part that is only reachable through an open assembly.
+
+        Returns the opened document, or None when nothing matches. Matching is on
+        the component name (``P05_CylinderCap.1``), its part number, and the file
+        name of the part it references, so every handle a caller may hold works.
+        """
+        key = name.strip().casefold()
+        for i in range(1, self.conn.documents.Count + 1):
+            try:
+                document = self.conn.documents.Item(i)
+                product = self.conn.product_of(document)
+            except Exception:  # noqa: BLE001 - not a Product
+                continue
+            try:
+                children = product.Products
+            except Exception:  # noqa: BLE001
+                continue
+            for index in range(1, children.Count + 1):
+                try:
+                    child = children.Item(index)
+                    candidates = {str(child.Name).casefold(),
+                                  str(child.PartNumber).casefold()}
+                    part_doc = child.ReferenceProduct.Parent
+                    candidates.add(str(part_doc.Name).casefold())
+                    candidates.add(str(part_doc.Name).split(".")[0].casefold())
+                except Exception:  # noqa: BLE001 - a dead link, not a match
+                    continue
+                if key not in candidates:
+                    continue
+                try:
+                    path = str(part_doc.FullName)
+                except Exception:  # noqa: BLE001
+                    path = ""
+                if not path or not os.path.isabs(path):
+                    raise RuntimeError(
+                        f"'{name}' is a component of '{document.Name}' but its part "
+                        "has never been saved, so it cannot be opened as its own "
+                        "document; save the part first (catia_save_document)."
+                    )
+                opened = self.conn.documents.Open(os.path.normpath(path))
+                self.opened_for_measurement = str(opened.Name)
+                return opened
+        return None
 
     def _part_inertia(self, part: Any, density: float | None,
                       label: str) -> str:
@@ -483,7 +571,7 @@ class MeasurementTools:
         doc = part.Parent
         body = part.MainBody
         if body.Shapes.Count == 0:
-            raise RuntimeError(f"'{label}' has no solid in its main body yet.")
+            raise RuntimeError(self._no_solid_reason(part, body, label))
         spa = doc.GetWorkbench("SPAWorkbench")
         measurable = spa.GetMeasurable(part.CreateReferenceFromObject(body))
         payload: dict[str, Any] = {"document": label}
@@ -505,17 +593,60 @@ class MeasurementTools:
         if density and payload.get("volume_mm3"):
             payload["mass_kg"] = round(density * payload["volume_mm3"] / 1e9, 6)
         payload["note"] = ("measured on this document's own Part, independent of "
-                           "which document CATIA reports as active; the inertia "
-                           "matrix is only computed for the active document")
+                           "which document CATIA reports as active. The inertia "
+                           "TENSOR is not computed on this route - CATIA only "
+                           "computes it for the active document - so if you need "
+                           "the matrix, make this part active (activate_document) "
+                           "and call get_inertia without 'document'.")
         return json.dumps(payload, indent=2)
+
+    @staticmethod
+    def _no_solid_reason(part: Any, body: Any, label: str) -> str:
+        """Say why a part has no solid, without calling an empty part 'surface-only'.
+
+        A brand-new part and a part made of GSD surfaces both have an empty main
+        body, and they need different advice: the first one has nothing to measure
+        at all, the second one is one close_surface away from a solid. Reported
+        2026-10-24: a completely empty part was told it was "surface-only".
+        """
+        try:
+            surfaces = sum(
+                part.HybridBodies.Item(i).HybridShapes.Count
+                for i in range(1, part.HybridBodies.Count + 1))
+        except Exception:  # noqa: BLE001
+            surfaces = -1
+        if surfaces == 0:
+            return (
+                f"'{label}' is empty: '{getattr(body, 'Name', 'the main body')}' holds "
+                "no solid and there is no surface geometry either, so volume / area / "
+                "centroid are undefined. Build something first (catia_pad / "
+                "catia_gsd_*)."
+            )
+        counted = ("no surface geometry either" if surfaces < 0
+                   else f"{surfaces} surface element(s) and no solid")
+        return (
+            f"'{label}' has no solid in '{getattr(body, 'Name', 'the main body')}' "
+            f"({counted}), so volume / area / centroid are undefined. Close the "
+            "surfaces into a solid first (catia_gsd_close_surface) or measure the "
+            "surfaces another way."
+        )
 
     def _get_inertia(self, density: float | None = None,
                      document: str | None = None) -> str:
         self.conn.ensure_connected()
         if document:
+            self.opened_for_measurement = None
             doc = self._resolve_open_document(document)
-            return self._part_inertia(self.conn.part_of(doc), density,
-                                      str(doc.Name))
+            reply = self._part_inertia(self.conn.part_of(doc), density, str(doc.Name))
+            if self.opened_for_measurement:
+                payload = json.loads(reply)
+                payload["opened"] = (
+                    f"'{self.opened_for_measurement}' existed only as a component of "
+                    "an open assembly, so it was opened as its own document to be "
+                    "measured; it stays open (close it with catia_close_document)."
+                )
+                return json.dumps(payload, indent=2)
+            return reply
         if self._document_kind() == "assembly":
             return self._assembly_inertia(density)
         spa = self._spa_workbench()
@@ -526,12 +657,7 @@ class MeasurementTools:
         # Say it here: run_plan records this as inertia_error and carries on.
         try:
             if body.Shapes.Count == 0:
-                raise RuntimeError(
-                    f"'{part.Name}' has no solid in '{body.Name}' (surface-only "
-                    "part), so volume / area / centroid are undefined. Close the "
-                    "surfaces into a solid first (catia_gsd_close_surface) or "
-                    "measure the surfaces another way."
-                )
+                raise RuntimeError(self._no_solid_reason(part, body, part.Name))
         except RuntimeError:
             raise
         except Exception:  # noqa: BLE001 - Shapes is readable on every part
@@ -581,11 +707,33 @@ class MeasurementTools:
             vals = self._evaluate_floats(self._VBS_INERTIA, "catia_mcp_inertia", [body])
             result["mass_from_material_kg"] = round(vals[0], 6)
             inertia = vals[1:10]
+            # Inertia spans 1e-9 .. 1e2 kg.m2, so a fixed number of DECIMALS is
+            # wrong by construction: rounding to 4 places turned a 72 cm3 plate's
+            # three principal moments (Ixx 2.1e-5, Izz 5.6e-5) into 0.0 / 0.0001
+            # and a 73 cm3 loft's into all zeros - a number a caller then compares
+            # against CAD and reads as "0 % error" (reported 2026-10-24). Six
+            # significant digits survive the whole range.
             result["inertia_matrix_kg_m2"] = [
-                [round(inertia[0], 4), round(inertia[1], 4), round(inertia[2], 4)],
-                [round(inertia[3], 4), round(inertia[4], 4), round(inertia[5], 4)],
-                [round(inertia[6], 4), round(inertia[7], 4), round(inertia[8], 4)],
+                [_sig(inertia[0]), _sig(inertia[1]), _sig(inertia[2])],
+                [_sig(inertia[3]), _sig(inertia[4]), _sig(inertia[5])],
+                [_sig(inertia[6]), _sig(inertia[7]), _sig(inertia[8])],
             ]
+            result["inertia_matrix_unit"] = "kg*m^2"
+            result["inertia_matrix_about"] = (
+                "component axes through the centre of gravity, in the document's "
+                "own axis system (CATIA Inertia.GetInertiaMatrix); the diagonal is "
+                "Ixx/Iyy/Izz, the off-diagonals are the products of inertia"
+            )
+            if "mass_kg" in result:
+                result["mass_note"] = (
+                    "mass_kg = the density you passed x volume; "
+                    "mass_from_material_kg = the mass CATIA gets from the part's own "
+                    "material, and that is also the density the inertia tensor is "
+                    "computed with - so when the two masses differ, the tensor and "
+                    "mass_kg differ by the same ratio (measured 2026-10-24: a 8000 "
+                    "mm3 block reported 0.0628 kg for density 7850, 0.008 kg from "
+                    "the material, and Ixx 3.33e-7 = 0.008/12*(0.02^2+0.01^2))."
+                )
         except Exception as e:
             result["inertia_matrix_kg_m2"] = f"unavailable: {e}"
 
@@ -703,8 +851,10 @@ class MeasurementTools:
                 continue
             if not points:
                 skipped.append({"component": label,
-                                "error": "no vertices (fully curved part); the mesh "
-                                         "method needs that document active"})
+                                "error": "no vertices (fully curved part), so a "
+                                         "vertex sweep cannot bound it; measure it by "
+                                         "name: get_bounding_box(document='" + label +
+                                         "', method='mesh')"})
                 continue
             world = [self._to_world(row["matrix"], row["translation"], p)
                      for p in points]
@@ -725,16 +875,33 @@ class MeasurementTools:
             corners.extend(world)
 
         if not corners:
-            raise RuntimeError(
-                "Could not measure any component of this assembly: "
-                + ("; ".join(f"{s['component']}: {s['error']}" for s in skipped)
-                   or "no components")
-            )
-        note = ("world coordinates: each component's local vertex box transformed "
-                "by its placement, then aggregated; a revolved part's diameter is "
-                "under-reported because a vertex sweep has no vertex at the "
-                "extremum (activate that part and use method='mesh' for the true "
-                "value)")
+            # Every component failed: return the partial result instead of an
+            # exception. "Which parts could not be measured, and why" is itself
+            # the answer a caller needs, and it was previously thrown away
+            # (reported 2026-10-24: an assembly holding only a fully curved part
+            # failed the whole call).
+            return json.dumps({
+                "dimensions": None,
+                "min": None,
+                "max": None,
+                "components": [],
+                "skipped": skipped,
+                "method": ("no component could be measured from its vertices; each "
+                           "one's reason is in 'skipped'. A fully curved part has no "
+                           "vertex at any extremum, so measure it by name - "
+                           "catia_get_bounding_box(document='<part>.CATPart', "
+                           "method='mesh')"),
+            }, indent=2)
+        note = ("world coordinates: each component's local VERTEX box transformed "
+                "by its placement, then aggregated. A vertex sweep is exact only "
+                "when every face is planar: any part whose extremum lies on a "
+                "curved face is under-reported here, and that is not limited to "
+                "revolved parts - an arched or cylindrical face loses the same way "
+                "(measured: a camera bracket's arch, 33.27 mm reported against "
+                "41.40 mm true, -19.6 %). For a true per-part box open the part "
+                "(catia_open_document) and call get_bounding_box(document="
+                "'<part>.CATPart', method='mesh'), then place it with "
+                "catia_get_component_transform.")
         payload = json.loads(self._bbox_json(corners, note))
         payload["components"] = entries
         if skipped:
@@ -882,12 +1049,13 @@ class MeasurementTools:
                     "curved solid), so a vertex sweep cannot bound it. Use "
                     "method='mesh'."
                 )
-        corners, triangles = self._mesh_corners(part)
+        corners, triangles, copy_note = self._mesh_corners(part)
         return self._bbox_json(
             corners,
             f"STL mesh sweep of '{part.Parent.Name}' over {triangles} triangle "
             "vertices; the mesh chords curved faces, so these bounds are a LOWER "
-            "bound on the true envelope (measured 0.47-0.73 % small)" + auto_note,
+            "bound on the true envelope (measured 0.47-0.73 % small)"
+            + copy_note + auto_note,
         )
 
     def _get_bounding_box(self, method: str = "auto",
@@ -900,6 +1068,7 @@ class MeasurementTools:
         # vertices - at the cost of chording the surface).
         self.conn.ensure_connected()
         if document:
+            self.opened_for_measurement = None
             doc = self._resolve_open_document(document)
             try:
                 part = self.conn.part_of(doc)
@@ -908,7 +1077,16 @@ class MeasurementTools:
                     f"'{document}' is not a Part document ({exc}); a Product can "
                     "only be measured without 'document' (world aggregation)."
                 ) from exc
-            return self._part_bbox(part, method)
+            reply = self._part_bbox(part, method)
+            if self.opened_for_measurement:
+                payload = json.loads(reply)
+                payload["opened"] = (
+                    f"'{self.opened_for_measurement}' existed only as a component of "
+                    "an open assembly, so it was opened as its own document to be "
+                    "measured; it stays open (close it with catia_close_document)."
+                )
+                return json.dumps(payload, indent=2)
+            return reply
         if self._document_kind() == "assembly":
             if method == "mesh":
                 # Refuse instead of silently returning vertex-sweep numbers:
@@ -918,11 +1096,12 @@ class MeasurementTools:
                     "world box would need every component's own mesh, and the "
                     "aggregated path only reads the vertices the assembly exposes. "
                     "Two working routes: (a) get_bounding_box(document='<part>"
-                    ".CATPart', method='mesh') per component, then apply the "
-                    "placement from catia_get_component_transform - the reporter "
-                    "measured all nine parts this way with zero deviation; or (b) "
-                    "omit method for the vertex-based aggregation, whose "
-                    "under-reporting on revolved parts is stated in the reply."
+                    ".CATPart', method='mesh') per component - the part does not "
+                    "have to be open first, it is opened by path if it exists only "
+                    "as a component - then apply the placement from "
+                    "catia_get_component_transform; or (b) omit method for the "
+                    "vertex-based aggregation, whose under-reporting on any part "
+                    "with a curved extremum is stated in the reply."
                 )
             return self._assembly_box(self.conn.active_document, method, component)
         part = self.conn.get_active_part()
@@ -950,12 +1129,12 @@ class MeasurementTools:
                     "Use method='mesh'."
                 )
 
-        corners, triangles = self._mesh_corners(part)
+        corners, triangles, copy_note = self._mesh_corners(part)
         return self._bbox_json(
             corners,
             f"STL mesh sweep over {triangles} triangle vertices; the mesh chords "
             "curved faces, so these bounds are a LOWER bound on the true envelope "
-            "(measured 0.47-0.73 % small)" + auto_note,
+            "(measured 0.47-0.73 % small)" + copy_note + auto_note,
         )
 
     # A wireframe element's "infinite" end point is stored as 1e7 mm. Sweeping
@@ -1020,25 +1199,33 @@ class MeasurementTools:
             kept.append(point)
         return kept, dropped
 
-    def _mesh_corners(self, part: Any) -> tuple[list[list[float]], int]:
+    def _mesh_corners(self, part: Any) -> tuple[list[list[float]], int, str]:
         """Bounding corners from an STL export of that part's document.
 
         ExportData activates the document it exports, so a measurement aimed at a
         named part used to leave the session on that part (reported 2026-10-24:
         "the tool quietly changes the active document"). The previously active
         document is restored before returning.
-        """
-        import shutil
 
+        Two failure modes had to be handled, both reported 2026-10-24 against
+        v0.3.10, and both of them in the one scenario this method exists for - a
+        part that is a component of the open assembly:
+
+        * ``ExportData`` is REFUSED while the part is being edited in context
+          (CATIA: "编辑上下文时，无法另存为 stl" / "cannot Save As stl while editing
+          in context"), and the refusal arrives as a modal dialog. Depending on
+          the build it then either raises or returns having written nothing, and
+          the empty target surfaced as ``[WinError 2] ... part.stl`` - an error
+          that says nothing about the cause.
+        * Same refusal when the part has no window of its own at all.
+
+        So the export result is checked by file size, and a part that cannot be
+        exported in place is re-exported from a temporary copy opened as its own
+        document. Measured on V5-6R2020 B30: a block that is a component of an
+        open product exports 3244 bytes as a standalone document and 0 bytes in
+        context; the copy route writes the same 3244 bytes from the same state.
+        """
         doc = part.Parent
-        # Measured on V5-6R2020 B30, 2026-10-24: ExportData writes a 37-byte
-        # EMPTY STL unless the part has been updated first - on a block and on a
-        # cylinder alike (37 bytes vs 3244 / 28899 after Update()). That failure
-        # mode is what made "mesh" look broken on curved solids.
-        try:
-            part.Update()
-        except Exception:  # noqa: BLE001 - export will report the real problem
-            pass
         previous = None
         try:
             previous = str(self.conn.active_document.Name)
@@ -1050,10 +1237,41 @@ class MeasurementTools:
         folder = tempfile.mkdtemp(prefix="catia_bbox_")
         path = os.path.join(folder, "part.stl")
         try:
-            # ExportData rejects forward-slash paths (E_FAIL).
-            doc.ExportData(os.path.normpath(path), "stl")
-            return _stl_extent(path)
+            # Measured on V5-6R2020 B30, 2026-10-24: ExportData writes a 37-byte
+            # EMPTY STL unless the part has been updated first - on a block and on
+            # a cylinder alike (37 bytes vs 3244 / 28899 after Update()). That
+            # failure mode is what made "mesh" look broken on curved solids.
+            try:
+                part.Update()
+            except Exception:  # noqa: BLE001 - the export reports the real problem
+                pass
+            export_error = None
+            try:
+                # ExportData rejects forward-slash paths (E_FAIL).
+                doc.ExportData(os.path.normpath(path), "stl")
+            except Exception as exc:  # noqa: BLE001 - the file check decides
+                export_error = exc
+            if (os.path.getsize(path) if os.path.exists(path) else 0) >= 128:
+                corners, triangles = _stl_extent(path)
+                return corners, triangles, ""
+            corners, triangles = self._mesh_from_copy(doc, path)
+            return corners, triangles, (
+                "; measured from a temporary copy of the saved file, because the "
+                "part is loaded inside the assembly and CATIA refuses to export a "
+                "part edited in context - unsaved edits are not included")
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                f"STL export failed for '{getattr(doc, 'Name', part.Name)}', so its "
+                "mesh bounding box cannot be measured. This is what CATIA does when "
+                "the part is loaded inside an open assembly and has no window of its "
+                "own (it refuses to save as stl while editing in context), and the "
+                "raw error for that is usually the useless '[WinError 2] part.stl'. "
+                f"Open the part as its own document first (catia_open_document "
+                f"'{getattr(doc, 'Name', '<part>.CATPart')}') and retry. "
+                f"Original error: {export_error if export_error else exc}"
+            ) from exc
         finally:
+            shutil = __import__("shutil")
             shutil.rmtree(folder, ignore_errors=True)
             if previous and previous != str(getattr(doc, "Name", "")):
                 try:
@@ -1064,6 +1282,51 @@ class MeasurementTools:
                             break
                 except Exception:  # noqa: BLE001 - best effort
                     pass
+
+    def _mesh_from_copy(self, doc: Any, path: str) -> tuple[list[list[float]], int]:
+        """Export from a temporary copy of the file, opened as its own document.
+
+        The copy has no link to the assembly, so CATIA treats it as a standalone
+        part and the in-context restriction does not apply. Its cost is stated in
+        the reply: it reads the SAVED file, so a part edited since its last save
+        is measured as it was on disk.
+        """
+        import shutil
+
+        try:
+            full = str(doc.FullName)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                f"the part has no saved file to copy ({exc}), and it cannot be "
+                "exported in place while it is being edited inside an assembly"
+            ) from exc
+        if not full or not os.path.isabs(full):
+            raise RuntimeError(
+                f"'{getattr(doc, 'Name', '?')}' has never been saved, so there is no "
+                "file to copy and it cannot be exported while editing in context; "
+                "save it first (catia_save_document)"
+            )
+        folder = os.path.dirname(path)
+        stem = os.path.splitext(os.path.basename(full))[0]
+        copy_path = os.path.join(folder, f"{stem}__bbox_copy.CATPart")
+        shutil.copyfile(full, copy_path)
+        opened = self.conn.documents.Open(os.path.normpath(copy_path))
+        try:
+            try:
+                self.conn.part_of(opened).Update()
+            except Exception:  # noqa: BLE001 - the export reports it
+                pass
+            opened.ExportData(os.path.normpath(path), "stl")
+            size = os.path.getsize(path) if os.path.exists(path) else 0
+            if size < 128:
+                raise RuntimeError(
+                    f"the copy opened as its own document still exported {size} bytes")
+            return _stl_extent(path)
+        finally:
+            try:
+                opened.Close()
+            except Exception:  # noqa: BLE001
+                pass
 
     @staticmethod
     def _bbox_json(points: list[list[float]], method_note: str) -> str:

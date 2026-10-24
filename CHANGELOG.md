@@ -4,6 +4,120 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.11] — 2026-10-24 · numbers that were quietly wrong, and a route that only worked if you already knew the rule
+
+Three reports against 0.3.10, all reproduced on V5-6R2020 B30 before they were
+touched. The first one matters most: `document=` was added in 0.3.9 for exactly
+one scenario - measuring a part while its assembly is open - and in that scenario
+it either could not find the part at all or exported nothing.
+
+### Fixed
+
+- **`document=` now reaches a part that only exists inside an open product.**
+  Components' part documents are not in the `Documents` collection (B30, measured:
+  a product referencing two parts leaves Documents holding just the product), so
+  the argument answered "No open document matches" in the case it was written for.
+  It now locates the component by instance name, part number or file name and
+  opens its file, and the reply says the session gained a document ("it stays
+  open").
+
+- **STL export no longer fails silently when the part is edited in context.**
+  CATIA refuses `ExportData` with "编辑上下文时，无法另存为 stl" while the part is
+  loaded inside an assembly with no window of its own; depending on the build that
+  arrives as a modal dialog, as a swallowed failure, or as
+  `[WinError 2] ... part.stl` - an error that names no cause. The export result is
+  now checked by file size and a part that cannot be exported in place is
+  re-exported from a temporary copy opened as its own document. The reply says so,
+  including the cost: a copy reads the SAVED file, so unsaved edits are not in the
+  box. When even that fails, the error names the cause and the route
+  (`catia_open_document`) instead of `WinError 2`.
+
+- **The inertia tensor was zero on every real part.** `round(x, 4)` on kg·m² is a
+  resolution of 1e-4, and a 72 cm³ plate's principal moments are 2.1e-5 and 5.6e-5,
+  so both came back `0.0` and a 73 cm³ loft came back all zeros - a number a caller
+  compares against CAD and reads as "0 % error" (reported 2026-10-24). Six
+  significant digits now, plus `inertia_matrix_unit` and `inertia_matrix_about`
+  (component axes through the centre of gravity). Measured after the change on a
+  40×20×10 block: `[[3.33e-7, 0, 0], [0, 1.13e-6, 0], [0, 0, 1.33e-6]]`, which is
+  m/12·(b²+c²) for the material mass - the tensor uses the MATERIAL density, not
+  the `density` argument, and `mass_note` now says so with that exact arithmetic.
+
+- **`activate_document` claimed success without switching.** A part that exists
+  only as a component of the open product is reachable as a document object and
+  accepts `Activate()`, but `ActiveDocument` stays on the product - so the next
+  `get_inertia` returned the assembly's volume (16000 mm³ for an 8000 mm³ part)
+  with no error at all (reported twice on B32, 2026-10-24). The call now reads
+  `ActiveDocument` back and raises with the two routes that work
+  (`get_inertia(document=...)`, or `open_document` first).
+
+- **`catia_measure_topology` and `catia_list_edges` count edges differently.**
+  Third release running: 109 edges from one tool and 101 from the other on the same
+  part. The counter filtered on the dynamic type (`Selection_Wire*`) while the
+  listings filtered on the NLS, and the two rules differ by exactly the datum
+  planes' own borders. Reproduced on B30: a block with a boss reported **18** edges
+  in `measure_topology` and **14** in `list_edges`, and the four extra were
+  `Selection_BorderREdge` on `Brp:(GSMPlane.N;k)`. One definition now (the
+  listings'), with `edges_excluded` split by reason
+  (`sketch_wire` / `datum_plane_borders`) so nothing disappears silently;
+  `list_edges` reports the same breakdown as `excluded`.
+
+- **`draft` without `neutral_face` picked the largest face, which is usually the
+  base** - the one face that cannot work, because its normal is parallel to the
+  pulling direction. The reported plate failed every time on a 2400 mm² base for a
+  `zx` pull, while an explicit side wall worked. It now tries the four largest
+  candidates in turn and keeps the first that updates (B30: Face.1 rejected,
+  Face.4 accepted), and when all four fail the error lists what was tried.
+
+- **An assembly where nothing is measurable failed the whole call.** It now returns
+  a partial result - `dimensions: null`, `components: []`, and `skipped` with each
+  component's reason - because "which part could not be measured and why" is the
+  answer, not an exception.
+
+- **`sketch_delete_element` now reports the volume delta** (measured: 10681.4 →
+  10053.0965 mm³ on the reporter's Ø40+Ø5 part), so the reply proves the rebuild
+  instead of asking for a second `get_inertia`.
+
+### Corrected claims
+
+These were wrong in a way that cost a caller a working tool:
+
+- **`diagnose` said the measurement tools return `UNSUPPORTED_CAPABILITY` when
+  Measurable lacks `GetBoundingBox` / `GetInertia`.** Nothing here uses either
+  method - volume/area/COG come from `Measurable.Volume`/`.Area`/`GetCOG`, boxes
+  from vertices or an STL, the tensor from `SPAWorkbench.Inertias`. The note now
+  says missing them changes nothing, and only warns about real gaps.
+- **`get_bounding_box`'s schema still said `auto = vertices if the shape has any`**
+  and "the mesh method cannot be applied to a non-active document". `auto` has
+  routed to the mesh since 0.3.10, and `document=` + mesh has measured
+  non-active parts since 0.3.9. Reading the old text led straight to passing
+  `method='vertices'`, i.e. to the under-reporting route. Both sentences rewritten.
+- **The assembly box note said "a revolved part's diameter is under-reported".**
+  A camera bracket's ARCH was under-reported by 8.13 mm / 19.6 % (33.2685 reported
+  against 41.3974 true) and it is not revolved. The rule is "any part whose
+  extremum lies on a curved face".
+- **The GSD loft warning said the tool "fails on V5-6R2022 (B32)".** That came
+  from one B32/SP6 session (2026-10-23, 7/7 configurations). Two other B32/SP6
+  sessions then built both the smooth and the ruled loft and matched B30 to
+  0.02 mm³ (2026-10-24, independently). It is session-sensitive, not
+  build-determined, and the description says so instead of talking B32 users out
+  of the tool.
+- **An empty part was called a "surface-only part".** A brand-new part and a part
+  made of GSD surfaces both have an empty main body but need different advice; the
+  message now distinguishes them.
+- **`new_product(name=...)` looked like a no-op** because `Product.Name` is
+  read-only on the root. `PartNumber` is writable, so that is tried first and the
+  reply says which attribute took (B30: `PartNumber set to 'ASMV'`).
+
+### Known, not fixed
+
+- `add_component` on a part whose document is already open: reported once as
+  putting up the "same identifier in session" dialog. The path normalisation and
+  the component-count check are in place, but nobody has reproduced that state
+  since, so it is listed here rather than claimed fixed.
+- `draft` / `fillet` / `chamfer` / `hole` still report no volume delta.
+- The per-component world box in an assembly is a vertex sweep by construction;
+  only `document=` + `mesh` gives the true per-part box.
+
 ## [0.3.10] — 2026-10-24 · measurements that can be trusted, crashes that say why
 
 ### Fixed

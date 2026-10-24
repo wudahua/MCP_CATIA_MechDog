@@ -1062,6 +1062,11 @@ class SketcherTools:
         """Delete one geometric element from a sketch, keeping everything else."""
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
+        # Volume before the delete, so the reply can show what the profile change
+        # actually cost downstream. Without it the caller has to call get_inertia
+        # again to know whether anything moved (reported 2026-10-24: 10681.4 ->
+        # 10053.1 was left for them to find).
+        before = self._solid_volume(part)
         sketch, how = self._locate_sketch(sketch_name)
         name = str(sketch.Name)
         was_open = self._active_sketch is sketch
@@ -1112,8 +1117,26 @@ class SketcherTools:
                 "- features built on this sketch may be in error; fix them next."
             )
         self.conn.refresh_display()
+        after = self._solid_volume(part)
+        change = ""
+        if before is not None and after is not None:
+            change = (f" Volume {before:.4f} -> {after:.4f} mm3 "
+                      f"(delta {after - before:+.4f}).")
         return (
             f"Deleted element {index} ('{element_name}') from sketch '{name}': "
             f"{left} element(s) left. Features that consume this sketch were "
-            "rebuilt with the new profile."
+            "rebuilt with the new profile." + change
         )
+
+    @staticmethod
+    def _solid_volume(part: Any) -> float | None:
+        """Main-body volume in mm3, or None when it cannot be read."""
+        try:
+            body = part.MainBody
+            if body.Shapes.Count == 0:
+                return 0.0
+            spa = part.Parent.GetWorkbench("SPAWorkbench")
+            measurable = spa.GetMeasurable(part.CreateReferenceFromObject(body))
+            return measurable.Volume * 1e9
+        except Exception:  # noqa: BLE001 - the delta is a courtesy, not the result
+            return None

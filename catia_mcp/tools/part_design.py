@@ -2246,9 +2246,7 @@ class PartDesignTools:
         # update (measured 2026-10-23, four variants, only a face worked).
         neutral_name = args.get("neutral_face")
         if neutral_name:
-            neutral_ref = self._topo_reference(
-                "Face", self._topo_index(neutral_name, "Face"))
-            neutral_note = f"neutral {neutral_name}"
+            candidates = [(neutral_name, f"neutral {neutral_name}")]
         else:
             # _list_faces returns {"count": ..., "faces": [...]} since 0.3.7;
             # iterating the object yielded its keys (strings) and every draft
@@ -2262,40 +2260,54 @@ class PartDesignTools:
                 raise RuntimeError(
                     "catia_draft needs a neutral face, and this body reports only "
                     "the face being drafted. Pass neutral_face explicitly.")
-            neutral_name = others[0]["name"]
-            neutral_ref = self._topo_reference(
-                "Face", self._topo_index(neutral_name, "Face"))
-            neutral_note = (f"neutral auto-picked: {neutral_name} "
-                            f"(largest remaining face, {others[0].get('area_mm2', 0):.0f} mm2)")
+            # Area alone is not the criterion - the neutral face also has to be
+            # perpendicular to the pulling direction, and the largest face is
+            # usually the base, whose normal is parallel to it instead. Picking
+            # only the largest failed every time on a reported plate (2400 mm2
+            # base chosen for a zx pull, "UpdateObject failed", 2026-10-24), and
+            # an explicit side wall then worked. Try the largest few in turn and
+            # keep the first that updates.
+            candidates = [
+                (f["name"],
+                 f"neutral auto-picked: {f['name']} "
+                 f"({f.get('area_mm2', 0):.0f} mm2)")
+                for f in others[:4]
+            ]
 
         # Pulling direction = the selected plane's normal.
         direction = {"xy": (0, 0, 1), "yz": (1, 0, 0), "zx": (0, 1, 0)}[plane_key]
 
-        # AddNewDraft(iFaceToDraft, iNeutral, iNeutralMode, iParting,
-        #             iDirX, iDirY, iDirZ, iMode, iAngle, iMultiselectionMode)
-        # iParting may be None - an empty Reference (CreateReferenceFromName(""))
-        # is accepted by COM and then rejected by the factory.
-        draft = sf.AddNewDraft(
-            face_ref, neutral_ref, 0, None,
-            direction[0], direction[1], direction[2],
-            0, angle, 0,
-        )
-
-        update_error = self._try_update(part, draft)
-        self.conn.refresh_display()
-        if update_error is not None:
+        errors: list[str] = []
+        for neutral_name, neutral_note in candidates:
+            neutral_ref = self._topo_reference(
+                "Face", self._topo_index(neutral_name, "Face"))
+            # AddNewDraft(iFaceToDraft, iNeutral, iNeutralMode, iParting,
+            #             iDirX, iDirY, iDirZ, iMode, iAngle, iMultiselectionMode)
+            # iParting may be None - an empty Reference (CreateReferenceFromName(""))
+            # is accepted by COM and then rejected by the factory.
+            draft = sf.AddNewDraft(
+                face_ref, neutral_ref, 0, None,
+                direction[0], direction[1], direction[2],
+                0, angle, 0,
+            )
+            update_error = self._try_update(part, draft)
+            if update_error is None:
+                self.conn.refresh_display()
+                return (f"Draft created: {angle} deg on {face_name}, {neutral_note}. "
+                        f"Feature: '{draft.Name}'")
             gone = self._remove_feature(part, draft)
-            raise RuntimeError(
-                "CATIA rejected the draft"
-                + (" and it was removed from the tree" if gone else
-                   " (the dead feature could NOT be deleted - close the document "
-                   "without saving)")
-                + f". {angle} deg on {face_name}, {neutral_note}. The neutral "
-                "face has to touch the drafted face and be perpendicular to the "
-                f"pulling direction. Original error: {update_error}"
-            ) from update_error
-        return (f"Draft created: {angle} deg on {face_name}, {neutral_note}. "
-                f"Feature: '{draft.Name}'")
+            errors.append(f"{neutral_name}: {update_error}"
+                          + ("" if gone else " (and the dead feature could NOT be "
+                                              "deleted - close the document without "
+                                              "saving)"))
+        self.conn.refresh_display()
+        raise RuntimeError(
+            "CATIA rejected the draft on every neutral face tried. "
+            f"{angle} deg on {face_name}, pulling direction {plane_key}. The neutral "
+            "face has to touch the drafted face and be perpendicular to the pulling "
+            "direction; pass neutral_face explicitly with a side wall that does. "
+            "Tried - " + "; ".join(errors)
+        )
 
     def _thickness(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
@@ -3025,7 +3037,7 @@ class PartDesignTools:
                 "hint": "No edge matched the filter.",
                 "edges": [],
             }, indent=2)
-        return json.dumps({
+        payload: dict[str, Any] = {
             "count": len(edges),
             "matched": matched,
             "total": total,
@@ -3037,4 +3049,16 @@ class PartDesignTools:
                      "catia_fillet / catia_chamfer instead of 'name': Edge.N is "
                      "renumbered by every feature that changes the topology."),
             "edges": edges,
-        }, indent=2)
+        }
+        if raw_total is not None and raw_total != total:
+            # Same sentence as catia_measure_topology: one definition of "edge of
+            # the solid", so an acceptance script cannot get 109 from one tool and
+            # 101 from the other (reported three releases running).
+            payload["excluded"] = {
+                "total": raw_total - total,
+                "raw_total": raw_total,
+                "reason": ("consumed sketch wires and datum-plane borders, which the "
+                           "Edge search also returns; 'total' and Edge.N count only "
+                           "the solid's own edges"),
+            }
+        return json.dumps(payload, indent=2)

@@ -22,7 +22,7 @@ import time
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
-from catia_mcp.topo_search import search_topology
+from catia_mcp.topo_search import is_construction, nls_of, search_topology
 
 #: Result text longer than this is truncated in the per-step report, so a plan
 #: with fifty steps does not return a megabyte of chatter.
@@ -284,25 +284,55 @@ class PlannerTools:
         sel = self.conn.hso
         counts: dict[str, Any] = {}
         try:
-            for kind, key in (("Face", "faces"), ("Edge", "edges"), ("Vertex", "vertices")):
+            for kind, key in (("Face", "faces"), ("Edge", "edges"),
+                              ("Vertex", "vertices")):
+                # Same definition as catia_list_faces / catia_list_edges, which is
+                # what Face.N / Edge.N address. This counter used to apply its own
+                # filter (dynamic type starts with 'Selection_Wire') while the
+                # listings filtered on the NLS, so one part reported 18 edges here
+                # and 14 there - 109 vs 101 on the reporter's part, three releases
+                # running (2026-10-24). The two rules differ by exactly the datum
+                # planes' own borders ('Selection_BorderREdge' on
+                # 'Brp:(GSMPlane.N;k)'), which are not edges of any solid: a plain
+                # 40x20x10 block with a boss reported 18 here and 14 in
+                # catia_list_edges, and the four extra were GSMPlane borders.
                 sel.Clear()
                 sel.Add(body)
                 search_topology(sel, kind)
+                raw = sel.Count
                 solid = 0
                 wire = 0
-                for index in range(1, sel.Count + 1):
-                    if self._is_wireframe(sel.Item(index)):
+                borders = 0
+                for index in range(1, raw + 1):
+                    item = sel.Item(index)
+                    if not is_construction(nls_of(item)):
+                        solid += 1
+                    elif self._is_wireframe(item):
                         wire += 1
                     else:
-                        solid += 1
+                        borders += 1
                 counts[key] = solid
-                if wire:
-                    counts[f"{key}_wire_ignored"] = wire
+                if raw != solid:
+                    counts[f"{key}_excluded"] = {
+                        "total": raw - solid,
+                        "sketch_wire": wire,
+                        "datum_plane_borders": borders,
+                        "raw_total": raw,
+                    }
         finally:
             try:
                 sel.Clear()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
+        if "edges_excluded" in counts:
+            excluded = counts["edges_excluded"]
+            counts["note"] = (
+                f"{excluded['total']} of {excluded['raw_total']} cells the Edge "
+                "search returns are not edges of the solid (consumed sketch wires "
+                f"{excluded['sketch_wire']}, datum-plane borders "
+                f"{excluded['datum_plane_borders']}), so they are excluded here "
+                "exactly as in catia_list_edges - the count, Edge.N and the edge "
+                "fingerprints all refer to the same set.")
         counts["part"] = part.Name
         return counts
 

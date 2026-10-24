@@ -290,16 +290,30 @@ class DocumentTools:
         product = self.conn.product_of(doc)
         rename_note = ""
         if name:
-            try:
-                product.Name = name
-            except Exception as e:
-                rename_note = f" (rename to '{name}' not supported by this CATIA version: {e})"
+            # Product.Name is the INSTANCE name and is read-only on the root of a
+            # new product on B30 (it accepted the assignment and kept 'Product1'),
+            # which is why the parameter looked like a no-op for three releases
+            # (reported 2026-10-24). PartNumber is writable - catia_set_part_number
+            # uses it - so try that first and only then the name.
+            for attribute in ("PartNumber", "Name"):
+                try:
+                    setattr(product, attribute, name)
+                except Exception as exc:  # noqa: BLE001 - try the next attribute
+                    rename_note += (
+                        f" ({attribute} not settable: {str(exc).splitlines()[0][:60]})")
+                    continue
+                try:
+                    applied = str(getattr(product, attribute))
+                except Exception:  # noqa: BLE001
+                    applied = ""
+                if applied == name:
+                    rename_note = f" ({attribute} set to '{name}')"
+                    break
             else:
-                if product.Name != name:
-                    rename_note = (
-                        f" (requested name '{name}' was not applied by CATIA; "
-                        f"kept '{product.Name}')"
-                    )
+                rename_note = (
+                    f" (CATIA kept '{product.Name}': neither PartNumber nor Name "
+                    f"accepted '{name}' on this build - rename it after saving with "
+                    "catia_set_part_number)")
         product_name = product.Name
         try:
             doc_name = str(doc.Name)
@@ -497,7 +511,36 @@ class DocumentTools:
                 f"No open document named '{name}'. Open: {', '.join(names) or 'none'}."
             )
         target.Activate()
+        # Read the state back. Activate() returning without an exception means
+        # "the call was accepted", not "the document is now active": a part that
+        # exists only as a component of an open assembly is reachable as a
+        # document object, accepts Activate(), and leaves ActiveDocument on the
+        # product - so every later call silently measured the ASSEMBLY instead of
+        # the part (reported 2026-10-24 on B32, twice, with get_inertia returning
+        # 16000 mm3 for an 8000 mm3 part as the proof).
         self.conn.refresh_display()
+        try:
+            active = str(self.conn.app.ActiveDocument.Name)
+        except Exception:  # noqa: BLE001 - nothing active at all
+            active = ""
+        if active and active != str(target.Name):
+            if active.casefold().endswith(".catproduct"):
+                raise RuntimeError(
+                    f"CATIA did not switch to '{target.Name}': ActiveDocument is "
+                    f"still '{active}'. A part that exists only as a component of "
+                    "the open product cannot be made active by name on this build - "
+                    "it is being edited in context, not opened as a window. Two "
+                    "routes that work: (a) measure it by name without activating "
+                    f"anything - catia_get_inertia(document='{target.Name}') or "
+                    f"catia_get_bounding_box(document='{target.Name}', "
+                    "method='mesh'); (b) open the part as its own document with "
+                    f"catia_open_document, then activate it."
+                )
+            raise RuntimeError(
+                f"CATIA accepted Activate() but ActiveDocument is '{active}', not "
+                f"'{target.Name}'. The document was not switched, so any call you "
+                "make now acts on the wrong document."
+            )
         return f"Activated document: '{target.Name}'"
 
     def _set_part_number(self, part_number: str, component_name: str | None = None) -> str:
