@@ -809,11 +809,47 @@ class MeasurementTools:
             payload["skipped"] = skipped
         return json.dumps(payload, indent=2)
 
+    def _auto_method(self, method: str, body: Any) -> tuple[str, str]:
+        """Resolve 'auto' to the mesh.
+
+        The vertex sweep is exact only on all-planar solids and can be wrong by
+        tens of percent on a curved one (a revolved face has no vertex at its
+        extremum), so 'auto' takes the mesh and says so. `method='vertices'`
+        stays available for the cheap, exact-on-planar route.
+        """
+        if method != "auto":
+            return method, ""
+        return "mesh", (" (auto uses the STL mesh: exact for planar-faced solids and "
+                        "a lower bound within ~0.5 % for curved ones; pass "
+                        "method='vertices' for the cheap vertex sweep)")
+
+    @staticmethod
+    def _has_curved_faces(conn: Any, body: Any) -> bool:
+        """True when any face of the final shape is not planar.
+
+        This decides the measurement route: the vertex sweep is exact on an
+        all-planar solid, but a revolved or lofted face has no vertex at its
+        extremum, so a vertex box misses the diameter (reported 2026-10-24: a
+        mixed body's auto box came out 37.5 % small). Curved face -> mesh.
+        """
+        try:
+            cells = topology_cells(conn, body, "Face")
+        except Exception:  # noqa: BLE001 - be conservative
+            return True
+        for cell in cells:
+            try:
+                if "Planar" not in str(cell.Type):
+                    return True
+            except Exception:  # noqa: BLE001
+                return True
+        return False
+
     def _part_bbox(self, part: Any, method: str) -> str:
         """Bounding box of a named Part document (no reliance on ActiveDocument)."""
         body = part.MainBody
         if body.Shapes.Count == 0:
             raise RuntimeError("That part has no solid shape yet.")
+        method, auto_note = self._auto_method(method, body)
         if method in ("auto", "vertices"):
             points, truncated, total, dropped = self._vertex_points(body)
             if points:
@@ -835,8 +871,8 @@ class MeasurementTools:
         return self._bbox_json(
             corners,
             f"STL mesh sweep of '{part.Parent.Name}' over {triangles} triangle "
-            "vertices; the mesh chords curved faces, so the true surface lies a "
-            "fraction of a millimetre outside these bounds",
+            "vertices; the mesh chords curved faces, so these bounds are a LOWER "
+            "bound on the true envelope (measured 0.47-0.73 % small)" + auto_note,
         )
 
     def _get_bounding_box(self, method: str = "auto",
@@ -878,6 +914,7 @@ class MeasurementTools:
         body = self.conn.get_active_part_body()
         if body.Shapes.Count == 0:
             raise RuntimeError("The active body has no solid shape yet.")
+        method, auto_note = self._auto_method(method, body)
 
         if method in ("auto", "vertices"):
             points, truncated, total, dropped = self._vertex_points(body)
@@ -902,8 +939,8 @@ class MeasurementTools:
         return self._bbox_json(
             corners,
             f"STL mesh sweep over {triangles} triangle vertices; the mesh chords "
-            "curved faces, so the true surface lies a fraction of a millimetre "
-            "outside these bounds",
+            "curved faces, so these bounds are a LOWER bound on the true envelope "
+            "(measured 0.47-0.73 % small)" + auto_note,
         )
 
     # A wireframe element's "infinite" end point is stored as 1e7 mm. Sweeping
@@ -979,6 +1016,14 @@ class MeasurementTools:
         import shutil
 
         doc = part.Parent
+        # Measured on V5-6R2020 B30, 2026-10-24: ExportData writes a 37-byte
+        # EMPTY STL unless the part has been updated first - on a block and on a
+        # cylinder alike (37 bytes vs 3244 / 28899 after Update()). That failure
+        # mode is what made "mesh" look broken on curved solids.
+        try:
+            part.Update()
+        except Exception:  # noqa: BLE001 - export will report the real problem
+            pass
         previous = None
         try:
             previous = str(self.conn.active_document.Name)

@@ -4,6 +4,23 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- `catia_get_bounding_box` was wrong on curved solids, and the reason was not the
+  routing but the export: `ExportData(path, "stl")` writes a **37-byte empty
+  file** unless the part has been updated first - measured on B30 on both a block
+  (37 bytes -> 3244 after `Update()`) and a cylinder (37 -> 28899). With the
+  update in place, `auto` now takes the mesh, which is exact for planar-faced
+  solids and a lower bound for curved ones:
+
+  | solid | before (`auto`, vertices) | now (`auto`, mesh) | true |
+  |---|---|---|---|
+  | 40x20x10 block | 40 x 20 x 10 | 40 x 20 x 10 | same |
+  | Ø60 x 50 cylinder | missed the diameter (up to -37.5 % on mixed bodies) | **60 x 60 x 50** | same |
+
+  `method='vertices'` is still there for the cheap exact-on-planar route, and the
+  reply says which one ran and what its error is (the mesh reads ~0.5-0.73 % low,
+  stated as a lower bound rather than "a fraction of a millimetre").
+
 ### Added
 - `catia_gsd_multi_section_surface` takes `ruled=true`: a straight-sided loft,
   built as one blend per section pair and joined. This closes the capability gap
