@@ -301,8 +301,18 @@ class DocumentTools:
                         f"kept '{product.Name}')"
                     )
         product_name = product.Name
+        try:
+            doc_name = str(doc.Name)
+        except Exception:  # noqa: BLE001
+            doc_name = "the new document"
         self.conn.refresh_display()
-        return f"Created new Product (assembly) document: '{product_name}'{rename_note}"
+        return (
+            f"Created a Product document '{doc_name}' whose root product is "
+            f"'{product_name}'{rename_note}. The FILE keeps CATIA's default name "
+            "until it is saved: catia_save_document(file_path=...) decides it, so "
+            "pass the path you actually want (an unsaved assembly is always "
+            "'Product1.CATProduct')."
+        )
 
     def _open_document(self, file_path: str) -> str:
         self.conn.ensure_connected()

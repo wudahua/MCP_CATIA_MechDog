@@ -521,6 +521,21 @@ class MeasurementTools:
         spa = self._spa_workbench()
         part = self.conn.get_active_part()
         body = self.conn.get_active_part_body()
+        # A part made only of surfaces has volume/area/centroid = undefined, and
+        # SPA answers with placeholder strings that a caller then tries to use.
+        # Say it here: run_plan records this as inertia_error and carries on.
+        try:
+            if body.Shapes.Count == 0:
+                raise RuntimeError(
+                    f"'{part.Name}' has no solid in '{body.Name}' (surface-only "
+                    "part), so volume / area / centroid are undefined. Close the "
+                    "surfaces into a solid first (catia_gsd_close_surface) or "
+                    "measure the surfaces another way."
+                )
+        except RuntimeError:
+            raise
+        except Exception:  # noqa: BLE001 - Shapes is readable on every part
+            pass
         ref = part.CreateReferenceFromObject(body)
 
         measurable = spa.GetMeasurable(ref)

@@ -315,7 +315,11 @@ class PlannerTools:
             inertia = raw if isinstance(raw, dict) else json.loads(raw)
             measurements["volume_mm3"] = inertia.get("volume_mm3")
             measurements["area_mm2"] = inertia.get("area_mm2")
-            center = inertia.get("center_of_gravity_mm") or {}
+            center = inertia.get("center_of_gravity_mm")
+            if not isinstance(center, dict):
+                # get_inertia reports an unavailable centroid as a string; treating
+                # that as a dict raised "'str' object has no attribute 'get'".
+                center = {}
             measurements["cog"] = [
                 center.get("x"),
                 center.get("y"),

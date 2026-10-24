@@ -62,3 +62,37 @@ def test_auto_takes_the_mesh_and_says_why() -> None:
     # ExportData writes an empty STL unless the part is updated first (37 bytes).
     assert "part.Update()" in mesh
     assert "37-byte" in mesh or "37 bytes" in mesh
+
+
+# --------------------------------------------------- surface-only and naming
+
+def test_a_surface_only_part_says_why_it_cannot_be_measured() -> None:
+    """SPA answers an empty body with placeholder strings; a caller then treats
+    one as a dict - that is where "'str' object has no attribute 'get'" came from.
+    """
+    import inspect
+
+    from catia_mcp.tools.measurement import MeasurementTools as MT
+
+    source = inspect.getsource(MT._get_inertia)
+    assert "Shapes.Count == 0" in source
+    assert "surface-only" in source
+
+
+def test_the_planner_does_not_assume_a_dict_centroid() -> None:
+    import inspect
+
+    from catia_mcp.tools.planner import PlannerTools
+
+    source = inspect.getsource(PlannerTools._measure_part)
+    assert "isinstance(center, dict)" in source
+
+
+def test_new_product_separates_product_name_from_file_name() -> None:
+    import inspect
+
+    from catia_mcp.tools.document import DocumentTools
+
+    source = inspect.getsource(DocumentTools._new_product)
+    assert "root product" in source
+    assert "catia_save_document" in source      # the file name comes from saving

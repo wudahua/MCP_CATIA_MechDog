@@ -5,6 +5,19 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Fixed
+- A surface-only part no longer produces a payload full of `"unavailable: ..."`
+  strings from `catia_get_inertia`. Volume, area and centroid are undefined
+  without a solid, so it now says exactly that and names `catia_gsd_close_surface`
+  as the way to get one. `run_plan` records it as `inertia_error` and carries on.
+- `run_plan` treated `center_of_gravity_mm` as a dict even when `get_inertia` had
+  reported it as a string, which is the shape of the reported
+  `'str' object has no attribute 'get'` crash on a pure-surface plan. Guarded.
+- `catia_new_product` said it had created a document named after the argument,
+  while CATIA only renames the ROOT PRODUCT - the file stays `Product1.CATProduct`
+  until saved. The reply now separates the two and points at
+  `catia_save_document(file_path=...)`.
+
+### Fixed
 - `catia_get_bounding_box` was wrong on curved solids, and the reason was not the
   routing but the export: `ExportData(path, "stl")` writes a **37-byte empty
   file** unless the part has been updated first - measured on B30 on both a block
