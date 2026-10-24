@@ -303,9 +303,18 @@ class GSDTools:
                     "r=10/20/10, against 90059.0 for the smooth loft). The default "
                     "smooth loft interpolates THROUGH the sections and bulges between "
                     "them, so a spec whose ends are straight cannot be met that way. "
-                    "Note there is no tangent/curvature condition here: CATIA's GSD "
-                    "loft does not expose one (only SectionCoupling and Relimitation, "
-                    "and measured SectionCoupling 0/1/2/3 all give the same volume). "
+                    "Note on tangency: the API does have an end condition - "
+                    "SetStartSectionTangent / SetEndSectionTangent, one support "
+                    "surface each - so 'keep the loft tangent to the boss it grows "
+                    "out of' is possible: pass the surface as start_tangent / "
+                    "end_tangent. Measured on B30 2026-10-24: a cylindrical surface "
+                    "through the first section attached as start_tangent updates and "
+                    "changes the area by -4.9 % (10701.639 -> 10174.914 mm2 on "
+                    "r=10/20/10), while the same surface attached to the far end "
+                    "fails to update - the support has to touch that section. What "
+                    "does NOT exist: a tangent factor, a curvature factor, or a "
+                    "MaintainTangency switch (every *TangentFactor / MaintainTangency "
+                    "name is absent from the object). "
                     "BUILD SENSITIVITY: reported failing on V5-6R2022 (B32) with "
                     "'UpdateObject failed' even for two coaxial equal-radius circles "
                     "whose pair catia_gsd_blend accepts in the same session "
@@ -342,6 +351,26 @@ class GSDTools:
                                 "instead of one interpolated NURBS surface. Use this "
                                 "when the spec says the ends are tangent-continuous "
                                 "or the volume must match the analytic frustum."
+                            ),
+                        },
+                        "start_tangent": {
+                            "type": "string",
+                            "description": (
+                                "Element name of a surface (or face) the FIRST section "
+                                "lies on; the loft leaves that section tangent to it. "
+                                "This is 'keep tangency' in the UI. The support must "
+                                "actually touch the section - CATIA accepts the setter "
+                                "and then fails the update otherwise. No tangent factor "
+                                "is exposed by the API."
+                            ),
+                        },
+                        "end_tangent": {
+                            "type": "string",
+                            "description": (
+                                "Element name of a surface (or face) the LAST section "
+                                "lies on; the loft leaves that section tangent to it. "
+                                "Same rule as start_tangent: the support has to touch "
+                                "the section, and no tangent factor is exposed."
                             ),
                         },
                         "orientations": {
@@ -1127,6 +1156,13 @@ class GSDTools:
             )
 
         if args.get("ruled"):
+            if args.get("start_tangent") or args.get("end_tangent"):
+                raise ValueError(
+                    "'ruled' and an end tangency condition cannot be combined: the "
+                    "ruled path is built from one blend per section pair, so there is "
+                    "no single loft feature to carry the condition. Drop 'ruled' if "
+                    "you need tangency; drop the tangency if you need straight sides."
+                )
             return self._ruled_loft(sections, args.get("name"))
 
         loft = self._factory().AddNewLoft()
@@ -1140,19 +1176,46 @@ class GSDTools:
         for guide_name in guides:
             loft.AddGuide(self._ref(guide_name))
 
+        tangency: list[str] = []
+        tangency_error = ""
+        for attribute, spec, end in (("SetStartSectionTangent", args.get("start_tangent"), "first"),
+                                     ("SetEndSectionTangent", args.get("end_tangent"), "last")):
+            if not spec:
+                continue
+            try:
+                getattr(self.conn._dynamic(loft), attribute)(self._ref(spec))
+            except Exception as exc:  # noqa: BLE001 - reported with the rule that matters
+                raise RuntimeError(
+                    f"CATIA rejected '{spec}' as the {end} section's tangency support "
+                    f"({str(exc).splitlines()[0][:120]}). {attribute} takes ONE "
+                    "geometry: a surface or face that the section actually lies on. "
+                    "Measured on B30: a cylindrical surface through the first "
+                    "section works; a sketch circle and a surface that does not reach "
+                    "the section do not."
+                ) from exc
+            tangency.append(f"{end} section tangent to '{spec}'")
+            tangency_error = (
+                " A tangency support was set, and CATIA accepts the setter before it "
+                "checks the geometry: the support has to TOUCH that section, or the "
+                "update fails exactly like this (measured: a cylinder spanning the "
+                "start section updates, the same surface attached to the far end "
+                "does not).")
+
         guides_msg = f" with {len(guides)} guide(s)" if guides else ""
+        tangent_msg = ("; " + ", ".join(tangency)) if tangency else ""
         try:
             return self._finish(
                 loft, args.get("name"),
-                f"Multi-sections surface created through {len(sections)} sections{guides_msg}.",
+                f"Multi-sections surface created through {len(sections)} sections"
+                f"{guides_msg}{tangent_msg}.",
             )
         except RuntimeError as e:
             raise RuntimeError(
-                f"{e} Common causes: a guide that does not intersect every section "
-                f"(check with measurements), or a section whose curve direction "
-                f"opposes the others (flip it with orientations=-1). If neither "
-                f"applies and the sections are plainly lofts-able, retry once in a "
-                f"fresh session: one B32 SP6 session reported every loft failing "
+                f"{e}{tangency_error} Common causes: a guide that does not intersect "
+                f"every section (check with measurements), or a section whose curve "
+                f"direction opposes the others (flip it with orientations=-1). If "
+                f"neither applies and the sections are plainly lofts-able, retry once "
+                f"in a fresh session: one B32 SP6 session reported every loft failing "
                 f"while catia_gsd_blend accepted the same curve pair (2026-10-23), "
                 f"and two other B32 SP6 sessions then built both the smooth and the "
                 f"ruled loft and matched B30 to 0.02 mm3 (2026-10-24). If it still "

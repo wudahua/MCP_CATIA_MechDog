@@ -4,6 +4,57 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.13] — 2026-10-24 · the loft does have a tangency condition; we said it did not
+
+A user asked whether "keep tangency / tangent factor" was still missing. It was
+missing from *this fork*, and the reason given for that was wrong: since 0.3.2 the
+README and the tool description said CATIA's GSD loft exposes no tangent
+condition, "verified by enumerating its type information". The enumeration covered
+*properties*; the condition is a **method**.
+
+Measured on V5-6R2020 B30, 2026-10-24, on three circles r=10/20/10 at z=0/50/100:
+
+| call | result |
+|---|---|
+| `loft.SetStartSectionTangent(<circle ref>)` | accepted, then `UpdateObject failed` - a sketch curve is not a support |
+| `loft.SetStartSectionTangent(<cylinder surface>)` | updates, area **10701.639 → 10174.914 mm²** (−4.9 %) |
+| `loft.SetEndSectionTangent(<the same cylinder>)` | `UpdateObject failed` - that surface does not touch the far section |
+| `MaintainTangency`, `TangentFactor`, `*SectionTangentFactor` | absent (property *and* method form) |
+
+So: the entry point exists (one geometry each), the **factor does not**, and the
+support has to actually touch the section - CATIA accepts the setter before it
+looks at the geometry.
+
+### Added
+
+- `catia_gsd_multi_section_surface` takes **`start_tangent` / `end_tangent`**: the
+  element name of a surface (or face) that section lies on. The reply names which
+  end is tangent to what.
+- A failed update while a tangency support is set now says the support rule,
+  instead of only listing guides and section directions.
+- `ruled` + a tangency condition is refused with an explanation: the ruled path is
+  one blend per section pair, so there is no single loft feature to carry it.
+
+### Corrected
+
+- The claim "no tangent / curvature condition on a loft, verified by enumerating
+  its type information" (0.3.2) was **wrong for the condition and right for the
+  factor**. Both the tool description and the older changelog entry now say which
+  is which: `HybridShapeLoft` exposes `SetStartSectionTangent` /
+  `SetEndSectionTangent`, `SectionCoupling`, `Relimitation` and
+  `CanonicalDetection`; it does not expose a tangent factor, a curvature
+  condition's factor, or a `MaintainTangency` switch.
+
+### Also measured, not a fix
+
+- `CanonicalDetection` (0..2) changes nothing on this geometry: area stayed
+  10701.639 mm² for 0, 1 and 2. It is not the "straight sides" switch that
+  `ruled` provides.
+- `AddNewLoft` numbers its sections and a following GSD feature makes the next
+  `catia_create_sketch` start again at `草图.1`, which collides with the sketch the
+  loft already references. Build all section sketches before the first GSD feature,
+  or rename them - found the hard way here.
+
 ## [0.3.12] — 2026-10-24 · a dialog can no longer take the session hostage
 
 `catia_add_component` was the one call that could still kill a session: a CATIA
@@ -947,6 +998,13 @@ solid. All measured on a live V5-6R2020 (B30) session. **90 tools** (0.3.0 had 8
   `ShapeFactory.AddNewLoft()` is not automatable at all on V5-6R2020 (every
   member lookup fails). A spec that relies on "maintain tangency, tangent
   factor 1.0" has to be approximated with extra intermediate sections instead.
+
+  > **Corrected in 0.3.13.** The condition DOES exist: it is a method
+  > (`SetStartSectionTangent` / `SetEndSectionTangent`, one support geometry
+  > each), which a property enumeration cannot see. Only the **factor** and the
+  > `MaintainTangency` switch are absent. Measured on B30: a cylindrical support
+  > through the first section changes the area 10701.639 → 10174.914 mm². The
+  > parameters are now `start_tangent` / `end_tangent`.
 
 ## [0.3.0] — 2026-10-20 · lite fork
 
