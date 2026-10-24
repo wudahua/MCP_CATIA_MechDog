@@ -297,8 +297,15 @@ class GSDTools:
                     "section may also be a solid's own topology - 'Edge.3' takes it "
                     "straight from the finished body (see catia_list_edges), which is "
                     "how you loft from an existing end-face edge without redrawing it. "
+                    "Set 'ruled' for a STRAIGHT-SIDED loft: it is built as one blend "
+                    "per section pair, joined, which reproduces a 'loft with no end "
+                    "tangency' (measured on B30: 73304.7 mm3 vs 73303.8 analytic for "
+                    "r=10/20/10, against 90059.0 for the smooth loft). The default "
+                    "smooth loft interpolates THROUGH the sections and bulges between "
+                    "them, so a spec whose ends are straight cannot be met that way. "
                     "Note there is no tangent/curvature condition here: CATIA's GSD "
-                    "loft does not expose one (only SectionCoupling and Relimitation). "
+                    "loft does not expose one (only SectionCoupling and Relimitation, "
+                    "and measured SectionCoupling 0/1/2/3 all give the same volume). "
                     "BUILD SENSITIVITY: this is the one GSD tool whose result depends on "
                     "the CATIA build. It works on V5-6R2020 (B30) and fails on "
                     "V5-6R2022 (B32) with 'UpdateObject failed' even for two coaxial "
@@ -321,6 +328,17 @@ class GSDTools:
                             "description": (
                                 "Optional guide curve element names. Each guide MUST "
                                 "geometrically intersect every section, or the surface fails."
+                            ),
+                        },
+                        "ruled": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Straight sides between consecutive sections "
+                                "(piecewise ruled, built from blends and joined) "
+                                "instead of one interpolated NURBS surface. Use this "
+                                "when the spec says the ends are tangent-continuous "
+                                "or the volume must match the analytic frustum."
                             ),
                         },
                         "orientations": {
@@ -1105,6 +1123,9 @@ class GSDTools:
                 f"{len(sections)} sections — lengths must match."
             )
 
+        if args.get("ruled"):
+            return self._ruled_loft(sections, args.get("name"))
+
         loft = self._factory().AddNewLoft()
         for section_name, orientation in zip(sections, orientations):
             ref = self._ref(section_name)
@@ -1132,6 +1153,52 @@ class GSDTools:
                 f"where every loft fails while catia_gsd_blend accepts the same "
                 f"curve pair. Build the transition with two blends there."
             ) from e
+
+    def _ruled_loft(self, sections: list[str], name: str | None) -> str:
+        """Straight-sided loft: one blend per section pair, then joined.
+
+        Measured on V5-6R2020 B30, 2026-10-24, three circles r=10/20/10 at
+        z=0/50/100 closed into a solid:
+
+            GSM loft (NURBS through the sections)   90059.0 mm3  (+22.86 %)
+            two blends joined (this method)         73304.7 mm3  (ratio 1.0000)
+            analytic, two frusta                    73303.8 mm3
+
+        which is why the GSM loft cannot reproduce a "loft with no end tangency":
+        it interpolates smoothly through the sections and bulges. The blend API
+        is the ruled one, and joining the pieces gives exactly the straight-sided
+        solid. ``SectionCoupling`` was tried first and has NO effect on volume
+        (0/1/2/3 all measured 90059.0) - it changes the correspondence between
+        sections, not the interpolation.
+        """
+        part = self.conn.get_active_part()
+        factory = self._factory()
+        refs = [self._ref(section) for section in sections]
+        blends = []
+        for i in range(len(refs) - 1):
+            blend = factory.AddNewBlend()
+            blend.SetCurve(1, refs[i])
+            blend.SetCurve(2, refs[i + 1])
+            self._get_geoset().AppendHybridShape(blend)
+            part.UpdateObject(blend)
+            blends.append(blend)
+        if len(blends) == 1:
+            return self._finish(
+                blends[0], name,
+                f"Ruled surface created between {len(sections)} sections "
+                "(straight sides, not an interpolated loft).",
+            )
+        joined = factory.AddNewJoin(part.CreateReferenceFromObject(blends[0]),
+                                   part.CreateReferenceFromObject(blends[1]))
+        for blend in blends[2:]:
+            joined.AddElement(part.CreateReferenceFromObject(blend))
+        return self._finish(
+            joined, name,
+            f"Ruled surface created through {len(sections)} sections as "
+            f"{len(blends)} straight-sided pieces, joined. Measured on B30: "
+            "73304.7 mm3 for r=10/20/10 at z=0/50/100 (analytic 73303.8), "
+            "against 90059.0 for the smooth loft - +22.86 %.",
+        )
 
     def _sweep(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()

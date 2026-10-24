@@ -4,6 +4,24 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+- `catia_gsd_multi_section_surface` takes `ruled=true`: a straight-sided loft,
+  built as one blend per section pair and joined. This closes the capability gap
+  behind "the loft is bulged and the volume is +22.86 %".
+
+  Measured on V5-6R2020 B30 (2026-10-24), three circles r=10/20/10 at z=0/50/100
+  closed into a solid:
+
+  | route | volume | vs analytic |
+  |---|---|---|
+  | GSM loft (NURBS through the sections) | 90 059.0 | +22.86 % |
+  | `ruled=true` (blends joined) | 73 304.7 | ratio 1.0000 |
+  | analytic, two frusta | 73 303.8 | — |
+
+  `SectionCoupling` was measured first and is useless for this: 0, 1, 2 and 3 all
+  give 90 059.0, because it changes the correspondence between sections, not the
+  interpolation through them. The blend API is the ruled one.
+
 Fourth round of 2026-10-24 reports. Three of the four named something this fork
 got wrong in the previous release, and two of those were in the text a caller
 reads to decide what to do.
