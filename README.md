@@ -1,15 +1,38 @@
 # CATIA V5 MCP Server — lite fork
 
+**0.3.10** · [what changed](CHANGELOG.md) ·
+[releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
+[known limits](#known-limits)
+
 A trimmed, verification-first fork of
 [**daiemon12/catia-v5-mcp-server**](https://github.com/daiemon12/catia-v5-mcp-server)
 (MIT, by Adam M'HAMDI). Upstream keeps the whole CATIA surface; this fork keeps
-only what builds and checks a **solid from a written spec**, and fixes four
-defects that make that loop unreliable.
+only what builds and checks a **solid from a written spec**, and fixes the
+defects that make that loop lie to you. Most of the work since 0.3.0 came from
+people rebuilding real assemblies with it: the changelog is a list of things that
+produced a plausible number, a wrong number, or no explanation at all.
 
 **98 tools** (upstream: 98 — 16 dropped, 16 added). Nothing in the COM layer was
 rewritten — the value of upstream is the field-verified knowledge in its
 comments, so this fork is strictly add / subtract / patch. The count is asserted
 by `tests/test_readme_tool_counts.py`, so it cannot drift from the code again.
+
+### What it can verify, not just build
+
+* **Every cut is measured.** `pad` / `pocket` / `hole` / `shaft` / `groove` /
+  `circ_pattern` report the volume they moved before and after, so a feature that
+  silently did nothing is visible on the spot.
+* **Edges have fingerprints, not indices.** `catia_list_edges` returns
+  `L17.6112|Pad.6;2|Sketch.7;2`; `fillet` / `chamfer` resolve it at call time, so
+  a multi-fillet script survives its own edits.
+* **Sketches are editable after the fact.** `catia_sketch_edit` reopens a closed
+  sketch, `catia_sketch_delete_element` removes one wrong element, and the part
+  rebuilds. A wrong profile is no longer a full rebuild.
+* **Assemblies are measurable.** `catia_get_inertia` on a Product aggregates the
+  components' volumes and world centroids (verified to 0.009 mm on a 9-part
+  assembly); `catia_get_bounding_box` reports per-component world boxes.
+* **Out of range is `UNVERIFIED:`, not a success.** When a measurement cannot be
+  made the reply says which one failed and why.
 
 ---
 
@@ -39,7 +62,7 @@ Upstream 98 − 16 dropped + 16 added = 98.
 | `catia_get_component_transform` | The same placement in both conventions, plus where local X/Y/Z point in the assembly |
 | `catia_rename_component` | A readable assembly tree. `Part.Name` is read-only on V5-6R2020, so every part arrives as `Part1.1 / Part2.1 / …`; the instance name is writable |
 
-#### Added while building parts from a spec (8 tools)
+#### Added while building parts from a spec (11 tools)
 
 | Tool | Version | Why it exists |
 |---|---|---|
@@ -286,15 +309,25 @@ lying flat and its motors tilted 60° while every self-check reported success.
 | Planner | **2** | `run_plan`, `measure_topology` |
 | Diagnostics | 1 | `catia_diagnose` |
 
-\* `catia_get_bounding_box` is a vertex sweep inherited from upstream, and CATIA
-V5 automation exposes no bounding-box method. It **under-reports curved solids**
-and fails outright on a fully curved one. Use `catia_measure_topology` instead.
+\* `catia_get_bounding_box` measures two ways, and `auto` takes the STL mesh:
+exact on planar-faced solids, a **lower bound ~0.5-0.7 % small** on curved ones.
+`method="vertices"` is the cheap sweep, exact only when every face is planar (a
+revolved face has no vertex at its extremum, which is how an `auto` box once came
+out 37.5 % small). On an assembly the per-component world boxes are vertex-based;
+`document="<part>.CATPart", method="mesh"` gives a true per-part box, and
+`catia_get_component_transform` supplies the placement to combine them.
 
 ## Known limits
 
 * No lump-count check (upstream has none either) — the only reliable detector for
   an isolated floating boss.
-* No assembly-level centre of gravity: it needs each component's part measured.
+* Assembly **inertia tensors** are not aggregated (volumes and centroids are); a
+  tensor would have to be rotated into world space per component.
+* `catia_add_component` on a B32 build rejects forward-slash paths and can then
+  put up a modal dialog, which blocks the COM worker. The path is normalised and
+  a missing component is reported instead of claimed, but a dialog that is already
+  open still needs a human - no in-process timeout can interrupt a blocked COM
+  call.
 * The watchdog answers `#32770` message boxes only; CATIA's own `CATDlgDialog`
   panels are left alone so a human working alongside the agent is not interrupted.
 

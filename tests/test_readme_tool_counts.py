@@ -109,6 +109,34 @@ def test_the_added_section_lists_as_many_tools_as_it_claims():
     assert len(set(listed)) == len(listed), "the same tool is listed twice"
 
 
+def test_the_spec_subsection_heading_matches_its_rows():
+    """It said "(8 tools)" while eleven rows were listed below it.
+
+    The outer "### Added" heading is guarded above, but it stops at a level-3
+    heading - which let the level-4 subsection drift unnoticed while 0.3.4 / 0.3.5
+    / 0.3.8 added tools to it.
+    """
+    body = section(readme_text(), "#### Added while building parts from a spec")
+    claimed = int(re.search(r"\((\d+) tools\)", body).group(1))
+    listed = re.findall(r"^\| `(catia_[a-z0-9_]+)`", body, re.M)
+
+    assert len(listed) == claimed, (
+        f"subsection heading claims {claimed} tools, {len(listed)} are listed: {listed}"
+    )
+
+
+def test_the_readme_states_the_version_the_package_reports():
+    """A visitor reads the intro line to know which release this page describes."""
+    import catia_mcp
+
+    head = readme_text().splitlines()[:5]
+    stated = [m.group(1) for line in head if (m := re.match(r"\*\*(\d+\.\d+\.\d+)\*\*", line))]
+    assert stated, "the intro no longer states a version under the title"
+    assert stated[0] == catia_mcp.__version__, (
+        f"README advertises {stated[0]}, the package reports {catia_mcp.__version__}"
+    )
+
+
 def test_the_server_reports_its_own_version_not_the_dependency_version():
     """serverInfo used to carry the mcp library's version (1.30.0) for a 0.3.2 server."""
     import catia_mcp
