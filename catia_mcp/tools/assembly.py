@@ -7,6 +7,7 @@ Contact, Offset, Angle), move components, and manage the product tree.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
@@ -371,7 +372,7 @@ class AssemblyTools:
 
         from catia_mcp import dialogs, guard
 
-        product = self.conn.get_active_product()
+        product = self._require_active_product()
         products = product.Products
         # Only this call gets the Windows form; open_document / save_document /
         # export are field-verified with forward slashes and stay untouched.
@@ -418,6 +419,7 @@ class AssemblyTools:
                     raise RuntimeError(
                         f"CATIA did not add the component ({outcome.code}): "
                         f"{outcome.message}. Path used: '{native_path}'."
+                        + self._insert_blocked_hint(native_path)
                     )
                 after = int(outcome.data.get("after") or before)
                 added = outcome.data.get("added") or []
@@ -465,14 +467,104 @@ class AssemblyTools:
         return (f"Component added from: {native_path} "
                 f"({after - before} instance(s), assembly now holds {after}).{note}")
 
+    def _insert_blocked_hint(self, path: str) -> str:
+        """Extra sentence when an open document is what blocks the insert.
+
+        Measured on B30 2026-10-24: inserting a part file whose document is open
+        but was never activated works; the SAME insert fails with
+        'AddComponentsFromFiles 失败' right after that document was activated
+        (catia_activate_document, or the temporary activation a tensor measurement
+        does). Nothing in the COM error says so, and the state looks identical
+        from every listing, so the recovery step has to be in the message.
+        """
+        target = os.path.normcase(os.path.abspath(path))
+        for i in range(1, self.conn.documents.Count + 1):
+            doc = self.conn.documents.Item(i)
+            try:
+                full = os.path.normcase(os.path.abspath(str(doc.FullName)))
+            except Exception:  # noqa: BLE001 - unsaved document
+                continue
+            if full == target:
+                return (
+                    f" '{doc.Name}' is open in this session, and CATIA refuses to "
+                    "insert a file whose document has been activated (measured: the "
+                    "same insert works while the part is open but never activated). "
+                    f"Save it if needed, close it (catia_close_document), then insert "
+                    "again - the components already in the assembly are untouched."
+                )
+        return ""
+
     def _add_new_part(self, name: str | None = None) -> str:
+        """Create an empty part component, and say whether the name took.
+
+        ``Name`` is the instance name and is frequently refused on a fresh
+        component; ``PartNumber`` is the writable one (same split as
+        catia_new_product). Before 0.3.12 this reported CATIA's name and stayed
+        silent about the requested one, so a caller that passed 'EMPTY1' and read
+        'Part' back had no way to tell whether the argument had been ignored
+        (reported 2026-10-24).
+        """
         product = self.conn.get_active_product()
         products = product.Products
         new_product = products.AddNewProduct("Part")
+        note = ""
         if name:
-            new_product.Name = name
+            for attribute in ("Name", "PartNumber"):
+                try:
+                    setattr(new_product, attribute, name)
+                    applied = str(getattr(new_product, attribute))
+                except Exception as exc:  # noqa: BLE001 - try the next attribute
+                    note = f" ({attribute} not settable: {str(exc).splitlines()[0][:60]})"
+                    continue
+                if applied == name:
+                    note = f" ({attribute} set to '{name}')"
+                    break
+                note = (f" (requested '{name}' was not applied by CATIA; it kept "
+                        f"'{applied}' - rename it with catia_rename_component)")
         self.conn.refresh_display()
-        return f"New Part component created in assembly: '{new_product.Name}'"
+        return (f"New Part component created in assembly: '{new_product.Name}'"
+                f"{note}.")
+
+    def _require_active_product(self) -> Any:
+        """The active Product, or a message that names the actual state.
+
+        ``AddComponentsFromFiles`` is a method of ``Products``, so it needs a
+        Product document to be active. Measuring a part by name leaves the PART
+        active (``document=`` restores what was active before, which is often the
+        part), so the very next insert failed with a bare
+        'AddComponentsFromFiles 失败' plus a diagnostic about Part Design
+        factories - neither of which is true (reported 2026-10-24). If exactly one
+        product is open, activate it and say so.
+        """
+        try:
+            return self.conn.get_active_product()
+        except Exception:  # noqa: BLE001 - fall through to the diagnosis
+            pass
+        try:
+            active = str(self.conn.active_document.Name)
+        except Exception:  # noqa: BLE001
+            active = "<none>"
+        open_products = []
+        for i in range(1, self.conn.documents.Count + 1):
+            doc = self.conn.documents.Item(i)
+            try:
+                self.conn.product_of(doc)
+            except Exception:  # noqa: BLE001 - not a product
+                continue
+            open_products.append(str(doc.Name))
+        if len(open_products) == 1:
+            for i in range(1, self.conn.documents.Count + 1):
+                doc = self.conn.documents.Item(i)
+                if str(doc.Name) == open_products[0]:
+                    doc.Activate()
+                    return self.conn.get_active_product()
+        raise RuntimeError(
+            f"catia_add_component needs the ASSEMBLY to be the active document, and "
+            f"'{active}' is active. A component can only be inserted into a Product. "
+            + (f"Open assemblies: {', '.join(open_products)} - activate one with "
+               "catia_activate_document." if open_products
+               else "No Product document is open - create one with catia_new_product.")
+        )
 
     def _rename_component(self, args: dict[str, Any]) -> str:
         """Rename a component instance and report whether CATIA kept it."""

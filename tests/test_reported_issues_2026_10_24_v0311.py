@@ -36,12 +36,27 @@ def test_inertia_rounds_by_significant_digits_not_decimals():
 def test_the_inertia_payload_uses_the_significant_digit_helper():
     from catia_mcp.tools.measurement import MeasurementTools as MT
 
-    source = inspect.getsource(MT._get_inertia)
+    # The fields are built in one place so both routes (active document, and the
+    # temporary activation used by document=) format the matrix the same way.
+    source = inspect.getsource(MT._matrix_fields)
     assert "_sig(inertia[" in source
     assert "round(inertia[" not in source
     # the axes and unit have to be stated, or the matrix cannot be compared
     assert "inertia_matrix_about" in source
     assert "kg*m^2" in source
+    assert "_matrix_fields" in inspect.getsource(MT._get_inertia)
+
+
+def test_inertia_products_below_the_noise_floor_are_zero():
+    """-4.28e-50 was reported as an "inertia product" a caller had to judge."""
+    from catia_mcp.tools.measurement import MeasurementTools as MT
+
+    fields = MT._matrix_fields([0.01, 1.0e-4, -4.28e-50, 0.0,
+                                0.0, 2.0e-4, -4.8e-35,
+                                0.0, 0.0, 3.0e-4])
+    matrix = fields["inertia_matrix_kg_m2"]
+    assert matrix[0][1] == 0.0 and matrix[1][2] == 0.0
+    assert matrix[0][0] == 1e-4
 
 
 # ------------------------------------------------------- activate_document checks

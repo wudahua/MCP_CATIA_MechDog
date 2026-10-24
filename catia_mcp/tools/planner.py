@@ -358,14 +358,24 @@ class PlannerTools:
         except Exception as error:  # noqa: BLE001
             measurements["inertia_error"] = f"{type(error).__name__}: {error}"
         try:
-            counts = self._count_topology()
-            measurements.update(
-                faces=counts.get("faces"),
-                edges=counts.get("edges"),
-                vertices=counts.get("vertices"),
-            )
-        except Exception as error:  # noqa: BLE001
-            measurements["topology_error"] = f"{type(error).__name__}: {error}"
+            # A Product has no Part, so counting topology on it cannot work - but
+            # that is not an error of this run, and reporting it as
+            # "topology_error" next to a perfectly good volume read like a failed
+            # measurement (reported 2026-10-24).
+            self.conn.product_of(self.conn.active_document)
+            measurements["topology"] = (
+                "n/a (Product document: faces/edges/vertices belong to each part - "
+                "run catia_measure_topology while a part is active)")
+        except Exception:  # noqa: BLE001 - not a Product, so count them
+            try:
+                counts = self._count_topology()
+                measurements.update(
+                    faces=counts.get("faces"),
+                    edges=counts.get("edges"),
+                    vertices=counts.get("vertices"),
+                )
+            except Exception as error:  # noqa: BLE001
+                measurements["topology_error"] = f"{type(error).__name__}: {error}"
         return measurements
 
     # ---- assertions ---------------------------------------------------------

@@ -4,6 +4,116 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [Unreleased]
+
+## [0.3.14] — 2026-10-24 · one rejected fillet used to kill the whole part
+
+Five reports against 0.3.11. The first one is the serious one, and it reproduced
+exactly as reported.
+
+### Fixed — a failed feature no longer poisons the part
+
+- **Single-feature failures left the dead node in the tree, and from then on every
+  update of the part failed at it.** Reproduced on B30: `fillet R40` on a
+  40×20×10 block → shape_count 1 → 2, `catia_update_part` fails, and the next
+  `pad` fails too, until `倒圆角.1` is deleted. The batch paths rolled back since
+  0.3.7; `fillet` (single), `mirror`, `shell`, `thickness` and `boolean` called
+  `part.UpdateObject` raw. They all go through `_safe_update` now, whose reply
+  says `rolled_back: true/false` - and when the removal itself fails it says the
+  feature must be deleted by name before anything else.
+- **`catia_update_part` now names the feature that blocks the update** instead of
+  answering a bare "方法 Update 失败": it tries each feature on its own and reports
+  the first that fails, with the `catia_delete_feature` call that fixes it.
+- **`catia_list_features` publishes `count` (and `body`)**, so "did my feature get
+  created, or is a dead one hanging around" is answerable from the success path -
+  the failure state line already showed `shape_count`, which is how the reporter
+  located this.
+
+### Fixed — the rest of the reports
+
+- **`catia_add_component` now checks the active document.** `AddComponentsFromFiles`
+  is a method of `Products`, so it needs a Product to be active; after a
+  `document=` measurement (or an explicit `activate_document`) a PART is active and
+  the insert failed with a bare `AddComponentsFromFiles 失败` plus a diagnostic
+  about Part Design factories that had nothing to do with it. It now activates the
+  assembly when exactly one is open, and otherwise says which documents are open
+  and what to do.
+- **Inserting a file whose document was ACTIVATED fails, and now says why.**
+  Measured on B30: the same insert works while the part is open but never
+  activated, and fails right after `activate_document` on it - nothing in the COM
+  error or in any listing distinguishes those two states. The message names the
+  open document and the recovery step (save, close, insert again; existing
+  components are untouched).
+- **`catia_list_documents` now says which assemblies use each part**
+  (`component_of`). A component's part IS listed and CANNOT be activated, so the
+  listing and `activate_document`'s refusal used to contradict each other; one
+  reporter wrote the wrong call order from it and wasted two round trips.
+- **`get_bounding_box(document=..., mesh)` no longer exports a part edited in
+  context.** On B32 that export puts up a modal dialog that nobody can answer,
+  and the call still returns a correct box - so the size check could not tell, and
+  six parts meant six dialogs. The state is detected first (activate + read back
+  `ActiveDocument`, the same test `activate_document` uses) and the copy route
+  runs instead. A box that came from the copy now carries a structured
+  `warnings: [...]` entry, not just prose inside `method`.
+- **`get_inertia` on an assembly where nothing is measurable returns a partial
+  result** (`volume_mm3: null`, `components: []`, `skipped` with each reason),
+  matching what the bounding box has done since 0.3.11. The tool that needed the
+  diagnosis most was the one throwing it away.
+- **`get_inertia(document=...)` now also returns the inertia tensor.** CATIA only
+  computes it for the ACTIVE document, so this route used to need
+  open + activate per part (18 calls for nine parts). It borrows the activation and
+  restores the previous document; when the part has no window of its own it says
+  so rather than returning a silently matrix-free payload. Side effect, measured
+  and documented in the message above: a part activated this way cannot then be
+  inserted as a component until it is closed.
+- **Products of inertia below 1e-12 of the largest principal moment are reported as
+  `0.0`** instead of -4.28e-50 dust.
+- **`rect_pattern` takes `dir1_axis` / `dir2_axis` (x/y/z) and
+  `reverse_dir1` / `reverse_dir2`.** An edge's direction cannot be read back from
+  any listing, so two edges of equal length gave opposite directions and the only
+  way to tell which one you got was the volume delta. Two things were found while
+  verifying it: the no-`feature_name` path patterned the BODY (the trap
+  `circ_pattern` had in 0.3.7) so every such call failed, and CATIA only accepts a
+  RIGHT-handed direction pair - `(x,y)`, `(y,z)`, `(z,x)` build, `(x,z)`, `(z,y)`,
+  `(y,x)` fail. A left-handed pair is now swapped internally (counts and spacings
+  with it, so the geometry is unchanged) and the reply says so.
+- **`list_bodies.faces` uses the same definition as `measure_topology`** -
+  191 vs 186 on the same body was the same bug family as the old edge counts.
+- **`draft` blames the direction before the neutral face.** A face cannot be
+  drafted along its own normal and then no neutral face helps; the reporter tried
+  all five and concluded the tool was broken.
+- **`add_new_part(name=...)` reports when the name did not take** (tries `Name`
+  then `PartNumber`, like `new_product`) instead of returning CATIA's name as if
+  the argument had applied.
+- **`run_plan` on a Product says `topology: "n/a (...)"`** instead of
+  `topology_error` next to a perfectly good volume.
+- **`new_product`'s reply no longer contradicts itself** ("Created 'ASMV.CATProduct'"
+  followed by "an unsaved assembly is always 'Product1.CATProduct'").
+
+### Metric semantics changed — re-baseline topology assertions
+
+`faces` / `edges` / `vertices` are now counted by ONE rule everywhere
+(`catia_measure_topology`, `catia_list_faces`, `catia_list_edges`,
+`catia_list_bodies`): the NLS filter, excluding consumed sketch wires and the
+datum planes' own borders. Consequences against 0.3.10 and earlier, measured by
+the reporter on a 9-solid body: P02_motor faces 48 → 46, edges 109 → 101,
+**vertices 72 → 96** (the old counter dropped 32 wire elements and now drops only
+the datum borders). Any `expect.faces/edges/vertices` stored before 0.3.11 must be
+re-baselined before it is used as an acceptance criterion again.
+
+### Reported, not reproduced on B30
+
+Both were reported as deterministic P1s on B32; neither reproduces here, so
+nothing was changed for them - a workaround for a build we cannot reproduce is
+just another silent branch:
+
+- `circ_pattern(count=2, angular_spacing=90)` builds normally on B30 with a Pad
+  seed (`2 instances, 1 added`, volume doubled) and with a Shaft seed.
+- `mirror` about YZ on a 4×90° circular pattern builds normally.
+
+If you hit either on B32, the session's `catia_list_features` count and the exact
+`UpdateObject` text are what would let this be pinned down.
+
 ## [0.3.13] — 2026-10-24 · the loft does have a tangency condition; we said it did not
 
 A user asked whether "keep tangency / tangent factor" was still missing. It was

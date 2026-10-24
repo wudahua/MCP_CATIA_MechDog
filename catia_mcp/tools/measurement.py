@@ -592,13 +592,59 @@ class MeasurementTools:
             pass
         if density and payload.get("volume_mm3"):
             payload["mass_kg"] = round(density * payload["volume_mm3"] / 1e9, 6)
-        payload["note"] = ("measured on this document's own Part, independent of "
-                           "which document CATIA reports as active. The inertia "
-                           "TENSOR is not computed on this route - CATIA only "
-                           "computes it for the active document - so if you need "
-                           "the matrix, make this part active (activate_document) "
-                           "and call get_inertia without 'document'.")
+        # The tensor is only computed for the ACTIVE document, so this route used
+        # to return volume/area/centroid without one - and getting nine parts'
+        # tensors took 18 calls (open + activate each). CATIA's activation is
+        # temporary here: activate, read, restore (reported 2026-10-24).
+        tensor = self._tensor_for(part)
+        if tensor:
+            payload.update(tensor)
+            payload["note"] = (
+                "measured on this document's own Part. The inertia tensor came from "
+                "activating it for the measurement and restoring the previous active "
+                "document afterwards.")
+        else:
+            payload["note"] = (
+                "measured on this document's own Part, independent of which document "
+                "CATIA reports as active. No inertia tensor: CATIA only computes it "
+                "for the ACTIVE document, and this part could not be activated - it "
+                "has no window of its own (open it with catia_open_document, then "
+                "activate it, then call get_inertia without 'document').")
         return json.dumps(payload, indent=2)
+
+    def _tensor_for(self, part: Any) -> dict[str, Any] | None:
+        """Inertia tensor of a specific part, by borrowing the activation.
+
+        Returns None when the part cannot be made active (a component with no
+        window of its own), which is the one case where the caller still has to
+        open the document first.
+        """
+        doc = part.Parent
+        try:
+            previous = str(self.conn.active_document.Name)
+        except Exception:  # noqa: BLE001
+            previous = None
+        try:
+            doc.Activate()
+            if str(self.conn.app.ActiveDocument.Name) != str(doc.Name):
+                return None
+            body = part.MainBody
+            if body.Shapes.Count == 0:
+                return None
+            vals = self._evaluate_floats(self._VBS_INERTIA, "catia_mcp_inertia", [body])
+            return self._matrix_fields(vals)
+        except Exception:  # noqa: BLE001 - the caller reports what is missing
+            return None
+        finally:
+            if previous and previous != str(getattr(doc, "Name", "")):
+                try:
+                    for i in range(1, self.conn.documents.Count + 1):
+                        candidate = self.conn.documents.Item(i)
+                        if str(candidate.Name) == previous:
+                            candidate.Activate()
+                            break
+                except Exception:  # noqa: BLE001 - best effort
+                    pass
 
     @staticmethod
     def _no_solid_reason(part: Any, body: Any, label: str) -> str:
@@ -705,25 +751,7 @@ class MeasurementTools:
             # Inertia data lives on the SPAWorkbench Inertia object, not on
             # Measurable (Measurable.GetInertia does not exist in V5).
             vals = self._evaluate_floats(self._VBS_INERTIA, "catia_mcp_inertia", [body])
-            result["mass_from_material_kg"] = round(vals[0], 6)
-            inertia = vals[1:10]
-            # Inertia spans 1e-9 .. 1e2 kg.m2, so a fixed number of DECIMALS is
-            # wrong by construction: rounding to 4 places turned a 72 cm3 plate's
-            # three principal moments (Ixx 2.1e-5, Izz 5.6e-5) into 0.0 / 0.0001
-            # and a 73 cm3 loft's into all zeros - a number a caller then compares
-            # against CAD and reads as "0 % error" (reported 2026-10-24). Six
-            # significant digits survive the whole range.
-            result["inertia_matrix_kg_m2"] = [
-                [_sig(inertia[0]), _sig(inertia[1]), _sig(inertia[2])],
-                [_sig(inertia[3]), _sig(inertia[4]), _sig(inertia[5])],
-                [_sig(inertia[6]), _sig(inertia[7]), _sig(inertia[8])],
-            ]
-            result["inertia_matrix_unit"] = "kg*m^2"
-            result["inertia_matrix_about"] = (
-                "component axes through the centre of gravity, in the document's "
-                "own axis system (CATIA Inertia.GetInertiaMatrix); the diagonal is "
-                "Ixx/Iyy/Izz, the off-diagonals are the products of inertia"
-            )
+            result.update(self._matrix_fields(vals))
             if "mass_kg" in result:
                 result["mass_note"] = (
                     "mass_kg = the density you passed x volume; "
@@ -738,6 +766,41 @@ class MeasurementTools:
             result["inertia_matrix_kg_m2"] = f"unavailable: {e}"
 
         return json.dumps(result, indent=2)
+
+    @staticmethod
+    def _matrix_fields(vals: list[float]) -> dict[str, Any]:
+        """The tensor fields, from the 10 numbers the VBS macro returns."""
+        inertia = vals[1:10]
+        # Inertia spans 1e-9 .. 1e2 kg.m2, so a fixed number of DECIMALS is wrong
+        # by construction: rounding to 4 places turned a 72 cm3 plate's three
+        # principal moments (Ixx 2.1e-5, Izz 5.6e-5) into 0.0 / 0.0001 and a
+        # 73 cm3 loft's into all zeros - a number a caller then compares against
+        # CAD and reads as "0 % error" (reported 2026-10-24). Six significant
+        # digits survive the whole range.
+        matrix = [
+            [_sig(inertia[0]), _sig(inertia[1]), _sig(inertia[2])],
+            [_sig(inertia[3]), _sig(inertia[4]), _sig(inertia[5])],
+            [_sig(inertia[6]), _sig(inertia[7]), _sig(inertia[8])],
+        ]
+        # Products of inertia come back as floating-point dust on a symmetric part
+        # (-4.28e-50 was reported). Six significant digits keeps it, and a caller
+        # then has to decide whether 1e-50 is an error. Anything below 1e-12 of
+        # the largest principal moment is zero for every purpose this is used for.
+        scale = max((abs(matrix[i][i]) for i in range(3)), default=0.0)
+        if scale > 0:
+            floor = 1e-12 * scale
+            matrix = [[0.0 if abs(value) < floor else value for value in row]
+                      for row in matrix]
+        return {
+            "mass_from_material_kg": round(vals[0], 6),
+            "inertia_matrix_kg_m2": matrix,
+            "inertia_matrix_unit": "kg*m^2",
+            "inertia_matrix_about": (
+                "component axes through the centre of gravity, in the document's "
+                "own axis system (CATIA Inertia.GetInertiaMatrix); the diagonal is "
+                "Ixx/Iyy/Izz, the off-diagonals are the products of inertia"
+            ),
+        }
 
     # ── assembly-side measurement ───────────────────────────────────────
     #
@@ -968,11 +1031,21 @@ class MeasurementTools:
                 acc[i] += volume * world[i]
 
         if total <= 0:
-            raise RuntimeError(
-                "Could not measure any component of this assembly: "
-                + ("; ".join(f"{s['component']}: {s['error']}" for s in skipped)
-                   or "no components")
-            )
+            # Same shape as the bounding-box path, because a script that measures
+            # volume first used to be stopped dead here while the box call happily
+            # returned "which component, and why" (reported 2026-10-24: the tool
+            # that needed the diagnosis most was the one that threw it away).
+            return json.dumps({
+                "volume_mm3": None,
+                "volume_cm3": None,
+                "center_of_gravity_mm": None,
+                "components": [],
+                "skipped": skipped or [{"component": "<assembly>",
+                                        "error": "the assembly has no components"}],
+                "note": ("no component could be measured, so there is no total. A "
+                         "component without a solid (surface-only, or an empty part) "
+                         "has no volume to add; each reason is in 'skipped'."),
+            }, indent=2)
         payload: dict[str, Any] = {
             "volume_mm3": round(total, 4),
             "volume_cm3": round(total / 1000.0, 4),
@@ -1050,13 +1123,27 @@ class MeasurementTools:
                     "method='mesh'."
                 )
         corners, triangles, copy_note = self._mesh_corners(part)
-        return self._bbox_json(
+        reply = self._bbox_json(
             corners,
             f"STL mesh sweep of '{part.Parent.Name}' over {triangles} triangle "
             "vertices; the mesh chords curved faces, so these bounds are a LOWER "
             "bound on the true envelope (measured 0.47-0.73 % small)"
             + copy_note + auto_note,
         )
+        if copy_note:
+            # The caveat used to live only inside the prose of `method`, where a
+            # caller doing `payload["dimensions"]` never sees it. "modeled but not
+            # saved yet" is exactly the loop this measure-then-fix workflow runs,
+            # so it gets a structured field (reported 2026-10-24).
+            payload = json.loads(reply)
+            payload["warnings"] = [
+                "the box was measured from a COPY of the part's saved file, because "
+                "the part is loaded inside an open assembly and CATIA refuses to "
+                "export it in context - edits made since the last save are NOT in "
+                "these numbers (catia_save_document, then measure again)"
+            ]
+            reply = json.dumps(payload, indent=2)
+        return reply
 
     def _get_bounding_box(self, method: str = "auto",
                           component: str | None = None,
@@ -1246,14 +1333,22 @@ class MeasurementTools:
             except Exception:  # noqa: BLE001 - the export reports the real problem
                 pass
             export_error = None
-            try:
-                # ExportData rejects forward-slash paths (E_FAIL).
-                doc.ExportData(os.path.normpath(path), "stl")
-            except Exception as exc:  # noqa: BLE001 - the file check decides
-                export_error = exc
-            if (os.path.getsize(path) if os.path.exists(path) else 0) >= 128:
-                corners, triangles = _stl_extent(path)
-                return corners, triangles, ""
+            in_context = self._edited_in_context(doc)
+            if not in_context:
+                try:
+                    # ExportData rejects forward-slash paths (E_FAIL).
+                    doc.ExportData(os.path.normpath(path), "stl")
+                except Exception as exc:  # noqa: BLE001 - the file check decides
+                    export_error = exc
+                if (os.path.getsize(path) if os.path.exists(path) else 0) >= 128:
+                    corners, triangles = _stl_extent(path)
+                    return corners, triangles, ""
+            # In context the export is REFUSED with a modal dialog that nobody
+            # can answer, and on one B32 session it still wrote a valid STL - so
+            # the size check could not tell us, and every measurement left a
+            # dialog plus an event report behind (reported 2026-10-24, 6 parts =
+            # 6 clicks). Detect the state first and never attempt the in-place
+            # export there.
             corners, triangles = self._mesh_from_copy(doc, path)
             return corners, triangles, (
                 "; measured from a temporary copy of the saved file, because the "
@@ -1282,6 +1377,22 @@ class MeasurementTools:
                             break
                 except Exception:  # noqa: BLE001 - best effort
                     pass
+
+    def _edited_in_context(self, doc: Any) -> bool:
+        """True when the document has no window of its own.
+
+        A part loaded inside an open assembly can be reached as a document and
+        accepts ``Activate()``, but ``ActiveDocument`` does not change - that is
+        the same read-back ``catia_activate_document`` uses to refuse. It is the
+        only precondition available before an export that would otherwise raise a
+        modal dialog, so it is checked first rather than inferred from the error.
+        """
+        try:
+            doc.Activate()
+            active = str(self.conn.app.ActiveDocument.Name)
+            return active != str(doc.Name)
+        except Exception:  # noqa: BLE001 - assume the risky state
+            return True
 
     def _mesh_from_copy(self, doc: Any, path: str) -> tuple[list[list[float]], int]:
         """Export from a temporary copy of the file, opened as its own document.
@@ -1390,6 +1501,51 @@ class MeasurementTools:
     def _update_part(self) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
-        part.Update()
+        try:
+            part.Update()
+        except Exception as error:  # noqa: BLE001 - diagnosed below
+            culprit = self._first_failing_feature(part)
+            if culprit:
+                raise RuntimeError(
+                    f"Update failed, and '{culprit}' is the feature that fails on "
+                    "its own - every later update stops there. A failed Part Design "
+                    "feature that is still in the tree does exactly this (a rejected "
+                    "fillet leaves an empty 倒圆角.N behind): delete it with "
+                    f"catia_delete_feature(feature_name='{culprit}') and update again. "
+                    f"Original error: {error}"
+                ) from error
+            raise RuntimeError(
+                f"Update failed and no single feature reproduces it on its own, so "
+                f"the problem is a relation between features (a fillet whose support "
+                f"moved, a pattern whose seed changed). Original error: {error}"
+            ) from error
         self.conn.refresh_display()
         return "Part updated successfully"
+
+    def _first_failing_feature(self, part: Any) -> str | None:
+        """Name of the first feature that fails to update alone, or None.
+
+        Only called when the whole-part update already failed, so the extra COM
+        calls cost nothing in the normal path. Without it the answer to "why did
+        Update fail" is a bare "方法 Update 失败", which is what made a 22-feature
+        part look unrecoverable (reported 2026-10-24).
+        """
+        try:
+            bodies = part.Bodies
+        except Exception:  # noqa: BLE001
+            return None
+        for b in range(1, bodies.Count + 1):
+            try:
+                shapes = bodies.Item(b).Shapes
+            except Exception:  # noqa: BLE001
+                continue
+            for i in range(1, shapes.Count + 1):
+                shape = shapes.Item(i)
+                try:
+                    part.UpdateObject(shape)
+                except Exception:  # noqa: BLE001 - this is the culprit
+                    try:
+                        return str(shape.Name)
+                    except Exception:  # noqa: BLE001
+                        return f"#{i} in '{bodies.Item(b).Name}'"
+        return None

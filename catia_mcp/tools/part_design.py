@@ -330,11 +330,41 @@ class PartDesignTools:
                 "name": "catia_rect_pattern",
                 "description": (
                     "Create a Rectangular Pattern of the last feature. "
-                    "Duplicates a feature in a grid along two directions."
+                    "Duplicates a feature in a grid along two directions. Prefer "
+                    "dir1_axis / dir2_axis (x, y or z) over dir1_edge / dir2_edge: "
+                    "an edge's DIRECTION cannot be read back from any listing, so "
+                    "two edges of equal length give opposite directions and the only "
+                    "way to tell which you got is the volume delta (reported "
+                    "2026-10-24, with 3 attempts and 2 wasted features). Omit all "
+                    "four to use CATIA's defaults, which are PlaneYZ -> X and "
+                    "PlaneZX -> Y regardless of what the spec meant."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
+                        "dir1_axis": {
+                            "type": "string",
+                            "enum": ["x", "y", "z"],
+                            "description": (
+                                "Direction 1 as a global axis (recommended). Do not "
+                                "combine with dir1_edge."
+                            ),
+                        },
+                        "dir2_axis": {
+                            "type": "string",
+                            "enum": ["x", "y", "z"],
+                            "description": "Direction 2 as a global axis.",
+                        },
+                        "reverse_dir1": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "Step along -dir1 instead of +dir1.",
+                        },
+                        "reverse_dir2": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "Step along -dir2 instead of +dir2.",
+                        },
                         "dir1_edge": {
                             "type": "string",
                             "description": (
@@ -1380,16 +1410,36 @@ class PartDesignTools:
         return after, delta < -1e-6
 
     def _safe_update(self, part: Any, feature: Any) -> None:
-        """Update a feature; if CATIA rejects it, remove the broken feature
-        from the tree so a failed attempt does not poison later features."""
+        """Update a feature; if CATIA rejects it, take the dead node back out.
+
+        A failed Part Design feature left in the tree is not inert: **every**
+        later Update of the part then fails at it, so one rejected fillet turns
+        a 22-feature part into one that cannot be rebuilt at all. Reproduced on
+        B30 2026-10-24: fillet R40 on a 40x20x10 block -> shape_count 1 -> 2,
+        `update_part` fails, and the next pad fails too, until the dead
+        `倒圆角.1` is deleted. The batch paths have rolled back since 0.3.7; the
+        single-feature paths (fillet / chamfer / mirror / shell / thickness /
+        boolean) called `UpdateObject` raw and did not.
+        """
         try:
             part.UpdateObject(feature)
-        except Exception as e:
-            self._remove_feature(part, feature)
+            return
+        except Exception as error:  # noqa: BLE001 - reported with the rollback state
+            name = str(getattr(feature, "Name", "the new feature"))
+            gone = self._remove_feature(part, feature)
+            if gone:
+                raise RuntimeError(
+                    f"CATIA rejected the feature and it was removed from the tree "
+                    f"again (rolled_back: true), so the rest of the part still "
+                    f"updates. Feature was '{name}'. Original error: {error}"
+                ) from error
             raise RuntimeError(
-                f"CATIA rejected the feature (update failed) and it was "
-                f"removed from the tree: {e}"
-            ) from e
+                f"CATIA rejected the feature '{name}' and it could NOT be removed "
+                "from the tree (rolled_back: false). Every later Update of this "
+                "part will now fail at that feature, so delete it before doing "
+                f"anything else: catia_delete_feature(feature_name='{name}'). "
+                f"Original error: {error}"
+            ) from error
 
     def _topo_reference(self, kind: str, index: int) -> Any:
         """Resolve Face.N / Edge.N on the body's final shape to a Reference.
@@ -1697,7 +1747,7 @@ class PartDesignTools:
             radius,
         )
 
-        part.UpdateObject(fillet)
+        self._safe_update(part, fillet)
         self.conn.refresh_display()
         self._clear_selection()
         return f"Fillet created: R{radius} mm on {scope}. Feature: '{fillet.Name}'"
@@ -1894,7 +1944,12 @@ class PartDesignTools:
         body = self._prepare_body(part)
         sf = part.ShapeFactory
 
-        feature = self._get_last_shape(args.get("feature_name"))
+        # Not _get_last_shape(None): that returns the BODY (right for topology
+        # searches), and patterning the body fails at UpdateObject - the same
+        # trap circ_pattern hit in 0.3.7. Reproduced 2026-10-24 while verifying
+        # the new axis arguments: every rect_pattern without feature_name failed,
+        # with or without dir1_axis.
+        feature = self._pattern_seed(body, args.get("feature_name"))
         d1_count = args["dir1_count"]
         d1_spacing = args["dir1_spacing"]
         d2_count = args.get("dir2_count", 1)
@@ -1907,13 +1962,70 @@ class PartDesignTools:
         # edges, the origin planes give deterministic X/Y directions.
         dir1_edge = args.get("dir1_edge")
         dir2_edge = args.get("dir2_edge")
+        dir1_axis = (args.get("dir1_axis") or "").lower() or None
+        dir2_axis = (args.get("dir2_axis") or "").lower() or None
         if bool(dir1_edge) != bool(dir2_edge):
             raise ValueError(
                 "Pass both 'dir1_edge' and 'dir2_edge' ('Edge.N' from "
                 "catia_list_edges, two adjacent edges sharing a corner), "
                 "or neither."
             )
-        if dir1_edge:
+        if (dir1_axis or dir2_axis) and (dir1_edge or dir2_edge):
+            raise ValueError(
+                "Use either dir1_axis/dir2_axis or dir1_edge/dir2_edge, not both. "
+                "The axis form is the readable one."
+            )
+        for value in (dir1_axis, dir2_axis):
+            if value and value not in ("x", "y", "z"):
+                raise ValueError("dir1_axis / dir2_axis must be 'x', 'y' or 'z'")
+        if dir1_axis and dir2_axis and dir1_axis == dir2_axis:
+            raise ValueError(
+                "dir1_axis and dir2_axis are the same axis; CATIA rejects two "
+                "parallel directions, and so does this tool."
+            )
+        reverse1 = bool(args.get("reverse_dir1"))
+        reverse2 = bool(args.get("reverse_dir2"))
+        if dir1_axis or dir2_axis:
+            # A datum plane's reference gives its NORMAL as the direction, so
+            # x -> PlaneYZ, y -> PlaneZX, z -> PlaneXY. Same mapping the edge
+            # path documents, minus the guesswork about which way an edge runs.
+            planes = self.conn.get_origin_elements()
+            by_axis = {"x": "yz", "y": "zx", "z": "xy"}
+            # CATIA needs dir1 x dir2 to be RIGHT-handed, or the update fails with
+            # a bare "UpdateObject failed". Measured on B30 2026-10-24 with a pad
+            # seed: (x,y) ok, (y,z) ok, (z,x) ok, (z,y) failed, (x,z) failed -
+            # the failures are exactly the left-handed pairs, and (z) alone took
+            # the same path because the old default second axis was 'y'.
+            cyclic = {"x": "y", "y": "z", "z": "x"}
+            first = dir1_axis or "x"
+            second = dir2_axis or cyclic[first]
+            if second == first:
+                raise ValueError(
+                    f"dir1_axis and dir2_axis are both '{first}'; a pattern needs two "
+                    "different directions."
+                )
+            # Right-handed or nothing: CATIA answers a left-handed frame with a bare
+            # "UpdateObject failed". Measured on B30 2026-10-24: (x,y), (y,z) and
+            # (z,x) build; (x,z), (z,y) and (y,x) do not. A reversal flips the
+            # handedness too, so it is part of the test. Rather than refuse the
+            # caller's axes, swap the two slots (counts and spacings with them) -
+            # the resulting geometry is identical.
+            right_handed = ((first, second) in (("x", "y"), ("y", "z"), ("z", "x"))
+                            and reverse1 == reverse2)
+            swapped = False
+            if not right_handed:
+                first, second = second, first
+                reverse1, reverse2 = reverse2, reverse1
+                d1_count, d2_count = d2_count, d1_count
+                d1_spacing, d2_spacing = d2_spacing, d1_spacing
+                swapped = True
+            ref1 = part.CreateReferenceFromObject(planes[by_axis[first]])
+            ref2 = part.CreateReferenceFromObject(planes[by_axis[second]])
+            directions = (f"axis {first}{' (reversed)' if reverse1 else ''} -> dir1, "
+                          f"axis {second}{' (reversed)' if reverse2 else ''} -> dir2")
+            if swapped:
+                directions += " (axes swapped internally: CATIA rejects a left-handed pair)"
+        elif dir1_edge:
             r1, r2 = topology_references(
                 self.conn, body, "Edge",
                 [self._topo_index(dir1_edge, "Edge"),
@@ -1937,7 +2049,7 @@ class PartDesignTools:
             d1_spacing, d2_spacing,
             1, 1,          # position of the original along dir1/dir2
             ref1, ref2,    # direction references
-            False, False,  # reversed dir1/dir2
+            reverse1, reverse2,  # reversed dir1/dir2
             0.0,           # rotation angle
         )
 
@@ -2174,7 +2286,7 @@ class PartDesignTools:
         # through this API.
         mirror = sf.AddNewMirror(ref)
 
-        part.UpdateObject(mirror)
+        self._safe_update(part, mirror)
         self.conn.refresh_display()
         return (
             f"Mirror created about {plane_key.upper()} plane (mirrors the "
@@ -2209,7 +2321,7 @@ class PartDesignTools:
             except Exception:
                 skipped.append(extra)
 
-        part.UpdateObject(shell)
+        self._safe_update(part, shell)
         self.conn.refresh_display()
         try:
             self.conn.hso.Clear()
@@ -2303,9 +2415,14 @@ class PartDesignTools:
         self.conn.refresh_display()
         raise RuntimeError(
             "CATIA rejected the draft on every neutral face tried. "
-            f"{angle} deg on {face_name}, pulling direction {plane_key}. The neutral "
-            "face has to touch the drafted face and be perpendicular to the pulling "
-            "direction; pass neutral_face explicitly with a side wall that does. "
+            f"{angle} deg on {face_name}, pulling direction {plane_key} "
+            f"({'/'.join(str(v) for v in direction)}). Check the DIRECTION first: a "
+            "face cannot be drafted along its own normal, and when it is, no neutral "
+            "face can rescue it - the reported plate failed all five faces that way, "
+            "while the same face drafted fine with the other two directions "
+            "(2026-10-24). If the drafted face is a side wall, pull along an axis "
+            "that is NOT that wall's normal. Only then try neutral_face: it has to "
+            "touch the drafted face and be perpendicular to the pulling direction. "
             "Tried - " + "; ".join(errors)
         )
 
@@ -2327,7 +2444,7 @@ class PartDesignTools:
         # AddNewThickness(iFaceToThicken, iOffset) - 2 parameters.
         thickness = sf.AddNewThickness(face_ref, offset)
 
-        part.UpdateObject(thickness)
+        self._safe_update(part, thickness)
         self.conn.refresh_display()
         return f"Thickness added: {offset} mm on {face_name}. Feature: '{thickness.Name}'"
 
@@ -2464,6 +2581,7 @@ class PartDesignTools:
 
     def _list_features(self) -> str:
         self.conn.ensure_connected()
+        part = self.conn.get_active_part()
         body = self.conn.get_active_part_body()
         shapes = body.Shapes
 
@@ -2479,7 +2597,17 @@ class PartDesignTools:
 
         if not features:
             return "No features in the active body"
-        return json.dumps(features, indent=2)
+        # count == body.Shapes.Count, and it is published so a caller can tell
+        # "my feature was created" from "a dead feature is still hanging around".
+        # A failed fillet used to show up here as a normal-looking row and as a
+        # shape_count one higher than expected in the failure state line
+        # (reported 2026-10-24, which is how that report located the bug).
+        return json.dumps({
+            "body": str(body.Name),
+            "count": len(features),
+            "bodies": part.Bodies.Count,
+            "features": features,
+        }, indent=2)
 
     _BOOLEAN_METHODS = {
         "add": "AddNewAdd",
@@ -2558,6 +2686,7 @@ class PartDesignTools:
         out = []
         total_volume = 0.0
         total_faces = 0
+        total_excluded = 0
         for i in range(1, bodies.Count + 1):
             body = bodies.Item(i)
             entry: dict[str, Any] = {
@@ -2579,11 +2708,22 @@ class PartDesignTools:
                     except Exception:
                         pass
                 try:
+                    # Same definition of "face of the solid" as
+                    # catia_measure_topology: the Face search also returns the
+                    # datum planes' own borders, so counting sel.Count reported
+                    # 191 on a body where measure_topology said 186 - the same
+                    # class of bug as the old edge-count split (reported
+                    # 2026-10-24, third release of this family).
                     sel.Clear()
                     sel.Add(body)
                     search_topology(sel, "Face")
-                    entry["faces"] = sel.Count
-                    total_faces += sel.Count
+                    raw = sel.Count
+                    faces = len(topology_cells(self.conn, body, "Face"))
+                    entry["faces"] = faces
+                    total_faces += faces
+                    if raw != faces:
+                        entry["faces_excluded"] = raw - faces
+                        total_excluded += raw - faces
                 except Exception:
                     pass
                 finally:
@@ -2597,12 +2737,18 @@ class PartDesignTools:
             return "No solid bodies in the active part"
         # The part's volume is the sum of its bodies, which is what a spec means
         # by "several solids that interpenetrate, Merge = false".
-        return json.dumps({
+        payload = {
             "bodies": out,
             "count": len(out),
             "total_volume_mm3": round(total_volume, 1),
             "total_faces": total_faces,
-        }, indent=2)
+        }
+        if total_excluded:
+            payload["faces_note"] = (
+                f"{total_excluded} face(s) the search also returns are datum-plane "
+                "borders or sketch wires, and are excluded here exactly as in "
+                "catia_measure_topology and catia_list_faces - the counts agree.")
+        return json.dumps(payload, indent=2)
 
     def _set_visibility(self, name: str, show: bool) -> str:
         """Show or hide a tree node by name, searching the whole part.
@@ -2816,7 +2962,7 @@ class PartDesignTools:
         feature = getattr(part.ShapeFactory, method)(tool)
         if args.get("name"):
             feature.Name = args["name"]
-        part.UpdateObject(feature)
+        self._safe_update(part, feature)
 
         # The tool body is consumed by CATIA, so it can no longer be the target
         # of new features.

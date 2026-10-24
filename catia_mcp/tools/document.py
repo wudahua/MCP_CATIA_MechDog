@@ -320,12 +320,15 @@ class DocumentTools:
         except Exception:  # noqa: BLE001
             doc_name = "the new document"
         self.conn.refresh_display()
+        # The old sentence ended "an unsaved assembly is always 'Product1.CATProduct'",
+        # which stopped being true once PartNumber started working: the document
+        # is now named after it. Saying both in one breath made the reply
+        # contradict itself (reported 2026-10-24, twice).
         return (
             f"Created a Product document '{doc_name}' whose root product is "
-            f"'{product_name}'{rename_note}. The FILE keeps CATIA's default name "
-            "until it is saved: catia_save_document(file_path=...) decides it, so "
-            "pass the path you actually want (an unsaved assembly is always "
-            "'Product1.CATProduct')."
+            f"'{product_name}'{rename_note}. In this session the document is called "
+            f"'{doc_name}'; a path you save it to decides the FILE name "
+            "(catia_save_document(file_path=...))."
         )
 
     def _open_document(self, file_path: str) -> str:
@@ -453,8 +456,20 @@ class DocumentTools:
         return f"Document '{name}' closed" + (" (saved)" if save else "")
 
     def _list_documents(self) -> str:
+        """Every document in the session, and which assemblies use it.
+
+        A part that exists only as a component of an open product IS in this
+        collection, and it cannot be activated - so listing it beside real
+        windows left the caller with two messages that contradict each other
+        ("it is open" / "open it first"). Reproduced by a reporter who wrote the
+        wrong call order from exactly this listing (2026-10-24). ``component_of``
+        says which open assemblies reference the part; that is a fact this tool
+        can read without touching the session, whereas "activatable" would need
+        an Activate() per document.
+        """
         self.conn.ensure_connected()
         docs = self.conn.documents
+        uses = self._component_usage()
         result = []
         for i in range(1, docs.Count + 1):
             doc = docs.Item(i)
@@ -473,11 +488,41 @@ class DocumentTools:
                     doc_info["type"] = "CATProduct"
                 except Exception:
                     doc_info["type"] = "Other"
+            if doc_info["type"] == "CATPart" and str(doc.Name) in uses:
+                doc_info["component_of"] = uses[str(doc.Name)]
+                doc_info["note"] = (
+                    "used by an open assembly, so it may have no window of its own; "
+                    "if catia_activate_document refuses it, open it with "
+                    "catia_open_document (or measure it by name with document=)")
             result.append(doc_info)
 
         if not result:
             return "No documents open in CATIA"
         return json.dumps(result, indent=2, ensure_ascii=False)
+
+    def _component_usage(self) -> dict[str, list[str]]:
+        """Part document name -> the open assemblies whose components use it."""
+        uses: dict[str, list[str]] = {}
+        docs = self.conn.documents
+        for i in range(1, docs.Count + 1):
+            product_doc = docs.Item(i)
+            try:
+                product = self.conn.product_of(product_doc)
+                children = product.Products
+            except Exception:  # noqa: BLE001 - not a product
+                continue
+            for j in range(1, children.Count + 1):
+                try:
+                    child = children.Item(j)
+                    part_doc = child.ReferenceProduct.Parent
+                    name = str(part_doc.Name)
+                except Exception:  # noqa: BLE001 - a dead link
+                    continue
+                uses.setdefault(name, [])
+                owner = str(product_doc.Name)
+                if owner not in uses[name]:
+                    uses[name].append(owner)
+        return uses
 
     def _activate_document(self, name: str) -> str:
         """Activate an open document by name so later calls act on it.
