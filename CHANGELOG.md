@@ -4,6 +4,36 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+Fourth round of 2026-10-24 reports. Three of the four named something this fork
+got wrong in the previous release, and two of those were in the text a caller
+reads to decide what to do.
+
+### Fixed
+- `catia_get_inertia` accepted `document=` since 0.3.9 but its schema never
+  declared it, so a client that builds its form from `tools/list` could not pass
+  it. Declared now, with a test.
+- `catia_add_component` hung a whole session for 2 h 14 min on B32. Root cause
+  measured by the reporter: `AddComponentsFromFiles` rejects **forward-slash**
+  paths, then puts up a modal "打开" dialog that blocks the COM worker - and the
+  old code reported success without checking. The path is normalised to Windows
+  form for this call only (every other file tool is field-verified with forward
+  slashes), file alerts are silenced around it, and success now requires the
+  component count to have grown.
+- `catia_sketch_delete_element` said the consuming features were rebuilt while
+  only the sketch had been updated, so a pad kept its old volume. The part is
+  rebuilt now.
+- A `method='mesh'` measurement of a named document left the session on that
+  document, because `ExportData` activates what it exports. The previously active
+  document is restored before returning.
+
+### Corrected claims
+- Two messages said the opposite of what happens and steered users off the only
+  working path: that activating a component's part "does not change
+  ActiveDocument" (it does - measured three times on B32), and that a part
+  "cannot be activated while its product is open" (it can). Both rewritten. The
+  Product refusal for `component=` + `mesh` now gives the real reason - only
+  vertices are reachable there - and names the two routes that work.
+
 ## [0.3.9] — 2026-10-24 · two regressions fixed, and a named document can be measured
 
 Third round of 2026-10-24 reports (three at once). Two of them are regressions this

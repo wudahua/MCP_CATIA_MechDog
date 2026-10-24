@@ -342,13 +342,56 @@ class AssemblyTools:
                 raise ValueError(f"Unknown assembly tool: {tool_name}")
 
     def _add_component(self, file_path: str) -> str:
+        """Insert a part file, with the two traps that hang a whole session fixed.
+
+        Measured by the reporter on V5-6R2020 B32 (2026-10-24): this API rejects
+        FORWARD-slash paths (``AddComponentsFromFiles`` answers E_FAIL and then
+        puts up a modal "打开" dialog), and a modal dialog blocks the COM worker
+        for as long as nobody answers it - their call sat there for 2 h 14 min,
+        and the old code would have claimed success anyway. So: normalise the
+        path to backslashes for this call only (every other tool is fine with
+        forward slashes), silence file alerts, and check that a component
+        actually appeared before saying so.
+        """
+        import os
+
         product = self.conn.get_active_product()
         products = product.Products
-        component = products.AddComponentsFromFiles(
-            [file_path], "All"
-        )
+        # Only this call gets the Windows form; open_document / save_document /
+        # export are field-verified with forward slashes and stay untouched.
+        native_path = os.path.normpath(file_path)
+        before = 0
+        try:
+            before = products.Count
+        except Exception:  # noqa: BLE001 - the comparison is best-effort
+            pass
+        alerts = None
+        try:
+            alerts = self.conn.app.DisplayFileAlerts
+            self.conn.app.DisplayFileAlerts = False
+        except Exception:  # noqa: BLE001 - not every build exposes it
+            alerts = None
+        try:
+            products.AddComponentsFromFiles([native_path], "All")
+        finally:
+            if alerts is not None:
+                try:
+                    self.conn.app.DisplayFileAlerts = alerts
+                except Exception:  # noqa: BLE001
+                    pass
+        after = products.Count
         self.conn.refresh_display()
-        return f"Component added from: {file_path}"
+        if after <= before:
+            raise RuntimeError(
+                f"CATIA accepted the call but no component appeared (count stayed "
+                f"{before}). Path used: '{native_path}'. On this build "
+                "AddComponentsFromFiles rejects forward-slash paths and then opens a "
+                "modal dialog that blocks the automation thread; if the file is not "
+                "a saved .CATPart, save it first - or build it in place with "
+                "catia_add_new_part."
+            )
+        return (f"Component added from: {native_path} "
+                f"({after - before} instance(s), assembly now holds {after}).")
 
     def _add_new_part(self, name: str | None = None) -> str:
         product = self.conn.get_active_product()

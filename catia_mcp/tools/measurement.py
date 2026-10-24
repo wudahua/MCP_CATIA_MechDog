@@ -180,6 +180,16 @@ class MeasurementTools:
                             "type": "number",
                             "description": "Material density in kg/m3 (optional, for mass calculation)",
                         },
+                        "document": {
+                            "type": "string",
+                            "description": (
+                                "Measure THIS open document instead of the active "
+                                "one (alias: document_name). Activating a "
+                                "component's part does switch ActiveDocument on "
+                                "B32, but the switch is easy to lose track of - "
+                                "naming the document is unambiguous."
+                            ),
+                        },
                     },
                 },
             },
@@ -225,9 +235,11 @@ class MeasurementTools:
                             "type": "string",
                             "description": (
                                 "Measure THIS open document instead of the active "
-                                "one - the only way to measure a part while its "
-                                "assembly is open (activating it does not change "
-                                "ActiveDocument on this build). Alias: document_name."
+                                "one - a shortcut that does not depend on which "
+                                "document CATIA reports as active. Note that a "
+                                "method='mesh' measurement switches the active "
+                                "document to the measured one; the tool switches it "
+                                "back. Alias: document_name."
                             ),
                         },
                     },
@@ -851,13 +863,15 @@ class MeasurementTools:
                 # Refuse instead of silently returning vertex-sweep numbers:
                 # a wrong number that looks plausible is worse than an error.
                 raise RuntimeError(
-                    "method='mesh' is not available in Product mode: an STL "
-                    "export only works for the active document, and a component's "
-                    "part cannot be activated while its product is open. Call "
-                    "get_bounding_box(document='<the part>.CATPart', method='mesh') "
-                    "for a true per-part box, or omit method for the world "
-                    "aggregation (vertex-based, so a revolved part's diameter is "
-                    "under-reported - that is stated in the reply)."
+                    "method='mesh' is not available in Product mode: a per-component "
+                    "world box would need every component's own mesh, and the "
+                    "aggregated path only reads the vertices the assembly exposes. "
+                    "Two working routes: (a) get_bounding_box(document='<part>"
+                    ".CATPart', method='mesh') per component, then apply the "
+                    "placement from catia_get_component_transform - the reporter "
+                    "measured all nine parts this way with zero deviation; or (b) "
+                    "omit method for the vertex-based aggregation, whose "
+                    "under-reporting on revolved parts is stated in the reply."
                 )
             return self._assembly_box(self.conn.active_document, method, component)
         part = self.conn.get_active_part()
@@ -955,10 +969,21 @@ class MeasurementTools:
         return kept, dropped
 
     def _mesh_corners(self, part: Any) -> tuple[list[list[float]], int]:
-        """Bounding corners from an STL export of the active document."""
+        """Bounding corners from an STL export of that part's document.
+
+        ExportData activates the document it exports, so a measurement aimed at a
+        named part used to leave the session on that part (reported 2026-10-24:
+        "the tool quietly changes the active document"). The previously active
+        document is restored before returning.
+        """
         import shutil
 
         doc = part.Parent
+        previous = None
+        try:
+            previous = str(self.conn.active_document.Name)
+        except Exception:  # noqa: BLE001 - nothing to restore
+            previous = None
         # ExportData raises an overwrite prompt when the target exists, and that
         # dialog blocks the worker thread forever. mkstemp would create the file
         # up front, so make a directory and hand over a name that does not exist.
@@ -970,6 +995,15 @@ class MeasurementTools:
             return _stl_extent(path)
         finally:
             shutil.rmtree(folder, ignore_errors=True)
+            if previous and previous != str(getattr(doc, "Name", "")):
+                try:
+                    for i in range(1, self.conn.documents.Count + 1):
+                        candidate = self.conn.documents.Item(i)
+                        if str(candidate.Name) == previous:
+                            candidate.Activate()
+                            break
+                except Exception:  # noqa: BLE001 - best effort
+                    pass
 
     @staticmethod
     def _bbox_json(points: list[list[float]], method_note: str) -> str:

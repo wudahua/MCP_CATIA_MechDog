@@ -1100,10 +1100,15 @@ class SketcherTools:
                     pass
         try:
             part.UpdateObject(sketch)
+            # UpdateObject(sketch) rebuilds the sketch, not the features built on
+            # it: the reporter's pad stayed at the old volume while this reply
+            # claimed the profile had been rebuilt (2026-10-24). A full part
+            # update is what makes the claim true.
+            part.Update()
         except Exception as exc:  # noqa: BLE001 - the delete itself worked
             return (
                 f"Deleted element {index} ('{element_name}') from sketch '{name}', "
-                f"{left} element(s) left, but the update afterwards failed ({exc}) "
+                f"{left} element(s) left, but the rebuild afterwards failed ({exc}) "
                 "- features built on this sketch may be in error; fix them next."
             )
         self.conn.refresh_display()
