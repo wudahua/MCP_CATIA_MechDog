@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.19** · [what changed](CHANGELOG.md) ·
+**0.3.20** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -53,7 +53,9 @@ are domain-neutral and cheap. See `FORK.md` §8 if you want to cut further.
 Five of them came with the fork, fourteen were added while building parts from
 a spec (0.3.1: three, 0.3.2: four, 0.3.4: one, 0.3.5: one, 0.3.8: two, 0.3.17:
 two - `catia_delete_body`, `catia_solid_loft`; 0.3.19: one - `catia_copy_component`).
-Upstream 98 − 16 dropped + 19 added = 101.
+Upstream 98 − 16 dropped + 19 added = 101. 0.3.20 added arguments instead of
+tools: a sketch support given as `origin`/`u`/`v`, edges given as coordinates,
+arcs given as their two endpoints, and one plan per several documents.
 
 | Tool | What it gives you |
 |---|---|

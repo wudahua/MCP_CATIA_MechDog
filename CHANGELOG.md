@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [0.3.20] — 2026-10-26 · a sketch on any plane, an edge by coordinate
 
 ### Added — sketch on an arbitrary plane (`{"type": "frame"}`)
 
