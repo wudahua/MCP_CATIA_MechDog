@@ -32,6 +32,12 @@ catia-mcp = "catia_mcp.server:main"
 [tool.setuptools.packages.find]
 include = ["catia_mcp*"]
 
+[tool.pytest.ini_options]
+# -ra prints the short test summary for every non-passing outcome, including
+# skips. Without it a B32 run reported "329 passed" against a B30 "332 passed"
+# and neither column said why (reported 2026-10-25).
+addopts = "-ra"
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"

@@ -638,6 +638,55 @@ class PartDesignTools:
                 },
             },
             {
+                "name": "catia_solid_loft",
+                "description": (
+                    "SOLID multi-section loft (Part Design 'Multi-sections solid'): "
+                    "one feature, one Update, a closed solid from 2+ section curves. "
+                    "Sections may be sketches, GSD curves or a solid's topology. "
+                    "THIS IS THE ROUTE FOR THIN SECTIONS, and the reason is measured: "
+                    "the surface route (catia_gsd_multi_section_surface + "
+                    "catia_gsd_thick_surface) cannot offset a section that is thinner "
+                    "than the thickness asked for - a 2.30 mm lens section refused "
+                    "1.27/1.27 AND 2.54/0 - while this tool builds it in one call. "
+                    "Verified on B30 2026-10-25 with r8 at z=0 and r16 at z=40: "
+                    "feature '多截面实体.1', volume 18765.8 mm3, area 4080.97 mm2, "
+                    "centre of gravity z=24.286 - a solid, not a surface. "
+                    "Section rule is the same as the surface loft: ONE curve per "
+                    "section. A polygon of separate sketch lines is several curves "
+                    "and fails; a closed catia_sketch_spline or catia_gsd_spline is "
+                    "one. Reported by a user who found AddNewLoft after this server "
+                    "said no solid loft existed (2026-10-25) - that statement was a "
+                    "gap in the probing, not a CATIA limit."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "sections": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "description": (
+                                "Section names in lofting order: sketch names, GSD "
+                                "curve names, or 'Edge.N' / 'Face.N'."
+                            ),
+                        },
+                        "start_tangent": {
+                            "type": "string",
+                            "description": (
+                                "Optional support surface the first section is "
+                                "tangent to (see catia_gsd_multi_section_surface)."
+                            ),
+                        },
+                        "end_tangent": {
+                            "type": "string",
+                            "description": "Optional tangency support at the last section.",
+                        },
+                        "name": {"type": "string", "description": "Optional feature name"},
+                    },
+                    "required": ["sections"],
+                },
+            },
+            {
                 "name": "catia_delete_body",
                 "description": (
                     "Delete a solid body from the active part. Only needed for "
@@ -877,6 +926,8 @@ class PartDesignTools:
                 return self._list_features()
             case "catia_new_body":
                 return self._new_body(arguments.get("name"))
+            case "catia_solid_loft":
+                return self._solid_loft(arguments)
             case "catia_delete_body":
                 return self._delete_body(arguments["name"],
                                          bool(arguments.get("force", False)))
@@ -1583,6 +1634,17 @@ class PartDesignTools:
                         f"Edge.{index} is out of range: the final shape exposes "
                         f"{len(table)} edge(s).")
                 entry = table[index - 1]
+                if faces and set(faces) != set(entry["bounded_by"]):
+                    # An index plus faces means the caller wanted a specific one
+                    # of two indistinguishable edges. If the index no longer
+                    # carries those faces, the tree changed under them, and
+                    # quietly filleting the wrong edge is worse than stopping.
+                    raise RuntimeError(
+                        f"Edge.{index} is not the edge you fingerprinted: its "
+                        f"bounding faces are {sorted(entry['bounded_by'])} but the "
+                        f"spec gave {sorted(set(faces))}. Re-run catia_list_edges "
+                        "and take the Edge.N from that listing."
+                    )
             else:
                 entry = self._match_edge(table, faces, length, spec)
             labels.append(f"{entry['name']} ({entry['fingerprint']})")
@@ -1617,11 +1679,20 @@ class PartDesignTools:
                 + ". Fingerprints come from catia_list_edges and are re-resolved "
                 "on every call, so they survive renumbering - an Edge.N does not."
             )
+        same_print = len({e["fingerprint"] for e in candidates}) == 1
         raise RuntimeError(
             f"'{spec}' matches {len(candidates)} edges: "
             + "; ".join(f"{e['name']} len={e['length']} {e['fingerprint']}"
                         for e in candidates[:6])
-            + ". Add length_mm, or pass one fingerprint per edge."
+            + (" - and their FINGERPRINTS ARE IDENTICAL, so length and bounding "
+               "faces cannot tell them apart. This happens at a fillet boundary: "
+               "the fillet cuts a new edge beside the original one, with the same "
+               "length and the same two faces. Pass "
+               '{"index": N, "faces": [...]} instead of a bare fingerprint - the '
+               "Edge.N values above are the disambiguator, and nothing rebuilds "
+               "between this listing and the retry, so they are still valid."
+               if same_print else
+               ". Add length_mm, or pass one fingerprint per edge.")
         )
 
     def _fillet(self, args: dict[str, Any]) -> str:
@@ -1756,6 +1827,16 @@ class PartDesignTools:
                     f"one-at-a-time retry (the batch rebuild failed: {rebuild_error})")
         if done:
             head += f" ({', '.join(done)})"
+            # Which radius each edge got, spelled out: the same edge can be sent
+            # again in a later call with a different radius, and the reply used to
+            # name the edges without saying what was applied to them (reported
+            # 2026-10-25, after two edges were rebuilt at the wrong radius).
+            try:
+                stamp = f"{float(radius):g}"
+            except (TypeError, ValueError):
+                stamp = str(radius)
+            short = [str(name).split(" ")[0] for name in done]
+            head += " [applied " + ", ".join(f"{n}@R{stamp}" for n in short) + "]"
         if failed:
             head += ". Rejected: " + "; ".join(f"{n} -> {m}" for n, m in failed)
             head += (
@@ -2787,6 +2868,131 @@ class PartDesignTools:
         "intersect": "AddNewIntersect",
         "assemble": "AddNewAssemble",
     }
+
+    def _solid_loft(self, args: dict[str, Any]) -> str:
+        """A Part Design solid loft: sections in, closed solid out.
+
+        ``ShapeFactory.AddNewLoft()`` returns a Part Design feature whose
+        ``.HybridShape`` is the GSM loft that feeds it - sections go into THAT,
+        with the same three-argument form the surface loft uses. Measured on B30
+        2026-10-25 (the reporter's recipe, independently reproduced): two circles
+        r8 at z=0 and r16 at z=40 give a 18765.8 mm3 solid in one Update.
+
+        This exists because the surface route cannot make a thin solid: offsetting
+        a 2.30 mm section by 1.27+1.27 mm self-intersects, whichever side it goes.
+        A solid loft has no thickness to add, so the limit does not apply.
+        """
+        sections = args["sections"]
+        if len(sections) < 2:
+            # Checked before touching CATIA: a bad argument should not depend on
+            # a document being open.
+            raise ValueError("A loft needs at least two sections.")
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        body = self._prepare_body(part)
+        sf = part.ShapeFactory
+
+        refs = [self._section_reference(name) for name in sections]
+
+        before, volume_note = self._volume_probe(part, body)
+        if before is None and self._body_is_empty(body):
+            # An empty body has no volume to measure, which is not a failure:
+            # the loft's own volume is the whole of it, and saying "not verified"
+            # there would hide the one number the caller wants.
+            before, volume_note = 0.0, None
+        part.InWorkObject = body
+        feature = sf.AddNewLoft()
+        inner = feature.HybridShape
+        for ref in refs:
+            # (section, orientation, closing point) - three arguments; the
+            # closing point may be None, which is what "automatic" means here.
+            try:
+                inner.AddSectionToLoft(ref, 1, None)
+            except Exception:
+                inner.AddSectionToLoft(ref, 1)
+
+        tangency = []
+        for attribute, spec, end in (("SetStartSectionTangent", args.get("start_tangent"), "first"),
+                                     ("SetEndSectionTangent", args.get("end_tangent"), "last")):
+            if not spec:
+                continue
+            try:
+                getattr(self.conn._dynamic(inner), attribute)(self._section_reference(spec))
+            except Exception as exc:  # noqa: BLE001 - reported with the rule
+                raise RuntimeError(
+                    f"CATIA rejected '{spec}' as the {end} section's tangency support "
+                    f"({str(exc).splitlines()[0][:120]}). The support has to be a "
+                    "surface that actually touches that section."
+                ) from exc
+            tangency.append(f"{end} section tangent to '{spec}'")
+
+        if args.get("name"):
+            try:
+                feature.Name = str(args["name"])
+            except Exception:  # noqa: BLE001 - the default name is usable
+                pass
+
+        try:
+            part.Update()
+        except Exception as error:
+            gone = self._remove_feature(part, feature)
+            raise FeatureRejected(
+                f"CATIA rejected the solid loft"
+                + (" and it was removed from the tree again (rolled_back: true)"
+                   if gone else " and it could NOT be removed (rolled_back: false)")
+                + ". Sections: " + ", ".join(sections)
+                + ". The usual cause is a section that is not ONE curve - a polygon "
+                "of separate sketch lines is several curves, and an Extract of it is "
+                "still several; use a closed catia_sketch_spline or catia_gsd_spline. "
+                "Second cause, seen with the surface loft on the same build: the "
+                "loft is session-sensitive, so retry once in a fresh session before "
+                f"rebuilding the sections. Original error: {error}",
+                rolled_back=gone,
+            ) from error
+
+        self.conn.refresh_display()
+        after, after_note = self._volume_probe(part, body)
+        detail = ""
+        if before is not None and after is not None:
+            detail = f" Volume {before:.1f} -> {after:.1f} mm3."
+        elif after_note or volume_note:
+            detail = f" Volume not verified ({after_note or volume_note})."
+        return (
+            f"Solid loft created through {len(sections)} section(s)"
+            + (f" ({'; '.join(tangency)})" if tangency else "")
+            + f". Feature: '{feature.Name}' in '{body.Name}', a Part Design solid, "
+            "not a surface - no thickening step is needed."
+            + detail
+        )
+
+    def _section_reference(self, name: str) -> Any:
+        """A Reference for a loft section: sketch, GSD curve, or Edge.N / Face.N."""
+        part = self.conn.get_active_part()
+        body = self.conn.get_active_part_body()
+        cleaned = (name or "").strip()
+        if re.fullmatch(r"(Edge|Face|Vertex)\.\d+", cleaned, re.I):
+            kind = cleaned.split(".")[0].capitalize()
+            index = int(cleaned.split(".")[1])
+            return topology_reference(self.conn, body, kind, index).reference
+        for i in range(1, part.Bodies.Count + 1):
+            candidate = part.Bodies.Item(i)
+            try:
+                return part.CreateReferenceFromObject(candidate.Sketches.Item(cleaned))
+            except Exception:  # noqa: BLE001 - not this body
+                pass
+        for i in range(1, part.HybridBodies.Count + 1):
+            hb = part.HybridBodies.Item(i)
+            for collection in ("HybridShapes", "HybridSketches"):
+                try:
+                    element = getattr(hb, collection).Item(cleaned)
+                except Exception:  # noqa: BLE001
+                    continue
+                return part.CreateReferenceFromObject(element)
+        raise RuntimeError(
+            f"No sketch or geometrical element named '{name}' to use as a loft "
+            "section. catia_list_sketches and catia_gsd_list_elements both report "
+            "the names this accepts."
+        )
 
     def _delete_body(self, name: str, force: bool = False) -> str:
         """Remove a body from the part, refusing to take features with it.

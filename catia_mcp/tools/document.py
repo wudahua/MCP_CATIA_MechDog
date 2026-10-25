@@ -100,7 +100,13 @@ class DocumentTools:
                     "before assuming you must rebuild: if CATIA refuses, nothing is lost. "
                     "The order that always works is still to save the empty part to its "
                     "final path right after catia_new_part, then model, then call this "
-                    "tool with no file_path - that goes through doc.Save()."
+                    "tool with no file_path - that goes through doc.Save(). "
+                    "OVERWRITE IS REFUSED BY DEFAULT: if file_path already exists "
+                    "and is not this document's own file, the call stops and names "
+                    "the file (size, last modified) instead of replacing it. Pass "
+                    "overwrite=true to mean it. Added after a verification run "
+                    "saved a new empty part onto a finished P03_prop.CATPart and "
+                    "lost it - the overwrite had been silent (reported 2026-10-25)."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -108,6 +114,15 @@ class DocumentTools:
                         "file_path": {
                             "type": "string",
                             "description": "Optional new file path for Save As",
+                        },
+                        "overwrite": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Replace an existing file at file_path. Without "
+                                "it, an existing file is reported instead of "
+                                "overwritten."
+                            ),
                         },
                     },
                 },
@@ -236,7 +251,8 @@ class DocumentTools:
             case "catia_open_document":
                 return self._open_document(arguments["file_path"])
             case "catia_save_document":
-                return self._save_document(arguments.get("file_path"))
+                return self._save_document(arguments.get("file_path"),
+                                           bool(arguments.get("overwrite", False)))
             case "catia_save_as_copy":
                 return self._save_as_copy(
                     arguments["file_path"], bool(arguments.get("overwrite", True)))
@@ -371,7 +387,8 @@ class DocumentTools:
                 continue
         return None
 
-    def _save_document(self, file_path: str | None = None) -> str:
+    def _save_document(self, file_path: str | None = None,
+                       overwrite: bool = False) -> str:
         doc = self.conn.active_document
         if file_path:
             # SaveAs onto the file of a document that is already open (very often
@@ -400,10 +417,20 @@ class DocumentTools:
                     "failing. Close that document - or the assembly that references "
                     "it - and save again, or write to a different path."
                 )
+            replaced = self._existing_file_note(file_path)
+            if replaced and not overwrite:
+                raise RuntimeError(
+                    f"'{file_path}' already exists ({replaced}) and is not this "
+                    "document's file. Saving there would replace it, and a "
+                    "verification run that did exactly that lost a finished part "
+                    "(reported 2026-10-25). Pass overwrite=true if you mean to "
+                    "replace it, or choose another path."
+                )
             # CATIA's SaveAs rejects forward-slash paths (E_FAIL) and pops a
             # modal prompt when the target exists, which freezes the STA worker.
             target = dialogs.save_as(doc, file_path)
-            return f"Document saved as: {target}"
+            note = f" (overwrote an existing file, {replaced})" if replaced else ""
+            return f"Document saved as: {target}{note}"
         if not self._document_has_path(doc):
             # doc.Save() on a never-saved document raises E_FAIL and retrying it
             # is pure delay: there is no path to write to, and SaveAs is refused
@@ -420,6 +447,27 @@ class DocumentTools:
             )
         name = dialogs.save(doc)
         return f"Document '{name}' saved"
+
+    @staticmethod
+    def _existing_file_note(path: str) -> str | None:
+        """``"12.3 KB, 2026-10-25 09:14"`` when the file is already there."""
+        import datetime
+        import os
+
+        try:
+            if not os.path.isfile(path):
+                return None
+            stat = os.stat(path)
+        except OSError:
+            return None
+        size = stat.st_size
+        for unit in ("B", "KB", "MB"):
+            if size < 1024 or unit == "MB":
+                amount = f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+                break
+            size /= 1024.0
+        stamp = datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+        return f"{amount}, last modified {stamp}"
 
     def _save_as_copy(self, file_path: str, overwrite: bool = True) -> str:
         """Save, then copy the file - the only way to snapshot a finished model.

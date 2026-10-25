@@ -4,6 +4,68 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added — `catia_solid_loft`: the solid loft this server said did not exist
+
+- **`ShapeFactory.AddNewLoft()` exists and builds a closed solid in one update.**
+  A user found it after `catia_diagnose` reported no such capability, and built a
+  smooth propeller blade with it. The claim in 0.3.17's `thick_surface` text -
+  "there is no solid loft to fall back on" - was wrong, and it was wrong because
+  the probe checked a hand-written method list instead of the object.
+- Reproduced here on B30 2026-10-25 with two circles (r8 at z=0, r16 at z=40):
+  feature `多截面实体.1`, **volume 18 765.8 mm³**, area 4080.97 mm², CoG z=24.286.
+  A Part Design solid, `list_features` shows it as `loft`.
+- The case it exists for: a 2.30 mm lens section that refuses **every** thick
+  surface offset (1.27/1.27 and 2.54/0 both fail) lofts to a **720.5 mm³** solid.
+  Sections may be sketches, GSD curves or `Edge.N` / `Face.N`; the one-curve rule
+  is the same as the surface loft, and a four-line sketch is still refused - with
+  its own hint and a rollback that leaves the tree clean.
+
+### Fixed — `catia_diagnose` reads the method table instead of a sample
+
+- Both factories now report `typeinfo_addnew`: every `AddNew*` method read from
+  the object's own type library (B30: 88 on `ShapeFactory`, 131 on
+  `HybridShapeFactory`, including `AddNewLoft`, `AddNewRib`, `AddNewSplit`).
+- The note says which list is which: the hand-written one is a licence and
+  regression sample, **not** the capability list, so a method missing from it
+  must not be read as "CATIA cannot do this".
+
+### Fixed — Save As no longer replaces a file silently
+
+- `catia_save_document(file_path=...)` **refuses by default** when the target
+  already exists and is not this document's own file, and reports its size and
+  last-modified time. `overwrite=true` replaces it and says what it replaced.
+- This comes from a real loss: a verification run saved a new empty part onto a
+  finished `P03_prop.CATPart`; the finished file was gone, and only a saved
+  run_plan JSON made the rebuild possible (reported 2026-10-25).
+
+### Fixed — a fingerprint collision is now solvable, not just reported
+
+- Two edges can share length *and* both bounding faces at a fillet boundary: the
+  fillet cuts a new edge beside the original one. The refusal now says the
+  fingerprints are identical, names the `Edge.N` values as the disambiguator, and
+  explains that they are still valid because nothing rebuilt in between.
+- `{"index": N, "faces": [...]}` is accepted for that case, and the faces are
+  cross-checked against the indexed edge - if they disagree the tree moved and
+  the call stops instead of filleting the wrong edge.
+- A batch fillet reply now lists the radius per edge: `[applied Edge.1@R3.81, …]`,
+  after a run where two edges were rebuilt at the wrong radius because the reply
+  named the edges without saying what had been applied to them.
+
+### Documented
+
+- **The spline bulge can be cancelled**, which the 0.3.16 text did not say:
+  scale the control points toward the section centroid by
+  `k = sqrt(target area / measured area)` and rebuild once. A nine-section blade
+  at k=0.76 landed within 2 % of its 11 382 mm³ target, where the unscaled spline
+  was +70 %. This is now in both the sketch spline and the GSD spline text.
+- `catia_close_sketch` says what its `Profile:` echo covers: what this session
+  drew in this document, nothing after a reopen - an empty echo is not an empty
+  sketch.
+- `thick_surface` points at `catia_solid_loft` instead of ending in "no solid
+  loft exists".
+- `pyproject.toml` sets `addopts = "-ra"`, so a run that skips tests says so;
+  a B32 run reporting 329 against a B30 332 had no column explaining the gap.
+
 ## [0.3.17] — 2026-10-25 · every part has a 草图.1
 
 ### Fixed — the sketch memory was keyed by name, so every part shared one record

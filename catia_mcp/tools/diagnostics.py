@@ -252,6 +252,13 @@ class DiagnosticsTools:
             return probe
 
         probe["factory"] = "available"
+        # The hand-written list below is a licence / regression sample, and it
+        # was read as "the capability list" - a user concluded CATIA had no solid
+        # loft because AddNewLoft was not in it, while the object exposes it and
+        # it works (measured on B30 2026-10-25: AddNewLoft builds a 18 765.8 mm3
+        # solid from two circles). So the probe now also reads the object's own
+        # type library, which cannot miss a method.
+        probe["typeinfo_addnew"] = self._typeinfo_methods(factory)
         exposed: list[str] = []
         missing: list[str] = []
         errored: dict[str, str] = {}
@@ -271,8 +278,45 @@ class DiagnosticsTools:
             probe["errored_methods"] = errored
         return probe
 
+    @staticmethod
+    def _typeinfo_methods(obj: Any, prefix: str = "AddNew") -> list[str] | None:
+        """Every ``AddNew*`` method the object really exposes, from its type info.
+
+        ``None`` when the type library cannot be read (late-bound dispatch without
+        a cached typelib), which is a different answer from "no methods".
+        """
+        try:
+            info = obj._oleobj_.GetTypeInfo()
+            count = info.GetTypeAttr().cFuncs
+        except Exception:  # noqa: BLE001 - reported as unavailable
+            return None
+        names = set()
+        for index in range(count):
+            try:
+                name = info.GetNames(info.GetFuncDesc(index).memid)[0]
+            except Exception:  # noqa: BLE001 - skip the undocumented ones
+                continue
+            if name.startswith(prefix):
+                names.add(name)
+        return sorted(names)
+
     def _notes(self, report: dict[str, Any]) -> list[str]:
         notes: list[str] = []
+        # Say which list is which, once. A caller read "missing_methods" as the
+        # set of things CATIA cannot do, and concluded there was no solid loft.
+        factories = report.get("factories", {})
+        typed = {key: len(probe.get("typeinfo_addnew") or [])
+                 for key, probe in factories.items()
+                 if isinstance(probe, dict) and probe.get("typeinfo_addnew")}
+        if typed:
+            notes.append(
+                "typeinfo_addnew is the object's own method table ("
+                + ", ".join(f"{k}: {v}" for k, v in sorted(typed.items()))
+                + " AddNew* methods). The checked list is a licence and "
+                "regression sample, NOT the capability list - a method absent "
+                "from it can still exist and work, so read typeinfo_addnew "
+                "before concluding CATIA cannot do something."
+            )
         factories = report.get("factories", {})
         labels = {
             "shape_factory": ("ShapeFactory", "Part Design (MD2/PD1 level)"),

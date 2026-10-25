@@ -196,7 +196,10 @@ class GSDTools:
                     "the corners of a 20 x 12 rectangle measured 24.04 x 21.46 on "
                     "B30 2026-10-25 (+20 % / +79 %). If the sections are a "
                     "specification with tolerances, that bulge is a shape change, "
-                    "not a conversion; check the envelope after using this. "
+                    "not a conversion; check the envelope after using this, or "
+                    "cancel it: scale the points toward their centroid by "
+                    "k = sqrt(target area / measured area) and rebuild once - "
+                    "measured on a nine-section blade, k=0.76 landed within 2 %. "
                     "SHORTER ROUTE on the sketch side: catia_sketch_spline("
                     "closed=true) draws the same interpolating curve INSIDE the "
                     "sketch, so the sketch is already one curve and can be a loft "
@@ -690,8 +693,11 @@ class GSDTools:
                     "self-intersects whichever side it goes. A 6 mm hexagonal section "
                     "of the same length thickens fine. If a section is thinner than "
                     "the offset you want, thicken LESS, or model the part as a padded "
-                    "polygon instead - there is no solid loft in this surface to fall "
-                    "back on."
+                    "polygon - or better, use catia_solid_loft, which builds the "
+                    "same shape as a solid in one feature with no thickness to add "
+                    "and therefore no limit to hit (measured: a 2.30 mm lens "
+                    "section that refuses every offset here lofts to a 720.5 mm3 "
+                    "solid there)."
                 ),
                 "inputSchema": {
                     "type": "object",

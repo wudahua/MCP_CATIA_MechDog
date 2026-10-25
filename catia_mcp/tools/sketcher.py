@@ -126,6 +126,7 @@ class SketcherTools:
                 "description": (
                     "Close the active sketch and return to Part Design. "
                     "Must be called after finishing sketch geometry before applying 3D features."
+                    "SCOPE OF THE ECHO: the Profile line counts what THIS session drew in THIS document. After reopening a file it cannot report the sketch's contents (the coordinates are not readable back), so an empty echo is not an empty sketch - and catia_gsd_spline(element=...) refuses the same sketches for the same reason."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -240,7 +241,11 @@ class SketcherTools:
                     "if the profile is a SPECIFICATION (an area, a chord, a thickness), "
                     "draw it with catia_sketch_line segments and accept that it will "
                     "not loft - or draw the spline and treat the envelope as something "
-                    "to re-measure, not something to assume."
+                    "to re-measure, not something to assume. And the bulge can be "
+                    "cancelled: scale the points toward their centroid by "
+                    "k = sqrt(target area / measured area) and rebuild once - a "
+                    "nine-section blade at k=0.76 landed within 2 % of its 11 382 mm3 "
+                    "target, where the unscaled spline was +70 %."
                 ),
                 "inputSchema": {
                     "type": "object",
