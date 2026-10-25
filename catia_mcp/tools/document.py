@@ -397,6 +397,7 @@ class DocumentTools:
             # so by failing, six times, ~14 s later (reported 2026-10-25). Name
             # the holder instead of retrying into the same wall.
             holder = self._document_at_path(file_path)
+            existing = self._existing_file_note(file_path)
             if holder is not None:
                 try:
                     same = str(holder.Name) == str(doc.Name)
@@ -408,14 +409,20 @@ class DocumentTools:
                     return f"Document '{name}' saved"
                 users = self._component_usage().get(str(holder.Name)) or []
                 raise RuntimeError(
-                    f"'{file_path}' is the file of '{holder.Name}', which is open in "
-                    "this session"
+                    # Report what is there FIRST, whichever guard fires: the two
+                    # refusals lead to different next steps, and only "what is on
+                    # disk" lets a caller tell a finished part from a stale one
+                    # (reported 2026-10-25, where this branch reported neither the
+                    # size nor the mtime).
+                    f"'{file_path}' already exists ({existing or 'size unknown'}). "
+                    f"It is the file of '{holder.Name}', which is open in this "
+                    "session"
                     + (f" as a component of {', '.join(users)}" if users else "")
-                    + ". CATIA cannot Save As onto a file that is open (or held by an "
-                    "open assembly): the overwrite needs the file and the open "
-                    "document has it, and the call then retries six times before "
-                    "failing. Close that document - or the assembly that references "
-                    "it - and save again, or write to a different path."
+                    + ". CATIA cannot Save As onto a file an open document holds, "
+                    "and overwrite=true does NOT help here - the file is locked by "
+                    "the open document, so the call would only retry and fail. "
+                    "Close that document (or the assembly that references it) and "
+                    "save again, or write to a different path."
                 )
             replaced = self._existing_file_note(file_path)
             if replaced and not overwrite:
@@ -429,7 +436,11 @@ class DocumentTools:
             # CATIA's SaveAs rejects forward-slash paths (E_FAIL) and pops a
             # modal prompt when the target exists, which freezes the STA worker.
             target = dialogs.save_as(doc, file_path)
-            note = f" (overwrote an existing file, {replaced})" if replaced else ""
+            # Always say whether the path was free. A caller in a finished-parts
+            # directory should never have to check the folder afterwards to know
+            # whether it just replaced something (reported 2026-10-25).
+            note = (f" (replaced the existing file: {replaced})" if replaced
+                    else " (new file - nothing was overwritten)")
             return f"Document saved as: {target}{note}"
         if not self._document_has_path(doc):
             # doc.Save() on a never-saved document raises E_FAIL and retrying it

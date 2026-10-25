@@ -208,8 +208,14 @@ class AssemblyTools:
                     "type": "object",
                     "properties": {
                         "component_name": {
-                            "type": "string",
-                            "description": "Component name, or its 1-based index as a string",
+                            "type": ["string", "object"],
+                            "description": (
+                                "Component name, its 1-based index as a string, or "
+                                '{"part_number": "P02_motor", "occurrence": 3} - '
+                                "the last form survives an insert that silently "
+                                "failed, where the '.N' suffix no longer means what "
+                                "it did."
+                            ),
                         },
                         "new_name": {
                             "type": "string",
@@ -221,10 +227,64 @@ class AssemblyTools:
             },
             {
                 "name": "catia_list_components",
-                "description": "List all components in the active assembly/product with their names and positions.",
+                "description": (
+                    "List all components in the active assembly/product with their "
+                    "names and positions. The 'rotation' it returns is the MATRIX "
+                    "form (row-major A in P_asm = A*P_local + T), which is the "
+                    "TRANSPOSE of what catia_set_component_transform reads when you "
+                    "pass rotation_convention='basis'. Each entry says so in its own "
+                    "'convention' field, so a first comparison does not look like a "
+                    "wrong placement (reported 2026-10-25). Pass 'part_number' to "
+                    "see just the instances of one part."
+                ),
                 "inputSchema": {
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "part_number": {
+                            "type": "string",
+                            "description": (
+                                "Only list components whose PartNumber or "
+                                "instance-name stem matches this (e.g. 'P02_motor')."
+                            ),
+                        }
+                    },
+                },
+            },
+            {
+                "name": "catia_copy_component",
+                "description": (
+                    "Add more INSTANCES of a component already in the assembly - the "
+                    "same reference, not another copy of the file. "
+                    "catia_add_component inserts the file again (one isolated process "
+                    "per call, and N peer components rather than N instances of one "
+                    "reference, which matters for a BOM or a drawing); this repeats "
+                    "an existing component in one call. Measured on B30 2026-10-25: "
+                    "Products.AddComponent(component.ReferenceProduct) creates "
+                    "'INST2.2' whose ReferenceProduct is the very same product, so it "
+                    "is a true instance. Selection.Copy/Paste is NOT usable: Paste "
+                    "fails with E_FAIL and raises CATIA's 'cannot insert this product "
+                    "under the selected part' dialog. "
+                    "Pass component_name as a name, a 1-based index string, or "
+                    '{"part_number": "...", "occurrence": n}.'
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "component_name": {
+                            "type": ["string", "object"],
+                            "description": (
+                                "Instance to copy: 'P02_motor.1', '3', or "
+                                '{"part_number": "P02_motor", "occurrence": 1}.'
+                            ),
+                        },
+                        "count": {
+                            "type": "integer",
+                            "default": 1,
+                            "minimum": 1,
+                            "description": "How many extra instances to add",
+                        },
+                    },
+                    "required": ["component_name"],
                 },
             },
             {
@@ -249,8 +309,14 @@ class AssemblyTools:
                     "type": "object",
                     "properties": {
                         "component_name": {
-                            "type": "string",
-                            "description": "Component name, or its 1-based index as a string",
+                            "type": ["string", "object"],
+                            "description": (
+                                "Component name, its 1-based index as a string, or "
+                                '{"part_number": "P02_motor", "occurrence": 3} - '
+                                "the last form survives an insert that silently "
+                                "failed, where the '.N' suffix no longer means what "
+                                "it did."
+                            ),
                         },
                     },
                     "required": ["component_name"],
@@ -275,8 +341,14 @@ class AssemblyTools:
                     "type": "object",
                     "properties": {
                         "component_name": {
-                            "type": "string",
-                            "description": "Component name, or its 1-based index as a string",
+                            "type": ["string", "object"],
+                            "description": (
+                                "Component name, its 1-based index as a string, or "
+                                '{"part_number": "P02_motor", "occurrence": 3} - '
+                                "the last form survives an insert that silently "
+                                "failed, where the '.N' suffix no longer means what "
+                                "it did."
+                            ),
                         },
                         "rotation_rows": {
                             "type": "array",
@@ -338,7 +410,9 @@ class AssemblyTools:
             case "catia_rename_component":
                 return self._rename_component(arguments)
             case "catia_list_components":
-                return self._list_components()
+                return self._list_components(arguments.get("part_number"))
+            case "catia_copy_component":
+                return self._copy_component(arguments)
             case "catia_list_constraints":
                 return self._list_constraints()
             case "catia_get_component_transform":
@@ -747,9 +821,48 @@ class AssemblyTools:
         return position_components(self.conn.app, position)
 
     @staticmethod
-    def _resolve_component(product: Any, name: str) -> Any:
-        """Accept a component name or its 1-based index (as a string)."""
+    def _resolve_component(product: Any, name: Any) -> Any:
+        """Accept a name, a 1-based index (as a string), or part+occurrence.
+
+        ``{"part_number": "P02_motor", "occurrence": 3}`` exists because an
+        instance name carries a CATIA-assigned suffix: after one silent insert
+        failure ``P02_motor.3`` is no longer the third motor anyone meant, and an
+        assembly-wide index has to be counted by hand (reported 2026-10-25).
+        """
         products = product.Products
+        if isinstance(name, dict):
+            wanted = str(name.get("part_number") or name.get("name") or "").strip()
+            occurrence = int(name.get("occurrence", 1))
+            if not wanted:
+                raise ValueError(
+                    "The component object needs 'part_number' (and optionally "
+                    "'occurrence', 1-based)."
+                )
+            matches = []
+            for i in range(1, products.Count + 1):
+                component = products.Item(i)
+                stem = str(component.Name).rsplit(".", 1)[0]
+                try:
+                    part_number = str(component.PartNumber)
+                except Exception:  # noqa: BLE001 - broken link, still match on name
+                    part_number = ""
+                if wanted in (stem, part_number):
+                    matches.append(component)
+            if not matches:
+                available = [products.Item(i).Name
+                             for i in range(1, products.Count + 1)]
+                raise ValueError(
+                    f"No component whose part is '{wanted}'. Available: {available}"
+                )
+            if not 1 <= occurrence <= len(matches):
+                names = [str(c.Name) for c in matches]
+                raise ValueError(
+                    f"'{wanted}' has {len(matches)} instance(s) in this assembly "
+                    f"({', '.join(names)}), so occurrence {occurrence} does not "
+                    "exist. Occurrence is 1-based, in tree order."
+                )
+            return matches[occurrence - 1]
+        name = str(name)
         if name.isdigit():
             index = int(name)
             if 1 <= index <= products.Count:
@@ -965,7 +1078,80 @@ class AssemblyTools:
             f"R=({args.get('rx', 0)}, {args.get('ry', 0)}, {args.get('rz', 0)})°"
         )
 
-    def _list_components(self) -> str:
+    def _copy_component(self, args: dict[str, Any]) -> str:
+        """Repeat an existing component as instances of the same reference.
+
+        ``Products.AddComponent(Reference)`` is the documented route and the only
+        one measured to work: ``Selection.Copy`` + ``Paste`` fails and puts up a
+        modal dialog ("this product does not have a valid type"), which is exactly
+        the kind of interruption the isolated-insert work exists to avoid.
+        """
+        product = self._require_active_product()
+        source = self._resolve_component(product, args["component_name"])
+        count = int(args.get("count", 1))
+        if count < 1:
+            raise ValueError("count must be at least 1")
+
+        products = product.Products
+        before = products.Count
+        try:
+            reference = source.ReferenceProduct
+        except Exception as exc:  # noqa: BLE001 - the classic dead link
+            raise RuntimeError(
+                f"'{source.Name}' has no reachable ReferenceProduct, so it cannot be "
+                f"instantiated ({str(exc).splitlines()[0][:100]}). Reopen the part it "
+                "points to, or re-insert it with catia_add_component."
+            ) from exc
+        try:
+            part_number = str(source.PartNumber)
+        except Exception:  # noqa: BLE001
+            part_number = str(source.Name).rsplit(".", 1)[0]
+
+        made = []
+        for _ in range(count):
+            try:
+                fresh = products.AddComponent(reference)
+            except Exception as exc:  # noqa: BLE001 - reported with what did happen
+                raise RuntimeError(
+                    f"CATIA refused instance {len(made) + 1} of {count} "
+                    f"({str(exc).splitlines()[0][:120]}). {len(made)} instance(s) "
+                    f"were added before it; the assembly now holds "
+                    f"{products.Count} component(s), {before} before the call."
+                ) from exc
+            made.append(str(getattr(fresh, "Name", "?")))
+        self.conn.refresh_display()
+
+        instances = self._instances_of(product, part_number)
+        return (
+            f"Added {len(made)} instance(s) of '{part_number}' "
+            f"({', '.join(made)}). They share one reference, so this is one part "
+            f"with {len(instances)} instance(s) - {', '.join(instances)}. "
+            f"Assembly now holds {products.Count} component(s) "
+            f"({before} before)."
+        )
+
+    @staticmethod
+    def _instances_of(product: Any, part_number: str) -> list[str]:
+        """Every component name in the assembly whose part is ``part_number``."""
+        names = []
+        try:
+            products = product.Products
+        except Exception:  # noqa: BLE001
+            return names
+        for i in range(1, products.Count + 1):
+            component = products.Item(i)
+            try:
+                matches = str(component.PartNumber) == part_number
+            except Exception:  # noqa: BLE001 - fall back to the name stem
+                matches = str(component.Name).rsplit(".", 1)[0] == part_number
+            if matches:
+                try:
+                    names.append(str(component.Name))
+                except Exception:  # noqa: BLE001
+                    continue
+        return names
+
+    def _list_components(self, part_number: str | None = None) -> str:
         """Every component with its placement, surviving broken links.
 
         One dead link used to abort the whole listing (reported 2026-10-24:
@@ -980,9 +1166,10 @@ class AssemblyTools:
 
         components = []
         broken = 0
+        wanted = (part_number or "").strip().casefold() or None
         for i in range(1, products.Count + 1):
             comp = products.Item(i)
-            entry: dict[str, Any] = {"index": i}
+            entry: dict[str, Any] = {"index": i, "convention": "matrix"}
             problems = []
             for key, getter in (("name", lambda c: str(c.Name)),
                                 ("part_number", lambda c: str(c.PartNumber))):
@@ -1017,6 +1204,12 @@ class AssemblyTools:
                 entry["broken"] = True
                 entry["error"] = "; ".join(problems)
                 broken += 1
+            if wanted is not None:
+                stem = (entry.get("name") or "").rsplit(".", 1)[0].casefold()
+                pn = (entry.get("part_number") or "").casefold()
+                if wanted not in (stem, pn):
+                    continue
+            entry["occurrence"] = len(components) + 1
             components.append(entry)
 
         if not components:

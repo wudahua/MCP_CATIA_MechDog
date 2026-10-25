@@ -588,9 +588,12 @@ class PartDesignTools:
                     "Delete a feature by name (e.g. 'Pocket.2') in any body "
                     "of the active part, then update the part. Features "
                     "depending on it end up in error and are reported. "
-                    "With neither argument it deletes the last feature - the usual "
-                    "case is undoing the feature you have just created, which is "
-                    "otherwise only possible by closing the document."
+                    "Undoing the feature you have just created is still one call, "
+                    "but it now has to be asked for: with neither feature_name nor "
+                    "index, pass last=true. A bare no-argument call is refused and "
+                    "names what it would have deleted, because on a long tree the "
+                    "last created feature is usually the fillet you just added, not "
+                    "the test sketch you meant (reported 2026-10-25)."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -604,6 +607,15 @@ class PartDesignTools:
                             "description": (
                                 "1-based position in the active body's feature list, for when "
                                 "the name is not known. Ignored when feature_name is given."
+                            ),
+                        },
+                        "last": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Delete the last feature of the active body. "
+                                "Required when neither feature_name nor index is "
+                                "given."
                             ),
                         },
                     },
@@ -2673,9 +2685,23 @@ class PartDesignTools:
         part = self.conn.get_active_part()
         target = args.get("feature_name")
         if not target and args.get("index") is None:
-            # Default: the feature just created. Undoing an experiment should
-            # not require knowing CATIA's localized feature names.
+            # "Delete the last feature" is a convenience that turned into an
+            # accident: on a long tree, the last feature is whatever was created
+            # most recently, which is often the fillet you just added, not the
+            # test sketch you meant (reported 2026-10-25, one tip fillet lost).
+            # It is still available, but it has to be asked for by name.
             shapes = self.conn.get_active_part_body().Shapes
+            if not args.get("last"):
+                would = ("the body is empty" if shapes.Count == 0
+                         else f"'{shapes.Item(shapes.Count).Name}' (feature "
+                              f"{shapes.Count} of {shapes.Count})")
+                raise RuntimeError(
+                    "catia_delete_feature was called without 'feature_name' or "
+                    f"'index', and the shortcut would delete {would}. That is the "
+                    "LAST CREATED feature, which on a long tree is usually not the "
+                    "one you meant. Pass 'feature_name', 'index', or "
+                    "last=true to mean this one."
+                )
             if shapes.Count == 0:
                 raise RuntimeError("The active body has no features to delete.")
             target = str(shapes.Item(shapes.Count).Name)

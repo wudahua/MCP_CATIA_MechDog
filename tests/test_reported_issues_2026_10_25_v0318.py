@@ -209,7 +209,7 @@ def test_save_as_overwrites_when_told_to(monkeypatch, tmp_path):
     path.write_bytes(b"x" * 10)
     monkeypatch.setattr(dialogs, "save_as", lambda doc, target: str(path))
     reply = tools._save_document(str(path), overwrite=True)
-    assert "overwrote an existing file" in reply
+    assert "replaced the existing file" in reply
 
 
 def test_the_schema_documents_the_overwrite_flag():

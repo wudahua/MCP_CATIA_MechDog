@@ -421,6 +421,20 @@ class PlannerTools:
                 "exactly as in catia_list_edges - the count, Edge.N and the edge "
                 "fingerprints all refer to the same set.")
         counts["part"] = part.Name
+        if counts.get("vertices") == 0 and "vertices_excluded" in counts:
+            # A revolved solid genuinely has no vertex (a cylinder, a sphere, a
+            # cone), and the excluded cells are sketch corners and the datum
+            # planes' own borders. Without this sentence the pair reads like a
+            # broken measurement: "0 vertices, 20 excluded" (reported 2026-10-25).
+            excluded = counts["vertices_excluded"]
+            counts["vertices_note"] = (
+                "0 vertices is a real answer for a revolved or fully curved solid "
+                "- there is no corner to count. The "
+                f"{excluded['total']} excluded cell(s) are not missing vertices: "
+                f"{excluded['sketch_wire']} sketch corner(s) and "
+                f"{excluded['datum_plane_borders']} datum-plane border corner(s) "
+                "that the Vertex search also returns."
+            )
         if document:
             counts["document"] = document
         try:

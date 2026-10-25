@@ -349,7 +349,7 @@ def test_save_as_onto_an_open_file_names_the_holder():
         tools._save_document("/tmp/SAVED.CATPart")
     message = str(error.value)
     assert "ASM.CATProduct" in message
-    assert "retries six times" in message
+    assert "overwrite=true does NOT help" in message
     assert "close" in message.lower()
 
 

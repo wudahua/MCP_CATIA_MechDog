@@ -4,6 +4,70 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added — `catia_copy_component`: instances of one reference, in one call
+
+- A 24-instance assembly had to be built by calling `catia_add_component` once
+  per instance: N isolated processes, and N peer components rather than N
+  instances of one reference - which is a different thing in a BOM or a drawing
+  (reported 2026-10-25).
+- `Products.AddComponent(component.ReferenceProduct)` does it in one call.
+  Measured on B30: the new component `INST2.2` has the same `ReferenceProduct` as
+  `INST2.1`, so it is a true instance. `Selection.Copy` + `Paste` is NOT the way:
+  Paste fails with E_FAIL and puts up CATIA's "this product does not have a valid
+  type" dialog.
+- The reply lists every instance of that part afterwards, so "which motor is
+  number 3" is answered by the tool instead of by counting suffixes.
+
+### Added — one instance can be addressed by part and occurrence
+
+- `{"part_number": "P02_motor", "occurrence": 3}` is accepted wherever a
+  `component_name` is taken (transform, rename, visibility, copy). The name
+  suffix is CATIA-assigned: after one silent insert failure `P02_motor.3` is not
+  the third motor anyone meant, and an assembly-wide index has to be counted by
+  hand. Out-of-range names the instances that do exist.
+- `catia_list_components` takes `part_number` to list just those, reports
+  `occurrence`, and labels every entry `convention: "matrix"` - its `rotation` is
+  the transpose of what `catia_set_component_transform` reads with
+  `rotation_convention='basis'`, and a first comparison otherwise looks like a
+  wrong placement (reported 2026-10-25).
+
+### Fixed — the two Save As refusals now speak the same language
+
+- The "an open document holds this file" branch reported neither size nor mtime,
+  so a caller could not tell a finished part from a stale one, and could not tell
+  which of the two guards it had hit - while the two guards lead to different
+  next steps. Both now start with `already exists (<size>, last modified <time>)`,
+  and the holder branch adds that `overwrite=true` does NOT help, because the
+  file is locked by the open document.
+- The success path says which case it was: `(new file - nothing was overwritten)`
+  or `(replaced the existing file: …)`. Nobody should have to check the folder
+  afterwards to know whether they just replaced something.
+
+### Fixed — deleting "the last feature" has to be asked for
+
+- A no-argument `catia_delete_feature` deleted whatever was created most
+  recently, which on a long tree was the tip fillet the user had just added, not
+  the test sketch they meant (reported 2026-10-25, one fillet lost). It now
+  refuses and names the feature it would have deleted; pass `last=true` to mean
+  it.
+
+### Changed — a missing inertia tensor is a field, not a paragraph
+
+- `get_inertia(document=…)` replied with five lines of prose in every one of the
+  nine parts of a sweep. It now sets `"tensor": null` and `"tensor_reason": "…"`,
+  and the prose shrinks to one sentence pointing at the field. A caller branches
+  on the field instead of parsing a paragraph (reported 2026-10-25).
+
+### Documented
+
+- `measure_topology` adds `vertices_note` when the count is zero and cells were
+  excluded: a revolved or fully curved solid has no corner to count, so
+  "0 vertices, 20 excluded" is a correct answer, not a broken measurement.
+- The 0.3.17 claim that thin sections can only be padded polygons is superseded -
+  `catia_solid_loft` covers the lens-shaped case. No tool description still says
+  "there is no solid loft"; the phrase survives only inside `catia_solid_loft`'s
+  own history note and in a comment recording why diagnosis was rewritten.
+
 ## [0.3.18] — 2026-10-25 · there was a solid loft all along
 
 ### Added — `catia_solid_loft`: the solid loft this server said did not exist

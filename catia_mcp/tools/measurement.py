@@ -604,12 +604,21 @@ class MeasurementTools:
                 "activating it for the measurement and restoring the previous active "
                 "document afterwards.")
         else:
+            # A field, not a paragraph: this used to be five lines of prose in
+            # EVERY reply of a nine-part sweep, and a caller had to read it to
+            # find out whether the tensor was missing or merely unreadable
+            # (reported 2026-10-25). The prose stays, but only as the reason.
+            payload["tensor"] = None
+            payload["tensor_reason"] = (
+                "no own window: CATIA computes the tensor only for the active "
+                "document and this part cannot be activated where it is. Open it "
+                "with catia_open_document, activate it, then call get_inertia "
+                "without 'document'."
+            )
             payload["note"] = (
                 "measured on this document's own Part, independent of which document "
-                "CATIA reports as active. No inertia tensor: CATIA only computes it "
-                "for the ACTIVE document, and this part could not be activated - it "
-                "has no window of its own (open it with catia_open_document, then "
-                "activate it, then call get_inertia without 'document').")
+                "CATIA reports as active. The inertia tensor is missing - see "
+                "tensor_reason.")
         return json.dumps(payload, indent=2)
 
     def _tensor_for(self, part: Any) -> dict[str, Any] | None:
