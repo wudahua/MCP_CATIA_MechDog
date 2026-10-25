@@ -377,6 +377,9 @@ class AssemblyTools:
         # Only this call gets the Windows form; open_document / save_document /
         # export are field-verified with forward slashes and stay untouched.
         native_path = os.path.normpath(file_path)
+        activated = getattr(self, "_activated_for_insert", None)
+        lead = (f" (activated '{activated}' first: it was the only assembly open "
+                "and a Part document was active)") if activated else ""
         before = 0
         try:
             before = products.Count
@@ -427,6 +430,7 @@ class AssemblyTools:
                 return (f"Component added from: {native_path} "
                         f"({after - before} instance(s), assembly now holds {after})"
                         + (f" - {', '.join(added)}" if added else "")
+                        + lead
                         + ". The insert ran in an isolated process, so a CATIA "
                           "dialog could not block the session.")
             # The child could not start or could not attach (different desktop,
@@ -465,17 +469,19 @@ class AssemblyTools:
             note = (" (ran in-process: the isolated worker could not attach to "
                     "CATIA, so a dialog would have blocked this call)")
         return (f"Component added from: {native_path} "
-                f"({after - before} instance(s), assembly now holds {after}).{note}")
+                f"({after - before} instance(s), assembly now holds {after}).{note}{lead}")
 
     def _insert_blocked_hint(self, path: str) -> str:
-        """Extra sentence when an open document is what blocks the insert.
+        """Extra sentence when the refused file is already open in this session.
 
-        Measured on B30 2026-10-24: inserting a part file whose document is open
-        but was never activated works; the SAME insert fails with
-        'AddComponentsFromFiles 失败' right after that document was activated
-        (catia_activate_document, or the temporary activation a tensor measurement
-        does). Nothing in the COM error says so, and the state looks identical
-        from every listing, so the recovery step has to be in the message.
+        Two measurements, and they disagree, so the wording has to carry both.
+        On B30 (2026-10-24) inserting a part whose document was open but never
+        activated worked, and the same insert failed with
+        'AddComponentsFromFiles 失败' right after that document had been
+        activated (catia_activate_document, or the temporary activation a tensor
+        measurement does). On B32 the reporter could not reproduce it. An open
+        document is therefore a *candidate* cause worth naming - not a fact, and
+        not something to state as one (corrected 2026-10-25 by the reporter).
         """
         target = os.path.normcase(os.path.abspath(path))
         for i in range(1, self.conn.documents.Count + 1):
@@ -486,11 +492,13 @@ class AssemblyTools:
                 continue
             if full == target:
                 return (
-                    f" '{doc.Name}' is open in this session, and CATIA refuses to "
-                    "insert a file whose document has been activated (measured: the "
-                    "same insert works while the part is open but never activated). "
-                    f"Save it if needed, close it (catia_close_document), then insert "
-                    "again - the components already in the assembly are untouched."
+                    f" Note: '{doc.Name}' is already open in this session, which is "
+                    "the first thing to rule out - on V5-6R2020 B30 an insert of a "
+                    "file whose document had been activated failed this way, while "
+                    "the same insert worked before the activation (not reproduced "
+                    "on B32, so treat it as a suspect, not a diagnosis). Save it if "
+                    "needed, close it (catia_close_document), then insert again - "
+                    "the components already in the assembly are untouched."
                 )
         return ""
 
@@ -504,7 +512,10 @@ class AssemblyTools:
         'Part' back had no way to tell whether the argument had been ignored
         (reported 2026-10-24).
         """
-        product = self.conn.get_active_product()
+        # Not get_active_product(): on a Part document that returns the stub
+        # Product every PartDocument carries, and AddNewProduct on the stub
+        # fails. Same trap as catia_add_component (reported 2026-10-25).
+        product = self._require_active_product()
         products = product.Products
         new_product = products.AddNewProduct("Part")
         note = ""
@@ -525,6 +536,27 @@ class AssemblyTools:
         return (f"New Part component created in assembly: '{new_product.Name}'"
                 f"{note}.")
 
+    @staticmethod
+    def _is_product_document(doc: Any) -> bool:
+        """Whether ``doc`` is an assembly, decided by its type - not by ``.Product``.
+
+        ``PartDocument`` answers ``.Product`` too (a stub created for the
+        document's single component), so probing for the property proves
+        nothing: ``get_active_product()`` happily returns that stub while a Part
+        is active, and the insert then fails on it with '_AddComponentsFromFiles
+        失败'. Measured on B30 2026-10-25 (reported 2026-10-25).
+        """
+        try:
+            kind = str(doc.Type)
+        except Exception:  # noqa: BLE001 - fall back to the file name
+            kind = ""
+        if kind:
+            return kind.upper().endswith("PRODUCT")
+        try:
+            return str(doc.FullName).upper().endswith(".CATPRODUCT")
+        except Exception:  # noqa: BLE001 - unsaved and untyped: assume no
+            return False
+
     def _require_active_product(self) -> Any:
         """The active Product, or a message that names the actual state.
 
@@ -535,29 +567,39 @@ class AssemblyTools:
         'AddComponentsFromFiles 失败' plus a diagnostic about Part Design
         factories - neither of which is true (reported 2026-10-24). If exactly one
         product is open, activate it and say so.
+
+        The type check is what makes the fallback reachable at all: before
+        0.3.15 it asked ``get_active_product()`` first, which succeeds on a Part
+        document, so "activate the only open assembly for you" never ran and the
+        caller got the Part Design diagnostic instead (reported 2026-10-25).
         """
         try:
-            return self.conn.get_active_product()
-        except Exception:  # noqa: BLE001 - fall through to the diagnosis
-            pass
+            active_doc = self.conn.active_document
+        except Exception:  # noqa: BLE001 - no document at all
+            active_doc = None
+        self._activated_for_insert = None
+        if active_doc is not None and self._is_product_document(active_doc):
+            return self.conn.product_of(active_doc)
+
         try:
-            active = str(self.conn.active_document.Name)
+            active = str(active_doc.Name)
         except Exception:  # noqa: BLE001
             active = "<none>"
         open_products = []
         for i in range(1, self.conn.documents.Count + 1):
             doc = self.conn.documents.Item(i)
-            try:
-                self.conn.product_of(doc)
-            except Exception:  # noqa: BLE001 - not a product
-                continue
-            open_products.append(str(doc.Name))
+            if self._is_product_document(doc):
+                open_products.append(str(doc.Name))
         if len(open_products) == 1:
             for i in range(1, self.conn.documents.Count + 1):
                 doc = self.conn.documents.Item(i)
                 if str(doc.Name) == open_products[0]:
                     doc.Activate()
-                    return self.conn.get_active_product()
+                    # Only one assembly is open, so activating it is unambiguous -
+                    # but it changes what the caller has in front of them, so the
+                    # reply has to say it happened.
+                    self._activated_for_insert = open_products[0]
+                    return self.conn.product_of(doc)
         raise RuntimeError(
             f"catia_add_component needs the ASSEMBLY to be the active document, and "
             f"'{active}' is active. A component can only be inserted into a Product. "

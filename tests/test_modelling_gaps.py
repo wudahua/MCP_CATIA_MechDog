@@ -410,14 +410,16 @@ def test_edge_and_face_indices_come_from_the_body_not_the_last_feature():
 
 
 def test_save_as_documents_its_own_ordering_constraint():
-    """SaveAs after geometry fails, so the tool has to say how to keep a file."""
+    """SaveAs after geometry is refused on B30 but worked on B32, so the tool has
+    to say both - and still name the order that avoids the question."""
     from catia_mcp.tools.document import DocumentTools
 
     doc = [d for d in DocumentTools(connection=None).get_tool_definitions()
            if d["name"] == "catia_save_document"][0]
     text = doc["description"]
-    assert "no geometry" in text
-    assert "doc.Save()" in text
+    assert "already had geometry" in text
+    assert "B32" in text
+    assert "right after catia_new_part" in text
 
 
 # --------------------------------------------------------------------------

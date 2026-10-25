@@ -11,6 +11,7 @@ import re
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
+from catia_mcp.results import FeatureRejected
 from catia_mcp.topo_search import (
     edge_fingerprint,
     face_keys,
@@ -1428,17 +1429,19 @@ class PartDesignTools:
             name = str(getattr(feature, "Name", "the new feature"))
             gone = self._remove_feature(part, feature)
             if gone:
-                raise RuntimeError(
+                raise FeatureRejected(
                     f"CATIA rejected the feature and it was removed from the tree "
                     f"again (rolled_back: true), so the rest of the part still "
-                    f"updates. Feature was '{name}'. Original error: {error}"
+                    f"updates. Feature was '{name}'. Original error: {error}",
+                    rolled_back=True,
                 ) from error
-            raise RuntimeError(
+            raise FeatureRejected(
                 f"CATIA rejected the feature '{name}' and it could NOT be removed "
                 "from the tree (rolled_back: false). Every later Update of this "
                 "part will now fail at that feature, so delete it before doing "
                 f"anything else: catia_delete_feature(feature_name='{name}'). "
-                f"Original error: {error}"
+                f"Original error: {error}",
+                rolled_back=False,
             ) from error
 
     def _topo_reference(self, kind: str, index: int) -> Any:
@@ -1723,7 +1726,45 @@ class PartDesignTools:
                 "that came out of catia_gsd_close_surface cannot take a Part Design "
                 "fillet, while edges of a pad in the same body can."
             )
+            hint = self._coplanar_hint([n for n, _ in failed])
+            if hint:
+                head += hint
         return head
+
+    @staticmethod
+    def _bounding_faces(label: str) -> int:
+        """How many faces the fingerprint inside ``label`` names (0 when none)."""
+        inner = label[label.find("(") + 1:label.rfind(")")] if "(" in label else label
+        return len([part for part in inner.split("|") if ";" in part])
+
+    @staticmethod
+    def _coplanar_hint(labels: list[str]) -> str:
+        """Name the real cause when a rejected edge carries three or more faces.
+
+        A solid edge has two bounding faces. Three or more means two of them are
+        coplanar - they share a normal and lie in the same plane - so the "edge"
+        between them is a 180 degree seam with no dihedral angle and no material
+        to round off. Measured by the reporter 2026-10-24: after a boolean union
+        of two coplanar bosses, `catia_list_edges` hands out fingerprints like
+        `L43.1800|Sketch.9;2|Sketch.10;1|Sketch.9;1`, and every fillet on them
+        fails with a bare 'UpdateObject failed' - while their successful edges
+        all show exactly two faces. It is a hint rather than a refusal: this
+        server cannot measure face normals cheaply, and a part that legitimately
+        came out with three bounding faces would still be worth trying.
+        """
+        suspicious = [label for label in labels
+                      if PartDesignTools._bounding_faces(label) >= 3]
+        if not suspicious:
+            return ""
+        return (
+            f" {len(suspicious)} of these edge(s) are bounded by three or more "
+            "faces, and a real edge has two: the extra pair is most likely "
+            "coplanar (same normal, same plane), so the seam between them has no "
+            "dihedral angle and a fillet has no material to remove. That is what "
+            "a boolean union of two coplanar bosses leaves behind. Confirm with "
+            "catia_list_faces, then either draw the radius in the sketch, or cut "
+            "the transition with catia_gsd_* instead of a Part Design fillet."
+        )
 
     def _fillet_one(self, radius: float, edge_name: Any,
                     propagation: int = 0) -> str:
@@ -1747,10 +1788,52 @@ class PartDesignTools:
             radius,
         )
 
-        self._safe_update(part, fillet)
+        try:
+            self._safe_update(part, fillet)
+        except FeatureRejected as error:
+            hint = self._coplanar_hint([scope])
+            if hint:
+                raise FeatureRejected(str(error) + hint,
+                                      rolled_back=error.rolled_back) from error
+            raise
         self.conn.refresh_display()
         self._clear_selection()
-        return f"Fillet created: R{radius} mm on {scope}. Feature: '{fillet.Name}'"
+        return (f"Fillet created: R{radius} mm on {scope}. Feature: '{fillet.Name}'"
+                + self._tree_position(part, body, fillet))
+
+    def _tree_position(self, part: Any, body: Any, feature: Any) -> str:
+        """Where the new feature landed in the tree, and why it cannot move.
+
+        Reported 2026-10-25: every Part Design feature is appended to the end of
+        the tree and there is no way to place it earlier, so an edge that only
+        exists *before* a later feature can never be filleted afterwards - the
+        fillet would have to run before that feature, which is a different tree
+        order. CATIA's automation surface has no reorder: ``Part`` and ``Body``
+        expose no Insert / Reorder / Move (checked on B30 by listing the members
+        of both), and dragging is UI-only. Saying where the feature sits and that
+        it is last is the only honest answer; the alternative used to be silence
+        and a caller wondering why the geometry came out wrong.
+        """
+        try:
+            shapes = body.Shapes
+            total = shapes.Count
+            index = None
+            for i in range(1, total + 1):
+                if str(shapes.Item(i).Name) == str(feature.Name):
+                    index = i
+                    break
+        except Exception:  # noqa: BLE001 - the position is informative only
+            return ""
+        if index is None:
+            return ""
+        note = (f" It is feature {index} of {total} in '{body.Name}'. New features are "
+                "always appended and CATIA exposes no reorder (Part and Body have no "
+                "Insert / Reorder / Move), so a fillet cannot be placed before an "
+                "existing feature - rebuild in the order you need if it has to.")
+        if index != total:
+            note += (f" Something already sits after it ({total - index} feature(s)), "
+                     "which is worth knowing: the tree order decides which edges exist.")
+        return note
 
     def _chamfer(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
@@ -2021,8 +2104,8 @@ class PartDesignTools:
                 swapped = True
             ref1 = part.CreateReferenceFromObject(planes[by_axis[first]])
             ref2 = part.CreateReferenceFromObject(planes[by_axis[second]])
-            directions = (f"axis {first}{' (reversed)' if reverse1 else ''} -> dir1, "
-                          f"axis {second}{' (reversed)' if reverse2 else ''} -> dir2")
+            directions = (f"axis {first}{'-' if reverse1 else '+'} -> dir1, "
+                          f"axis {second}{'-' if reverse2 else '+'} -> dir2")
             if swapped:
                 directions += " (axes swapped internally: CATIA rejects a left-handed pair)"
         elif dir1_edge:
@@ -2059,6 +2142,19 @@ class PartDesignTools:
         effect = ""
         if before is not None and after is not None:
             effect = f" Volume {before:.1f} -> {after:.1f} mm3."
+            # A pattern with no material delta used to be reported as a plain
+            # success, so a 3x1 grid that put every copy outside the model read
+            # exactly like one that worked (reported 2026-10-25). The copies go
+            # only to the +side of each direction - the seed keeps index 1 - so a
+            # seed at the far end of the part has nowhere to go.
+            if abs(after - before) < 1e-6 and d1_count * d2_count > 1:
+                effect += (
+                    " WARNING: the pattern added no material at all. CATIA places "
+                    "the copies only on the side each direction points to (the seed "
+                    "stays at index 1), so a seed at the far end of the model puts "
+                    "them all outside it. Set reverse_dir1 / reverse_dir2 to flip "
+                    "that side, or use a larger spacing."
+                )
         return (
             f"Rectangular pattern '{pattern.Name}' created: {d1_count}x{d2_count}, "
             f"spacing {d1_spacing}x{d2_spacing} mm, directions: {directions}."
@@ -2597,17 +2693,50 @@ class PartDesignTools:
 
         if not features:
             return "No features in the active body"
+        payload: dict[str, Any] = {
+            "body": str(body.Name),
+            "count": len(features),
+            "bodies": part.Bodies.Count,
+            "features": features,
+        }
         # count == body.Shapes.Count, and it is published so a caller can tell
         # "my feature was created" from "a dead feature is still hanging around".
         # A failed fillet used to show up here as a normal-looking row and as a
         # shape_count one higher than expected in the failure state line
         # (reported 2026-10-24, which is how that report located the bug).
-        return json.dumps({
-            "body": str(body.Name),
-            "count": len(features),
-            "bodies": part.Bodies.Count,
-            "features": features,
-        }, indent=2)
+        #
+        # Geometrical sets are NOT features and were not listed at all, so the
+        # 'PatternAxis' set every circular pattern leaves behind (2 points + 1
+        # line, never cleaned) was invisible here while being plain to see in
+        # CATIA's tree - reported 2026-10-25 as residue nobody could account for.
+        geosets = self._pattern_geoset_inventory(part)
+        if geosets:
+            payload["geometrical_sets"] = geosets
+            payload["note"] = (
+                "geometrical_sets are wireframe containers, not Part Design "
+                "features, and they are not counted in 'count'. Each circular "
+                "pattern adds a line (plus its two points) to the 'PatternAxis' "
+                "set and that geometry must stay: the pattern holds a reference "
+                "to it, so deleting it deletes the pattern."
+            )
+        return json.dumps(payload, indent=2)
+
+    def _pattern_geoset_inventory(self, part: Any) -> list[dict[str, Any]]:
+        """Every geometrical set and how many elements it holds."""
+        found: list[dict[str, Any]] = []
+        try:
+            bodies = part.HybridBodies
+            for i in range(1, bodies.Count + 1):
+                hb = bodies.Item(i)
+                entry: dict[str, Any] = {"name": str(hb.Name)}
+                try:
+                    entry["elements"] = hb.HybridShapes.Count
+                except Exception:  # noqa: BLE001 - not reported when unknown
+                    pass
+                found.append(entry)
+        except Exception:  # noqa: BLE001 - the listing is informative only
+            return found
+        return found
 
     _BOOLEAN_METHODS = {
         "add": "AddNewAdd",

@@ -323,7 +323,17 @@ class GSDTools:
                     "loft and matched B30 to 0.02 mm3 (2026-10-24), so treat this as "
                     "SESSION-sensitive, not build-determined: if it fails, retry once "
                     "in a fresh session before working around it, and prefer "
-                    "catia_gsd_blend for the same section pair in the meantime."
+                    "catia_gsd_blend for the same section pair in the meantime. "
+                    "ONE CONTINUOUS CURVE PER SECTION: a section must be a single "
+                    "connected wire. Measured on B30 2026-10-24, and this is the "
+                    "cause people hit first - a sketch that draws the outline as FOUR "
+                    "separate lines, a multi-cell Extract, or a Join of curves that "
+                    "do not touch each other, all fail this call with a bare "
+                    "'invalid number of arguments' / 'UpdateObject failed'. A sketch "
+                    "profile drawn with catia_sketch_rectangle or catia_sketch_circle "
+                    "IS one wire and works; four catia_sketch_line calls are four "
+                    "wires and do not. Close the profile in the sketch (or "
+                    "catia_gsd_join the pieces into one curve) first."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1211,11 +1221,16 @@ class GSDTools:
             )
         except RuntimeError as e:
             raise RuntimeError(
-                f"{e}{tangency_error} Common causes: a guide that does not intersect "
-                f"every section (check with measurements), or a section whose curve "
-                f"direction opposes the others (flip it with orientations=-1). If "
-                f"neither applies and the sections are plainly lofts-able, retry once "
-                f"in a fresh session: one B32 SP6 session reported every loft failing "
+                f"{e}{tangency_error} Common causes, in the order to check them: "
+                f"(1) a section that is not ONE continuous curve - four separate "
+                f"sketch lines, a multi-cell Extract, or a Join of curves that do "
+                f"not touch fail here with the same bare error (measured on B30 "
+                f"2026-10-24: single-wire sketch profiles loft, multi-wire ones "
+                f"never do); (2) a guide that does not intersect every section "
+                f"(check with measurements); (3) a section whose curve direction "
+                f"opposes the others (flip it with orientations=-1). If none "
+                f"applies and the sections are plainly lofts-able, retry once in a "
+                f"fresh session: one B32 SP6 session reported every loft failing "
                 f"while catia_gsd_blend accepted the same curve pair (2026-10-23), "
                 f"and two other B32 SP6 sessions then built both the smooth and the "
                 f"ruled loft and matched B30 to 0.02 mm3 (2026-10-24). If it still "

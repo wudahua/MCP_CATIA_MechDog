@@ -85,14 +85,15 @@ def test_add_component_needs_an_active_assembly_and_says_so():
 
 
 def test_insert_blocked_by_an_activated_part_explains_the_recovery():
-    """Measured: the same insert works while the part is open but never
-    activated, and fails right after it was activated."""
+    """B30 failed right after the part was activated, B32 did not: the hint has
+    to name that as a suspect and not as a fact."""
     from catia_mcp.tools.assembly import AssemblyTools
 
     source = inspect.getsource(AssemblyTools._insert_blocked_hint)
     # the sentence is split across literals in the source
-    assert "refuses to " in source
-    assert "insert a file whose document has been activated" in source
+    assert "already open in this session" in source
+    assert "not reproduced" in source
+    assert "suspect, not a diagnosis" in source
     assert "catia_close_document" in source
 
 

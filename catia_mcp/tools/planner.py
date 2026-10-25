@@ -334,6 +334,20 @@ class PlannerTools:
                 "exactly as in catia_list_edges - the count, Edge.N and the edge "
                 "fingerprints all refer to the same set.")
         counts["part"] = part.Name
+        # The counting rule is part of the answer, not a footnote: it changed
+        # twice (0.3.11 excluded construction geometry, 0.3.15 excluded
+        # sketch-wire vertex corners too), and each time an unchanged part
+        # reported different numbers. A stored expectation that is not
+        # re-baselined then reads as "the model is wrong" (reported 2026-10-25).
+        counts["counting_rule"] = (
+            "These counts cover the SOLID only. Since 0.3.11 sketch wires and "
+            "datum-plane borders are excluded, and since 0.3.15 sketch-wire "
+            "vertex corners are too, which changed the numbers reported for an "
+            "unchanged part (measured 0.3.10 -> 0.3.14: vertices 72 -> 96, "
+            "faces 48 -> 46, edges 109 -> 101). Any expect.vertices / "
+            "expect.faces / expect.edges stored before that has to be "
+            "re-baselined before it is used as an acceptance criterion."
+        )
         return counts
 
     def _measure_part(self) -> dict[str, Any]:

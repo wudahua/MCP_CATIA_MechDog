@@ -4,7 +4,96 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
-## [Unreleased]
+## [0.3.15] — 2026-10-25 · the box was 60 mm wide because of a sketch corner
+
+Four reports against 0.3.14. Two of them reproduced exactly as written, and one
+of those had a root cause nobody had named.
+
+### Fixed — a sketch's wire corners were counted as vertices of the solid
+
+- **A 40×20×10 pad measured 60×80×10 in an assembly.** Reproduced on B30, then
+  traced: the vertex search returns 20 cells for that pad, and 4 of them are the
+  corners of a sketch that is no longer part of the solid. `is_construction`
+  knew about construction *edges* and *faces* but had **no vertex prefix at
+  all** - `Selection_BorderREdge`, `Selection_WireREdge`, `Selection_BorderRSur`
+  and nothing else - so every wire corner passed the filter and went into the
+  box. `Selection_WireFVertex` is what CATIA calls them; a vertex of the solid
+  is `Selection_FVertex`. The single-part box looked right only because the
+  polluted corners happened to sit inside the solid.
+- The rule is now "the leading type token carries `Wire` or `Border`" rather
+  than an exhaustive list, so variants nobody has met yet are covered too, and
+  it is checked against the head of the NLS path only (`Brp:(Sketch.1;...)`
+  appears in every path and means nothing).
+- Live check after the fix: that pad reports **8 vertices** in
+  `catia_measure_topology` and **40×20×10** both on its own and per component.
+
+### Fixed — the "activate the only open assembly for you" branch was dead code
+
+- **`catia_add_component` failed with a Part Design diagnostic whenever a Part
+  was active.** Every `PartDocument` answers `.Product` with a stub, so
+  `get_active_product()` succeeded on a Part document, the `except` that was
+  supposed to fall back never ran, and the insert then failed on the stub. The
+  document is now identified by `Type` (`CATProduct`), and only then asked for
+  its Product.
+- Live check: with the part active and one assembly open, the insert now
+  succeeds and the reply says so - "(activated 'ASMP.CATProduct' first: it was
+  the only assembly open and a Part document was active)".
+- `catia_add_new_part` had the same trap and got the same fix.
+
+### Fixed — the failure envelope contradicted the message
+
+- **`recovery.rollback_supported` was hard-coded `false` and `next_actions` said
+  "recovery is manual" even when the tool had just removed the feature CATIA
+  rejected.** Reported twice. A rolled-back failure now reports
+  `effects.modified: false`, `recovery.rolled_back: true` and "Nothing to
+  repair: ..."; a rollback that failed says which feature is poisoning the tree.
+  `rollback_supported` stays `false` because there is still no rollback *request*
+  a client can send - that is a different question from whether this failure
+  already undid itself, and the new field answers it.
+- The rollback state travels as an attribute on `FeatureRejected` (a
+  `RuntimeError` subclass) instead of being re-parsed out of the message.
+- Live check: `fillet R25` on the same block → `UpdateObject failed`,
+  `effects.modified: false`, `recovery.rolled_back: true`, tree back to one
+  feature, and `catia_update_part` succeeds immediately afterwards.
+
+### Fixed — smaller things the reports named
+
+- **`rect_pattern` reported a pattern that added no material as a plain
+  success.** When the model's volume does not change and the grid is larger
+  than 1×1, the reply now says so and names the cause: CATIA places copies only
+  on the side each direction points to, so a seed at the far end of the part
+  puts them all outside it. The direction line also carries its sign now
+  (`axis x+ -> dir1`) instead of only saying "(reversed)".
+- **`list_features` did not mention geometrical sets at all**, so the
+  `PatternAxis` set every circular pattern leaves behind (a line plus its two
+  points, which must stay - the pattern references them) was invisible in the
+  listing while being obvious in CATIA's tree. It is now reported with its
+  element count, and the payload says why it cannot be deleted.
+- **A fillet's reply now says where the feature landed** ("feature 2 of 2 in
+  '零件几何体'") and that CATIA exposes no reorder, so a fillet cannot be placed
+  before an existing feature. Measured: `Part` and `Body` have no
+  Insert / Reorder / Move at all.
+- **An edge bounded by three or more faces is now explained instead of merely
+  rejected.** A real edge has two; the extra pair is a coplanar seam left by a
+  boolean union of two coplanar bosses, with no dihedral angle and no material
+  to remove. Deliberately a hint, not a refusal: a part that legitimately ends
+  up with three bounding faces should still be attemptable.
+- **A multi-cell wire is the first thing a failing loft should blame.**
+  `catia_gsd_multi_section_surface` now says, in both the description and the
+  error, that a section must be ONE continuous wire - four separate sketch
+  lines, a multi-cell Extract or a Join of disjoint curves all fail the same
+  way, while `catia_sketch_rectangle` / `catia_sketch_circle` profiles work.
+- **`measure_topology` publishes its counting rule** (`counting_rule`), so a
+  stored `expect.vertices/faces/edges` that is no longer met reads as "the rule
+  changed" rather than "the model is wrong". It changed twice: 0.3.11 excluded
+  construction geometry, 0.3.15 excludes sketch-wire vertex corners.
+- **`save_document` no longer claims Save As is impossible after modelling.**
+  That was measured on B30 with the raw `Document.SaveAs`; this tool uses the
+  FileSystem route and the reporter saved a 35-feature part on B32 SP6 in one
+  call. Both are stated, and the order that always works is still recommended.
+- **`_insert_blocked_hint` no longer asserts that an activated part blocks the
+  insert.** It did not reproduce on B32, so the hint names the open document as
+  the first thing to rule out and says the measurement was build-specific.
 
 ## [0.3.14] — 2026-10-24 · one rejected fillet used to kill the whole part
 

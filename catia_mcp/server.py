@@ -56,7 +56,12 @@ def structured_result(data: dict[str, Any]) -> CallToolResult:
 
 
 def failure(
-    code: str, message: str, stage: str, modified: bool | None, tool: str
+    code: str,
+    message: str,
+    stage: str,
+    modified: bool | None,
+    tool: str,
+    rolled_back: bool | None = None,
 ) -> CallToolResult:
     return structured_result(
         operation_result(
@@ -66,6 +71,7 @@ def failure(
             message=message,
             data={"failure_stage": stage},
             modified=modified,
+            rolled_back=rolled_back,
         )
     )
 
@@ -221,7 +227,8 @@ class CATIAMCPServer:
                     "set fails exactly this way, and so does a topology reference whose "
                     "selection has been cleared. catia_diagnose reports both."
                 )
-            return failure(code, message, stage, False if stage == "connect" else None, name)
+            return failure(code, message, stage, False if stage == "connect" else None, name,
+                           rolled_back=getattr(error, "rolled_back", None))
 
     async def close(self) -> None:
         try:

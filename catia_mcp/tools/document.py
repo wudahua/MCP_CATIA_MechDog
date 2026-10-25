@@ -92,11 +92,15 @@ class DocumentTools:
                     "Save the active CATIA document. Optionally save to a new path (Save As). "
                     "Retries around CATIA's modal dialogs (overwrite prompt, first-SaveAs "
                     "dialog), which would otherwise freeze the worker thread. "
-                    "IMPORTANT: with file_path this is Save As, and CATIA only accepts it "
-                    "while the document still has no geometry (E_FAIL afterwards, verified "
-                    "on V5-6R2020 B30). To keep a model on disk, save the empty part to its "
-                    "final path right after catia_new_part, then call this tool with no "
-                    "file_path once the model is built - that goes through doc.Save()."
+                    "With file_path this is Save As. On V5-6R2020 B30 the raw "
+                    "Document.SaveAs refused a part that already had geometry (E_FAIL), "
+                    "but this tool goes through the FileSystem service instead of the raw "
+                    "call, and on V5-6R2022 B32 SP6 a part with 3 bodies and 35 features "
+                    "saved-as in one call (measured by the reporter 2026-10-24). Try it "
+                    "before assuming you must rebuild: if CATIA refuses, nothing is lost. "
+                    "The order that always works is still to save the empty part to its "
+                    "final path right after catia_new_part, then model, then call this "
+                    "tool with no file_path - that goes through doc.Save()."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -366,12 +370,12 @@ class DocumentTools:
             # attempts and reporting "Save failed after 3 attempts".
             raise RuntimeError(
                 f"'{doc.Name}' has never been saved, so there is no file for Save "
-                "to overwrite. CATIA will not accept a SaveAs for a part that "
-                "already has geometry, which means a new part must be given a "
-                "path BEFORE it is modelled: call catia_new_part, then "
-                "catia_save_document(file_path=...), then build. Everything "
-                "built so far is still in memory - save it now by passing "
-                "file_path to this same call."
+                "to overwrite. Pass file_path to this same call - everything built "
+                "so far is still in memory and Save As it now. (On B30 a SaveAs "
+                "was refused once the part carried geometry; the FileSystem route "
+                "this tool uses did succeed on B32 SP6 with 35 features, so it is "
+                "worth trying - if it is refused, nothing is lost. Giving a new "
+                "part its path right after catia_new_part avoids the question.)"
             )
         name = dialogs.save(doc)
         return f"Document '{name}' saved"

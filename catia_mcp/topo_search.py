@@ -72,10 +72,29 @@ class TopoRef(NamedTuple):
 # border, not an edge of the model, and every length-based selection built on
 # those indices was reading construction geometry.
 _CONSTRUCTION_PREFIXES = (
-    "Selection_BorderREdge",   # datum-plane border
-    "Selection_WireREdge",     # sketch wire
-    "Selection_BorderRSur",    # datum-plane face
+    "Selection_BorderREdge",    # datum-plane border
+    "Selection_WireREdge",      # sketch wire
+    "Selection_BorderRSur",     # datum-plane face
+    "Selection_WireFVertex",    # sketch wire corner
+    "Selection_BorderRVertex",  # datum-plane corner
 )
+
+# The word CATIA puts in front of a cell's type name is the whole difference
+# between construction geometry and the solid: a vertex of the solid is
+# ``Selection_FVertex``, a corner of a sketch wire is ``Selection_WireFVertex``.
+# The list above only ever covered edges and faces, so *every* vertex passed the
+# test and a deleted-but-still-referenced sketch stretched a bounding box. That
+# was invisible in the single-part box (the polluted points happened to sit
+# inside the solid) and only showed up per component in an assembly: a
+# 40 x 20 x 10 pad measured 60 x 80 x 10 (reported 2026-10-25, reproduced here
+# 2026-10-25 - 20 vertices found, 4 of them ``Selection_WireFVertex``).
+#
+# Matching the marker anywhere in the leading type token, rather than listing
+# every name CATIA can invent, also covers the variants nobody has met yet
+# (``Selection_WireRVertex``, ``Selection_BorderRFVertex``...). It is checked
+# against the head only - the full NLS path mentions ``Brp:(Sketch.1;...)``
+# everywhere and nothing in it may be read as a marker.
+_CONSTRUCTION_MARKERS = ("Wire", "Border")
 
 
 def nls_of(cell: Any) -> str:
@@ -96,6 +115,9 @@ def is_construction(nls: str) -> bool:
     if not nls:
         return False
     if nls.startswith(_CONSTRUCTION_PREFIXES):
+        return True
+    head = nls.split(":", 1)[0]
+    if any(marker in head for marker in _CONSTRUCTION_MARKERS):
         return True
     # A face/edge whose defining feature is a datum plane is the plane's own
     # border, not part of any solid.
