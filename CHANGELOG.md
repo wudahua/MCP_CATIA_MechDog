@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.19] — 2026-10-25 · instances of one reference
+
 ### Added — `catia_copy_component`: instances of one reference, in one call
 
 - A 24-instance assembly had to be built by calling `catia_add_component` once
