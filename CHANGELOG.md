@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.18] — 2026-10-25 · there was a solid loft all along
+
 ### Added — `catia_solid_loft`: the solid loft this server said did not exist
 
 - **`ShapeFactory.AddNewLoft()` exists and builds a closed solid in one update.**
