@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.16] — 2026-10-25 · a spline through four corners is not the four corners
+
 ### Corrected — the loft section rule I wrote in 0.3.15 was wrong
 
 - 0.3.15 said a section must be "one continuous wire", and that a sketch profile
