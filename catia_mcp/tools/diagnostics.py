@@ -71,6 +71,9 @@ class DiagnosticsTools:
 
     def __init__(self, connection: CATIAConnection) -> None:
         self.conn = connection
+        # Set by the server once the router is built, so a diagnosis can state
+        # the registered tool count instead of the documented one.
+        self.tool_count: int | None = None
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         return [
@@ -85,7 +88,10 @@ class DiagnosticsTools:
                     "UNSUPPORTED_CAPABILITY, and include its output when "
                     "reporting compatibility issues. Probing factories requires "
                     "an active Part document; without one, only "
-                    "application-level info is reported."
+                    "application-level info is reported. The first key, mcp, "
+                    "states the server name, version and registered tool count, "
+                    "so a bug report can quote both sides without reading "
+                    "pyproject.toml."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -105,13 +111,37 @@ class DiagnosticsTools:
         self.conn.ensure_connected()
         app = self.conn.app
 
-        report: dict[str, Any] = {"python": self._python_info(app)}
+        # Which server answered, and how many tools it registered: a report that
+        # quotes a version should not have to read pyproject.toml to get it, and
+        # "documented 94 vs registered 87" happened once already (reported
+        # 2026-10-25). This is the FIRST key on purpose - the factory probe
+        # returns early when no Part is open, and the block used to sit behind
+        # that early return, so a report run on an empty CATIA quoted no version
+        # at all (measured 2026-10-25: "mcp": null).
+        report: dict[str, Any] = {"mcp": self._server_info()}
+        report["python"] = self._python_info(app)
         report["catia"] = self._catia_info(app)
         report["workbenches"] = self._workbench_probe()
         report["factories"] = self._factory_probe()
         report["notes"] = self._notes(report)
 
         return json.dumps(report, indent=2)
+
+    def _server_info(self) -> dict[str, Any]:
+        """Name, version and registered tool count of this server.
+
+        ``tool_count`` is filled in by the server once the router is built, so a
+        diagnosis states what actually answered rather than what README claims.
+        """
+        try:
+            from catia_mcp import __version__ as mcp_version
+        except Exception:  # noqa: BLE001 - never fail a diagnosis over this
+            mcp_version = "unknown"
+        return {
+            "name": "MCP_CATIA_MechDog",
+            "version": mcp_version,
+            "tool_count": self.tool_count,
+        }
 
     def _python_info(self, app: Any) -> dict[str, Any]:
         info: dict[str, Any] = {
@@ -199,6 +229,8 @@ class DiagnosticsTools:
             )
             return result
 
+        # Which server answered is reported at the top level (report["mcp"]);
+        # this probe only answers "which factory methods work here".
         result["shape_factory"] = self._probe_methods(
             part, "ShapeFactory", _SHAPE_FACTORY_METHODS
         )

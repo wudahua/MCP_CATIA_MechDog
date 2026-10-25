@@ -117,6 +117,8 @@ class CATIAMCPServer:
         # The planner dispatches sub-steps through this same router, so it can
         # only be bound once every module has registered its tools.
         self.planner_tools.bind(self._tool_router)
+        # Let catia_diagnose report the count it actually registered.
+        self.diagnostics_tools.tool_count = len(self._tool_router)
         self._setup_handlers()
 
     def _setup_handlers(self) -> None:

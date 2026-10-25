@@ -75,7 +75,17 @@ class SketcherTools:
                                 "a 1-based Face.N from catia_list_faces, and the "
                                 "coordinates you draw are in that face's own "
                                 "frame, which cannot be read back - a wrong "
-                                "guess cuts nothing rather than failing."
+                                "guess cuts nothing rather than failing. Or "
+                                "{'type': 'frame', 'origin': [x,y,z], 'u': [..], "
+                                "'v': [..]} for a plane that is not parallel to any "
+                                "main plane: the sketch's H axis becomes your u and "
+                                "V becomes your v, so the (u, v) numbers from the "
+                                "spec are used unchanged (measured, not "
+                                "approximated: a frame sketch lands exactly on "
+                                "origin + u*du + v*dv). Reach for this instead of "
+                                "rotating a main plane - the rotation cannot be "
+                                "read back, and 'nearly parallel' is not parallel "
+                                "over a long part."
                             ),
                             "oneOf": [
                                 {
@@ -87,7 +97,28 @@ class SketcherTools:
                                     "properties": {
                                         "type": {
                                             "type": "string",
-                                            "enum": ["offset", "face"],
+                                            "enum": ["offset", "face", "frame"],
+                                        },
+                                        "origin": {
+                                            "type": "array",
+                                            "items": {"type": "number"},
+                                            "minItems": 3,
+                                            "maxItems": 3,
+                                            "description": "For type='frame': plane origin [x, y, z] in mm.",
+                                        },
+                                        "u": {
+                                            "type": "array",
+                                            "items": {"type": "number"},
+                                            "minItems": 3,
+                                            "maxItems": 3,
+                                            "description": "For type='frame': the sketch's H direction.",
+                                        },
+                                        "v": {
+                                            "type": "array",
+                                            "items": {"type": "number"},
+                                            "minItems": 3,
+                                            "maxItems": 3,
+                                            "description": "For type='frame': the sketch's V direction.",
                                         },
                                         "base": {
                                             "type": "string",
@@ -126,6 +157,12 @@ class SketcherTools:
                 "description": (
                     "Close the active sketch and return to Part Design. "
                     "Must be called after finishing sketch geometry before applying 3D features."
+                    "The echo names EVERY loose endpoint and the gap width at each "
+                    "one, not just the closest pair: point lists rounded to 0.001 mm "
+                    "break at several joints at once, and CATIA's own error ('open "
+                    "polyline or an arc chain with a gap') never says where. A gap "
+                    "of 0.0007 mm is enough to kill the pad - make the shared "
+                    "coordinate literally identical."
                     "SCOPE OF THE ECHO: the Profile line counts what THIS session drew in THIS document. After reopening a file it cannot report the sketch's contents (the coordinates are not readable back), so an empty echo is not an empty sketch - and catia_gsd_spline(element=...) refuses the same sketches for the same reason."
                 ),
                 "inputSchema": {
@@ -210,8 +247,16 @@ class SketcherTools:
             {
                 "name": "catia_sketch_arc",
                 "description": (
-                    "Draw a circular arc defined by center, radius, and start/end angles (degrees). "
-                    "Angles are measured counter-clockwise from the positive X axis."
+                    "Draw a circular arc. Give EITHER start_angle/end_angle (degrees, "
+                    "counter-clockwise from +X) OR p1/p2 - the two endpoints - plus "
+                    "direction. The endpoints form is the one reverse-engineered point "
+                    "lists use: they give 'centre (cx, cy) R r, (x1,y1) -> (x2,y2)' and "
+                    "no angles at all, and converting by hand is where a 240-degree "
+                    "major arc gets drawn as a 120-degree minor one (reported "
+                    "2026-10-25: 1 of 236 arcs in the source data was a 240-degree "
+                    "arc, and treating it as minor put the boss on the wrong side). "
+                    "The reply always states the SWEPT angle, because 'from 10 to 250' "
+                    "does not tell a reader whether it swept 240 or -120 degrees."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -221,8 +266,35 @@ class SketcherTools:
                         "radius": {"type": "number", "description": "Radius (mm)"},
                         "start_angle": {"type": "number", "description": "Start angle (degrees)"},
                         "end_angle": {"type": "number", "description": "End angle (degrees)"},
+                        "p1": {
+                            "type": "array",
+                            "items": {"type": "number"},
+                            "minItems": 2,
+                            "maxItems": 2,
+                            "description": (
+                                "Start point [x, y] (mm). Use with p2 instead of "
+                                "start_angle/end_angle."
+                            ),
+                        },
+                        "p2": {
+                            "type": "array",
+                            "items": {"type": "number"},
+                            "minItems": 2,
+                            "maxItems": 2,
+                            "description": "End point [x, y] (mm). Use with p1.",
+                        },
+                        "direction": {
+                            "type": "string",
+                            "enum": ["ccw", "cw"],
+                            "default": "ccw",
+                            "description": (
+                                "Which way the arc runs from p1 to p2. Decides "
+                                "minor vs major arc when the two points are more "
+                                "than 180 degrees apart."
+                            ),
+                        },
                     },
-                    "required": ["cx", "cy", "radius", "start_angle", "end_angle"],
+                    "required": ["cx", "cy", "radius"],
                 },
             },
             {
@@ -368,7 +440,12 @@ class SketcherTools:
                     "catia_sketch_get_geometry. This is the tool for 'the third line "
                     "is wrong': the sketch stays, the rest of the profile stays, and "
                     "a pad/pocket built on it survives the repair. Index 1 is the "
-                    "absolute axis and cannot be deleted."
+                    "absolute axis and cannot be deleted. The reply states the "
+                    "element count before and after, and the sketch is left OPEN "
+                    "for editing, so a second delete does not need "
+                    "catia_sketch_edit first. Indices after the deleted one each "
+                    "move down by one: re-read catia_sketch_get_geometry between "
+                    "deletes, or you will delete a curve you meant to keep."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -413,7 +490,9 @@ class SketcherTools:
             case "catia_sketch_arc":
                 return self._draw_arc(
                     arguments["cx"], arguments["cy"], arguments["radius"],
-                    arguments["start_angle"], arguments["end_angle"],
+                    arguments.get("start_angle"), arguments.get("end_angle"),
+                    p1=arguments.get("p1"), p2=arguments.get("p2"),
+                    direction=arguments.get("direction") or "ccw",
                 )
             case "catia_sketch_spline":
                 return self._draw_spline(
@@ -483,6 +562,8 @@ class SketcherTools:
             return "H/V/normal: " + cls._AXES[plane.lower()]
         if isinstance(plane, dict):
             kind = str(plane.get("type", "")).lower()
+            if kind == "frame":
+                return ("H/V/normal: H = your u, V = your v, normal = u x v")
             if kind == "face":
                 return ("H/V/normal: the face's own frame, which automation cannot "
                         "read back - prefer an offset datum plane")
@@ -490,6 +571,79 @@ class SketcherTools:
             if base in cls._AXES:
                 return "H/V/normal: " + cls._AXES[base]
         return "H/V/normal: unknown for this support (see catia_sketch_get_geometry)"
+
+    def _frame_plane(self, part: Any, body: Any, plane: dict[str, Any]) -> Any:
+        """A datum plane from origin + two directions, so (u, v) mean what they say.
+
+        Measured on B30 2026-10-25: a sketch on such a plane takes its H axis from
+        ``u`` and its V axis from ``v`` exactly - a rectangle drawn at
+        u 0..10 / v 0..4 with origin (17.525, 185.862, 0), u (0.995584, -0.093875,
+        0), v (0, 0, -1) padded to x 17.525..27.6686, y 184.9233..187.8532,
+        z -4..0, which is O + 10u + 4v plus 2 mm along u x v. That is the point of
+        the form: a spec's numbers go in unchanged, with no frame conversion.
+
+        Two traps, both measured: ``HybridShapeFactory.AddNewPlane`` does not
+        exist (the three-point form is ``AddNewPlane3Points``), and the plane has
+        to be inserted INTO THE BODY - ``AddNewPad`` refuses a sketch whose
+        support lives in a geometrical set (E_FAIL from the factory).
+        """
+        origin = plane.get("origin")
+        first = plane.get("u")
+        second = plane.get("v")
+        for label, value in (("origin", origin), ("u", first), ("v", second)):
+            if not isinstance(value, (list, tuple)) or len(value) != 3:
+                raise ValueError(
+                    f"plane of type 'frame' needs '{label}' as [x, y, z], got {value!r}."
+                )
+        o = [float(v) for v in origin]
+        u = [float(v) for v in first]
+        v = [float(v) for v in second]
+        if max(abs(c) for c in u) < 1e-9 or max(abs(c) for c in v) < 1e-9:
+            raise ValueError("'u' and 'v' must be direction vectors, not zero.")
+        cross = [u[1] * v[2] - u[2] * v[1],
+                 u[2] * v[0] - u[0] * v[2],
+                 u[0] * v[1] - u[1] * v[0]]
+        if max(abs(c) for c in cross) < 1e-9:
+            raise ValueError("'u' and 'v' are parallel, so they span no plane.")
+
+        def unit(vector: list[float], length: float = 10.0) -> list[float]:
+            norm = sum(component * component for component in vector) ** 0.5
+            return [component / norm * length for component in vector]
+
+        # The three points are O, O + 10*u-hat and O + 10*v-hat. Ten millimetres
+        # rather than one: a plane built on a 1 mm baseline is numerically the
+        # same plane, but the sketch frame derived from it is less stable.
+        along_u, along_v = unit(u), unit(v)
+        corners = [
+            o,
+            [o[i] + along_u[i] for i in range(3)],
+            [o[i] + along_v[i] for i in range(3)],
+        ]
+        factory = part.HybridShapeFactory
+        collector = part.HybridBodies.Add()
+        collector.Name = f"SketchFrame_{abs(hash((tuple(o), tuple(u), tuple(v)))) % 100000}"
+        points = []
+        for coords in corners:
+            point = factory.AddNewPointCoord(*coords)
+            collector.AppendHybridShape(point)
+            part.UpdateObject(point)
+            points.append(part.CreateReferenceFromObject(point))
+        plane_feature = factory.AddNewPlane3Points(points[0], points[1], points[2])
+        plane_feature.Name = "Datum_frame"
+        # The work object has to be the BODY while the plane goes in: creating the
+        # collector set left it pointing at that set, and InsertHybridShape then
+        # fails with a bare E_FAIL (measured 2026-10-25).
+        part.InWorkObject = body
+        body.InsertHybridShape(plane_feature)
+        part.UpdateObject(plane_feature)
+        return part.CreateReferenceFromObject(plane_feature)
+
+    @staticmethod
+    def _describe_frame(plane: dict[str, Any]) -> str:
+        o = ", ".join(f"{float(value):g}" for value in plane["origin"])
+        return (f"datum plane through ({o}) with H = your u, V = your v, "
+                "normal = u x v - sketch (u, v) coordinates are the numbers you "
+                "gave, unchanged")
 
     def _describe_plane(self, plane_key: str, offset: float | None) -> str:
         where = self._PLANE_LABELS.get(plane_key, plane_key)
@@ -522,6 +676,10 @@ class SketcherTools:
             )
 
         kind = str(plane.get("type", "")).strip().lower()
+
+        if kind == "frame":
+            return (self._frame_plane(part, body, plane),
+                    self._describe_frame(plane))
 
         if kind == "face":
             index = plane.get("index")
@@ -664,6 +822,14 @@ class SketcherTools:
         """
         if isinstance(plane, str) and plane.lower() in cls._AXES:
             return {"base": plane.lower(), "distance": float(offset or 0.0)}
+        if isinstance(plane, dict) and str(plane.get("type", "")).lower() == "frame":
+            try:
+                return {"base": "frame",
+                        "origin": [float(v) for v in plane["origin"]],
+                        "u": [float(v) for v in plane["u"]],
+                        "v": [float(v) for v in plane["v"]]}
+            except Exception:  # noqa: BLE001 - unreadable frame, no record
+                return None
         if isinstance(plane, dict) and str(plane.get("type", "")).lower() == "offset":
             base = str(plane.get("base", "xy")).lower()
             if base in ("xy", "yz", "zx"):
@@ -721,13 +887,18 @@ class SketcherTools:
         return " Profile: " + "; ".join(parts) + "." if parts else ""
 
     def _profile_warning(self) -> str:
-        """Name the near-miss endpoints that will make pad/pocket fail.
+        """Name every breakpoint that will make pad/pocket fail.
 
         The gap itself is invisible in CATIA's error ("open polyline or an arc
         chain with a gap"), and the coordinates cannot be read back afterwards,
-        so the warning is computed from the numbers the sketch tools were given.
-        Only near misses are reported: a genuinely open profile (a sweep guide,
-        say) is not a mistake and would otherwise generate noise on every close.
+        so this is computed from the numbers the sketch tools were given.
+
+        It reports ALL loose endpoints, not just the closest pair (reported
+        2026-10-25: point lists rounded to 0.001 mm produce 0.0002-0.0005 mm
+        gaps at several joints at once, and a message that names one pair sends
+        the caller round the loop once per joint). Where the loose point sits is
+        the useful part: two points a few microns apart is a typo, two points
+        12 mm apart is a profile that is open on purpose.
         """
         import math
 
@@ -748,23 +919,63 @@ class SketcherTools:
             else:
                 used[i] = True
                 loose.append((x, y))
-        best: tuple[float, tuple[float, float], tuple[float, float]] | None = None
-        for i in range(len(loose)):
-            for j in range(i + 1, len(loose)):
-                gap = math.hypot(loose[i][0] - loose[j][0], loose[i][1] - loose[j][1])
-                if best is None or gap < best[0]:
-                    best = (gap, loose[i], loose[j])
-        if best is None or best[0] > self._NEAR_TOL:
+        if not loose:
             return ""
-        gap, a, b = best
-        return (
-            f" WARNING: the profile is not closed - ({a[0]:.4f}, {a[1]:.4f}) and "
-            f"({b[0]:.4f}, {b[1]:.4f}) are {gap:.4f} mm apart. A gap this small "
-            "still makes pad/pocket fail with 'open polyline or an arc chain with "
-            "a gap'; make the two coordinates identical. (Computed from the "
-            "coordinates passed to the sketch tools; CATIA's own points cannot be "
-            "read back through automation, so a constraint may have moved them.)"
+
+        # Greedy nearest pairing among the leftovers: each pair is one
+        # breakpoint, and the interesting number is the gap.
+        remaining = list(range(len(loose)))
+        pairs: list[tuple[float, int, int]] = []
+        while len(remaining) > 1:
+            best: tuple[float, int, int] | None = None
+            for ai in range(len(remaining)):
+                for bi in range(ai + 1, len(remaining)):
+                    a, b = remaining[ai], remaining[bi]
+                    gap = math.hypot(loose[a][0] - loose[b][0],
+                                     loose[a][1] - loose[b][1])
+                    if best is None or gap < best[0]:
+                        best = (gap, a, b)
+            if best is None:
+                break
+            pairs.append(best)
+            remaining = [r for r in remaining if r not in (best[1], best[2])]
+        dangling = [loose[i] for i in remaining]
+        # A profile that is open on purpose (a sweep guide, say) must not be
+        # nagged about, so the warning only fires when at least one gap is small
+        # enough to be a rounding artefact - but then it names EVERY gap, not
+        # just that one.
+        if not pairs or min(gap for gap, _, _ in pairs) > self._NEAR_TOL:
+            return ""
+
+        lines = [
+            f"({loose[a][0]:.4f}, {loose[a][1]:.4f}) <-> "
+            f"({loose[b][0]:.4f}, {loose[b][1]:.4f}) = {gap:.4f} mm"
+            for gap, a, b in sorted(pairs)
+        ]
+        if dangling:
+            lines.append("unpaired at " + ", ".join(
+                f"({x:.4f}, {y:.4f})" for x, y in dangling))
+        tiny = [p for p in pairs if p[0] <= self._NEAR_TOL]
+        text = (
+            f" WARNING: the profile is not closed - {len(loose)} loose "
+            f"endpoint(s) in {len(pairs) + (1 if dangling else 0)} break(s): "
+            + "; ".join(lines) + "."
         )
+        if tiny:
+            text += (
+                " The first gap(s) are within 0.05 mm: that is a rounding "
+                "artefact, and CATIA still refuses the feature - pad/pocket "
+                "report 'open polyline or an arc chain with a gap'. Make the "
+                "shared coordinate literally identical (use the exact "
+                "circle-circle intersection at a junction, and project a "
+                "line end onto the arc rather than recomputing it)."
+            )
+        text += (
+            " (Computed from the coordinates passed to the sketch tools; "
+            "CATIA's own points cannot be read back through automation, so a "
+            "constraint may have moved them.)"
+        )
+        return text
 
     def _close_sketch(self) -> str:
         if self._active_sketch is None:
@@ -859,7 +1070,9 @@ class SketcherTools:
 
     def _draw_arc(
         self, cx: float, cy: float, radius: float,
-        start_angle: float, end_angle: float,
+        start_angle: float | None = None, end_angle: float | None = None,
+        p1: list[float] | None = None, p2: list[float] | None = None,
+        direction: str = "ccw",
     ) -> str:
         self._ensure_sketch_open()
         factory = self._active_factory
@@ -867,13 +1080,80 @@ class SketcherTools:
         # Factory2D has no CreateArc in CATIA V5 (field-verified against the
         # R20 API reference). An arc is an open circle: CreateCircle takes
         # optional start/end parameters in radians that leave it open.
-        start_rad = math.radians(start_angle)
-        end_rad = math.radians(end_angle)
+        notes: list[str] = []
+        if p1 is not None or p2 is not None:
+            if p1 is None or p2 is None:
+                raise ValueError(
+                    "catia_sketch_arc needs BOTH p1 and p2 (the two endpoints), "
+                    "or start_angle and end_angle. Got only one endpoint."
+                )
+            a1 = math.atan2(float(p1[1]) - cy, float(p1[0]) - cx)
+            a2 = math.atan2(float(p2[1]) - cy, float(p2[0]) - cx)
+            # How far each given point is from the circle it is supposed to sit
+            # on. A reverse-engineered point list rounds to 0.001 mm, so a
+            # radius that does not match its endpoints by more than a few
+            # microns is a data error, not noise - and it is invisible once the
+            # arc is drawn, because the endpoints move onto the circle.
+            off = max(
+                abs(math.hypot(float(p1[0]) - cx, float(p1[1]) - cy) - radius),
+                abs(math.hypot(float(p2[0]) - cx, float(p2[1]) - cy) - radius),
+            )
+            if off > 1e-3:
+                notes.append(
+                    f" WARNING: the endpoints are up to {off:.4f} mm off the "
+                    f"R{radius} circle; the arc was drawn on the circle, so its "
+                    "ends moved by that much. Check the centre/radius against the "
+                    "point pair - this is how a profile ends up with a gap."
+                )
+            if direction == "cw":
+                # CreateCircle always runs counter-clockwise from start to end,
+                # so a clockwise arc is the same sweep with the endpoints
+                # swapped. That keeps a 240-degree major arc at 240 instead of
+                # silently turning it into 120.
+                start_rad, end_rad = a2, a1
+            else:
+                start_rad, end_rad = a1, a2
+            start_angle = math.degrees(start_rad)
+            end_angle = math.degrees(end_rad)
+        elif start_angle is not None and end_angle is not None:
+            start_rad = math.radians(start_angle)
+            end_rad = math.radians(end_angle)
+        else:
+            raise ValueError(
+                "catia_sketch_arc needs either start_angle and end_angle, or p1 "
+                "and p2."
+            )
         # CreateCircle requires endParam strictly greater than startParam;
         # normalize sweeps that wrap past 0 degrees.
         while end_rad <= start_rad:
             end_rad += 2 * math.pi
         factory.CreateCircle(cx, cy, radius, start_rad, end_rad)
+        # Remember the arc's own ends, computed from the numbers we were given.
+        # Automation cannot read a Point2D's coordinates back on this build
+        # (GetCoordinates needs a by-ref array it never fills), so this is the
+        # only place the exact endpoint survives - and it is the number that
+        # explains a pad failure caused by a 3.5 um gap.
+        self._note_ends(
+            (cx + radius * math.cos(start_rad), cy + radius * math.sin(start_rad)),
+            (cx + radius * math.cos(end_rad), cy + radius * math.sin(end_rad)),
+        )
+        self._note_element("arc", cx=cx, cy=cy, radius=radius,
+                           sweep_rad=end_rad - start_rad)
+        sweep = math.degrees(end_rad - start_rad)
+        swept = (f"{sweep:.0f}deg MAJOR arc (more than a half circle)"
+                 if sweep > 180.5 else
+                 "180deg half circle" if abs(sweep - 180) <= 0.5 else
+                 "minor arc")
+        return (
+            f"Arc created at ({cx}, {cy}), radius={radius} mm, "
+            f"from {start_angle:.4f}° to {end_angle:.4f}° - swept "
+            f"{sweep:.4f}° counter-clockwise ({swept}), arc length "
+            f"{radius * math.radians(sweep):.4f} mm"
+            + ("" if direction != "cw" or p1 is None else
+               " [entered clockwise from p1 to p2; the endpoints are the ones "
+               "you gave]")
+            + "".join(notes)
+        )
         # Remember the arc's own ends, computed from the numbers we were given.
         # Automation cannot read a Point2D's coordinates back on this build
         # (GetCoordinates needs a by-ref array it never fills), so this is the
@@ -1154,8 +1434,10 @@ class SketcherTools:
         was_open = self._active_sketch is sketch
         if not was_open:
             sketch.OpenEdition()
+        total_before = 0
         try:
             geom = sketch.GeometricElements
+            total_before = geom.Count
             if index < 1 or index > geom.Count:
                 raise RuntimeError(
                     f"Element index {index} is out of range: sketch '{name}' has "
@@ -1185,6 +1467,7 @@ class SketcherTools:
                     sketch.CloseEdition()
                 except Exception:  # noqa: BLE001 - best effort
                     pass
+        rebuild_error = None
         try:
             part.UpdateObject(sketch)
             # UpdateObject(sketch) rebuilds the sketch, not the features built on
@@ -1193,12 +1476,32 @@ class SketcherTools:
             # update is what makes the claim true.
             part.Update()
         except Exception as exc:  # noqa: BLE001 - the delete itself worked
+            rebuild_error = str(exc).splitlines()[0][:140]
+        self.conn.refresh_display()
+        # Reopen the edition session and leave it open - on BOTH paths. Deleting
+        # three elements in a row meant three catia_sketch_edit calls (reported
+        # 2026-10-25); and after a failed rebuild the caller needs the sketch
+        # open more than ever, to put back what the pad cannot live without.
+        reopened = False
+        try:
+            self._active_factory = sketch.OpenEdition()
+            self._active_sketch = sketch
+            self._sketch_part = part
+            self.conn.last_sketch = sketch
+            reopened = True
+        except Exception:  # noqa: BLE001 - the delete stands either way
+            self._active_sketch = None
+            self._active_factory = None
+        if rebuild_error is not None:
             return (
                 f"Deleted element {index} ('{element_name}') from sketch '{name}', "
-                f"{left} element(s) left, but the rebuild afterwards failed ({exc}) "
-                "- features built on this sketch may be in error; fix them next."
+                f"{total_before} -> {left} element(s), but the rebuild afterwards "
+                f"failed ({rebuild_error}) - features built on this sketch may be "
+                "in error."
+                + (" The sketch is still open, so you can append the replacement "
+                   "geometry directly." if reopened else
+                   " Call catia_sketch_edit to repair it.")
             )
-        self.conn.refresh_display()
         after = self._solid_volume(part)
         change = ""
         if before is not None and after is not None:
@@ -1206,8 +1509,17 @@ class SketcherTools:
                       f"(delta {after - before:+.4f}).")
         return (
             f"Deleted element {index} ('{element_name}') from sketch '{name}': "
-            f"{left} element(s) left. Features that consume this sketch were "
-            "rebuilt with the new profile." + change
+            f"{total_before} -> {left} element(s). Features that consume this "
+            "sketch were rebuilt with the new profile." + change
+            + (" The sketch is still open for editing, so the next draw appends "
+               "to it; call catia_close_sketch before building a feature."
+               if reopened else
+               " The sketch was closed afterwards; call catia_sketch_edit to "
+               "continue drawing.")
+            + (" Every element AFTER the deleted one moved down by one, so "
+               "re-read catia_sketch_get_geometry before deleting another - an "
+               "index reused from before this call removes the wrong curve."
+               if left else "")
         )
 
     @staticmethod

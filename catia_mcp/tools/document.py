@@ -44,7 +44,13 @@ class DocumentTools:
                 "name": "catia_new_part",
                 "description": (
                     "Create a new empty Part document in CATIA V5. "
-                    "A Part is used for single-body 3D modeling (sketches + features)."
+                    "A Part is used for single-body 3D modeling (sketches + features). "
+                    "Pass file_path to save it immediately: a part that has geometry "
+                    "but no path cannot be saved later, and it cannot be inserted "
+                    "into an assembly either - the caller only finds out when "
+                    "catia_add_component cannot find the file (reported 2026-10-25). "
+                    "The measured-safe order for a build is new_part(file_path=...) "
+                    "then build; nothing else is needed when the path is given."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -52,6 +58,14 @@ class DocumentTools:
                         "name": {
                             "type": "string",
                             "description": "Optional name for the part",
+                        },
+                        "file_path": {
+                            "type": "string",
+                            "description": (
+                                "Save the new part here straight away, e.g. "
+                                "'E:/WB_CATIA/parts/P05.CATPart'. The directory must "
+                                "exist."
+                            ),
                         },
                     },
                 },
@@ -245,7 +259,8 @@ class DocumentTools:
             case "catia_disconnect":
                 return self.conn.disconnect()
             case "catia_new_part":
-                return self._new_part(arguments.get("name"))
+                return self._new_part(arguments.get("name"),
+                                      arguments.get("file_path"))
             case "catia_new_product":
                 return self._new_product(arguments.get("name"))
             case "catia_open_document":
@@ -270,7 +285,8 @@ class DocumentTools:
             case _:
                 raise ValueError(f"Unknown document tool: {tool_name}")
 
-    def _new_part(self, name: str | None = None) -> str:
+    def _new_part(self, name: str | None = None,
+                  file_path: str | None = None) -> str:
         self.conn.ensure_connected()
         docs = self.conn.documents
         doc = docs.Add("Part")
@@ -297,11 +313,24 @@ class DocumentTools:
                         "the instance later with catia_rename_component.")
         part_name = part.Name
         self.conn.refresh_display()
+        saved = ""
+        if file_path:
+            # The one failure this prevents: a part built for half an hour,
+            # never saved, and then unavailable to catia_add_component because
+            # there is no file (reported 2026-10-25). Saving here means the
+            # document has a path from its first feature on.
+            try:
+                saved = " " + self._save_document(str(file_path))
+            except Exception as exc:  # noqa: BLE001 - the part itself exists
+                saved = (f" The part was created but could not be saved to "
+                         f"'{file_path}' ({str(exc).splitlines()[0][:120]}). Call "
+                         "catia_save_document(file_path=...) before building on it.")
         hint = (" Save it now - catia_save_document(file_path='...') - because a "
-                "part that has geometry but no path cannot be saved later.")
+                "part that has geometry but no path cannot be saved later."
+                if not file_path else "")
         return (f"Created new Part document: '{part_name}'"
                 + (f" [{part_number}]" if part_number else "")
-                + f".{note}{hint}")
+                + f".{note}{saved}{hint}")
 
     def _new_product(self, name: str | None = None) -> str:
         self.conn.ensure_connected()
@@ -449,7 +478,14 @@ class DocumentTools:
             # attempts and reporting "Save failed after 3 attempts".
             raise RuntimeError(
                 f"'{doc.Name}' has never been saved, so there is no file for Save "
-                "to overwrite. Pass file_path to this same call - everything built "
+                "to overwrite"
+                # Saying this explicitly: a plan that writes overwrite=true on
+                # every step then hit this message on the FIRST save, where
+                # overwrite is meaningless and looked like the cause
+                # (reported 2026-10-25).
+                + (" ('overwrite' had no file to act on - it only applies when "
+                   "file_path already exists)" if overwrite else "")
+                + ". Pass file_path to this same call - everything built "
                 "so far is still in memory and Save As it now. (On B30 a SaveAs "
                 "was refused once the part carried geometry; the FileSystem route "
                 "this tool uses did succeed on B32 SP6 with 35 features, so it is "

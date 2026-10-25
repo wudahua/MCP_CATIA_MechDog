@@ -35,10 +35,12 @@ class PlannerTools:
     def __init__(self, connection: CATIAConnection) -> None:
         self.conn = connection
         self._router: dict[str, Any] | None = None
+        self._schemas: dict[str, dict[str, Any]] | None = None
 
     def bind(self, router: dict[str, Any]) -> None:
         """Give the planner access to every registered tool module."""
         self._router = router
+        self._schemas = None
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         return [
@@ -69,15 +71,46 @@ class PlannerTools:
                                         "type": "string",
                                         "description": "Label echoed back in the report",
                                     },
+                                    "measure": {
+                                        "type": "boolean",
+                                        "default": False,
+                                        "description": (
+                                            "Measure the active part after THIS step "
+                                            "and store it in the step's report as "
+                                            "'measurements'. That is how a plan that "
+                                            "builds several parts keeps one volume "
+                                            "per part without thirty separate calls."
+                                        ),
+                                    },
                                 },
                                 "required": ["tool"],
                             },
                         },
                         "expect": {
-                            "type": "object",
-                            "description": "Assertions measured after the last step",
+                            "anyOf": [
+                                {"type": "object"},
+                                {"type": "array", "items": {"type": "object"}},
+                            ],
+                            "description": (
+                                "Assertions measured after the last step. An object "
+                                "checks the last active document. A LIST checks one "
+                                "entry each, and any entry carrying "
+                                "'document': 'P06' is measured on THAT open document - "
+                                "so one plan can build thirty parts and assert all "
+                                "thirty (reported 2026-10-25: a merged plan returned "
+                                "only the last part's numbers)."
+                            ),
                             "additionalProperties": False,
                             "properties": {
+                                "document": {
+                                    "type": "string",
+                                    "description": (
+                                        "Measure this OPEN document instead of the "
+                                        "active one (alias: doc)."
+                                    ),
+                                },
+                                "doc": {"type": "string",
+                                        "description": "Alias of 'document'."},
                                 "volume_mm3": {"type": "number"},
                                 "volume_tolerance_pct": {"type": "number", "default": 1.0},
                                 "area_mm2": {"type": "number"},
@@ -169,6 +202,73 @@ class PlannerTools:
                 problems.append(f"step {index}: unknown tool '{tool}'")
         return problems
 
+    def _tool_schemas(self) -> dict[str, dict[str, Any]]:
+        """Every registered tool's inputSchema, keyed by tool name."""
+        if self._schemas is not None:
+            return self._schemas
+        schemas: dict[str, dict[str, Any]] = {}
+        modules = {}
+        for module in (self._router or {}).values():
+            modules[id(module)] = module
+        for module in modules.values():
+            try:
+                definitions = module.get_tool_definitions()
+            except Exception:  # noqa: BLE001 - a schema is a courtesy
+                continue
+            for definition in definitions:
+                schemas[definition["name"]] = definition.get("inputSchema") or {}
+        self._schemas = schemas
+        return schemas
+
+    def _validate_args(self, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Check each step's args against its own tool schema before running it.
+
+        A step with a missing argument used to surface as a bare
+        ``STEP_FAILED / KeyError: 'name'`` after the plan had already changed the
+        model (reported 2026-10-25), while the same call made directly to the
+        tool was rejected with a readable message. Same check, same wording,
+        before anything runs.
+        """
+        from jsonschema import Draft7Validator  # noqa: PLC0415 - only for plans
+
+        schemas = self._tool_schemas()
+        problems: list[dict[str, Any]] = []
+        for index, step in enumerate(steps, start=1):
+            tool = step.get("tool")
+            schema = schemas.get(tool) if tool else None
+            if not schema:
+                continue
+            args = step.get("args") or {}
+            try:
+                errors = sorted(
+                    Draft7Validator(schema).iter_errors(args),
+                    key=lambda error: [str(p) for p in error.path],
+                )
+            except Exception:  # noqa: BLE001 - never fail a plan over this
+                continue
+            if not errors:
+                continue
+            required = list(schema.get("required") or [])
+            missing = [name for name in required if name not in args]
+            first = errors[0]
+            where = "/".join(str(part) for part in first.path) or "args"
+            problems.append({
+                "step": index,
+                "tool": tool,
+                "code": "BAD_ARGS",
+                "missing": missing,
+                "path": where,
+                "message": (
+                    f"step {index} ({tool}): {first.message}"
+                    + (f" [missing: {', '.join(missing)}]" if missing else "")
+                ),
+                "schema": {
+                    "required": required,
+                    "properties": sorted((schema.get("properties") or {}).keys()),
+                },
+            })
+        return problems
+
     def _run_plan(self, arguments: dict[str, Any]) -> dict[str, Any]:
         if self._router is None:
             raise RuntimeError("Planner is not bound to the tool router")
@@ -177,13 +277,19 @@ class PlannerTools:
             raise ValueError("steps must contain at least one entry")
 
         problems = self._validate_steps(steps)
-        if problems:
+        arg_problems = self._validate_args(steps)
+        if problems or arg_problems:
+            messages = problems + [p["message"] for p in arg_problems]
             return {
                 "ok": False,
-                "code": "INVALID_PLAN",
+                # "BAD_ARGS" is the honest code when the only thing wrong is a
+                # step's arguments: the plan itself is fine, and the caller has
+                # to fix a call, not a sequence.
+                "code": "BAD_ARGS" if arg_problems and not problems else "INVALID_PLAN",
                 "tool": "catia_run_plan",
-                "message": "Plan rejected before touching the model",
-                "data": {"problems": problems},
+                "message": "Plan rejected before touching the model: "
+                           + "; ".join(messages[:3]),
+                "data": {"problems": messages, "details": arg_problems},
             }
         if arguments.get("dry_run"):
             return {
@@ -227,6 +333,13 @@ class PlannerTools:
                         entry["error"] = raw.get("message")
                 else:
                     entry.update(ok=True, result=self._trim(raw))
+            if entry["ok"] and step.get("measure"):
+                # Opt-in per step: measuring costs an inertia call, but it is the
+                # only way one plan can report one volume per part it built.
+                try:
+                    entry["measurements"] = self._measure_part()
+                except Exception as error:  # noqa: BLE001 - reported, not fatal
+                    entry["measurements_error"] = f"{type(error).__name__}: {error}"
             entry["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
             report.append(entry)
 
@@ -240,7 +353,7 @@ class PlannerTools:
         assertions: list[dict[str, Any]] = []
         if measure and failed_at is None:
             measurements = self._measure_part()
-            assertions = self._check(arguments.get("expect") or {}, measurements)
+            assertions = self._check_all(arguments.get("expect"), measurements)
 
         failed_assertions = [a for a in assertions if not a["pass"]]
         ok = failed_at is None and not failed_assertions
@@ -462,12 +575,15 @@ class PlannerTools:
         counts["counting_rule"] = self._COUNTING_RULE
         return counts
 
-    def _measure_part(self) -> dict[str, Any]:
+    def _measure_part(self, document: str | None = None) -> dict[str, Any]:
         if self._router is None:
             return {}
         measurements: dict[str, Any] = {}
+        target = {"document": document} if document else {}
+        if document:
+            measurements["document"] = document
         try:
-            raw = self._router["catia_get_inertia"].execute("catia_get_inertia", {})
+            raw = self._router["catia_get_inertia"].execute("catia_get_inertia", target)
             inertia = raw if isinstance(raw, dict) else json.loads(raw)
             measurements["volume_mm3"] = inertia.get("volume_mm3")
             measurements["area_mm2"] = inertia.get("area_mm2")
@@ -488,13 +604,25 @@ class PlannerTools:
             # that is not an error of this run, and reporting it as
             # "topology_error" next to a perfectly good volume read like a failed
             # measurement (reported 2026-10-24).
-            self.conn.product_of(self.conn.active_document)
+            #
+            # The test is the DOCUMENT TYPE, not "does .Product resolve":
+            # PartDocument carries a stub Product, so probing for the property
+            # made every part report "n/a (Product document)" and threw away its
+            # face/edge/vertex counts (found 2026-10-25 while adding per-document
+            # assertions - the same trap that made add_component fail on a Part).
+            if not self._is_product_document(self._named_document(document)):
+                raise RuntimeError("not a Product document")
             measurements["topology"] = (
                 "n/a (Product document: faces/edges/vertices belong to each part - "
                 "run catia_measure_topology while a part is active)")
+            # An assembly's surface area is not "missing data", it is not a
+            # thing a Product has. A bare null read as "this assembly has no
+            # area" (reported 2026-10-25).
+            if measurements.get("area_mm2") is None:
+                measurements["area_mm2"] = "n/a (Product document)"
         except Exception:  # noqa: BLE001 - not a Product, so count them
             try:
-                counts = self._count_topology()
+                counts = self._count_topology(document)
                 measurements.update(
                     faces=counts.get("faces"),
                     edges=counts.get("edges"),
@@ -504,7 +632,66 @@ class PlannerTools:
                 measurements["topology_error"] = f"{type(error).__name__}: {error}"
         return measurements
 
+    @staticmethod
+    def _is_product_document(doc: Any) -> bool:
+        """Whether ``doc`` is an assembly, decided by its type - not by ``.Product``."""
+        try:
+            kind = str(doc.Type)
+        except Exception:  # noqa: BLE001 - fall back to the file name
+            kind = ""
+        if kind:
+            return "PRODUCT" in kind.upper()
+        try:
+            return str(doc.FullName).upper().endswith(".CATPRODUCT")
+        except Exception:  # noqa: BLE001 - unsaved and untyped: assume no
+            return False
+
+    def _named_document(self, document: str | None) -> Any:
+        """The open document called ``document``, or the active one when None."""
+        if not document:
+            return self.conn.active_document
+        docs = self.conn.documents
+        key = document.strip().casefold()
+        for i in range(1, docs.Count + 1):
+            doc = docs.Item(i)
+            try:
+                names = {str(doc.Name).casefold(), str(doc.Name).casefold()[:-8]}
+            except Exception:  # noqa: BLE001
+                continue
+            if key in names:
+                return doc
+        raise RuntimeError(
+            f"'{document}' is not open. Documents: "
+            + ", ".join(str(docs.Item(i).Name) for i in range(1, docs.Count + 1))
+        )
+
     # ---- assertions ---------------------------------------------------------
+    def _check_all(self, expect: Any, active: dict[str, Any]
+                   ) -> list[dict[str, Any]]:
+        """Assertions for one expect object, or one per entry of a list of them.
+
+        An entry may name a document, which is measured on its own instead of the
+        active one - the difference between "one plan per part" and one plan that
+        builds and verifies thirty parts in a single submission (reported
+        2026-10-25).
+        """
+        if not expect:
+            return []
+        entries = expect if isinstance(expect, list) else [expect]
+        checks: list[dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            document = entry.get("document") or entry.get("doc")
+            actual = active
+            if document:
+                actual = self._measure_part(str(document))
+            for check in self._check(entry, actual):
+                if document:
+                    check["document"] = str(document)
+                checks.append(check)
+        return checks
+
     def _check(self, expect: dict[str, Any], actual: dict[str, Any]) -> list[dict[str, Any]]:
         checks: list[dict[str, Any]] = []
 

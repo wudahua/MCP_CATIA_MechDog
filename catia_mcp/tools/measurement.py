@@ -116,6 +116,37 @@ def read_measurable_array(app: Any, measurable: Any, method: str, count: int) ->
     return values
 
 
+_MIN_DISTANCE_POINTS = (
+    # GetMinimumDistance returns a distance and nothing else, and
+    # GetMinimumDistancePoints needs an OUT array, which pywin32's late-bound
+    # call cannot supply (it answers "type mismatch" / drops the result). The
+    # CATScript engine can, so the pair of closest points is read there.
+    "Public Function catia_mcp_minpoints(measurable, other)\n"
+    "    Dim a(5)\n"
+    "    measurable.GetMinimumDistancePoints other, a\n"
+    "    catia_mcp_minpoints = a\n"
+    "End Function\n"
+)
+
+
+def read_min_distance_points(app: Any, measurable: Any,
+                             other_ref: Any) -> tuple[list[float], list[float]]:
+    """Closest point on the measured object, and the matching point on ``other``.
+
+    ``other_ref`` is a REFERENCE (a point object), not a Measurable: passing a
+    Measurable raises "type mismatch" - measured on B30 2026-10-25.
+    """
+    result = app.SystemService.Evaluate(_MIN_DISTANCE_POINTS, 0,
+                                        "catia_mcp_minpoints",
+                                        [measurable, other_ref])
+    values = [float(v) for v in result]
+    if len(values) != 6:
+        raise RuntimeError(
+            f"GetMinimumDistancePoints returned {len(values)} values, expected 6"
+        )
+    return values[:3], values[3:]
+
+
 def _pick(arguments: dict[str, Any], *names: str) -> str:
     """First present alias, or a message naming every accepted spelling.
 
@@ -957,6 +988,9 @@ class MeasurementTools:
                 "min": None,
                 "max": None,
                 "components": [],
+                "complete": False,
+                "instances": {"total": len(skipped), "measured": 0,
+                              "skipped": len(skipped)},
                 "skipped": skipped,
                 "method": ("no component could be measured from its vertices; each "
                            "one's reason is in 'skipped'. A fully curved part has no "
@@ -974,10 +1008,29 @@ class MeasurementTools:
                 "(catia_open_document) and call get_bounding_box(document="
                 "'<part>.CATPart', method='mesh'), then place it with "
                 "catia_get_component_transform.")
-        payload = json.loads(self._bbox_json(corners, note))
+        payload = json.loads(self._bbox_json(
+            corners, note,
+            bounds="lower bound: each component's VERTEX box, so any part whose "
+                   "extremum lies on a curved face is under-reported"))
         payload["components"] = entries
+        # Say whether the box covers the whole assembly. 'skipped' sat beside
+        # min/max as a sibling key, so a caller reading only the numbers never
+        # learned that 6 of 70 instances were left out and the box is a lower
+        # bound in the directions they could have driven (reported 2026-10-25).
+        payload["complete"] = not skipped
+        payload["instances"] = {"total": len(entries) + len(skipped),
+                                "measured": len(entries),
+                                "skipped": len(skipped)}
         if skipped:
             payload["skipped"] = skipped
+            payload["incomplete_because"] = (
+                f"{len(skipped)} of {len(entries) + len(skipped)} instance(s) could "
+                "not be bounded from their vertices (fully curved parts have no "
+                "vertex at an extremum), so this box is exact only for the ones "
+                "measured and is a LOWER BOUND in any direction they extend. "
+                "Measure those by name with method='mesh' and place them with "
+                "catia_get_component_transform."
+            )
         return json.dumps(payload, indent=2)
 
     def _document_kind(self) -> str:
@@ -1124,6 +1177,9 @@ class MeasurementTools:
                     "faces may extend beyond these bounds"
                     + (" (capped at 200)" if truncated else "")
                     + (f"; {dropped} construction point(s) ignored" if dropped else ""),
+                    bounds="exact for a planar-faced solid; a curved face has no "
+                           "vertex at its extremum, so read 'bounds' as a lower "
+                           "bound there - use method='mesh' for those",
                 )
             if method == "vertices":
                 raise RuntimeError(
@@ -1138,6 +1194,9 @@ class MeasurementTools:
             "vertices; the mesh chords curved faces, so these bounds are a LOWER "
             "bound on the true envelope (measured 0.47-0.73 % small)"
             + copy_note + auto_note,
+            bounds=("lower bound: mesh chording, measured 0.47-0.73 % small on "
+                    "curved faces. Exact for a solid whose diameter runs through "
+                    "a planar edge or a vertex"),
         )
         if copy_note:
             # The caveat used to live only inside the prose of `method`, where a
@@ -1217,6 +1276,9 @@ class MeasurementTools:
                     + (" (capped at 200)" if truncated else "")
                     + (f"; {dropped} construction point(s) ignored (sketch wires "
                        f"and wireframe ends at 1e7 mm are not the solid)" if dropped else ""),
+                    bounds="exact for a planar-faced solid; a curved face has no "
+                           "vertex at its extremum, so read 'bounds' as a lower "
+                           "bound there - use method='mesh' for those",
                 )
             if method == "vertices":
                 raise RuntimeError(
@@ -1231,6 +1293,9 @@ class MeasurementTools:
             f"STL mesh sweep over {triangles} triangle vertices; the mesh chords "
             "curved faces, so these bounds are a LOWER bound on the true envelope "
             "(measured 0.47-0.73 % small)" + copy_note + auto_note,
+            bounds=("lower bound: mesh chording, measured 0.47-0.73 % small on "
+                    "curved faces (P02 Y 219.6278 against a true 220). Exact for "
+                    "a solid whose diameter lies on a planar edge or vertex"),
         )
 
     # A wireframe element's "infinite" end point is stored as 1e7 mm. Sweeping
@@ -1449,7 +1514,8 @@ class MeasurementTools:
                 pass
 
     @staticmethod
-    def _bbox_json(points: list[list[float]], method_note: str) -> str:
+    def _bbox_json(points: list[list[float]], method_note: str,
+                   bounds: str | None = None) -> str:
         xs = [p[0] for p in points]
         ys = [p[1] for p in points]
         zs = [p[2] for p in points]
@@ -1461,6 +1527,11 @@ class MeasurementTools:
                 "length_y": round(max(ys) - min(ys), 4),
                 "length_z": round(max(zs) - min(zs), 4),
             },
+            # Whether these numbers are the envelope or a lower bound on it. It
+            # used to live only inside 'method', where a caller reading
+            # 'dimensions' never sees it: a mesh box under-reports a curved face
+            # by 0.47-0.73 % (reported 2026-10-25, P02 Y 219.6278 against 220).
+            "bounds": bounds or "exact (no curved-face chording involved)",
             "method": method_note,
         }
         return json.dumps(result, indent=2)

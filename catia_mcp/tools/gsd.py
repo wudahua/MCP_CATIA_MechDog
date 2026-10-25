@@ -1360,8 +1360,14 @@ class GSDTools:
         0..6), zx -> (0..6, 25, 0..20). So zx maps u to Z and v to X, which is
         the mapping everybody gets wrong once.
         """
-        distance = float(placement.get("distance") or 0.0)
         base = str(placement.get("base") or "xy").lower()
+        if base == "frame":
+            # A sketch on an arbitrary plane keeps its own (u, v): p = O + u*w + v*t.
+            origin = [float(x) for x in placement.get("origin") or (0, 0, 0)]
+            first = [float(x) for x in placement.get("u") or (1, 0, 0)]
+            second = [float(x) for x in placement.get("v") or (0, 1, 0)]
+            return [origin[i] + first[i] * u + second[i] * v for i in range(3)]
+        distance = float(placement.get("distance") or 0.0)
         if base == "yz":
             return [distance, u, v]
         if base == "zx":

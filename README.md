@@ -101,15 +101,19 @@ flight**; topology counts filter `Selection_Wire*` elements. Revolution now goes
 through `AddNewShaftFromRef` + `SetProfileElement` + `RevoluteAxis` with
 `FirstAngle.Value`, and every cut is measured before it is reported.
 
-### Modelling a written spec: the four arguments that were missing
+### Modelling a written spec: the arguments that were missing
 
 | Argument | Why a spec needs it |
 |---|---|
 | `catia_create_sketch` → `offset`, or `{"type": "offset", "base", "distance"}` | A spec says "on the z=530 face". Only three datum planes existed, so most features of a real part could not be placed. The offset plane is inserted **into the body** — `AddNewPad` rejects a sketch whose support lives in a geometrical set |
 | `catia_create_sketch` → `{"type": "face", "index"}` | For a face that is not parallel to a datum plane. Sketches on a face use **that face's own coordinate frame**, which cannot be read back through automation — prefer the offset form whenever the face is axis-aligned |
+| `catia_create_sketch` → `{"type": "frame", "origin", "u", "v"}` | The way specs actually describe an inclined sketch: "O=(17.525, 185.862, 0), u=(0.995584, -0.093875, 0), v=-Z". The datum plane is built through the origin with H = `u` and V = `v`, so the numbers can be typed in unchanged. Without it, ten steps of a 2026-10-25 report could not be modelled at all (8 grooves at 5.39°, 2 faces at 14.04°) |
+| `catia_sketch_arc` → `p1`, `p2`, `direction` | Reverse-engineered data gives "centre, R, (x1,y1) -> (x2,y2)" and no angles. Converting by hand is what turns the one 240° major arc of 236 into a 120° minor one. Every arc reply now also states its swept angle |
 | `catia_sketch_line` → `construction` | A revolution axis or reference geometry that must not join the profile |
 | `catia_pocket` / `catia_hole` → `through_all` | CATIA's "up to last": the cut finds its own extent instead of you guessing a depth taller than the part |
 | `catia_shaft` / `catia_groove` → `axis` (`horizontal`/`vertical`) | Which of the sketch's two absolute axes to revolve about. A construction line is accepted by the property setter and then rejected at update time, so it is not offered |
+| `catia_fillet` / `catia_chamfer` → `edge_anchors` (+ `anchor_tol`) | The other half of a spec: "fillet R2.5 on the edge at (0, 65, -20)". Each anchor is matched to the edge whose minimum distance to it is smallest, and the reply states the edge name and the distance — an anchor that matches nothing, or two edges equally well, is refused instead of filleting the wrong one |
+| `catia_list_edges` → `coords: true` | Adds `point_on_edge` — a coordinate that lies ON the edge (the midpoint for a straight edge, measured) — which is both the value to feed back as an anchor and the thing to compare with a spec sheet |
 
 Details, measurements and caveats: **[`FORK.md`](FORK.md)** (Chinese).
 
@@ -140,6 +144,23 @@ keeps the reply small.
 Two related defaults: `propagation` defaults to `none`, so one picked edge is one
 fillet instead of its whole tangent chain, and a batch whose rebuild fails is
 retried one edge at a time rather than lost.
+
+When the source gives coordinates instead of edge names, skip the listing
+entirely:
+
+```jsonc
+{"tool": "catia_fillet", "args": {"radius": 2.5,
+  "edge_anchors": [[0, 65, -20], [50, 65, -20]], "anchor_tol": 0.5}}
+// -> Fillet R2.5: 2/2 edge(s) done [applied Edge.6@R2.5, Edge.9@R2.5]
+//    Edge anchors: Anchor [0.0, 65.0, -20.0] -> Edge.6 @ 0.0000 mm; ...
+```
+
+`Measurable.GetMinimumDistance` takes a **point reference** — it rejects a
+Measurable with "type mismatch" — so the anchors are turned into scratch points
+in a temporary geometrical set that is deleted before the reply. An anchor that
+lands beyond `anchor_tol`, or exactly where two edges meet, is refused with the
+candidates and their distances: a fillet on the wrong edge is a perfectly legal
+feature nobody asked for.
 
 ---
 

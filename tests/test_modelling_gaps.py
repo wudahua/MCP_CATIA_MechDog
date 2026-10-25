@@ -67,7 +67,7 @@ def test_create_sketch_accepts_a_face_and_an_offset_object():
     props = schema(CATIAMCPServer(), "catia_create_sketch")["properties"]
     objects = [p for p in props["plane"]["oneOf"] if p["type"] == "object"]
     assert len(objects) == 1
-    assert objects[0]["properties"]["type"]["enum"] == ["offset", "face"]
+    assert objects[0]["properties"]["type"]["enum"] == ["offset", "face", "frame"]
     assert "index" in objects[0]["properties"]
     assert "distance" in objects[0]["properties"]
 

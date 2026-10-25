@@ -59,6 +59,18 @@ class AssemblyTools:
                             "type": "string",
                             "description": "Full path to the .CATPart or .CATProduct file to add",
                         },
+                        "count": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 1,
+                            "description": (
+                                "Insert this many instances of the same file, all at "
+                                "the origin - then place them with one "
+                                "catia_set_component_transform(placements=[...]) call. "
+                                "Each instance is still its own guarded insert; a "
+                                "failure part-way says how many landed."
+                            ),
+                        },
                     },
                     "required": ["file_path"],
                 },
@@ -335,11 +347,26 @@ class AssemblyTools:
                     "yields a valid-looking placement that is the transpose of what you "
                     "asked for. `position_components` takes CATIA's raw 12 numbers instead. "
                     "Reads the placement back and reports deviation, det, orthogonality and "
-                    "where each local axis actually ended up."
+                    "where each local axis actually ended up. Pass `placements` - a "
+                    "list of {component_name, rotation_rows, translation, ...} - to "
+                    "place many components in ONE call with one display refresh; "
+                    "the reply reports each component's max deviation, so a batch "
+                    "cannot hide a placement that did not take."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
+                        "placements": {
+                            "type": "array",
+                            "description": (
+                                "Batch form: each entry takes the same keys as a "
+                                "single call (component_name plus rotation_rows / "
+                                "position_components / translation). When given, the "
+                                "top-level component_name/rotation_rows/translation "
+                                "are ignored."
+                            ),
+                            "items": {"type": "object"},
+                        },
                         "component_name": {
                             "type": ["string", "object"],
                             "description": (
@@ -386,7 +413,11 @@ class AssemblyTools:
                             "default": True,
                         },
                     },
-                    "required": ["component_name"],
+                    # Either a single placement or the batch form - never neither.
+                    "anyOf": [
+                        {"required": ["component_name"]},
+                        {"required": ["placements"]},
+                    ],
                 },
             },
         ]
@@ -394,7 +425,8 @@ class AssemblyTools:
     def execute(self, tool_name: str, arguments: dict[str, Any]) -> str:
         match tool_name:
             case "catia_add_component":
-                return self._add_component(arguments["file_path"])
+                return self._add_components(arguments["file_path"],
+                                            int(arguments.get("count", 1) or 1))
             case "catia_add_new_part":
                 return self._add_new_part(arguments.get("name"))
             case "catia_fix_constraint":
@@ -545,6 +577,47 @@ class AssemblyTools:
         return (f"Component added from: {native_path} "
                 f"({after - before} instance(s), assembly now holds {after}).{note}{lead}")
 
+    def _add_components(self, file_path: str, count: int = 1) -> str:
+        """Insert the same part ``count`` times.
+
+        Each insert still runs as its own guarded call - the isolated process is
+        what keeps a CATIA dialog from blocking the session, and batching inside
+        one process would put every instance behind a single dialog. What the
+        batch saves is the round trip, and what it must not do is report success
+        for a run where instance 7 failed: the reply states how many of the
+        requested instances actually landed.
+        """
+        if count < 1:
+            raise ValueError(f"count must be at least 1; got {count}.")
+        if count == 1:
+            return self._add_component(file_path)
+        import os
+
+        done = 0
+        last = ""
+        for index in range(1, count + 1):
+            try:
+                last = self._add_component(file_path)
+            except Exception as error:  # noqa: BLE001 - reported with the count
+                raise RuntimeError(
+                    f"Inserted {done} of {count} instance(s) of "
+                    f"'{os.path.basename(file_path)}', then instance {index} "
+                    f"failed: {error}. The {done} that landed are untouched - "
+                    "check catia_list_components before retrying, and note that "
+                    "a retry of the full count would double the ones that already "
+                    "succeeded."
+                ) from error
+            done += 1
+        product = self._require_active_product()
+        try:
+            total = int(product.Products.Count)
+        except Exception:  # noqa: BLE001
+            total = None
+        holds = f"; the assembly now holds {total} component(s)" if total is not None else ""
+        return (f"{done} instance(s) of '{os.path.basename(file_path)}' inserted"
+                f"{holds}. Each insert ran in its own isolated process, so a "
+                "CATIA dialog could not block the session. Last: " + last)
+
     def _insert_blocked_hint(self, path: str) -> str:
         """Extra sentence when the refused file is already open in this session.
 
@@ -625,7 +698,9 @@ class AssemblyTools:
         except Exception:  # noqa: BLE001 - fall back to the file name
             kind = ""
         if kind:
-            return kind.upper().endswith("PRODUCT")
+            # "Product" on B30, "ProductDocument" through other bindings: both
+            # contain PRODUCT, and no other document type does.
+            return "PRODUCT" in kind.upper()
         try:
             return str(doc.FullName).upper().endswith(".CATPRODUCT")
         except Exception:  # noqa: BLE001 - unsaved and untyped: assume no
@@ -955,6 +1030,10 @@ class AssemblyTools:
         return json.dumps(report, indent=2, ensure_ascii=False)
 
     def _set_component_transform(self, args: dict[str, Any]) -> str:
+        placements = args.get("placements")
+        if placements:
+            return self._apply_placements(placements,
+                                          verify=args.get("verify", True))
         product = self.conn.get_active_product()
         component = self._resolve_component(product, args["component_name"])
 
@@ -998,7 +1077,8 @@ class AssemblyTools:
             )
 
         component.Position.SetComponents(values)
-        self.conn.refresh_display()
+        if args.get("refresh", True):
+            self.conn.refresh_display()
 
         report: dict[str, Any] = {
             "component": component.Name,
@@ -1028,6 +1108,59 @@ class AssemblyTools:
                     "verified.position_components before continuing."
                 )
         return json.dumps(report, indent=2, ensure_ascii=False)
+
+    def _apply_placements(self, placements: list[Any], verify: bool = True) -> str:
+        """Place many components in one call, and report each one's deviation.
+
+        Reported 2026-10-25: seventy instances meant seventy calls that each
+        changed twelve numbers. The verification is what makes batching safe -
+        a batch that says "70 applied" without saying "all 70 read back at 0 mm"
+        is exactly the claim this tool exists to avoid.
+        """
+        results: list[dict[str, Any]] = []
+        for index, entry in enumerate(placements, start=1):
+            if not isinstance(entry, dict) or not entry.get("component_name"):
+                raise ValueError(
+                    f"placements[{index - 1}] must be an object with "
+                    "'component_name' plus the same arguments a single call takes "
+                    "(rotation_rows / position_components / translation)."
+                )
+            try:
+                raw = self._set_component_transform(
+                    {**entry, "verify": verify, "refresh": False})
+            except Exception as error:  # noqa: BLE001 - one placement, not the batch
+                results.append({
+                    "component": entry.get("component_name"),
+                    "ok": False,
+                    "error": str(error).splitlines()[0][:200],
+                })
+                continue
+            data = raw if isinstance(raw, dict) else json.loads(raw)
+            verified = data.get("verified") or {}
+            results.append({
+                "component": data.get("component"),
+                "ok": True,
+                "source": data.get("source"),
+                "max_deviation": verified.get("max_deviation"),
+                "matches_request": verified.get("matches_request"),
+            })
+        self.conn.refresh_display()
+        placed = [r for r in results if r["ok"]]
+        failed = [r for r in results if not r["ok"]]
+        worst = None
+        if verify and placed:
+            deviations = [r["max_deviation"] for r in placed
+                          if isinstance(r.get("max_deviation"), (int, float))]
+            worst = round(max(deviations), 12) if deviations else None
+        return json.dumps({
+            "count": len(results),
+            "placed": len(placed),
+            "failed": len(failed),
+            "worst_max_deviation": worst,
+            "placements": results,
+            "note": ("One call, one display refresh. Read 'placements' - an entry "
+                     "with ok=false did not move, and the rest still did."),
+        }, indent=2, ensure_ascii=False)
 
     def _move_component(self, args: dict[str, Any]) -> str:
         import math
@@ -1224,7 +1357,15 @@ class AssemblyTools:
                          "Replace them with catia_add_component, or re-create the "
                          "assembly - the good components listed here are intact."),
             }, indent=2, ensure_ascii=False)
-        return json.dumps(components, indent=2, ensure_ascii=False)
+        # Always an object, never a bare list: the broken case answers an object,
+        # and a caller that has to branch on the SHAPE of a listing before it can
+        # read it will one day branch wrong (the same drift the 2026-10-25
+        # reports describe for plan results).
+        return json.dumps({
+            "components": components,
+            "count": len(components),
+            "convention": "matrix",
+        }, indent=2, ensure_ascii=False)
 
     def _list_constraints(self) -> str:
         product = self.conn.get_active_product()

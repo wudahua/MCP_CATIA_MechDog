@@ -357,12 +357,18 @@ def test_save_as_onto_an_open_file_names_the_holder():
 # 6. The failure texts that were asked for.
 # --------------------------------------------------------------------------
 
-def test_pad_no_material_suggests_the_retry_and_the_self_intersection():
+def test_pad_no_material_checks_the_direction_before_blaming_the_profile():
+    """0.3.19 replaced the blanket "retry once" with a measurement: pad the same
+    sketch the other way and see whether it grows. A wrong direction cannot be
+    fixed by retrying, so the old advice sent users round a loop."""
     from catia_mcp.tools.part_design import PartDesignTools
 
     source = inspect.getsource(PartDesignTools._pad)
-    assert "self-intersecting" in source
-    assert "this once more" in source
+    assert "_pad_other_direction" in source
+    assert "THE PROFILE IS FINE" in source
+    assert "in EITHER direction" in source
+    assert "self-intersects" in source
+    assert "this once more" not in source
 
 
 def test_the_three_face_hint_names_the_previous_fillet():

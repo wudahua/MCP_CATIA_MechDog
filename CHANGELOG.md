@@ -4,6 +4,154 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added — sketch on an arbitrary plane (`{"type": "frame"}`)
+
+- `catia_create_sketch` takes `{"type": "frame", "origin": [...], "u": [...],
+  "v": [...]}` and builds a datum plane through that origin whose H axis is `u`
+  and whose V axis is `v`, so a spec sheet's `(u, v)` numbers can be typed
+  straight in. Ten steps in the 2026-10-25 report could not be modelled at all
+  without it (eight 5.39°-tilted groove sketches on a track pad, two 14.04°
+  inclined faces), because `plane: xy|yz|zx + offset` cannot express a normal
+  that is not on a coordinate axis.
+- Mechanism, measured on B30: `AddNewPlane3Points` (there is no `AddNewPlane`)
+  on three points built from the frame, then `part.InWorkObject = body` before
+  `body.InsertHybridShape(plane)` - without that assignment the call fails with
+  E_FAIL. Verified: a 10 x 4 mm profile drawn in a frame at
+  `(17.525, 185.862, 0)` with `u = (0.995584, -0.093875, 0)`, `v = -Z` pads to a
+  box spanning x 17.525…27.6686, y 184.9233…187.8532, z -4…0 - i.e. exactly the
+  frame, not an approximation of it.
+- `catia_gsd_spline(element=...)` converts frame sketches back to global
+  coordinates, so a frame profile can still become a 3D spline.
+
+### Added — edges addressed by a coordinate that lies on them
+
+- `catia_list_edges(coords=true)` adds `point_on_edge` and
+  `distance_to_centre_mm` to every edge: a point ON the edge, taken as the
+  closest point to the body's centre of gravity - the midpoint for a straight
+  edge. Verified on a 60 x 40 x 40 box: all twelve edges come back exactly at
+  their midpoints.
+- `catia_fillet` / `catia_chamfer` take `edge_anchors: [[x, y, z], ...]` with
+  `anchor_tol` (default 0.5 mm), and the reply states the matched edge name and
+  the measured distance for each anchor. An anchor beyond the tolerance, or one
+  equally close to two edges, is refused with the candidates listed - a fillet
+  on the wrong edge is a legal feature nobody asked for. In the report, 22
+  edges given as coordinates could be mapped to 4; the other 18 were given up
+  because `catia_list_edges` returned no coordinates at all.
+- How, measured: `Measurable.GetMinimumDistance` takes a POINT REFERENCE (it
+  rejects a Measurable with "type mismatch"), `GetPoint`/`GetCOG`/
+  `GetBoundingBox` all fail on an edge, and `GetPointsOnCurve` fails on solid
+  edges too. The scratch points live in a temporary geometrical set that is
+  deleted before the reply, so the model tree is left as it was.
+- `catia_list_edges` now always answers one shape (`components`/`edges` inside
+  an object, `convention` included) instead of returning a bare list in one case
+  and an object in another.
+
+### Added — arc from its two endpoints
+
+- `catia_sketch_arc` accepts `p1`/`p2` plus `direction` instead of
+  `start_angle`/`end_angle`. The source data that drove this gives "centre, R,
+  (x1,y1) -> (x2,y2)" and no angles; of 236 arcs exactly one was a 240° major
+  arc, and converting by hand is what turns it into a 120° one that puts the
+  boss on the wrong side. Measured: `p1` at 10°, `p2` at 250° gives "swept
+  240.0000° MAJOR arc" counter-clockwise and "swept 120.0000°" clockwise.
+- Every arc reply now states the swept angle and the arc length, and a radius
+  that does not fit its endpoints by more than 1 µm is called out - that is how
+  a reverse-engineered profile acquires a gap.
+
+### Added — batch assembly work
+
+- `catia_add_component(count=N)` inserts N instances of one file. Each insert
+  still runs as its own guarded process (the isolation is what keeps a CATIA
+  dialog from blocking the session); a failure part-way reports how many landed
+  rather than claiming success.
+- `catia_set_component_transform(placements=[...])` places many components in
+  one call with one display refresh, and reports each one's `max_deviation`.
+  Measured: two instances, `worst_max_deviation` 0.0.
+- `catia_new_part(file_path=...)` saves the new part immediately. A part with
+  geometry and no path cannot be saved later and cannot be inserted into an
+  assembly either - the caller only finds out when the insert cannot find the
+  file.
+
+### Added — plan steps are validated before the model changes
+
+- `catia_run_plan` checks every step's `args` against that tool's own
+  `inputSchema` and answers `BAD_ARGS` with `details: [{step, tool, missing,
+  path, message, schema}]`. A step with a missing argument used to surface as
+  `STEP_EXCEPTION / KeyError: 'name'` after the plan had already changed the
+  model, while the same call made directly was rejected with a readable message.
+- A step may carry `measure: true`; the report then holds that step's
+  measurements. That is how one plan that builds several parts keeps one volume
+  per part.
+- `expect` may be a LIST, and an entry with `"document": "P06.CATPart"` is
+  measured on that document - verified: PA.CATPart 800 mm3 and PB.CATPart
+  1200 mm3 asserted in the same plan, both passing, each assertion tagged with
+  its document.
+
+### Fixed — a part is no longer described as a Product
+
+- `catia_run_plan`'s measurements said `topology: "n/a (Product document)"` for
+  every PART, because the test was "does `.Product` resolve" and a
+  `PartDocument` carries a stub Product. Face/edge/vertex counts were therefore
+  thrown away for parts (found 2026-10-25 while adding per-document assertions -
+  the same trap that made `catia_add_component` fail on a Part document). The
+  test is now the document type.
+- On a real Product, `area_mm2` is `"n/a (Product document)"` instead of `null`,
+  which read as "this assembly has no surface area".
+- `catia_get_bounding_box` gains a `bounds` field beside `dimensions`: `exact`
+  for a planar-faced solid, `lower bound` for a mesh sweep (measured 0.47-0.73 %
+  small on curved faces) and for the assembly's vertex aggregation. It used to
+  live only inside the prose of `method`, where a caller reading `dimensions`
+  never sees it.
+
+### Fixed — pad/pocket no longer blame the profile for a zero-volume sweep
+
+- When a pad builds no material, the tool now pads the SAME sketch in the
+  opposite direction before saying anything about the profile. Measured on B30:
+  "THE PROFILE IS FINE: the same sketch padded in the opposite direction adds
+  64.0 mm3 ... Pass direction='reverse'", or "It adds nothing in EITHER
+  direction". Both of the report's real cases (a reversed direction, and a
+  profile lying inside existing material) were previously answered with "the
+  profile may be open - call this once more", and no number of retries can fix
+  either.
+
+### Fixed — the diagnosis names the server, even with no Part open
+
+- `catia_diagnose` reports `mcp: {name, version, tool_count}` as its FIRST key.
+  It previously sat behind the factory probe's early return, so a report written
+  on an empty CATIA quoted no version at all (measured: `"mcp": null`).
+  Verified: `{"name": "MCP_CATIA_MechDog", "version": "0.3.19",
+  "tool_count": 101}`.
+
+### Fixed — close_sketch names every breakpoint
+
+- The warning lists ALL loose endpoints with the gap at each one, not just the
+  closest pair: point lists rounded to 0.001 mm break at several joints at once.
+  Verified with two gaps (0.0004 mm and 0.0006 mm): "4 loose endpoint(s) in 2
+  break(s)". A profile that is open on purpose (a sweep guide) is still not
+  nagged about.
+
+### Fixed — sketch_delete_element keeps the sketch open
+
+- The edition session is reopened on both paths, so a second delete does not
+  need `catia_sketch_edit` first, and after a failed rebuild the sketch is open
+  for the repair. The reply states the element count before and after, and says
+  that every later index moved down by one. Index 1 remains the absolute axis.
+
+### Fixed — the assembly bounding box says whether it covers everything
+
+- The aggregated box carries `complete`, `instances: {total, measured, skipped}`
+  and `incomplete_because`. `skipped` used to sit beside `min`/`max` as a
+  sibling key, so a caller reading only the numbers never learned that six of
+  seventy instances were excluded.
+- `catia_shell` takes `external_thickness` - the third argument of
+  `AddNewShell(face, internal, external)` is the only route to material OUTSIDE
+  the surface. Measured on a 96 000 mm3 box with one face removed: internal 5
+  gives 43 500 mm3, external 5 gives 61 500, and 2.5/2.5 gives 52 125, so the
+  side has to be stated. A negative `thickness` is refused up front: CATIA
+  answers it with a bare "UpdateObject failed", which reads like a bad feature
+  name. A closed shell (no face removed) is refused with the measurement that
+  `AddNewShell(None, ...)` builds an EMPTY feature (volume 0.0).
+
 ## [0.3.19] — 2026-10-25 · instances of one reference
 
 ### Added — `catia_copy_component`: instances of one reference, in one call

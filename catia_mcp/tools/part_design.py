@@ -24,6 +24,92 @@ from catia_mcp.topo_search import (
 )
 
 
+# Shared by catia_fillet and catia_chamfer: pick edges by a coordinate that is
+# ON them instead of by an index. Reports come in the other direction - a spec
+# sheet says 'fillet R2.5 on the edge at (0, 65, -20)' and never says Edge.11.
+_EDGE_ANCHOR_PROPERTIES: dict[str, Any] = {
+    "edge_anchors": {
+        "type": "array",
+        "items": {
+            "type": "array",
+            "items": {"type": "number"},
+            "minItems": 3,
+            "maxItems": 3,
+        },
+        "description": (
+            "Edges given as [x, y, z] points that lie ON them. Each anchor is "
+            "matched to the edge whose minimum distance to it is smallest, and "
+            "the reply states the edge name and the measured distance for every "
+            "anchor - so 'I selected the wrong edge' becomes visible instead of "
+            "producing a legal fillet in the wrong place. An anchor that is "
+            "outside anchor_tol, or equally close to two edges, is refused with "
+            "the candidates and their distances. Can be combined with edge_names."
+        ),
+    },
+    "anchor_tol": {
+        "type": "number",
+        "default": 0.5,
+        "exclusiveMinimum": 0,
+        "description": (
+            "How far an anchor may sit from the edge it means, in mm. 0.5 "
+            "accepts a coordinate rounded to a tenth; tighten it when two "
+            "candidate edges pass close together."
+        ),
+    },
+}
+
+
+class _ProbePoints:
+    """A few scratch points in a throwaway geometrical set.
+
+    CATIA's minimum-distance API takes a POINT REFERENCE, not a coordinate, so
+    turning "[x, y, z] from a report" into "which edge is this" needs a real
+    point object. They are collected in one set and that set is deleted on the
+    way out (field-verified on B30 2026-10-25: Selection.Delete removes the set
+    itself, leaving HybridBodies.Count back at 0), so the reply can quote
+    coordinates without leaving anything in the caller's model tree.
+    """
+
+    NAME = "MCP_probe_points"
+
+    def __init__(self, conn: Any, part: Any) -> None:
+        self.conn = conn
+        self.part = part
+        self.factory = part.HybridShapeFactory
+        self.set = part.HybridBodies.Add()
+        self.set.Name = self.NAME
+        self.shapes: list[Any] = []
+        self._updated = False
+
+    def add(self, x: float, y: float, z: float) -> Any:
+        point = self.factory.AddNewPointCoord(float(x), float(y), float(z))
+        self.set.AppendHybridShape(point)
+        self.shapes.append(point)
+        self._updated = False
+        return point
+
+    def update(self) -> None:
+        """One rebuild for every point added since the last one."""
+        if self._updated or not self.shapes:
+            return
+        self.part.Update()
+        self._updated = True
+
+    def close(self) -> None:
+        try:
+            sel = self.conn.hso
+            sel.Clear()
+            sel.Add(self.set)
+            sel.Delete()
+            sel.Clear()
+        except Exception:  # noqa: BLE001 - a leftover probe set is not fatal
+            pass
+        try:
+            self.part.Update()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 class PartDesignTools:
     """Tools for 3D Part Design features in CATIA V5."""
 
@@ -205,7 +291,13 @@ class PartDesignTools:
                     "took and why the others did not. Prefer the 'fingerprint' from "
                     "catia_list_edges ('L17.6112|Pad.6;2|Sketch.7;2') over 'Edge.N': "
                     "the index is renumbered by every feature, the fingerprint is "
-                    "re-resolved when the call runs."
+                    "re-resolved when the call runs. When the source data gives "
+                    "COORDINATES instead of edge names - 'R2.5 on the edge at "
+                    "(0, 65, -20)' - pass them as edge_anchors: each one is matched "
+                    "to the nearest edge, and the reply states the edge name and the "
+                    "measured distance for every anchor. An anchor that matches "
+                    "nothing within anchor_tol, or matches two edges equally well, "
+                    "is refused rather than guessed."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -243,6 +335,7 @@ class PartDesignTools:
                             "enum": ["tangency", "none"],
                             "default": "none",
                         },
+                        **_EDGE_ANCHOR_PROPERTIES,
                     },
                     "required": ["radius"],
                 },
@@ -271,6 +364,7 @@ class PartDesignTools:
                             "items": {"anyOf": [{"type": "string"}, {"type": "object"}]},
                             "description": "Several edges at once, e.g. ['Edge.3','Edge.9'] or a list of fingerprints. Takes precedence over edge_name.",
                         },
+                        **_EDGE_ANCHOR_PROPERTIES,
                     },
                     "required": ["length"],
                 },
@@ -498,27 +592,60 @@ class PartDesignTools:
             {
                 "name": "catia_shell",
                 "description": (
-                    "Create a Shell feature: hollows out a solid leaving walls of specified thickness. "
-                    "Optionally remove faces to create openings."
+                    "Create a Shell feature: hollows out a solid, leaving walls of the "
+                    "given thickness. 'thickness' is the INTERNAL one (material goes "
+                    "inward); 'external_thickness' is the other side of CATIA's "
+                    "AddNewShell(face, internal, external) and is the only way to get "
+                    "material outside the original surfaces. Both were measured on B30 "
+                    "2026-10-25 on a 60x40x40 box (96 000 mm3) with one face removed: "
+                    "internal 5 gives 43 500 mm3, external 5 gives 61 500, and 2.5/2.5 "
+                    "gives 52 125 - three different shapes, so say which side you "
+                    "mean. 'thickness' must be POSITIVE: CATIA rejects a negative "
+                    "value with a bare 'UpdateObject failed', which reads like a bad "
+                    "feature name rather than a bad argument. The first face in "
+                    "'faces_to_remove' is what the API calls the face to remove, so "
+                    "at least one is required - a closed shell is not expressible "
+                    "through this factory. Measured 2026-10-25: passing None for "
+                    "the face 'succeeds' and leaves an EMPTY feature (volume 0.0 "
+                    "on a 96 000 mm3 box), which is worse than a refusal. For a "
+                    "part that must stay closed, shell it with one face removed "
+                    "and thicken or pad the opening back, or build the walls as a "
+                    "pad of the outer profile minus a pocket of the inner one."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "thickness": {
                             "type": "number",
-                            "description": "Wall thickness in mm",
+                            "exclusiveMinimum": 0,
+                            "description": (
+                                "Wall thickness in mm, measured INWARD from the "
+                                "surface. Must be positive."
+                            ),
+                        },
+                        "external_thickness": {
+                            "type": "number",
+                            "minimum": 0,
+                            "default": 0,
+                            "description": (
+                                "Thickness added OUTSIDE the original surface "
+                                "(CATIA's third AddNewShell argument). 0 = the "
+                                "usual inward shell."
+                            ),
                         },
                         "faces_to_remove": {
                             "type": "array",
                             "items": {"type": "string"},
+                            "minItems": 1,
                             "description": (
-                                "REQUIRED: indexed faces to remove and open "
-                                "('Face.N' from catia_list_faces); the first "
-                                "one anchors the shell."
+                                "Indexed faces to remove and open ('Face.N' from "
+                                "catia_list_faces); the first one is the face "
+                                "CATIA's AddNewShell anchors on, so at least one "
+                                "is required."
                             ),
                         },
                     },
-                    "required": ["thickness"],
+                    "required": ["thickness", "faces_to_remove"],
                 },
             },
             {
@@ -878,6 +1005,20 @@ class PartDesignTools:
                                   "description": "Return at most this many (0 = all)"},
                         "include_nls": {"type": "boolean", "default": True,
                                         "description": "Include each edge's NLS path"},
+                        "coords": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Add 'point_on_edge' [x, y, z] to every edge - a "
+                                "coordinate that lies ON it (the point closest to "
+                                "the body's centre of gravity, i.e. the midpoint "
+                                "for a straight edge). Costs one measurement per "
+                                "edge, so it is off by default. This is the "
+                                "coordinate to feed back as edge_anchors, and the "
+                                "one to compare with a spec sheet that says "
+                                "'the edge at (0, 65, -20)'."
+                            ),
+                        },
                     },
                 },
             },
@@ -962,7 +1103,8 @@ class PartDesignTools:
                     arguments.get("min_length"), arguments.get("max_length"),
                     arguments.get("faces"), int(arguments.get("offset", 0) or 0),
                     int(arguments.get("limit", 0) or 0),
-                    bool(arguments.get("include_nls", True)))
+                    bool(arguments.get("include_nls", True)),
+                    bool(arguments.get("coords", False)))
             case _:
                 raise ValueError(f"Unknown part design tool: {tool_name}")
 
@@ -1033,6 +1175,120 @@ class PartDesignTools:
             self.conn.hso.Clear()
         except Exception:
             pass
+
+    def _edge_probe_points(self, part: Any) -> "_ProbePoints":
+        """Scratch points for "which edge is this coordinate on" questions."""
+        return _ProbePoints(self.conn, part)
+
+    def _anchors_to_edges(
+        self, body: Any, anchors: list[list[float]], tol: float,
+    ) -> tuple[list[str], list[Any], str, list[dict[str, Any]]]:
+        """Map anchor coordinates to edges by minimum distance.
+
+        Measured on B30 2026-10-25: ``Measurable.GetMinimumDistance`` accepts a
+        POINT REFERENCE (it rejects a Measurable with "type mismatch"), so a
+        coordinate becomes an edge index without ever moving the mouse. The
+        distance is reported for every anchor - an anchor that lands 0.4 mm from
+        the edge the caller meant looks identical to a correct one if the reply
+        only says "fillet created".
+
+        Anything that is not a single unambiguous match is refused rather than
+        guessed: a fillet on the wrong edge is a legal feature nobody asked for.
+        """
+        part = self.conn.get_active_part()
+        spa = self._topo_measure(part)
+        if spa is None:
+            raise RuntimeError(
+                "SPAWorkbench is not available, so edge anchors cannot be "
+                "measured. Use Edge.N or a fingerprint from catia_list_edges."
+            )
+        table = self._edge_table(body)
+        if not table:
+            raise RuntimeError("The active body has no edges to fillet yet.")
+        measurables = []
+        for entry in table:
+            try:
+                measurables.append(spa.GetMeasurable(entry["cell"].Reference))
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    f"Could not measure {entry['name']}: {exc}"
+                ) from exc
+
+        labels: list[str] = []
+        refs: list[Any] = []
+        matches: list[int] = []
+        report: list[str] = []
+        seen: set[int] = set()
+        probe = self._edge_probe_points(part)
+        try:
+            for anchor in anchors:
+                if len(anchor) != 3:
+                    raise RuntimeError(
+                        f"Each edge anchor must be [x, y, z]; got {anchor!r}."
+                    )
+                point_ref = probe.add(*anchor)
+                probe.update()
+                dists: list[tuple[float, int]] = []
+                for i, measurable in enumerate(measurables):
+                    try:
+                        dists.append((float(measurable.GetMinimumDistance(point_ref)), i))
+                    except Exception:  # noqa: BLE001 - one edge, not the call
+                        continue
+                dists.sort()
+                if not dists:
+                    raise RuntimeError(
+                        f"No edge of the body could be measured against anchor "
+                        f"{anchor}."
+                    )
+                best_distance, best_index = dists[0]
+                entry = table[best_index]
+                if best_distance > tol:
+                    raise RuntimeError(
+                        f"Anchor {anchor} is {best_distance:.4f} mm from the "
+                        f"nearest edge ({entry['name']}, L{entry['length'] or 0:.4f}), "
+                        f"beyond anchor_tol={tol}. Nothing was filleted. Raise "
+                        "anchor_tol if the coordinate is a rounded measurement, or "
+                        "pass Edge.N / a fingerprint from catia_list_edges."
+                    )
+                near = [d for d in dists[1:]
+                        if d[0] <= tol and abs(d[0] - best_distance) < 1e-6]
+                if near:
+                    others = ", ".join(
+                        f"{table[i]['name']} (L{table[i]['length'] or 0:.4f})"
+                        for _, i in near)
+                    raise RuntimeError(
+                        f"Anchor {anchor} is {best_distance:.4f} mm from "
+                        f"{entry['name']} and equally close to {others}, so the "
+                        "edge it means is ambiguous - the anchor sits on where "
+                        "they meet. Nothing was filleted; pass explicit "
+                        "edge_names/edge_name for these edges."
+                    )
+                if best_index in seen:
+                    report.append(
+                        f"Anchor {anchor} -> {entry['name']} @ {best_distance:.4f} mm "
+                        "(already selected by an earlier anchor; not added twice)"
+                    )
+                    continue
+                seen.add(best_index)
+                matches.append(best_index)
+                report.append(
+                    f"Anchor {anchor} -> {entry['name']} @ {best_distance:.4f} mm")
+        finally:
+            # The probe set is deleted here, and that clears the selection,
+            # which invalidates every topology Reference taken from it - so the
+            # references are re-read afterwards, by index, not kept from above.
+            probe.close()
+        if not matches:
+            raise RuntimeError(
+                "None of the given edge_anchors matched a distinct edge: "
+                + "; ".join(report)
+            )
+        table = self._edge_table(body)
+        for index in matches:
+            entry = table[index]
+            labels.append(f"{entry['name']} (by anchor)")
+            refs.append(entry["cell"].Reference)
+        return labels, refs, "Edge anchors: " + "; ".join(report) + ".", table
 
     def _prepare_body(self, part: Any) -> Any:
         """Put the solid body back in work and return it.
@@ -1112,21 +1368,44 @@ class PartDesignTools:
             gone = self._remove_feature(part, pad)
             stayed = (f"Volume stayed {before:.1f} mm3." if before is not None
                       else f"The volume could not be measured ({volume_note}).")
+            # Before blaming the profile, ask CATIA the one question that settles
+            # it: does the SAME sketch, padded the other way, grow the body? If it
+            # does, the direction is wrong and no amount of profile repair helps.
+            # Reported 2026-10-25: a 55 mm pad pointing into existing material
+            # came back as "the profile may be open", and the advice to retry sent
+            # a user round a loop that could never succeed.
+            reverse_gain = self._pad_other_direction(
+                part, body, sketch, height, symmetric, direction, before)
+            if reverse_gain is not None:
+                raise RuntimeError(
+                    "CATIA built no material for this pad, so it was rolled back"
+                    + ("" if gone else " (the dead feature could NOT be deleted - "
+                                        "close the document without saving)")
+                    + f" {stayed} THE PROFILE IS FINE: the same sketch padded in the "
+                    f"opposite direction adds {reverse_gain:.1f} mm3. "
+                    + ("You already passed direction='reverse', so the material is "
+                       "on the other side - use direction='normal'."
+                       if direction == "reverse"
+                       else "Pass direction='reverse' to build it there.")
+                    + " (Measured by building it both ways and rolling back the "
+                      "probe, not guessed.)"
+                )
             raise RuntimeError(
                 "CATIA built no material for this pad, so it was rolled back"
                 + ("" if gone else " (the dead feature could NOT be deleted - "
                                     "close the document without saving)")
-                + f" {stayed} A pad needs a CLOSED profile on the sketch; an open "
-                "polyline (or an arc chain with a gap) updates to an empty feature. "
-                "catia_close_sketch reports the two endpoints and the gap when it "
-                "can see one - a 0.0035 mm gap is enough to land here. "
-                "Two more cases land on this same message: a self-intersecting "
-                "outline (check the signed area - a bowtie has a small or negative "
-                "one), and a closed outline CATIA simply fails to solve. The second "
-                "is intermittent, not geometric: reported 2026-10-25, a six-point "
-                "polygon whose shoelace area (78.0) and closure were both fine failed "
-                "once and padded on the retry. So before rebuilding the sketch, call "
-                "this once more - if it pads, nothing was wrong with the profile."
+                + f" {stayed} It adds nothing in EITHER direction, so the direction "
+                "is not the problem. Three things do this://n"
+                "  · the profile is open (a 0.0035 mm gap is enough) - "
+                "catia_close_sketch reports the endpoints and the gap when it can "
+                "see one;\n"
+                "  · the profile lies inside existing material - the sweep is "
+                "absorbed, so move the sketch's offset so the sweep starts outside "
+                "the body, or extend the profile through the material;\n"
+                "  · the outline self-intersects (check the sign of its area).\n"
+                "Retrying changes none of these. A retry is only worth it when the "
+                "profile echo was clean, the direction is right AND the sweep has "
+                "somewhere to grow."
                 + (f". Original error: {update_error}" if update_error else ".")
             )
         self.conn.refresh_display()
@@ -1492,6 +1771,37 @@ class PartDesignTools:
         except Exception as exc:  # noqa: BLE001 - the caller measures instead
             return exc
 
+    def _pad_other_direction(self, part: Any, body: Any, sketch: Any, height: float,
+                             symmetric: bool, direction: str,
+                             before: float | None) -> float | None:
+        """How much the SAME pad would add the other way, or None if it adds none.
+
+        Builds a throwaway pad, measures, and deletes it again, so the diagnosis
+        costs one feature and one update only on the failure path. ``None`` means
+        "it adds nothing that way either", which is the case where the profile or
+        the material really is the problem.
+        """
+        probe = None
+        try:
+            probe = part.ShapeFactory.AddNewPad(sketch, height / 2.0 if symmetric else height)
+            if symmetric:
+                probe.IsSymmetric = True
+            else:
+                probe.DirectionOrientation = 0 if direction == "reverse" else 1
+            part.UpdateObject(probe)
+        except Exception:  # noqa: BLE001 - a failed probe answers "no"
+            if probe is not None:
+                self._remove_feature(part, probe)
+            return None
+        grew = None
+        try:
+            after = self._body_volume_mm3(part, body)
+            if before is not None and after is not None and after - before > 1e-6:
+                grew = after - before
+        finally:
+            self._remove_feature(part, probe)
+        return grew
+
     def _settle(self, part: Any, body: Any, before: float | None,
                 expect: str = "subtract") -> tuple[float | None, bool | None]:
         """Measure what a feature actually did: ``(after_volume, took_effect)``.
@@ -1624,7 +1934,8 @@ class PartDesignTools:
             "like {\"length_mm\": 17.6112, \"faces\": [\"Pad.6;2\"]}."
         )
 
-    def _resolve_edge_specs(self, body: Any, specs: list[Any]
+    def _resolve_edge_specs(self, body: Any, specs: list[Any],
+                            table: list[dict[str, Any]] | None = None,
                             ) -> tuple[list[str], list[Any]]:
         """Resolve edge references against the body as it is *now*.
 
@@ -1632,8 +1943,15 @@ class PartDesignTools:
         (``Edge.30 (L17.6112|Pad.6;2|...)``) so the caller can see what was
         matched. Faces decide the match; the length only breaks a tie, because
         a neighbouring fillet legitimately shortens an edge.
+
+        ``table`` lets a caller that has just enumerated the edges reuse that
+        enumeration. It is not an optimisation: re-enumerating clears the
+        selection, and every Reference from the previous enumeration dies with
+        it - so a call that mixes anchors (which enumerate) with names has to
+        resolve both against ONE table.
         """
-        table = self._edge_table(body)
+        if table is None:
+            table = self._edge_table(body)
         if not table:
             raise RuntimeError("The active body has no edges to fillet yet.")
         labels: list[str] = []
@@ -1711,12 +2029,93 @@ class PartDesignTools:
         names = args.get("edge_names") or []
         if isinstance(names, str):
             names = [names]
+        anchors, tol = self._anchor_args(args)
+        if anchors:
+            specs = list(names)
+            if args.get("edge_name"):
+                specs.append(args["edge_name"])
+            return self._edges_by_anchor(
+                args["radius"], specs, anchors, tol, self._propagation(args),
+                kind="fillet")
         if len(names) > 1 or (names and not args.get("edge_name")):
             return self._fillet_many(args["radius"], list(names),
                                      self._propagation(args))
         target = args.get("edge_name")
         return self._fillet_one(args["radius"], target,
                                 self._propagation(args))
+
+    @staticmethod
+    def _anchor_args(args: dict[str, Any]) -> tuple[list[list[float]], float]:
+        """``edge_anchors`` / ``anchor_tol`` in the shapes callers actually send."""
+        raw = args.get("edge_anchors") or []
+        if isinstance(raw, dict):
+            raw = raw.get("points") or []
+        cleaned: list[list[float]] = []
+        for item in raw:
+            if isinstance(item, dict):
+                item = [item.get("x"), item.get("y"), item.get("z")]
+            try:
+                values = [float(v) for v in item]
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    f"edge_anchors entries must be [x, y, z]; got {item!r}."
+                ) from exc
+            if len(values) != 3:
+                raise RuntimeError(
+                    f"edge_anchors entries must be [x, y, z]; got {item!r}."
+                )
+            cleaned.append(values)
+        tol = args.get("anchor_tol")
+        tol = 0.5 if tol is None else float(tol)
+        if tol <= 0:
+            raise RuntimeError(
+                f"anchor_tol must be greater than 0; got {tol}. It is a "
+                "distance in mm - 0.5 accepts a coordinate rounded to a tenth."
+            )
+        return cleaned, tol
+
+    def _edges_by_anchor(self, value: float, specs: list[Any],
+                         anchors: list[list[float]], tol: float,
+                         propagation: int, kind: str = "fillet",
+                         angle: float = 45.0) -> str:
+        """Fillet/chamfer a list of coordinate anchors instead of edge names."""
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        body = self._prepare_body(part)
+        sf = part.ShapeFactory
+
+        labels, refs, report, table = self._anchors_to_edges(body, anchors, tol)
+        if specs:
+            more_labels, more_refs = self._resolve_edge_specs(body, specs,
+                                                              table=table)
+            labels = more_labels + labels
+            refs = more_refs + refs
+
+        if kind == "chamfer":
+            def add(ref: Any) -> Any:
+                return sf.AddNewChamfer(
+                    ref,
+                    1,        # catTangencyChamferPropagation
+                    1,        # catLengthAngleChamfer mode
+                    0,        # catNoReverseChamfer
+                    value,
+                    angle,
+                )
+            label = "Chamfer"
+        else:
+            def add(ref: Any) -> Any:
+                return sf.AddNewSolidEdgeFilletWithConstantRadius(
+                    ref, propagation, value)
+            label = "Fillet R"
+
+        try:
+            out = self._apply_fillets(value, labels, refs, add, part=part,
+                                      label=label,
+                                      resolve=lambda: (labels, refs))
+        finally:
+            self._clear_selection()
+            self.conn.refresh_display()
+        return out + " " + report
 
     @staticmethod
     def _propagation(args: dict[str, Any]) -> int:
@@ -1972,6 +2371,18 @@ class PartDesignTools:
         return note
 
     def _chamfer(self, args: dict[str, Any]) -> str:
+        anchors, tol = self._anchor_args(args)
+        if anchors:
+            specs = []
+            names = args.get("edge_names") or []
+            if isinstance(names, str):
+                names = [names]
+            specs.extend(names)
+            if args.get("edge_name"):
+                specs.append(args["edge_name"])
+            return self._edges_by_anchor(
+                float(args["length"]), specs, anchors, tol, 1,
+                kind="chamfer", angle=float(args.get("angle", 45)))
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
         body = self._prepare_body(part)
@@ -2532,6 +2943,16 @@ class PartDesignTools:
         sf = part.ShapeFactory
 
         thickness = args["thickness"]
+        external = float(args.get("external_thickness") or 0.0)
+        if thickness <= 0:
+            raise ValueError(
+                f"'thickness' must be positive, got {thickness}. CATIA's Shell "
+                "offsets INWARD by this amount; a negative value is rejected at "
+                "update with a message that looks like a bad feature name. To put "
+                "material outside the surface, use 'external_thickness'."
+            )
+        if external < 0:
+            raise ValueError("'external_thickness' cannot be negative.")
         faces = args.get("faces_to_remove") or []
         if not faces:
             raise ValueError(
@@ -2545,7 +2966,9 @@ class PartDesignTools:
                 self.conn, body, "Face", [self._topo_index(f, "Face") for f in faces])
         ]
         # AddNewShell(iFaceToRemove, iInternalThickness, iExternalThickness)
-        shell = sf.AddNewShell(refs[0], thickness, 0)
+        # AddNewShell(iFaceToRemove, iInternalThickness, iExternalThickness):
+        # the third argument is the only route to material outside the surface.
+        shell = sf.AddNewShell(refs[0], thickness, external)
         skipped = []
         for extra, ref in zip(faces[1:], refs[1:]):
             try:
@@ -3578,11 +4001,80 @@ class PartDesignTools:
             except Exception:
                 pass
 
+    def _attach_edge_points(self, part: Any, rows: list[dict[str, Any]],
+                            edges: list[dict[str, Any]]) -> str | None:
+        """Give each listed edge a coordinate that lies ON it.
+
+        One measurement per edge, which is why it is opt-in: a 78-edge part pays
+        78 SPA calls. The point is the one closest to the body's centre of
+        gravity - for a straight edge that is its midpoint (verified on B30
+        2026-10-25 against a 60x40x40 box: all 12 edges came back exactly at
+        their midpoint), for an arc it is the part of the arc facing the centre.
+        There is no way to read an edge's own vertices through this API: a
+        vertex reference answers 'GetPoint failed', so this is the only route to
+        a coordinate at all.
+        """
+        spa = self._topo_measure(part)
+        if spa is None:
+            return "point_on_edge was not reported: SPAWorkbench is unavailable."
+        try:
+            from catia_mcp.tools.measurement import (  # noqa: PLC0415 - cycle
+                read_measurable_array,
+                read_min_distance_points,
+            )
+            body = self._prepare_body(part)
+            body_ref = part.CreateReferenceFromObject(body)
+            centre = read_measurable_array(
+                self.conn.app, spa.GetMeasurable(body_ref), "GetCOG", 3)
+        except Exception as exc:  # noqa: BLE001 - the listing still stands
+            return f"point_on_edge was not reported: {exc}"
+
+        probe = self._edge_probe_points(part)
+        failures = 0
+        try:
+            point_ref = probe.add(*centre)
+            probe.update()
+            # Re-enumerate AFTER the rebuild: the references held by the first
+            # enumeration died when its selection was cleared, and every
+            # coordinate here is measured against them.
+            fresh = {entry["index"]: entry for entry in self._edge_table(body)}
+            for entry, item in zip(rows, edges):
+                source = fresh.get(entry["index"])
+                if source is None:
+                    failures += 1
+                    item["point_on_edge_unknown"] = True
+                    continue
+                try:
+                    on_edge, _ = read_min_distance_points(
+                        self.conn.app,
+                        spa.GetMeasurable(source["cell"].Reference), point_ref)
+                except Exception:  # noqa: BLE001 - one edge, not the listing
+                    failures += 1
+                    item["point_on_edge_unknown"] = True
+                    continue
+                item["point_on_edge"] = [round(v, 4) for v in on_edge]
+                item["distance_to_centre_mm"] = round(
+                    sum((on_edge[i] - centre[i]) ** 2 for i in range(3)) ** 0.5, 3)
+        finally:
+            probe.close()
+        note = (
+            "point_on_edge is a point ON the edge - the one closest to the "
+            "body's centre of gravity, which is the midpoint for a straight edge "
+            "and the centre-facing part for an arc. Pass it back to "
+            "catia_fillet / catia_chamfer as edge_anchors when the source data "
+            "gives coordinates instead of Edge.N."
+        )
+        if failures:
+            note += (f" {failures} edge(s) could not be measured and carry "
+                     "point_on_edge_unknown instead.")
+        return note
+
     def _list_edges(self, min_length: float | None = None,
                     max_length: float | None = None,
                     faces: list[str] | None = None,
                     offset: int = 0, limit: int = 0,
-                    include_nls: bool = True) -> str:
+                    include_nls: bool = True,
+                    coords: bool = False) -> str:
         """List solid edges, filterable and pageable, with a stable fingerprint.
 
         The fingerprint is the point: ``Edge.N`` moves when the topology changes,
@@ -3622,6 +4114,7 @@ class PartDesignTools:
             rows = rows[:limit]
 
         edges = []
+        points_on_edges: list[tuple[dict[str, Any], list[float]]] = []
         for entry in rows:
             item: dict[str, Any] = {
                 "index": entry["index"],
@@ -3644,6 +4137,10 @@ class PartDesignTools:
                 item["created_by"] = nls_features(entry["nls"])
             edges.append(item)
 
+        coordinates_note = None
+        if coords and rows:
+            coordinates_note = self._attach_edge_points(part, rows, edges)
+
         if not edges:
             return json.dumps({
                 "count": 0, "total": total,
@@ -3663,6 +4160,8 @@ class PartDesignTools:
                      "renumbered by every feature that changes the topology."),
             "edges": edges,
         }
+        if coordinates_note:
+            payload["coordinates"] = coordinates_note
         if raw_total is not None and raw_total != total:
             # Same sentence as catia_measure_topology: one definition of "edge of
             # the solid", so an acceptance script cannot get 109 from one tool and
