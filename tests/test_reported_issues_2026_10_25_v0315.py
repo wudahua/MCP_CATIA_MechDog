@@ -357,21 +357,29 @@ def test_tree_position_names_index_and_total():
 # 8. Loft sections have to be one continuous curve.
 # --------------------------------------------------------------------------
 
-def test_loft_description_names_the_one_wire_rule():
+def test_loft_description_names_the_one_curve_rule():
+    """Corrected 2026-10-25: a closed polyline is NOT one curve, and neither is
+    an Extract of it. The first version of this text claimed a sketch rectangle
+    would work; measured, it fails like four separate lines do."""
     from catia_mcp.tools.gsd import GSDTools
 
     doc = [d for d in GSDTools(connection=None).get_tool_definitions()
            if d["name"] == "catia_gsd_multi_section_surface"][0]
     text = doc["description"]
-    assert "ONE CONTINUOUS CURVE PER SECTION" in text
-    assert "four catia_sketch_line calls" in text
+    assert "ONE CURVE PER SECTION" in text
+    assert "sketch rectangle" in text
+    assert "SKETCH CIRCLE" in text
+    # the two claims that were wrong must not come back
+    assert "IS one wire and works" not in text
+    assert "Extracting the profile does not help" in text
 
 
-def test_loft_failure_checks_the_wire_rule_first():
+def test_loft_failure_checks_the_curve_rule_first():
     from catia_mcp.tools.gsd import GSDTools
 
     source = inspect.getsource(GSDTools._multi_section_surface)
-    assert "not ONE continuous curve" in source
+    assert "not ONE curve" in source
+    assert "closed catia_gsd_spline" in source
 
 
 # --------------------------------------------------------------------------

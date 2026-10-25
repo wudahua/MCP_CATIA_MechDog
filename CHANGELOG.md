@@ -4,6 +4,30 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Corrected — the loft section rule I wrote in 0.3.15 was wrong
+
+- 0.3.15 said a section must be "one continuous wire", and that a sketch profile
+  from `catia_sketch_rectangle` **is** one wire and therefore works. Measured on
+  B30 2026-10-25, section pairs of the same size:
+
+  | section | result |
+  |---|---|
+  | `gsd_circle` ×2 | builds |
+  | **sketch circle** ×2 | builds |
+  | closed 3D spline through the same corners ×2 | builds |
+  | `sketch_rectangle` ×2 | **fails** |
+  | that rectangle → `gsd_extract` ×2 | **fails** |
+
+  So "wire" was the wrong unit: a closed polyline is stored as four curves, and
+  a loft section is ONE curve - CATIA does not associate a loop, and an Extract
+  of the profile is still four cells. The description and the failure message
+  now say that, and no longer recommend an Extract that does not work.
+- This matters beyond wording: it is why a spec that gives corner coordinates
+  ends up as a spline section (a spline through the corners is the only measured
+  form that builds). A spline interpolates, so it does not reproduce a source
+  part whose surface bulges past its sections - the P03 propeller envelope
+  question, which is a modelling route and not a tool fix.
+
 ## [0.3.15] — 2026-10-25 · the box was 60 mm wide because of a sketch corner
 
 Four reports against 0.3.14. Two of them reproduced exactly as written, and one
