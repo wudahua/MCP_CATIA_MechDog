@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.17] — 2026-10-25 · every part has a 草图.1
+
 ### Fixed — the sketch memory was keyed by name, so every part shared one record
 
 - **A fresh part's `close_sketch` echo listed the previous part's rectangle.**
