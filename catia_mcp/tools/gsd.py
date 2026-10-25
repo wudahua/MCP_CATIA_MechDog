@@ -679,7 +679,19 @@ class GSDTools:
                 "name": "catia_gsd_thick_surface",
                 "description": (
                     "Turn a surface into a SOLID by adding thickness (Part Design "
-                    "ThickSurface). The solid is created in the active body."
+                    "ThickSurface). The solid is created in the active body. "
+                    "THE TOTAL OFFSET MUST STAY BELOW TWICE THE SURFACE'S SMALLEST "
+                    "RADIUS OF CURVATURE, and a thin wing section is the case that "
+                    "breaks: the offset surfaces meet on the far side and the update "
+                    "fails. Measured on B30 2026-10-25 on a lens-shaped loft whose "
+                    "normal thickness is 2.30 mm - thickness1/thickness2 = 1.27/1.27 "
+                    "failed, and so did 2.54/0, so it is not a two-sided problem: at "
+                    "the sharp corners the radius goes to zero and the offset "
+                    "self-intersects whichever side it goes. A 6 mm hexagonal section "
+                    "of the same length thickens fine. If a section is thinner than "
+                    "the offset you want, thicken LESS, or model the part as a padded "
+                    "polygon instead - there is no solid loft in this surface to fall "
+                    "back on."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1204,15 +1216,30 @@ class GSDTools:
         from what this server drew, and the sketch's placement turns them into
         global XYZ.
         """
-        recorded = (getattr(self.conn, "sketch_outlines", None) or {}).get(name)
+        outlines = getattr(self.conn, "sketch_outlines", None) or {}
+        try:
+            document = str(self.conn.active_document.Name)
+        except Exception:  # noqa: BLE001 - no document, no record either
+            document = "?"
+        key = f"{document}::{name}"
+        recorded = outlines.get(key)
         if not recorded:
             raise RuntimeError(
-                f"No outline recorded for sketch '{name}'. This server remembers "
-                "the outlines it drew in this session; a sketch drawn in CATIA's "
-                "own UI, or one from a reopened file, has no record. Pass the "
-                "corners as 'points' instead - or draw the section as a closed "
-                "catia_sketch_spline inside the sketch, which is already one "
-                "curve and needs no 3D spline at all."
+                f"No outline recorded for sketch '{name}' in '{document}'. This "
+                "server remembers the outlines it drew in THIS session and THIS "
+                "document - reopening a file does not restore them, and a sketch "
+                "drawn in CATIA's own UI never had one. Pass the corners as "
+                "'points' instead, or draw the outline again in this session. "
+                "(Falling back to the sketch's own geometry is not possible: a "
+                "CATIA Point2D exposes no readable X/Y through automation, which "
+                "is why the numbers are remembered at drawing time.)"
+            )
+        if not self._sketch_exists(name):
+            raise RuntimeError(
+                f"Sketch '{name}' is not in '{document}', although this session "
+                "drew an outline under that name - the sketch was renamed or "
+                "deleted. Run catia_list_sketches and use the name it reports, or "
+                "pass 'points'."
             )
         placement = recorded.get("placement")
         if not placement:
@@ -1233,6 +1260,23 @@ class GSDTools:
         coords = [self._to_global(placement, u, v) for u, v in loop]
         return coords, (f" Corners taken from sketch '{name}' in "
                         f"{placement['base']} plane order, z={placement['distance']:g}.")
+
+    def _sketch_exists(self, name: str) -> bool:
+        """Whether the active part still holds a sketch by that name.
+
+        Cheap guard against a record outliving its sketch: the outline is keyed
+        by document and name, and CATIA renumbers sketches when one is deleted,
+        so a hit in memory is not proof that the sketch is still there.
+        """
+        try:
+            body = self.conn.get_active_part_body()
+            sketches = body.Sketches
+            for i in range(1, sketches.Count + 1):
+                if str(sketches.Item(i).Name) == name:
+                    return True
+        except Exception:  # noqa: BLE001 - cannot check, do not block the call
+            return True
+        return False
 
     def _chain_outline(self, elements: list[dict[str, Any]],
                        name: str) -> list[list[float]]:
@@ -1545,10 +1589,21 @@ class GSDTools:
         fill = self._factory().AddNewFill()
         for boundary_name in boundaries:
             fill.AddBound(self._ref(boundary_name))
-        return self._finish(
-            fill, args.get("name"),
-            f"Fill surface created from {len(boundaries)} boundary curve(s).",
-        )
+        try:
+            return self._finish(
+                fill, args.get("name"),
+                f"Fill surface created from {len(boundaries)} boundary curve(s).",
+            )
+        except RuntimeError as error:
+            raise RuntimeError(
+                f"{error} A fill needs CLOSED boundaries that meet each other: one "
+                "wire for a single loop, or several curves that actually share "
+                "endpoints (the two ends of a loft plus its section rings, for "
+                "instance). Boundaries that only come close do not bind. If they do "
+                "meet and this still fails, it is session-sensitive like the loft: "
+                "retry once in a fresh session, and if it still fails build the cap "
+                "as a swept-and-thickened section instead."
+            ) from error
 
     def _blend(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
@@ -1651,7 +1706,18 @@ class GSDTools:
         part.InWorkObject = body
         # AddNewThickSurface(surface, isymmetric, top offset, bottom offset)
         thick = part.ShapeFactory.AddNewThickSurface(surface_ref, 0, thickness1, thickness2)
-        self._safe_update(thick)
+        try:
+            self._safe_update(thick)
+        except Exception as error:
+            raise RuntimeError(
+                f"{error} ThickSurface offset {thickness1}+{thickness2} mm and the "
+                "update failed. The usual cause is geometric, not an argument: if "
+                "the surface is thinner somewhere than the total offset, the two "
+                "offset faces cross and CATIA refuses - measured on a 2.30 mm lens "
+                "section with 1.27/1.27 and with 2.54/0, both refused, while a 6 mm "
+                "hexagon of the same shape thickened. Try a smaller total, or model "
+                "the part as a padded polygon instead."
+            ) from error
         self.conn.refresh_display()
         return (
             f"ThickSurface solid created from '{args['surface']}' "

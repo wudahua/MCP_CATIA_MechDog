@@ -16,9 +16,22 @@ import inspect
 import pytest
 
 
+DOC = "T.CATPart"
+
+
+class _Doc:
+    Name = DOC
+
+
 class _Conn:
     def __init__(self, outlines=None):
         self.sketch_outlines = outlines or {}
+        self.active_document = _Doc()
+
+
+def _key(name: str) -> str:
+    """Records are keyed by document AND sketch - every part has a 草图.1."""
+    return f"{DOC}::{name}"
 
 
 def _gsd(outlines=None):
@@ -147,7 +160,7 @@ def test_a_sketch_this_server_never_drew_says_so():
 
 
 def test_a_sketch_on_a_face_refuses_rather_than_guessing():
-    gsd = _gsd({"草图.1": _record(None, [{"kind": "rectangle", "x1": 0, "y1": 0,
+    gsd = _gsd({_key("草图.1"): _record(None, [{"kind": "rectangle", "x1": 0, "y1": 0,
                                           "x2": 1, "y2": 1}])})
     with pytest.raises(RuntimeError) as error:
         gsd._outline_points("草图.1", True)
@@ -155,7 +168,7 @@ def test_a_sketch_on_a_face_refuses_rather_than_guessing():
 
 
 def test_the_happy_path_returns_global_coordinates_and_says_where_they_came_from():
-    gsd = _gsd({"草图.1": _record(
+    gsd = _gsd({_key("草图.1"): _record(
         {"base": "xy", "distance": 50.0},
         [{"kind": "line", "x1": -10, "y1": -6, "x2": 10, "y2": -6},
          {"kind": "line", "x1": 10, "y1": -6, "x2": 10, "y2": 6},
@@ -168,7 +181,7 @@ def test_the_happy_path_returns_global_coordinates_and_says_where_they_came_from
 
 
 def test_an_empty_sketch_is_refused():
-    gsd = _gsd({"草图.1": _record({"base": "xy", "distance": 0.0}, [])})
+    gsd = _gsd({_key("草图.1"): _record({"base": "xy", "distance": 0.0}, [])})
     with pytest.raises(RuntimeError) as error:
         gsd._outline_points("草图.1", True)
     assert "holds nothing" in str(error.value)

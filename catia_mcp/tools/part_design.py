@@ -638,6 +638,33 @@ class PartDesignTools:
                 },
             },
             {
+                "name": "catia_delete_body",
+                "description": (
+                    "Delete a solid body from the active part. Only needed for "
+                    "cleanup: bodies created for an experiment stay in the tree "
+                    "otherwise, because catia_delete_feature looks inside bodies and "
+                    "never sees one, so a part ended up carrying nine empty bodies "
+                    "(reported 2026-10-25). The MainBody cannot be deleted, and a "
+                    "body that still holds features is refused unless 'force' is "
+                    "true - deleting it silently removes those features too."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Body name to delete"},
+                        "force": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Delete even when the body still holds features. "
+                                "Those features are lost."
+                            ),
+                        },
+                    },
+                    "required": ["name"],
+                },
+            },
+            {
                 "name": "catia_list_bodies",
                 "description": (
                     "List every solid body in the active part, with its volume and "
@@ -850,6 +877,9 @@ class PartDesignTools:
                 return self._list_features()
             case "catia_new_body":
                 return self._new_body(arguments.get("name"))
+            case "catia_delete_body":
+                return self._delete_body(arguments["name"],
+                                         bool(arguments.get("force", False)))
             case "catia_list_bodies":
                 return self._list_bodies()
             case "catia_set_active_body":
@@ -1026,7 +1056,14 @@ class PartDesignTools:
                 + f" {stayed} A pad needs a CLOSED profile on the sketch; an open "
                 "polyline (or an arc chain with a gap) updates to an empty feature. "
                 "catia_close_sketch reports the two endpoints and the gap when it "
-                "can see one - a 0.0035 mm gap is enough to land here."
+                "can see one - a 0.0035 mm gap is enough to land here. "
+                "Two more cases land on this same message: a self-intersecting "
+                "outline (check the signed area - a bowtie has a small or negative "
+                "one), and a closed outline CATIA simply fails to solve. The second "
+                "is intermittent, not geometric: reported 2026-10-25, a six-point "
+                "polygon whose shoelace area (78.0) and closure were both fine failed "
+                "once and padded on the retry. So before rebuilding the sketch, call "
+                "this once more - if it pads, nothing was wrong with the profile."
                 + (f". Original error: {update_error}" if update_error else ".")
             )
         self.conn.refresh_display()
@@ -1763,7 +1800,13 @@ class PartDesignTools:
             "dihedral angle and a fillet has no material to remove. That is what "
             "a boolean union of two coplanar bosses leaves behind. Confirm with "
             "catia_list_faces, then either draw the radius in the sketch, or cut "
-            "the transition with catia_gsd_* instead of a Part Design fillet."
+            "the transition with catia_gsd_* instead of a Part Design fillet. "
+            "SECOND CAUSE, and it looks identical: if this edge shares an endpoint "
+            "with an edge you have ALREADY filleted, the faces of that fillet are "
+            "the extra pair - the boundary really has three faces now. Fillet the "
+            "whole chain in ONE call (edge_names=[...]) instead of one by one; "
+            "reported 2026-10-25, a six-sided tip took R3.81 on one side and R1.27 "
+            "on the next, then refused the third edge for exactly this reason."
         )
 
     def _fillet_one(self, radius: float, edge_name: Any,
@@ -2744,6 +2787,69 @@ class PartDesignTools:
         "intersect": "AddNewIntersect",
         "assemble": "AddNewAssemble",
     }
+
+    def _delete_body(self, name: str, force: bool = False) -> str:
+        """Remove a body from the part, refusing to take features with it.
+
+        ``catia_delete_feature`` cannot do this: it searches ``body.Shapes`` and
+        ``body.Sketches``, and a body is not inside a body, so an experimental
+        body could only be emptied, never removed (reported 2026-10-25). CATIA
+        does allow the deletion through the selection.
+        """
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        bodies = part.Bodies
+        target = None
+        names = []
+        for i in range(1, bodies.Count + 1):
+            body = bodies.Item(i)
+            label = str(body.Name)
+            names.append(label)
+            if label == name:
+                target = body
+        if target is None:
+            raise RuntimeError(
+                f"No solid body named '{name}'. Bodies: {', '.join(names) or 'none'}."
+            )
+        if str(target.Name) == str(part.MainBody.Name):
+            raise RuntimeError(
+                f"'{name}' is the MainBody and cannot be deleted: every part needs "
+                "one. Delete its features instead, or build the geometry in another "
+                "body and leave this one empty."
+            )
+        try:
+            count = target.Shapes.Count
+        except Exception:  # noqa: BLE001 - unknown, so do not force
+            count = None
+        if count and not force:
+            raise RuntimeError(
+                f"Body '{name}' still holds {count} feature(s), and deleting the body "
+                "deletes them too. Pass force=true if that is what you want, or "
+                "remove the features first with catia_delete_feature."
+            )
+        before = bodies.Count
+        sel = self.conn.hso
+        try:
+            sel.Clear()
+            sel.Add(target)
+            sel.Delete()
+        finally:
+            try:
+                sel.Clear()
+            except Exception:  # noqa: BLE001
+                pass
+        self.conn.refresh_display()
+        if self.conn.get_active_part_body() is target:  # the handle is gone
+            self.conn.active_body = None
+        after = part.Bodies.Count
+        if after >= before:
+            raise RuntimeError(
+                f"CATIA accepted the deletion but '{name}' is still there "
+                f"({before} -> {after} bodies). Close the document without saving "
+                "and rebuild, or empty the body and leave it."
+            )
+        return (f"Body '{name}' deleted ({before} -> {after} bodies)."
+                + (f" Its {count} feature(s) went with it." if count else ""))
 
     def _new_body(self, name: str | None = None) -> str:
         """Create a solid body and route subsequent features into it."""

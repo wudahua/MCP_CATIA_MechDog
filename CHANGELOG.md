@@ -4,6 +4,76 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed — the sketch memory was keyed by name, so every part shared one record
+
+- **A fresh part's `close_sketch` echo listed the previous part's rectangle.**
+  Reproduced on B30: part A draws a rectangle (echo "1 rectangle(s)"), part B
+  draws only a circle and the echo says "1 circle(s), 1 rectangle(s)".
+  `_drawn` was keyed by sketch name, and every part names its first sketch
+  `草图.1`. Reported twice (2026-10-25) with independent traces, including a part
+  whose first sketch echoed "1 rectangle(s), 1 spline(s)" it never drew.
+- The outline record behind `catia_gsd_spline(element=...)` had the same key, so
+  a reopened file could inherit **another document's corners**. Both are now
+  keyed `document::sketch`, and creating a sketch clears its record.
+- `element=` with no record now says so and names the document, instead of
+  falling through: "No outline recorded for sketch '草图.3' in 'SAVED.CATPart' …
+  reopening a file does not restore them". A record whose sketch has since been
+  renamed or deleted is refused too. This is the case any reopened file hits —
+  the nine parts of a rebuilt assembly all have a `草图.1`.
+
+### Added — `catia_delete_body`, so an experiment can be cleaned up
+
+- `catia_delete_feature` searches inside bodies and never sees one, so an
+  experimental body could be emptied but never removed: one part ended up
+  carrying nine empty bodies (reported 2026-10-25). The MainBody is refused, and
+  a body that still holds features is refused unless `force` is true.
+- Live: empty body deleted (3 → 2 bodies), body with a feature refused, forced
+  deletion reports what went with it, MainBody refused by name.
+
+### Added — `catia_measure_topology(document=...)`, and "there is no solid"
+
+- Same argument `catia_get_inertia` and `catia_get_bounding_box` already take, so
+  checking nine parts no longer costs nine open + activate pairs. An unknown name
+  lists the open documents instead of a bare failure.
+- An empty part now answers `solid: false` plus `note_empty` instead of three
+  silent zeroes: "0 faces" and "this body holds no solid" are different verdicts
+  and only the second means the counts cannot be used at all.
+
+### Fixed — Save As onto a file that is already open fails in one step, not six
+
+- With an assembly open that references `P03_prop.CATPart`, saving a new part
+  onto that same path retried six times and failed after ~14 s. The reason is
+  that the target file is held by the open document. The tool now finds the
+  holder first and names it (plus the assembly that references it) before trying,
+  and routes the "save onto its own path" case to a plain `Save`.
+
+### Documented — the four geometry answers people needed and did not get
+
+- **`thick_surface` has a real limit**: the total offset must stay below twice
+  the surface's smallest radius of curvature. Measured on B30 2026-10-25 on a
+  lens-shaped loft 2.30 mm thick: `1.27/1.27` failed **and `2.54/0` failed**, so
+  it is not a two-sided problem — at the sharp corners the radius goes to zero
+  and the offset self-intersects whichever side it goes. A 6 mm hexagonal
+  section of the same shape thickens fine. Thin wing sections cannot be thickened
+  at all; model them as padded polygons.
+- **A spline is not a polyline, and the difference is the volume**: a six-point
+  aerofoil-like outline padded +29.3 % as a closed spline against **+0.48 %** for
+  the same six points joined with straight lines (reporter's measurement,
+  2026-10-25; matches the +20 %/+79 % rectangle already in the loft text). So if
+  the profile is a specification, draw lines and accept that it will not loft, or
+  draw the spline and re-measure the envelope.
+- **`pad`/`pocket` "built no material"** now names two causes beyond an open
+  profile: a self-intersecting outline (check the signed area) and a closed
+  outline CATIA simply failed to solve — which is intermittent, and the reporter's
+  six-point polygon padded on the retry. The message says to call it once more
+  before rebuilding the sketch.
+- **A three-face edge has a second cause worth naming**: if it shares an endpoint
+  with an edge you have already filleted, the fillet's own faces are the extra
+  pair. Fillet the chain in ONE call (`edge_names=[...]`) instead of one by one.
+- **`fill` failures** explain that boundaries must be closed and must meet each
+  other, and that a session-sensitive failure is retried in a fresh session
+  before falling back to a swept-and-thickened section.
+
 ## [0.3.16] — 2026-10-25 · a spline through four corners is not the four corners
 
 ### Corrected — the loft section rule I wrote in 0.3.15 was wrong

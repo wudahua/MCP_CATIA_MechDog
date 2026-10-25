@@ -356,9 +356,50 @@ class DocumentTools:
             return False
         return bool(full) and os.path.isabs(full)
 
+    def _document_at_path(self, path: str) -> Any:
+        """The open document whose file is ``path`` (None when nothing holds it)."""
+        import os
+
+        wanted = os.path.normcase(os.path.abspath(path))
+        docs = self.conn.documents
+        for i in range(1, docs.Count + 1):
+            doc = docs.Item(i)
+            try:
+                if os.path.normcase(os.path.abspath(str(doc.FullName))) == wanted:
+                    return doc
+            except Exception:  # noqa: BLE001 - never saved
+                continue
+        return None
+
     def _save_document(self, file_path: str | None = None) -> str:
         doc = self.conn.active_document
         if file_path:
+            # SaveAs onto the file of a document that is already open (very often
+            # a part loaded as a component of an open assembly) cannot work: the
+            # overwrite needs the file and the open document holds it. CATIA says
+            # so by failing, six times, ~14 s later (reported 2026-10-25). Name
+            # the holder instead of retrying into the same wall.
+            holder = self._document_at_path(file_path)
+            if holder is not None:
+                try:
+                    same = str(holder.Name) == str(doc.Name)
+                except Exception:  # noqa: BLE001
+                    same = False
+                if same:
+                    # Asking to save a document onto its own file is a Save.
+                    name = dialogs.save(doc)
+                    return f"Document '{name}' saved"
+                users = self._component_usage().get(str(holder.Name)) or []
+                raise RuntimeError(
+                    f"'{file_path}' is the file of '{holder.Name}', which is open in "
+                    "this session"
+                    + (f" as a component of {', '.join(users)}" if users else "")
+                    + ". CATIA cannot Save As onto a file that is open (or held by an "
+                    "open assembly): the overwrite needs the file and the open "
+                    "document has it, and the call then retries six times before "
+                    "failing. Close that document - or the assembly that references "
+                    "it - and save again, or write to a different path."
+                )
             # CATIA's SaveAs rejects forward-slash paths (E_FAIL) and pops a
             # modal prompt when the target exists, which freezes the STA worker.
             target = dialogs.save_as(doc, file_path)

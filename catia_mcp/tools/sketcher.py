@@ -228,7 +228,19 @@ class SketcherTools:
                 "name": "catia_sketch_spline",
                 "description": (
                     "Draw a spline through a list of control points. "
-                    "Each point is [x, y] in mm."
+                    "Each point is [x, y] in mm. With closed=true the result is ONE "
+                    "curve, which is what makes a sketch usable as a loft section "
+                    "(a polygon of separate lines is several curves and is not). "
+                    "IT IS NOT A POLYLINE, and the difference is not small: the curve "
+                    "bulges outward between the points, worst across the short side. "
+                    "Measured on B30 2026-10-25: a closed spline through the corners "
+                    "of a 20 x 12 rectangle padded to 24.04 x 21.46 (+20 % / +79 %); a "
+                    "six-point aerofoil-like outline padded +29.3 % in volume against "
+                    "+0.48 % for the same six points joined with straight lines. So: "
+                    "if the profile is a SPECIFICATION (an area, a chord, a thickness), "
+                    "draw it with catia_sketch_line segments and accept that it will "
+                    "not loft - or draw the spline and treat the envelope as something "
+                    "to re-measure, not something to assume."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -567,7 +579,11 @@ class SketcherTools:
         self._sketch_part = part
         self._active_factory = sketch.OpenEdition()
         # Where this sketch sits, so GSD can place its outline in 3D later.
-        record = self._outline_record(str(sketch.Name))
+        # Keyed by document too, and reset here: a record that is not cleared
+        # would carry the previous sketch's elements into this one's echo.
+        key = self._sketch_key(str(sketch.Name))
+        self._drawn[key] = []
+        record = self._outline_record(key)
         if record is not None:
             record["placement"] = self._placement_of(plane, offset)
             record["elements"] = []
@@ -596,21 +612,39 @@ class SketcherTools:
             name = str(self._active_sketch.Name)
         except Exception:  # noqa: BLE001 - the record is still useful
             name = "?"
-        self._drawn.setdefault(name, []).append({"kind": kind, **params})
+        key = self._sketch_key(name)
+        self._drawn.setdefault(key, []).append({"kind": kind, **params})
         # Same record on the connection, where catia_gsd_spline can reach it:
         # GSD needs the outline's coordinates to build a 3D spline through a
         # polygon's corners, and the sketch itself cannot hand them back (a
         # Point2D exposes no readable X/Y through automation on this build).
-        record = self._outline_record(name)
+        record = self._outline_record(key)
         if record is not None:
             record["elements"].append({"kind": kind, **params})
 
-    def _outline_record(self, name: str) -> dict[str, Any] | None:
+    def _outline_record(self, key: str) -> dict[str, Any] | None:
         """The shared outline record for one sketch (None with no connection)."""
         outlines = getattr(self.conn, "sketch_outlines", None)
         if outlines is None:
             return None
-        return outlines.setdefault(name, {"placement": None, "elements": []})
+        return outlines.setdefault(key, {"placement": None, "elements": []})
+
+    def _sketch_key(self, name: str) -> str:
+        """Document-scoped key for a sketch name.
+
+        Every part names its first sketch '草图.1', so a bare name is not an
+        identity: with one key per name, the profile echo of a fresh part listed
+        the rectangle drawn in the PREVIOUS part, and the outline record handed
+        GSD another document's corners (reported 2026-10-25, reproduced on B30 -
+        a new part holding one circle echoed "1 circle(s), 1 rectangle(s)").
+        Scoping by the document name fixes both, and a reopened file simply has
+        no record instead of somebody else's.
+        """
+        try:
+            document = str(self.conn.active_document.Name)
+        except Exception:  # noqa: BLE001 - record it anyway, under a catch-all
+            document = "?"
+        return f"{document}::{name}"
 
     @classmethod
     def _placement_of(cls, plane: Any, offset: float | None) -> dict[str, Any] | None:
@@ -651,7 +685,8 @@ class SketcherTools:
                 sketch_name = str(self._active_sketch.Name)
             except Exception:  # noqa: BLE001
                 sketch_name = None
-        drawn = self._drawn.get(sketch_name, []) if sketch_name else []
+        drawn = (self._drawn.get(self._sketch_key(sketch_name), [])
+                 if sketch_name else [])
         if not ends and not drawn:
             return ""
         counts: dict[str, int] = {}
@@ -1066,7 +1101,7 @@ class SketcherTools:
                 "catia_sketch_delete_element to remove one element."
             ),
         }
-        drawn = self._drawn.get(str(sketch.Name))
+        drawn = self._drawn.get(self._sketch_key(str(sketch.Name)))
         if drawn:
             payload["drawn_this_session"] = drawn
         return json.dumps(payload, indent=2)

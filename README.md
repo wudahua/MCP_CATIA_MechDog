@@ -12,7 +12,7 @@ defects that make that loop lie to you. Most of the work since 0.3.0 came from
 people rebuilding real assemblies with it: the changelog is a list of things that
 produced a plausible number, a wrong number, or no explanation at all.
 
-**98 tools** (upstream: 98 — 16 dropped, 16 added). Nothing in the COM layer was
+**99 tools** (upstream: 98 — 16 dropped, 17 added). Nothing in the COM layer was
 rewritten — the value of upstream is the field-verified knowledge in its
 comments, so this fork is strictly add / subtract / patch. The count is asserted
 by `tests/test_readme_tool_counts.py`, so it cannot drift from the code again.
@@ -48,11 +48,12 @@ by `tests/test_readme_tool_counts.py`, so it cannot drift from the code again.
 `export` (STEP/STL hand-off) and `http_transport` (remote agent) are kept: they
 are domain-neutral and cheap. See `FORK.md` §8 if you want to cut further.
 
-### Added (16 tools over upstream)
+### Added (17 tools over upstream)
 
-Five of them came with the fork, eleven were added while building parts from a
-spec (0.3.1: three, 0.3.2: four, 0.3.4: one, 0.3.5: one, 0.3.8: two).
-Upstream 98 − 16 dropped + 16 added = 98.
+Five of them came with the fork, twelve were added while building parts from
+a spec (0.3.1: three, 0.3.2: four, 0.3.4: one, 0.3.5: one, 0.3.8: two, 0.3.17:
+one - `catia_delete_body`).
+Upstream 98 − 16 dropped + 17 added = 99.
 
 | Tool | What it gives you |
 |---|---|
@@ -62,11 +63,12 @@ Upstream 98 − 16 dropped + 16 added = 98.
 | `catia_get_component_transform` | The same placement in both conventions, plus where local X/Y/Z point in the assembly |
 | `catia_rename_component` | A readable assembly tree. `Part.Name` is read-only on V5-6R2020, so every part arrives as `Part1.1 / Part2.1 / …`; the instance name is writable |
 
-#### Added while building parts from a spec (11 tools)
+#### Added while building parts from a spec (12 tools)
 
 | Tool | Version | Why it exists |
 |---|---|---|
 | `catia_new_body` | 0.3.1 | A spec's part is often several solids. `catia_pad` used to always land in the body that was already in work, and there was no way back once work had moved past the second body |
+| `catia_delete_body` | 0.3.17 | `catia_delete_feature` looks inside bodies and never sees one, so an experimental body could only be emptied, never removed — a part ended up carrying nine empty bodies |
 | `catia_list_bodies` | 0.3.1 | Per-body volume and face count — the only way to check a nine-solid part body by body, since `catia_get_inertia` reports just the one in work |
 | `catia_boolean` | 0.3.1 | Join / cut / intersect two bodies, for the cases where the spec merges what the source kept separate |
 | `catia_set_active_body` | 0.3.2 | `catia_new_body` only moves forward; this is the way back to the main body |
@@ -301,7 +303,7 @@ lying flat and its motors tilted 60° while every self-check reported success.
 |---|---|---|
 | Document | 12 | new/open/save/close/list + `catia_save_as_copy`; `catia_save_document` retries around dialogs |
 | Sketcher | 13 | lines, rectangles, circles, constraints; reopen a closed sketch and delete one element |
-| Part Design | 23 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, bodies… |
+| Part Design | 24 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, bodies (create / list / delete)… |
 | Generative Shape Design | 25 | wireframe and surfaces, extract, revolve + close surface |
 | Assembly | **12** | upstream 9 + get/set component transform, rename, list constraints |
 | Measurement | 6 | inertia, distance, bounding box\*, parameters |

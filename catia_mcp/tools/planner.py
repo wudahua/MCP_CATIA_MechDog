@@ -119,9 +119,26 @@ class PlannerTools:
                     "the cheapest guard against a part that has the right volume but the "
                     "wrong shape: an isolated boss, an inverted pocket or a hole drilled "
                     "into air all leave the volume nearly unchanged while changing the "
-                    "topology."
+                    "topology. Pass 'document' to count another OPEN part by name without "
+                    "activating it - the same argument catia_get_inertia and "
+                    "catia_get_bounding_box take, and the reason checking nine parts used "
+                    "to cost nine open + activate pairs (reported 2026-10-25). A part "
+                    "that exists only as a component of an open assembly is not in "
+                    "Documents and cannot be counted this way: open it first."
                 ),
-                "inputSchema": {"type": "object", "properties": {}},
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "document": {
+                            "type": "string",
+                            "description": (
+                                "Name or stem of an open document to measure "
+                                "(e.g. 'P01' or 'P01.CATPart'). Default: the "
+                                "active document."
+                            ),
+                        }
+                    },
+                },
             },
         ]
 
@@ -130,7 +147,8 @@ class PlannerTools:
             case "catia_run_plan":
                 return self._run_plan(arguments)
             case "catia_measure_topology":
-                return json.dumps(self._count_topology(), indent=2, ensure_ascii=False)
+                return json.dumps(self._count_topology(arguments.get("document")),
+                                 indent=2, ensure_ascii=False)
             case _:
                 raise ValueError(f"Unknown planner tool: {tool_name}")
 
@@ -255,6 +273,55 @@ class PlannerTools:
             },
         }
 
+    def _topology_target(self, document: str | None) -> tuple[Any, Any]:
+        """The part and body to count: the named open document, or the active one."""
+        if not document:
+            return self.conn.get_active_part(), self.conn.get_active_part_body()
+        docs = self.conn.documents
+        key = document.strip().casefold()
+        for i in range(1, docs.Count + 1):
+            doc = docs.Item(i)
+            try:
+                name = str(doc.Name)
+            except Exception:  # noqa: BLE001
+                continue
+            if key not in (name.casefold(), name.rsplit(".", 1)[0].casefold()):
+                continue
+            try:
+                part = self.conn.part_of(doc)
+                return part, part.MainBody
+            except Exception as exc:  # noqa: BLE001 - a product, most likely
+                raise RuntimeError(
+                    f"'{name}' is open but is not a Part document, so there is no "
+                    f"solid to count ({str(exc).splitlines()[0][:80]}). Use "
+                    "catia_measure_topology without 'document' for an assembly."
+                ) from exc
+        names = []
+        for i in range(1, docs.Count + 1):
+            try:
+                names.append(str(docs.Item(i).Name))
+            except Exception:  # noqa: BLE001
+                continue
+        raise RuntimeError(
+            f"No open document matches '{document}'. Open documents: "
+            f"{', '.join(names) or 'none'}. A part that exists only as a component "
+            "of an open assembly is not in this list - open it with "
+            "catia_open_document first."
+        )
+
+    # Published in every topology answer: the counting rule changed twice, and a
+    # stored expectation that is not re-baselined then reads as "the model is
+    # wrong" (reported 2026-10-25).
+    _COUNTING_RULE = (
+        "These counts cover the SOLID only. Since 0.3.11 sketch wires and "
+        "datum-plane borders are excluded, and since 0.3.15 sketch-wire vertex "
+        "corners are too, which changed the numbers reported for an unchanged "
+        "part (measured 0.3.10 -> 0.3.14: vertices 72 -> 96, faces 48 -> 46, "
+        "edges 109 -> 101). Any expect.vertices / expect.faces / expect.edges "
+        "stored before that has to be re-baselined before it is used as an "
+        "acceptance criterion."
+    )
+
     @staticmethod
     def _trim(value: Any) -> str:
         text = value if isinstance(value, str) else str(value)
@@ -278,11 +345,31 @@ class PlannerTools:
             return False
         return isinstance(name, str) and name.startswith("Selection_Wire")
 
-    def _count_topology(self) -> dict[str, Any]:
-        part = self.conn.get_active_part()
-        body = self.conn.get_active_part_body()
-        sel = self.conn.hso
+    def _count_topology(self, document: str | None = None) -> dict[str, Any]:
+        part, body = self._topology_target(document)
         counts: dict[str, Any] = {}
+        try:
+            empty = body.Shapes.Count == 0
+        except Exception:  # noqa: BLE001 - assume not empty, the counts will say
+            empty = False
+        if empty:
+            # Nothing to search: an empty body answers "0 0 0", and the answer
+            # needs to say why (reported 2026-10-25 - "0 faces" and "this part
+            # holds no solid" are different verdicts, and only the second means
+            # the counts cannot be used at all).
+            counts.update({"faces": 0, "edges": 0, "vertices": 0, "part": part.Name})
+            if document:
+                counts["document"] = document
+            counts["solid"] = False
+            counts["note_empty"] = (
+                f"Body '{body.Name}' holds no solid at all, so these zeroes mean "
+                "'nothing to count', not 'counted and found empty'. The part may "
+                "hold GSD surfaces, curves or sketches - measure those by name, and "
+                "check catia_list_features for the tree."
+            )
+            counts["counting_rule"] = self._COUNTING_RULE
+            return counts
+        sel = self.conn.hso
         try:
             for kind, key in (("Face", "faces"), ("Edge", "edges"),
                               ("Vertex", "vertices")):
@@ -334,20 +421,31 @@ class PlannerTools:
                 "exactly as in catia_list_edges - the count, Edge.N and the edge "
                 "fingerprints all refer to the same set.")
         counts["part"] = part.Name
+        if document:
+            counts["document"] = document
+        try:
+            # "0 faces" and "this part holds no solid" are different answers, and
+            # only the second one means the counts cannot be used at all. Empty
+            # parts came back as three zeroes with no word of warning (reported
+            # 2026-10-25); catia_get_inertia already says "holds no solid".
+            if body.Shapes.Count == 0:
+                counts["solid"] = False
+                counts["note_empty"] = (
+                    f"Body '{body.Name}' holds no solid at all, so these zeroes mean "
+                    "'nothing to count', not 'counted and found empty'. The part may "
+                    "hold GSD surfaces, curves or sketches - measure those by name, "
+                    "and check catia_list_features for the tree."
+                )
+            else:
+                counts["solid"] = True
+        except Exception:  # noqa: BLE001 - the flag is informative only
+            pass
         # The counting rule is part of the answer, not a footnote: it changed
         # twice (0.3.11 excluded construction geometry, 0.3.15 excluded
         # sketch-wire vertex corners too), and each time an unchanged part
         # reported different numbers. A stored expectation that is not
         # re-baselined then reads as "the model is wrong" (reported 2026-10-25).
-        counts["counting_rule"] = (
-            "These counts cover the SOLID only. Since 0.3.11 sketch wires and "
-            "datum-plane borders are excluded, and since 0.3.15 sketch-wire "
-            "vertex corners are too, which changed the numbers reported for an "
-            "unchanged part (measured 0.3.10 -> 0.3.14: vertices 72 -> 96, "
-            "faces 48 -> 46, edges 109 -> 101). Any expect.vertices / "
-            "expect.faces / expect.edges stored before that has to be "
-            "re-baselined before it is used as an acceptance criterion."
-        )
+        counts["counting_rule"] = self._COUNTING_RULE
         return counts
 
     def _measure_part(self) -> dict[str, Any]:
