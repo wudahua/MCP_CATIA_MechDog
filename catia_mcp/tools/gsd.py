@@ -177,8 +177,33 @@ class GSDTools:
             {
                 "name": "catia_gsd_spline",
                 "description": (
-                    "Create a 3D spline through a list of points. Each point is an existing "
-                    "element name or [x, y, z] coordinates in mm."
+                    "Create a 3D spline through a list of points. Each point is an "
+                    "existing element name or [x, y, z] coordinates in mm. "
+                    "Pass 'element' instead of 'points' to take the corners of a "
+                    "sketch THIS SERVER drew in this session: useful when the "
+                    "sketch holds a polygon (catia_sketch_rectangle, or a chain of "
+                    "catia_sketch_line calls), because a loft section is ONE curve "
+                    "and a polygon outline is four - the spline turns it into a "
+                    "curve that can be lofted. The corners come back in loop order "
+                    "and in global XYZ, converted through the plane the sketch was "
+                    "created on (xy/yz/zx; a sketch on a face has no readable "
+                    "frame and is refused rather than guessed). It also saves "
+                    "transcribing coordinates: they were typed once, when the "
+                    "polygon was drawn. "
+                    "WHAT YOU GET IS A SPLINE, NOT THE POLYGON: the curve "
+                    "interpolates, so it bulges outward between the corners and "
+                    "bulges most across the short side - a closed spline through "
+                    "the corners of a 20 x 12 rectangle measured 24.04 x 21.46 on "
+                    "B30 2026-10-25 (+20 % / +79 %). If the sections are a "
+                    "specification with tolerances, that bulge is a shape change, "
+                    "not a conversion; check the envelope after using this. "
+                    "SHORTER ROUTE on the sketch side: catia_sketch_spline("
+                    "closed=true) draws the same interpolating curve INSIDE the "
+                    "sketch, so the sketch is already one curve and can be a loft "
+                    "section directly - measured on B30 2026-10-25, such a sketch "
+                    "lofts and closes into a solid. Use this 3D spline when the "
+                    "curve has to live in GSD (blend, trim, offset); use the sketch "
+                    "spline when it just has to be loftable."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -189,6 +214,15 @@ class GSDTools:
                             "minItems": 2,
                             "description": "Points the spline passes through, in order",
                         },
+                        "element": {
+                            "type": "string",
+                            "description": (
+                                "Sketch name (e.g. '草图.1') whose drawn outline "
+                                "becomes the point list, in loop order. Only "
+                                "sketches this server drew in this session, on a "
+                                "datum plane. Mutually exclusive with 'points'."
+                            ),
+                        },
                         "closed": {
                             "type": "boolean",
                             "description": "Close the spline into a loop",
@@ -196,7 +230,7 @@ class GSDTools:
                         },
                         "name": {"type": "string", "description": "Optional name for the spline"},
                     },
-                    "required": ["points"],
+                    "required": [],
                 },
             },
             {
@@ -333,10 +367,38 @@ class GSDTools:
                     "loft section is ONE curve: CATIA does not associate a loop. "
                     "Extracting the profile does not help either, because the "
                     "extract is still four cells. So to loft a polygon, pass a "
-                    "closed catia_gsd_spline through its corners - that is the only "
-                    "form measured to work, and it is also why a spec that gives "
-                    "corner coordinates ends up as a spline section rather than the "
-                    "polygon it describes."
+                    "closed catia_gsd_spline through its corners - or draw the "
+                    "section as a closed catia_sketch_spline, which is one curve "
+                    "already - that is the only form measured to work, and it is "
+                    "also why a spec that gives corner coordinates ends up as a "
+                    "spline section rather than the polygon it describes. "
+                    "A SPLINE IS NOT THE POLYGON: it interpolates, so it bulges "
+                    "outward between the corners, and it bulges most across the "
+                    "SHORT side. Measured on B30 2026-10-25, a closed spline "
+                    "through the corners of a 20 x 12 rectangle swept "
+                    "24.04 x 21.46 - +20 % in x and +79 % in y. Expect the same "
+                    "sign of error whenever a quadrilateral section is replaced by "
+                    "a spline through its corners; it is a substitution, not a "
+                    "neutral conversion. "
+                    "WHEN THE SOURCE BULGES PAST ITS OWN SECTIONS: this surface "
+                    "interpolates through the sections and never runs outside "
+                    "them, and neither does a spline through the same corners. If "
+                    "the source part's envelope is larger than its sections, the "
+                    "extra comes from a tangency condition with a tension factor "
+                    "(SolidWorks 'maintain tangency, factor 1.0'), and CATIA's GSM "
+                    "loft has no such control: the two end conditions it does have "
+                    "are support-surface tangency, which needs a surface touching "
+                    "the section. The way through is to model the bulge instead of "
+                    "asking the loft for it - add sections where the source is "
+                    "thickest, with area and span read off measured cross-sections "
+                    "of the source part. Worked example, a propeller blade whose "
+                    "sections at z=0/19.05/158.75 span x -4.604..16.256 while the "
+                    "part reaches x +-23.222: add a section at z=30 of 78.0 mm2 "
+                    "(x span 25.7, y span 13.7) and one at z=70 of 106.4 mm2 "
+                    "(x span 30.1, y span 14.6), and the envelope lands within "
+                    "5 %. 'ruled' is not the alternative here: it reproduces a "
+                    "straight-sided frustum, which came out 67 % short on that "
+                    "same part."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1089,10 +1151,29 @@ class GSDTools:
 
     def _spline(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
-        points = args["points"]
-        closed = args.get("closed", False)
+        element = args.get("element")
+        closed = bool(args.get("closed", False))
 
-        refs = [self._point_ref(p) for p in points]
+        if element and args.get("points"):
+            raise ValueError(
+                "Pass either 'points' or 'element', not both: 'element' takes the "
+                "corners of a sketch this server drew, 'points' takes them from you."
+            )
+        if element:
+            coords, note = self._outline_points(str(element), closed)
+            refs = [self._point_ref(p) for p in coords]
+            count = len(coords)
+        else:
+            points = args.get("points")
+            if not points:
+                raise ValueError(
+                    "catia_gsd_spline needs 'points' (element names or [x, y, z]) "
+                    "or 'element' (a sketch whose outline this server drew)."
+                )
+            refs = [self._point_ref(p) for p in points]
+            count = len(points)
+            note = ""
+
         spline = self._factory().AddNewSpline()
         for ref in refs:
             spline.AddPoint(ref)
@@ -1101,8 +1182,141 @@ class GSDTools:
 
         return self._finish(
             spline, args.get("name"),
-            f"3D spline created through {len(points)} points{' (closed)' if closed else ''}.",
+            f"3D spline created through {count} points"
+            f"{' (closed)' if closed else ''}.{note}",
         )
+
+    # Matching tolerance when chaining a sketch's lines back into a loop.
+    # The recorded numbers are the caller's own, so they agree exactly; the
+    # slack is for CATIA snapping a typed endpoint onto an existing point.
+    _LOOP_TOL = 1e-3
+
+    def _outline_points(self, name: str, closed: bool
+                        ) -> tuple[list[list[float]], str]:
+        """Global coordinates of a sketch's outline corners, in loop order.
+
+        Exists because a loft section is ONE curve and a polygon outline is
+        several: ``catia_sketch_rectangle`` is four curves, so it cannot be
+        lofted, and neither can the Extract of it (measured on B30 2026-10-25).
+        The way through is a curve through the same corners, which needs their
+        coordinates - and a sketch cannot give them back, because a CATIA
+        Point2D exposes no readable X/Y through automation. So the corners come
+        from what this server drew, and the sketch's placement turns them into
+        global XYZ.
+        """
+        recorded = (getattr(self.conn, "sketch_outlines", None) or {}).get(name)
+        if not recorded:
+            raise RuntimeError(
+                f"No outline recorded for sketch '{name}'. This server remembers "
+                "the outlines it drew in this session; a sketch drawn in CATIA's "
+                "own UI, or one from a reopened file, has no record. Pass the "
+                "corners as 'points' instead - or draw the section as a closed "
+                "catia_sketch_spline inside the sketch, which is already one "
+                "curve and needs no 3D spline at all."
+            )
+        placement = recorded.get("placement")
+        if not placement:
+            raise RuntimeError(
+                f"'{name}' was not created on a datum plane (it sits on a face, "
+                "or on an element whose frame cannot be read back), so its 2D "
+                "coordinates cannot be turned into global XYZ here. Pass the "
+                "corners as 'points', or rebuild the sketch on an offset datum "
+                "plane - the frame of xy/yz/zx is known, a face's is not."
+            )
+
+        loop = self._chain_outline(recorded.get("elements") or [], name)
+        if len(loop) < 2:
+            raise RuntimeError(
+                f"'{name}' holds {len(loop)} usable corner(s); a spline needs at "
+                "least 2."
+            )
+        coords = [self._to_global(placement, u, v) for u, v in loop]
+        return coords, (f" Corners taken from sketch '{name}' in "
+                        f"{placement['base']} plane order, z={placement['distance']:g}.")
+
+    def _chain_outline(self, elements: list[dict[str, Any]],
+                       name: str) -> list[list[float]]:
+        """Order a sketch's drawn elements into one loop of 2D corners."""
+        kinds = {str(e.get("kind")) for e in elements}
+        if kinds == {"rectangle"} and len(elements) == 1:
+            e = elements[0]
+            x1, y1, x2, y2 = (float(e["x1"]), float(e["y1"]),
+                              float(e["x2"]), float(e["y2"]))
+            return [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
+        if kinds == {"line"}:
+            return self._chain_lines(elements, name)
+
+        already = kinds & {"circle", "arc"}
+        if already:
+            raise RuntimeError(
+                f"'{name}' holds a {sorted(already)[0]}, which is already ONE "
+                "curve - pass the sketch itself as the loft section; it needs no "
+                "3D spline."
+            )
+        if "spline" in kinds:
+            raise RuntimeError(
+                f"'{name}' already holds a spline, which is one curve: pass the "
+                "sketch itself as the section instead of wrapping it in a 3D "
+                "spline."
+            )
+        raise RuntimeError(
+            f"Cannot turn '{name}' into a corner list: it holds "
+            f"{sorted(kinds) or 'nothing'}. Only a rectangle or a chain of lines "
+            "is supported; pass 'points' for anything else."
+        )
+
+    def _chain_lines(self, elements: list[dict[str, Any]], name: str
+                     ) -> list[list[float]]:
+        """Walk a set of drawn lines into one ordered loop (reversing as needed)."""
+        tol = self._LOOP_TOL
+
+        def near(a: list[float], b: list[float]) -> bool:
+            return abs(a[0] - b[0]) <= tol and abs(a[1] - b[1]) <= tol
+
+        remaining = []
+        for e in elements:
+            remaining.append([[float(e["x1"]), float(e["y1"])],
+                              [float(e["x2"]), float(e["y2"])]])
+        first = remaining.pop(0)
+        loop = [first[0], first[1]]
+        while remaining:
+            tail = loop[-1]
+            for index, seg in enumerate(remaining):
+                if near(seg[0], tail):
+                    loop.append(seg[1])
+                elif near(seg[1], tail):
+                    loop.append(seg[0])
+                else:
+                    continue
+                remaining.pop(index)
+                break
+            else:
+                raise RuntimeError(
+                    f"The lines in '{name}' do not form one chain: after "
+                    f"{len(loop)} corner(s) nothing continues from "
+                    f"({tail[0]:g}, {tail[1]:g}). Draw them end to end, or pass "
+                    "'points' in the order you want the spline to run."
+                )
+        if len(loop) > 2 and near(loop[0], loop[-1]):
+            loop.pop()          # a closed polygon: the spline closes it
+        return loop
+
+    @staticmethod
+    def _to_global(placement: dict[str, Any], u: float, v: float) -> list[float]:
+        """Sketch (u, v) to global XYZ, per the plane it was drawn on.
+
+        Measured on B30 2026-10-25: a 20 x 6 rectangle on each datum plane at
+        offset 25 padded to the box xy -> (0..20, 0..6, 25), yz -> (25, 0..20,
+        0..6), zx -> (0..6, 25, 0..20). So zx maps u to Z and v to X, which is
+        the mapping everybody gets wrong once.
+        """
+        distance = float(placement.get("distance") or 0.0)
+        base = str(placement.get("base") or "xy").lower()
+        if base == "yz":
+            return [distance, u, v]
+        if base == "zx":
+            return [v, distance, u]
+        return [u, v, distance]
 
     def _circle(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()

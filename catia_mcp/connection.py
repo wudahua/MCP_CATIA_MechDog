@@ -36,6 +36,14 @@ class CATIAConnection:
         self.last_sketch: Any | None = None
         # Solid body new features should go into. None = the part's MainBody.
         self.active_body: Any | None = None
+        # What this server drew inside each sketch, plus where the sketch sits:
+        #   {sketch name: {"placement": {"base": "xy", "distance": 50.0} | None,
+        #                  "elements": [{"kind": "line", "x1": .., ...}, ...]}}
+        # The only way to get an outline's coordinates: a CATIA Point2D exposes
+        # no readable X/Y through automation on this build, so the numbers have
+        # to be remembered at drawing time. catia_gsd_spline(element=...) reads
+        # this; a sketch drawn elsewhere (or a reopened file) has no record.
+        self.sketch_outlines: dict[str, dict[str, Any]] = {}
 
     @property
     def is_connected(self) -> bool:

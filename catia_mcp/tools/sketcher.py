@@ -566,6 +566,11 @@ class SketcherTools:
         self._active_sketch = sketch
         self._sketch_part = part
         self._active_factory = sketch.OpenEdition()
+        # Where this sketch sits, so GSD can place its outline in 3D later.
+        record = self._outline_record(str(sketch.Name))
+        if record is not None:
+            record["placement"] = self._placement_of(plane, offset)
+            record["elements"] = []
         # Remember it by identity: body.Sketches is ordered by tree position,
         # not by creation, so a later feature cannot find "the sketch I just
         # made" by index. Recording it here is what makes pad/pocket/shallow
@@ -592,6 +597,43 @@ class SketcherTools:
         except Exception:  # noqa: BLE001 - the record is still useful
             name = "?"
         self._drawn.setdefault(name, []).append({"kind": kind, **params})
+        # Same record on the connection, where catia_gsd_spline can reach it:
+        # GSD needs the outline's coordinates to build a 3D spline through a
+        # polygon's corners, and the sketch itself cannot hand them back (a
+        # Point2D exposes no readable X/Y through automation on this build).
+        record = self._outline_record(name)
+        if record is not None:
+            record["elements"].append({"kind": kind, **params})
+
+    def _outline_record(self, name: str) -> dict[str, Any] | None:
+        """The shared outline record for one sketch (None with no connection)."""
+        outlines = getattr(self.conn, "sketch_outlines", None)
+        if outlines is None:
+            return None
+        return outlines.setdefault(name, {"placement": None, "elements": []})
+
+    @classmethod
+    def _placement_of(cls, plane: Any, offset: float | None) -> dict[str, Any] | None:
+        """Where a new sketch sits, in terms GSD can turn into global XYZ.
+
+        Only the datum-plane forms are answered, because only those have a frame
+        this server knows: xy is (u, v, offset), yz is (offset, u, v) and zx is
+        (v, offset, u) - measured on B30 2026-10-25 by padding a 20 x 6 rectangle
+        on each plane and reading the box back. A sketch on a face, or on an
+        element that is not a datum plane, gets None and the GSD side refuses
+        rather than guessing a frame.
+        """
+        if isinstance(plane, str) and plane.lower() in cls._AXES:
+            return {"base": plane.lower(), "distance": float(offset or 0.0)}
+        if isinstance(plane, dict) and str(plane.get("type", "")).lower() == "offset":
+            base = str(plane.get("base", "xy")).lower()
+            if base in ("xy", "yz", "zx"):
+                distance = plane.get("distance", plane.get("offset", 0))
+                try:
+                    return {"base": base, "distance": float(distance)}
+                except (TypeError, ValueError):
+                    return None
+        return None
 
     def _profile_summary(self, sketch_name: str | None = None) -> str:
         """Echo the drawn profile: element counts, size, total outline length.

@@ -28,6 +28,45 @@ All notable changes to this project are documented here.
   part whose surface bulges past its sections - the P03 propeller envelope
   question, which is a modelling route and not a tool fix.
 
+### Added — `catia_gsd_spline(element=...)`, so a polygon's corners need typing once
+
+- A loft section is one curve and a polygon is four, so the way through is a
+  curve through the same corners - which needs their coordinates, and a sketch
+  cannot hand them back (a CATIA Point2D exposes no readable X/Y through
+  automation on this build). So the server now remembers the outline it drew and
+  where the sketch sits, and `element='草图.1'` turns that into a closed spline:
+  corners in loop order, in global XYZ, converted through the plane the sketch
+  was created on.
+- The plane mapping is measured, not assumed (B30 2026-10-25, a 20 x 6 rectangle
+  padded on each datum plane): `xy` -> `(u, v, offset)`, `yz` -> `(offset, u, v)`,
+  `zx` -> `(v, offset, u)`. Verified end to end: a 4-line sketch on `zx` at
+  offset 25 became a spline whose thickened solid measured x 0..6, y 25..27,
+  z 0..20.
+- Refused rather than guessed in three cases, each with its own sentence: a
+  sketch this server never drew (or one from a reopened file), a sketch on a
+  face (no readable frame), and a sketch holding a circle or a spline (already
+  one curve - pass the sketch itself as the section).
+- Closed lines are chained back into a loop, including segments drawn backwards;
+  a chain that does not close names the point where it stops.
+
+### Added — the loft description now carries the two routes that actually work
+
+- **`catia_sketch_spline(closed=true)`** draws the same interpolating curve
+  *inside* the sketch, so the sketch is one curve and lofts directly. Measured:
+  such a sketch lofted through two sections and closed into a solid.
+- **When the source bulges past its own sections** (a tangency with a tension
+  factor, which CATIA's GSM loft does not expose), model the bulge instead of
+  asking the loft for it: add sections where the source is thickest, with area
+  and span read off measured cross-sections. Worked example included (a blade
+  whose sections span x -4.604..16.256 while the part reaches x ±23.222: add
+  z=30 / 78.0 mm² and z=70 / 106.4 mm², lands within 5 %; `ruled` came out 67 %
+  short on that same part).
+- **A spline is not the polygon.** Measured: a closed spline through the corners
+  of a 20 x 12 rectangle swept 24.04 x 21.46 - +20 % in x and +79 % in y. The
+  bulge is worst across the short side, so replacing a thin quadrilateral
+  section with a spline thickens exactly the direction that had to stay thin.
+  That is a substitution, and both descriptions now say so.
+
 ## [0.3.15] — 2026-10-25 · the box was 60 mm wide because of a sketch corner
 
 Four reports against 0.3.14. Two of them reproduced exactly as written, and one
