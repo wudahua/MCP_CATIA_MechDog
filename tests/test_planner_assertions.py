@@ -56,8 +56,29 @@ def test_cog_distance_uses_millimetres():
 
 
 def test_missing_measurement_does_not_invent_a_pass():
+    """It must not pass - and since 2026-10-26 it must not vanish either.
+
+    Dropping the assertion entirely is how `expect: {"document": …, "volume_mm3":
+    1.0}` came back as PLAN_OK: the measurement had failed, so no check was built,
+    so nothing contradicted the caller's expectation.
+    """
     checks = planner()._check({"volume_mm3": 1000}, {})
-    assert checks == []
+    assert len(checks) == 1
+    assert checks[0]["pass"] is False
+    assert checks[0]["actual"] is None
+    assert "unavailable" in checks[0]
+
+
+def test_an_unmeasurable_area_is_a_failure_not_a_skip():
+    checks = planner()._check({"area_mm2": 100.0},
+                             {"area_mm2": "n/a (Product document)"})
+    assert checks[0]["pass"] is False
+    assert "Product" in checks[0]["unavailable"]
+
+
+def test_a_cog_with_a_missing_component_is_a_failure():
+    checks = planner()._check({"cog": [0, 0, 1]}, {"cog": [0, None, 1]})
+    assert checks[0]["pass"] is False
 
 
 # ---- plan validation -------------------------------------------------------

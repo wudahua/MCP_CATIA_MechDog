@@ -52,7 +52,15 @@ class PlannerTools:
                     "assertions. Returns per-step outcomes plus measured volume, area, "
                     "face/edge/vertex counts and centre of gravity compared against the "
                     "expected values. Use it to make a build reproducible instead of "
-                    "replaying dozens of individual calls."
+                    "replaying dozens of individual calls. "
+                    "NOT nestable: 'catia_run_plan' and 'catia_measure_topology' - a plan "
+                    "containing either is rejected before any step runs, with the step "
+                    "number and the tool named (a topology count is already part of the "
+                    "measurements, and nesting a plan gives nothing but ambiguity). "
+                    "Every step's args are validated against that tool's own schema "
+                    "before the first step runs: a missing argument comes back as "
+                    "code BAD_ARGS with details[{step, tool, missing, path, schema}], "
+                    "not as a KeyError halfway through the model."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -249,7 +257,22 @@ class PlannerTools:
             if not errors:
                 continue
             required = list(schema.get("required") or [])
+            # A schema may accept several spellings (catia_activate_document takes
+            # 'name', 'document' or 'document_name') and express it as anyOf of
+            # required lists. Name the shortest unsatisfied branch, so the message
+            # still says "missing: name" instead of listing every alternative.
+            alternatives = [
+                list(branch.get("required") or [])
+                for branch in (schema.get("anyOf") or [])
+                if isinstance(branch, dict) and branch.get("required")
+            ]
             missing = [name for name in required if name not in args]
+            if not required and alternatives:
+                unsatisfied = [branch for branch in alternatives
+                               if any(name not in args for name in branch)]
+                if unsatisfied:
+                    best = min(unsatisfied, key=len)
+                    required, missing = list(best), list(best)
             first = errors[0]
             where = "/".join(str(part) for part in first.path) or "args"
             problems.append({
@@ -265,6 +288,7 @@ class PlannerTools:
                 "schema": {
                     "required": required,
                     "properties": sorted((schema.get("properties") or {}).keys()),
+                    **({"alternatives": alternatives} if alternatives else {}),
                 },
             })
         return problems
@@ -362,9 +386,7 @@ class PlannerTools:
             message = f"Step {failed_at} ({report[failed_at - 1]['tool']}) failed"
         elif failed_assertions:
             code = "ASSERTION_FAILED"
-            message = "; ".join(
-                f"{a['name']}: expected {a['expected']}, got {a['actual']}" for a in failed_assertions
-            )
+            message = "; ".join(self._assertion_line(a) for a in failed_assertions)
         else:
             code = "PLAN_OK"
             message = (
@@ -578,6 +600,19 @@ class PlannerTools:
     def _measure_part(self, document: str | None = None) -> dict[str, Any]:
         if self._router is None:
             return {}
+        if document:
+            # A Product cannot be measured "by document": get_inertia needs a Part,
+            # and the assembly's volume only comes from the aggregation route that
+            # runs on the ACTIVE document. Activate, measure, restore (reported
+            # 2026-10-26: `expect: {"document": "M113_asm", "volume_mm3": …}`
+            # answered "exposes no 'Part'", so an assembly could not be asserted
+            # at all in the per-document form).
+            try:
+                named = self._named_document(document)
+            except Exception:  # noqa: BLE001 - let the named path report it
+                named = None
+            if named is not None and self._is_product_document(named):
+                return self._measure_active_product(str(document))
         measurements: dict[str, Any] = {}
         target = {"document": document} if document else {}
         if document:
@@ -631,6 +666,27 @@ class PlannerTools:
             except Exception as error:  # noqa: BLE001
                 measurements["topology_error"] = f"{type(error).__name__}: {error}"
         return measurements
+
+    def _measure_active_product(self, document: str) -> dict[str, Any]:
+        """Measure an assembly by making it active, then put the session back."""
+        previous = None
+        try:
+            previous = str(self.conn.active_document.Name)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self._router["catia_activate_document"].execute(
+                "catia_activate_document", {"name": document})
+            data = self._measure_part()
+        finally:
+            if previous and previous != document:
+                try:
+                    self._router["catia_activate_document"].execute(
+                        "catia_activate_document", {"name": previous})
+                except Exception:  # noqa: BLE001 - the numbers are the point
+                    pass
+        data["document"] = document
+        return data
 
     @staticmethod
     def _is_product_document(doc: Any) -> bool:
@@ -692,69 +748,116 @@ class PlannerTools:
                 checks.append(check)
         return checks
 
+    @staticmethod
+    def _assertion_line(check: dict[str, Any]) -> str:
+        """One failed assertion, in words that say what actually happened.
+
+        "expected 1.0, got None" is literally true and useless: it does not say
+        whether the model is wrong or the measurement never happened.
+        """
+        where = f"{check['document']}: " if check.get("document") else ""
+        if check.get("unavailable"):
+            return (f"{where}{check['name']}: expected {check['expected']}, but it "
+                    f"could not be measured ({check['unavailable']})")
+        return (f"{where}{check['name']}: expected {check['expected']}, "
+                f"got {check['actual']}")
+
     def _check(self, expect: dict[str, Any], actual: dict[str, Any]) -> list[dict[str, Any]]:
         checks: list[dict[str, Any]] = []
 
         def tolerance(value: float, target: float, pct: float) -> bool:
             return abs(value - target) <= abs(target) * pct / 100.0
 
-        if "volume_mm3" in expect and actual.get("volume_mm3") is not None:
-            target = float(expect["volume_mm3"])
-            value = float(actual["volume_mm3"])
-            pct = float(expect.get("volume_tolerance_pct", 1.0))
-            checks.append(
-                {
-                    "name": "volume_mm3",
-                    "expected": target,
-                    "actual": round(value, 4),
-                    "delta_pct": round((value - target) / target * 100.0, 4) if target else None,
-                    "tolerance_pct": pct,
-                    "pass": tolerance(value, target, pct),
-                }
-            )
+        def why_missing() -> str:
+            return str(actual.get("inertia_error") or
+                       actual.get("topology_error") or
+                       "the measurement returned nothing for this key")
 
-        if "area_mm2" in expect and actual.get("area_mm2") is not None:
-            target = float(expect["area_mm2"])
-            value = float(actual["area_mm2"])
-            pct = float(expect.get("area_tolerance_pct", 1.0))
-            checks.append(
-                {
-                    "name": "area_mm2",
-                    "expected": target,
-                    "actual": round(value, 4),
-                    "delta_pct": round((value - target) / target * 100.0, 4) if target else None,
-                    "tolerance_pct": pct,
-                    "pass": tolerance(value, target, pct),
-                }
-            )
+        def unavailable(name: str, expected: Any, reason: str) -> None:
+            # An assertion that cannot be evaluated is a FAILED assertion, never a
+            # skipped one. 0.3.20 dropped it instead: `expect: {"document": …,
+            # "volume_mm3": 1.0}` on an assembly answered PLAN_OK with an empty
+            # `assertions` list, so a wrong expectation of 1.0 against 76 million
+            # mm3 was reported as a pass (reported 2026-10-26).
+            checks.append({
+                "name": name,
+                "expected": expected,
+                "actual": None,
+                "pass": False,
+                "unavailable": reason,
+            })
+
+        if "volume_mm3" in expect:
+            if actual.get("volume_mm3") is None:
+                unavailable("volume_mm3", expect["volume_mm3"], why_missing())
+            else:
+                target = float(expect["volume_mm3"])
+                value = float(actual["volume_mm3"])
+                pct = float(expect.get("volume_tolerance_pct", 1.0))
+                checks.append(
+                    {
+                        "name": "volume_mm3",
+                        "expected": target,
+                        "actual": round(value, 4),
+                        "delta_pct": round((value - target) / target * 100.0, 4) if target else None,
+                        "tolerance_pct": pct,
+                        "pass": tolerance(value, target, pct),
+                    }
+                )
+
+        if "area_mm2" in expect:
+            value = actual.get("area_mm2")
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                # "n/a (Product document)" lands here - a Product has no area, so
+                # an area assertion against one cannot pass.
+                unavailable("area_mm2", expect["area_mm2"],
+                            value if isinstance(value, str) else why_missing())
+            else:
+                target = float(expect["area_mm2"])
+                pct = float(expect.get("area_tolerance_pct", 1.0))
+                checks.append(
+                    {
+                        "name": "area_mm2",
+                        "expected": target,
+                        "actual": round(float(value), 4),
+                        "delta_pct": round((float(value) - target) / target * 100.0, 4) if target else None,
+                        "tolerance_pct": pct,
+                        "pass": tolerance(float(value), target, pct),
+                    }
+                )
 
         for key in ("faces", "edges", "vertices"):
             if key in expect:
                 value = actual.get(key)
                 # Counts are exact: a partial feature or a missing fillet shows up here
                 # even when the volume is within tolerance.
+                check: dict[str, Any] = {
+                    "name": key,
+                    "expected": expect[key],
+                    "actual": value,
+                    "pass": value == expect[key],
+                }
+                if value is None:
+                    check["unavailable"] = why_missing()
+                checks.append(check)
+
+        if "cog" in expect:
+            value = actual.get("cog")
+            if not isinstance(value, (list, tuple)) or None in list(value):
+                unavailable("cog", expect["cog"], why_missing())
+            else:
+                target = [float(v) for v in expect["cog"]]
+                vector = [float(v) for v in value]
+                distance = sum((a - b) ** 2 for a, b in zip(vector, target)) ** 0.5
+                limit = float(expect.get("cog_tolerance_mm", 0.5))
                 checks.append(
                     {
-                        "name": key,
-                        "expected": expect[key],
-                        "actual": value,
-                        "pass": value == expect[key],
+                        "name": "cog",
+                        "expected": target,
+                        "actual": [round(v, 4) for v in vector],
+                        "distance_mm": round(distance, 4),
+                        "tolerance_mm": limit,
+                        "pass": distance <= limit,
                     }
                 )
-
-        if "cog" in expect and actual.get("cog"):
-            target = [float(v) for v in expect["cog"]]
-            value = [float(v) for v in actual["cog"]]
-            distance = sum((a - b) ** 2 for a, b in zip(value, target)) ** 0.5
-            limit = float(expect.get("cog_tolerance_mm", 0.5))
-            checks.append(
-                {
-                    "name": "cog",
-                    "expected": target,
-                    "actual": [round(v, 4) for v in value],
-                    "distance_mm": round(distance, 4),
-                    "tolerance_mm": limit,
-                    "pass": distance <= limit,
-                }
-            )
         return checks

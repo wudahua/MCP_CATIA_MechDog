@@ -164,6 +164,38 @@ lands beyond `anchor_tol`, or exactly where two edges meet, is refused with the
 candidates and their distances: a fillet on the wrong edge is a perfectly legal
 feature nobody asked for.
 
+Every bad anchor is listed at once, and `on_anchor_miss: "skip"` fillets the ones
+that do match while reporting the rest — a 20-row coordinate table should not
+cost 20 round trips because one row is wrong:
+
+```jsonc
+{"tool": "catia_fillet", "args": {"radius": 0.5, "on_anchor_miss": "skip",
+  "edge_anchors": [[0, 5, 4], [999, 999, 999]]}}
+// -> Fillet R0.5: 1/1 edge(s) done [applied Edge.1@R0.5]
+//    Edge anchors: Anchor [0, 5, 4] -> Edge.1 @ 0.0000 mm;
+//    SKIPPED (on_anchor_miss='skip'): 1 anchor(s) beyond anchor_tol=0.5:
+//    [999, 999, 999] is 1710.727 mm from the nearest edge (Edge.3, L20.0).
+```
+
+### A pad that adds nothing tries the other side
+
+`catia_pad` now behaves the way `catia_pocket` has since 0.3.4: if the requested
+direction grows no material, the same feature is flipped and re-measured, and a
+flip that works is kept and reported rather than turned into a diagnosis.
+
+```jsonc
+{"tool": "catia_pad", "args": {"height": 40}}   // sketch sits on the bottom face
+// -> Pad created: 40.000 mm (reverse). Feature: '凸台.2'
+//    Volume 96000.0 -> 100000.0 mm3 (delta +4000.0).
+//    (direction auto-flipped to reach material: ...)
+```
+
+The failure path no longer builds a second pad to answer "is the direction the
+problem?" — that probe was built from a sketch the failed pad had already
+consumed, so it answered "nothing either way" for a direction that works, and
+removing it deleted the caller's sketch. The same node is flipped instead, and
+the reply says whether the sketch survived.
+
 ---
 
 ## Requirements

@@ -56,6 +56,19 @@ _EDGE_ANCHOR_PROPERTIES: dict[str, Any] = {
             "candidate edges pass close together."
         ),
     },
+    "on_anchor_miss": {
+        "type": "string",
+        "enum": ["fail", "skip"],
+        "default": "fail",
+        "description": (
+            "'fail' (default) refuses the whole batch if ANY anchor is beyond "
+            "anchor_tol or ambiguous, and lists every one of them - nothing is "
+            "filleted, so no edge gets a feature nobody asked for. 'skip' fillets "
+            "the anchors that do match and reports the misses in the reply, which "
+            "is what a long coordinate table needs: 20 anchors with one bad "
+            "coordinate should not cost 20 round trips."
+        ),
+    },
 }
 
 
@@ -617,10 +630,15 @@ class PartDesignTools:
                     "properties": {
                         "thickness": {
                             "type": "number",
-                            "exclusiveMinimum": 0,
+                            "minimum": 0,
                             "description": (
                                 "Wall thickness in mm, measured INWARD from the "
-                                "surface. Must be positive."
+                                "surface. 0 is allowed when external_thickness > 0: "
+                                "that is a purely OUTWARD shell, whose wall grows "
+                                "outside the original envelope (a part whose "
+                                "tolerances are on the outside needs exactly that). "
+                                "A negative value is refused up front - CATIA "
+                                "rejects it with a bare 'UpdateObject failed'."
                             ),
                         },
                         "external_thickness": {
@@ -1182,6 +1200,7 @@ class PartDesignTools:
 
     def _anchors_to_edges(
         self, body: Any, anchors: list[list[float]], tol: float,
+        on_miss: str = "fail",
     ) -> tuple[list[str], list[Any], str, list[dict[str, Any]]]:
         """Map anchor coordinates to edges by minimum distance.
 
@@ -1194,6 +1213,11 @@ class PartDesignTools:
 
         Anything that is not a single unambiguous match is refused rather than
         guessed: a fillet on the wrong edge is a legal feature nobody asked for.
+        Every bad anchor is listed at once, not just the first: twenty anchors
+        with one wrong coordinate used to cost one round trip per bad anchor, and
+        the report that hit it collapsed twenty anchors to nine by hand because
+        the tool would only complain about one at a time (reported 2026-10-26).
+        ``on_miss="skip"`` fillets the anchors that do match and reports the rest.
         """
         part = self.conn.get_active_part()
         spa = self._topo_measure(part)
@@ -1218,6 +1242,8 @@ class PartDesignTools:
         refs: list[Any] = []
         matches: list[int] = []
         report: list[str] = []
+        missed: list[dict[str, Any]] = []
+        ambiguous: list[dict[str, Any]] = []
         seen: set[int] = set()
         probe = self._edge_probe_points(part)
         try:
@@ -1243,26 +1269,23 @@ class PartDesignTools:
                 best_distance, best_index = dists[0]
                 entry = table[best_index]
                 if best_distance > tol:
-                    raise RuntimeError(
-                        f"Anchor {anchor} is {best_distance:.4f} mm from the "
-                        f"nearest edge ({entry['name']}, L{entry['length'] or 0:.4f}), "
-                        f"beyond anchor_tol={tol}. Nothing was filleted. Raise "
-                        "anchor_tol if the coordinate is a rounded measurement, or "
-                        "pass Edge.N / a fingerprint from catia_list_edges."
-                    )
+                    missed.append({
+                        "anchor": [round(float(v), 6) for v in anchor],
+                        "nearest_edge": entry["name"],
+                        "nearest_length_mm": (round(entry["length"], 4)
+                                              if entry["length"] is not None else None),
+                        "distance_mm": round(best_distance, 4),
+                    })
+                    continue
                 near = [d for d in dists[1:]
                         if d[0] <= tol and abs(d[0] - best_distance) < 1e-6]
                 if near:
-                    others = ", ".join(
-                        f"{table[i]['name']} (L{table[i]['length'] or 0:.4f})"
-                        for _, i in near)
-                    raise RuntimeError(
-                        f"Anchor {anchor} is {best_distance:.4f} mm from "
-                        f"{entry['name']} and equally close to {others}, so the "
-                        "edge it means is ambiguous - the anchor sits on where "
-                        "they meet. Nothing was filleted; pass explicit "
-                        "edge_names/edge_name for these edges."
-                    )
+                    ambiguous.append({
+                        "anchor": [round(float(v), 6) for v in anchor],
+                        "candidates": [entry["name"]] + [table[i]["name"] for _, i in near],
+                        "distance_mm": round(best_distance, 4),
+                    })
+                    continue
                 if best_index in seen:
                     report.append(
                         f"Anchor {anchor} -> {entry['name']} @ {best_distance:.4f} mm "
@@ -1278,10 +1301,21 @@ class PartDesignTools:
             # which invalidates every topology Reference taken from it - so the
             # references are re-read afterwards, by index, not kept from above.
             probe.close()
+
+        trouble = self._anchor_trouble_text(missed, ambiguous, tol)
+        if trouble and on_miss != "skip":
+            raise RuntimeError(
+                trouble + ". Nothing was filleted - the whole batch is refused so "
+                "that no edge gets a feature nobody asked for. Fix the coordinates "
+                "above, raise anchor_tol, or pass on_anchor_miss='skip' to fillet "
+                "the anchors that do match and have these reported instead."
+            )
+        if trouble:
+            report.append("SKIPPED (on_anchor_miss='skip'): " + trouble)
         if not matches:
             raise RuntimeError(
-                "None of the given edge_anchors matched a distinct edge: "
-                + "; ".join(report)
+                "None of the given edge_anchors matched a distinct edge"
+                + (": " + trouble if trouble else ".")
             )
         table = self._edge_table(body)
         for index in matches:
@@ -1289,6 +1323,31 @@ class PartDesignTools:
             labels.append(f"{entry['name']} (by anchor)")
             refs.append(entry["cell"].Reference)
         return labels, refs, "Edge anchors: " + "; ".join(report) + ".", table
+
+    @staticmethod
+    def _anchor_trouble_text(missed: list[dict[str, Any]],
+                             ambiguous: list[dict[str, Any]],
+                             tol: float) -> str:
+        """Every anchor that could not be used, in one sentence."""
+        parts: list[str] = []
+        if missed:
+            parts.append(
+                f"{len(missed)} anchor(s) beyond anchor_tol={tol}: " + "; ".join(
+                    f"[{', '.join(f'{v:g}' for v in m['anchor'])}] is "
+                    f"{m['distance_mm']} mm from the nearest edge "
+                    f"({m['nearest_edge']}"
+                    + (f", L{m['nearest_length_mm']}" if m["nearest_length_mm"] else "")
+                    + ")"
+                    for m in missed)
+            )
+        if ambiguous:
+            parts.append(
+                f"{len(ambiguous)} ambiguous anchor(s): " + "; ".join(
+                    f"[{', '.join(f'{v:g}' for v in a['anchor'])}] is equally close "
+                    f"to {', '.join(a['candidates'])}"
+                    for a in ambiguous)
+            )
+        return ". ".join(parts)
 
     def _prepare_body(self, part: Any) -> Any:
         """Put the solid body back in work and return it.
@@ -1361,52 +1420,71 @@ class PartDesignTools:
         except Exception as exc:  # noqa: BLE001 - judged by volume below
             update_error = exc
         after, took = self._settle(part, body, before, expect="add")
+
+        # The same node, flipped, instead of a second throwaway pad. Measured
+        # 2026-10-26: the throwaway probe was built from a sketch the FAILED pad
+        # had already consumed, so it answered "nothing either way" for a
+        # direction that works - the caller was told the direction was not the
+        # problem while `direction='reverse'` added 4 000 mm3 on the same sketch.
+        # Removing that probe also took the caller's sketch with it, so the retry
+        # the message discouraged could not even run.
+        flipped = False
+        if took is False and not symmetric:
+            pad.DirectionOrientation = 0 if direction == "reverse" else 1
+            flip_error = self._try_update(part, pad)
+            after, retook = self._settle(part, body, before, expect="add")
+            if retook:
+                flipped = True
+                took = True
+                update_error = flip_error or update_error
+                direction = "normal" if direction == "reverse" else "reverse"
+            else:
+                # Air both ways. Put the requested orientation back so the tree
+                # would say what was asked for, then roll the node back below.
+                pad.DirectionOrientation = 1 if direction == "reverse" else 0
+                self._try_update(part, pad)
+                after = self._body_volume_mm3(part, body)
+                took = False
+
         if took is False:
-            # Nothing grew: drop the dead node so the document stays usable.
-            # This is the case that used to poison the whole part - a pad on an
-            # open profile left '凸台.N' behind and every later update failed.
+            # Nothing grew either way: drop the dead node so the document stays
+            # usable. This is the case that used to poison the whole part - a pad
+            # on an open profile left '凸台.N' behind and every later update
+            # failed. Only the pad is removed: the sketch was in the tree before
+            # this call and is none of this rollback's business.
             gone = self._remove_feature(part, pad)
+            survived = self._sketch_present(body, sketch)
             stayed = (f"Volume stayed {before:.1f} mm3." if before is not None
                       else f"The volume could not be measured ({volume_note}).")
-            # Before blaming the profile, ask CATIA the one question that settles
-            # it: does the SAME sketch, padded the other way, grow the body? If it
-            # does, the direction is wrong and no amount of profile repair helps.
-            # Reported 2026-10-25: a 55 mm pad pointing into existing material
-            # came back as "the profile may be open", and the advice to retry sent
-            # a user round a loop that could never succeed.
-            reverse_gain = self._pad_other_direction(
-                part, body, sketch, height, symmetric, direction, before)
-            if reverse_gain is not None:
-                raise RuntimeError(
-                    "CATIA built no material for this pad, so it was rolled back"
-                    + ("" if gone else " (the dead feature could NOT be deleted - "
-                                        "close the document without saving)")
-                    + f" {stayed} THE PROFILE IS FINE: the same sketch padded in the "
-                    f"opposite direction adds {reverse_gain:.1f} mm3. "
-                    + ("You already passed direction='reverse', so the material is "
-                       "on the other side - use direction='normal'."
-                       if direction == "reverse"
-                       else "Pass direction='reverse' to build it there.")
-                    + " (Measured by building it both ways and rolling back the "
-                      "probe, not guessed.)"
-                )
+            sketch_name = getattr(sketch, "Name", "the sketch")
             raise RuntimeError(
-                "CATIA built no material for this pad, so it was rolled back"
+                "CATIA built no material for this pad in EITHER direction, so it "
+                "was rolled back"
                 + ("" if gone else " (the dead feature could NOT be deleted - "
-                                    "close the document without saving)")
-                + f" {stayed} It adds nothing in EITHER direction, so the direction "
-                "is not the problem. Three things do this://n"
+                                   "close the document without saving)")
+                + f" {stayed} Both directions were MEASURED, not assumed: the same "
+                "pad node was flipped and re-updated, and neither orientation grew "
+                "the body."
+                + (f" Your sketch '{sketch_name}' is still in the tree - only the "
+                   "pad node was removed." if survived else
+                   f" WARNING: the sketch '{sketch_name}' did not survive the "
+                   "rollback, so it has to be re-created before this pad can be "
+                   "retried.")
+                + " Four things do this:\n"
+                "  · the sketch plane sits ON the material boundary and the sweep "
+                "runs INTO the body, so the whole sweep is absorbed - move the "
+                "sketch's offset so the sweep starts outside the material, or "
+                "extend the profile through it;\n"
+                "  · the profile lies entirely inside existing material, with air "
+                "on neither side;\n"
                 "  · the profile is open (a 0.0035 mm gap is enough) - "
-                "catia_close_sketch reports the endpoints and the gap when it can "
-                "see one;\n"
-                "  · the profile lies inside existing material - the sweep is "
-                "absorbed, so move the sketch's offset so the sweep starts outside "
-                "the body, or extend the profile through the material;\n"
-                "  · the outline self-intersects (check the sign of its area).\n"
-                "Retrying changes none of these. A retry is only worth it when the "
-                "profile echo was clean, the direction is right AND the sweep has "
-                "somewhere to grow."
-                + (f". Original error: {update_error}" if update_error else ".")
+                "catia_close_sketch reports every endpoint and gap it can see;\n"
+                "  · the outline self-intersects, or is several overlapping closed "
+                "loops (catia_sketch_rectangle already draws a complete rectangle, "
+                "so calling it twice draws two).\n"
+                "Retrying the SAME call changes none of these; changing the offset "
+                "or the profile does."
+                + (f" Original error: {update_error}" if update_error else ".")
             )
         self.conn.refresh_display()
         span = "total %.3f mm, %0.3f each side" % (height, height / 2.0) if symmetric \
@@ -1428,6 +1506,10 @@ class PartDesignTools:
         if update_error is not None:
             note += (" (CATIA raised during the update, but the solid did grow "
                      "and the feature is kept.)")
+        if flipped:
+            note += (" (direction auto-flipped to reach material: the requested "
+                     "side was empty, and the same feature keeps the material it "
+                     "was asked for on the other side)")
         return f"Pad created: {span} ({direction}). Feature: '{pad.Name}'{note}"
 
     def _volume_probe(self, part: Any, body: Any) -> tuple[float | None, str | None]:
@@ -1762,6 +1844,38 @@ class PartDesignTools:
             except Exception:
                 pass
 
+    def _sketch_present(self, body: Any, sketch: Any) -> bool:
+        """Whether a sketch is still in the tree, by name, across every body.
+
+        A rollback that says "the feature was removed" has to be able to say what
+        else went with it. Reported 2026-10-26: a failed pad removed the caller's
+        input sketch, and the only evidence was the NEXT call answering "No sketch
+        named '草图.5'. Available: 草图.1, 草图.4." - which reads like a typo in the
+        caller's own naming. True when it cannot be determined; the sentence is a
+        courtesy, not a gate.
+        """
+        try:
+            name = str(sketch.Name)
+        except Exception:  # noqa: BLE001 - a dead handle proves nothing
+            return False
+        try:
+            bodies = body.Parent.Bodies
+        except Exception:  # noqa: BLE001
+            bodies = [body]
+        try:
+            for b in range(1, bodies.Count + 1):
+                container = bodies.Item(b)
+                try:
+                    sketches = container.Sketches
+                except Exception:  # noqa: BLE001
+                    continue
+                for s in range(1, sketches.Count + 1):
+                    if str(sketches.Item(s).Name) == name:
+                        return True
+        except Exception:  # noqa: BLE001 - cannot tell, so do not accuse
+            return True
+        return False
+
     @staticmethod
     def _try_update(part: Any, feature: Any) -> Exception | None:
         """Call UpdateObject, returning the exception instead of raising it."""
@@ -1770,37 +1884,6 @@ class PartDesignTools:
             return None
         except Exception as exc:  # noqa: BLE001 - the caller measures instead
             return exc
-
-    def _pad_other_direction(self, part: Any, body: Any, sketch: Any, height: float,
-                             symmetric: bool, direction: str,
-                             before: float | None) -> float | None:
-        """How much the SAME pad would add the other way, or None if it adds none.
-
-        Builds a throwaway pad, measures, and deletes it again, so the diagnosis
-        costs one feature and one update only on the failure path. ``None`` means
-        "it adds nothing that way either", which is the case where the profile or
-        the material really is the problem.
-        """
-        probe = None
-        try:
-            probe = part.ShapeFactory.AddNewPad(sketch, height / 2.0 if symmetric else height)
-            if symmetric:
-                probe.IsSymmetric = True
-            else:
-                probe.DirectionOrientation = 0 if direction == "reverse" else 1
-            part.UpdateObject(probe)
-        except Exception:  # noqa: BLE001 - a failed probe answers "no"
-            if probe is not None:
-                self._remove_feature(part, probe)
-            return None
-        grew = None
-        try:
-            after = self._body_volume_mm3(part, body)
-            if before is not None and after is not None and after - before > 1e-6:
-                grew = after - before
-        finally:
-            self._remove_feature(part, probe)
-        return grew
 
     def _settle(self, part: Any, body: Any, before: float | None,
                 expect: str = "subtract") -> tuple[float | None, bool | None]:
@@ -2036,7 +2119,7 @@ class PartDesignTools:
                 specs.append(args["edge_name"])
             return self._edges_by_anchor(
                 args["radius"], specs, anchors, tol, self._propagation(args),
-                kind="fillet")
+                kind="fillet", on_miss=str(args.get("on_anchor_miss") or "fail"))
         if len(names) > 1 or (names and not args.get("edge_name")):
             return self._fillet_many(args["radius"], list(names),
                                      self._propagation(args))
@@ -2077,14 +2160,15 @@ class PartDesignTools:
     def _edges_by_anchor(self, value: float, specs: list[Any],
                          anchors: list[list[float]], tol: float,
                          propagation: int, kind: str = "fillet",
-                         angle: float = 45.0) -> str:
+                         angle: float = 45.0, on_miss: str = "fail") -> str:
         """Fillet/chamfer a list of coordinate anchors instead of edge names."""
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
         body = self._prepare_body(part)
         sf = part.ShapeFactory
 
-        labels, refs, report, table = self._anchors_to_edges(body, anchors, tol)
+        labels, refs, report, table = self._anchors_to_edges(
+            body, anchors, tol, on_miss=on_miss)
         if specs:
             more_labels, more_refs = self._resolve_edge_specs(body, specs,
                                                               table=table)
@@ -2250,15 +2334,46 @@ class PartDesignTools:
             head += " [applied " + ", ".join(f"{n}@R{stamp}" for n in short) + "]"
         if failed:
             head += ". Rejected: " + "; ".join(f"{n} -> {m}" for n, m in failed)
-            head += (
-                ". A refusal here is usually the topology, not the argument: edges "
-                "that came out of catia_gsd_close_surface cannot take a Part Design "
-                "fillet, while edges of a pad in the same body can."
-            )
+            head += self._rejection_reason([n for n, _ in failed])
             hint = self._coplanar_hint([n for n, _ in failed])
             if hint:
                 head += hint
         return head
+
+    @staticmethod
+    def _rejection_reason(labels: list[str]) -> str:
+        """Why a fillet can refuse an edge, in the order that actually happens.
+
+        The old sentence named ``catia_gsd_close_surface`` as the usual cause.
+        Reported 2026-10-26 with the counter-example: four rejected edges whose
+        ``bounded_by`` contained only Sketch and Pad - no GSD surface anywhere -
+        while the real common factor was an existing R2.5 fillet meeting them at
+        a corner. The fingerprint carries the bounding faces, so the cause can be
+        read instead of guessed.
+        """
+        joined = " ".join(labels)
+        if "Fillet." in joined or "Chamfer." in joined:
+            return (
+                ". These edges are bounded by an existing fillet or chamfer - the "
+                "topology, not the argument: two rounds that meet at a corner fight "
+                "over the same material, and the second one cannot build. Apply "
+                "rounds that share a vertex in ONE call (the batch path builds them "
+                "together), or reduce the radius on the later one."
+            )
+        if "CloseSurface" in joined:
+            return (
+                ". At least one of these edges came out of a GSD CloseSurface: "
+                "those edges cannot take a Part Design fillet, while edges of a "
+                "pad in the same body can."
+            )
+        return (
+            ". The refusal is about the topology, not the argument. Usual causes, "
+            "in order: an edge adjacent to an existing fillet or chamfer that "
+            "shares a vertex with it; an edge shorter than twice the radius; and a "
+            "seam edge, where two coplanar faces meet at 180 degrees and there is "
+            "no dihedral angle to round off. catia_list_edges shows the bounding "
+            "faces of each edge, so a Fillet.N there is the first thing to look for."
+        )
 
     @staticmethod
     def _bounding_faces(label: str) -> int:
@@ -2382,7 +2497,8 @@ class PartDesignTools:
                 specs.append(args["edge_name"])
             return self._edges_by_anchor(
                 float(args["length"]), specs, anchors, tol, 1,
-                kind="chamfer", angle=float(args.get("angle", 45)))
+                kind="chamfer", angle=float(args.get("angle", 45)),
+                on_miss=str(args.get("on_anchor_miss") or "fail"))
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
         body = self._prepare_body(part)
@@ -2942,17 +3058,30 @@ class PartDesignTools:
         body = self._prepare_body(part)
         sf = part.ShapeFactory
 
-        thickness = args["thickness"]
+        thickness = float(args["thickness"])
         external = float(args.get("external_thickness") or 0.0)
-        if thickness <= 0:
+        if thickness < 0:
             raise ValueError(
-                f"'thickness' must be positive, got {thickness}. CATIA's Shell "
-                "offsets INWARD by this amount; a negative value is rejected at "
+                f"'thickness' cannot be negative, got {thickness}. CATIA's Shell "
+                "offsets INWARD by this amount and rejects a negative one at "
                 "update with a message that looks like a bad feature name. To put "
-                "material outside the surface, use 'external_thickness'."
+                "material OUTSIDE the surface use 'external_thickness'; to make "
+                "the wall purely outward pass thickness=0 with external_thickness>0."
             )
         if external < 0:
             raise ValueError("'external_thickness' cannot be negative.")
+        if thickness == 0 and external == 0:
+            raise ValueError(
+                "'thickness' and 'external_thickness' are both 0, so the shell "
+                "would have no wall at all. Give one of them a value."
+            )
+        if thickness == 0 and external > 0:
+            # Pure outward: the wall grows outside the original surface and the
+            # inside stays hollow. Asked for by a part whose tolerances are
+            # measured on the outside (reported 2026-10-26, whose workaround was
+            # thickness=0.001 + external=5 and left a 10.4 mm3 inner membrane on a
+            # 10 400 mm2 wall - right answer, wrong semantics).
+            pass
         faces = args.get("faces_to_remove") or []
         if not faces:
             raise ValueError(
@@ -2984,9 +3113,23 @@ class PartDesignTools:
             pass
         note = f" (could not add: {', '.join(skipped)})" if skipped else ""
         return (
-            f"Shell created: {thickness} mm wall, removed "
+            f"Shell created: {self._shell_wall_text(thickness, external)}, removed "
             f"{len(faces) - len(skipped)} face(s){note}. Feature: '{shell.Name}'"
         )
+
+    @staticmethod
+    def _shell_wall_text(thickness: float, external: float) -> str:
+        """Say which side(s) the wall grew on, because "0.0 mm wall" is nonsense.
+
+        A purely outward shell with thickness=0 built 61 500 mm3 on a 96 000 mm3
+        box (the analytic 70x50x45 minus 60x40x40, measured 2026-10-26) and the
+        reply described it as "0.0 mm wall".
+        """
+        if thickness and external:
+            return f"{thickness:g} mm inward + {external:g} mm outward wall"
+        if external:
+            return f"{external:g} mm OUTWARD wall (the original surface stays hollow)"
+        return f"{thickness:g} mm inward wall"
 
     def _draft(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()

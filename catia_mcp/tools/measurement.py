@@ -638,12 +638,16 @@ class MeasurementTools:
             # A field, not a paragraph: this used to be five lines of prose in
             # EVERY reply of a nine-part sweep, and a caller had to read it to
             # find out whether the tensor was missing or merely unreadable
-            # (reported 2026-10-25). The prose stays, but only as the reason.
+            # (reported 2026-10-25). The prose stays, but only as the reason -
+            # and beside a one-word CODE, because nine parts in a row produced
+            # nine identical sentences and the only thing a reader needs is which
+            # case it is (reported 2026-10-26).
             payload["tensor"] = None
+            payload["tensor_reason_code"] = "no_own_window"
             payload["tensor_reason"] = (
                 "no own window: CATIA computes the tensor only for the active "
-                "document and this part cannot be activated where it is. Open it "
-                "with catia_open_document, activate it, then call get_inertia "
+                "document and this part cannot be activated where it is. Fix: "
+                "catia_open_document + catia_activate_document, then get_inertia "
                 "without 'document'."
             )
             payload["note"] = (

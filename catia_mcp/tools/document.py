@@ -208,7 +208,10 @@ class DocumentTools:
                     "to the Part except closing the Product (reported 2026-10-23). "
                     "Matches the document name exactly first, then as a stem, then both "
                     "again ignoring case, so 'P05_stand.CATPart', 'P05_stand' and "
-                    "'p05_STAND' all work."
+                    "'p05_STAND' all work. The name is accepted as 'name', "
+                    "'document' or 'document_name' - every other tool spells it "
+                    "'document', and having exactly one tool insist on 'name' cost "
+                    "a round trip (reported 2026-10-26)."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -217,8 +220,20 @@ class DocumentTools:
                             "type": "string",
                             "description": "Document name, as listed by catia_list_documents",
                         },
+                        "document": {
+                            "type": "string",
+                            "description": "Alias of 'name'.",
+                        },
+                        "document_name": {
+                            "type": "string",
+                            "description": "Alias of 'name'.",
+                        },
                     },
-                    "required": ["name"],
+                    "anyOf": [
+                        {"required": ["name"]},
+                        {"required": ["document"]},
+                        {"required": ["document_name"]},
+                    ],
                 },
             },
             {
@@ -278,7 +293,10 @@ class DocumentTools:
             case "catia_get_active_document_info":
                 return self._get_active_document_info()
             case "catia_activate_document":
-                return self._activate_document(arguments["name"])
+                return self._activate_document(
+                    arguments.get("name")
+                    or arguments.get("document")
+                    or arguments.get("document_name") or "")
             case "catia_set_part_number":
                 return self._set_part_number(
                     arguments["part_number"], arguments.get("component_name"))
@@ -584,14 +602,33 @@ class DocumentTools:
         after = self._document_names()
         still = after.count(name) >= max(1, before.count(name))
         if still:
-            return (
+            users = self._component_usage().get(str(name)) or []
+            if users:
+                # A part that an OPEN assembly references cannot be closed - that
+                # is CATIA's ordinary semantics, not an error, and the caller did
+                # nothing wrong by opening the assembly first. Reporting it as
+                # "CLOSE NOT CONFIRMED" made a correct workflow look broken
+                # (reported 2026-10-26). The state is still reported exactly:
+                # closed: false, and who holds it.
+                return (
+                    f"Document '{name}' is STILL OPEN (closed: false). This is "
+                    "not a failure: CATIA keeps a document that an open assembly "
+                    "references, and "
+                    + ", ".join(f"'{user}'" for user in users)
+                    + " does. The close request was accepted and deferred.\n"
+                    "Next step: close the referencing assembly first "
+                    "(catia_activate_document, then catia_close_document) - this "
+                    "part goes with it. Until then a Save As of this part fails "
+                    "with '方法 SaveAs 失败', and that error looks unrelated to "
+                    "the assembly."
+                )
+            raise RuntimeError(
                 f"CLOSE NOT CONFIRMED: '{name}' is still open after Close() "
                 f"({before.count(name)} entry/entries before, {after.count(name)} "
-                "after). CATIA keeps a document that an open assembly references, "
-                "so close the referencing assembly first "
-                "(catia_activate_document, then close), then close this one. "
-                "Until then a save of this part fails with '方法 SaveAs 失败' and "
-                "the reason looks unrelated to the assembly."
+                "after), and NO open assembly references it - so this is not the "
+                "component case. Usual cause: a modal dialog holding the document "
+                "(a save prompt, or 'document modified'). Answer or cancel it, "
+                "then retry."
             )
         return f"Document '{name}' closed" + (" (saved)" if save else "")
 

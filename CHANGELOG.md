@@ -2,6 +2,133 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Fixed — a failed pad no longer deletes its input sketch
+
+- 0.3.20 diagnosed a pad that built nothing by creating a SECOND pad from the
+  same sketch and deleting it again. That probe was built from a sketch the
+  failed pad had already consumed, so (a) removing it took the caller's sketch
+  out of the tree - the next call answered `No sketch named '草图.5'. Available:
+  草图.1, 草图.4.`, which reads like a typo in the caller's own naming - and
+  (b) it answered "nothing either way" for a direction that works, because the
+  probe itself could not build. Reported 2026-10-26 with a 16-line reproduction.
+- The diagnosis now flips the SAME pad node (`DirectionOrientation`) and
+  re-measures, so nothing extra is created and nothing but that pad is ever
+  removed. The reply states whether the sketch survived:
+  `Your sketch '草图.5' is still in the tree - only the pad node was removed.`
+  Verified: after a two-way failure the listing still answers
+  `Available: 草图.1, 草图.2, 草图.3`.
+
+### Fixed — a pad that adds nothing in the requested direction now flips itself
+
+- `catia_pad` copies what `catia_pocket` has done since 0.3.4: when the requested
+  side adds no material, the same feature is flipped and re-measured, and if that
+  grows the body the feature is KEPT and reported as
+  `Pad created: 40.000 mm (reverse) ... (direction auto-flipped to reach
+  material: the requested side was empty, and the same feature keeps the material
+  it was asked for on the other side)`. Measured on a 60x40x40 box with a
+  10x10 sketch on its bottom face: +4 000.0 mm3, exactly 10 x 10 x 40.
+- The two-way failure message now states a measured fact - both orientations were
+  tried on the same node - and lists the cause that was missing: the sketch plane
+  sits ON the material boundary and the sweep runs INTO the body, so the whole
+  sweep is absorbed. It no longer says "the direction is not the problem", and no
+  longer tells the caller that retrying cannot help: retrying with a different
+  offset does.
+
+### Fixed — an assertion that cannot be measured is a failure, not a silent pass
+
+- `catia_run_plan` dropped an assertion whose value was missing, so
+  `expect: {"document": "M113_asm", "volume_mm3": 1.0}` against a 76 million mm3
+  assembly answered `PLAN_OK` with `assertions: []`. Every key that was asked for
+  now produces a check; when the value is unavailable the check carries
+  `pass: false` and an `unavailable` reason, and the failure line names the
+  document: `A.CATProduct: volume_mm3: expected 1.0, got 800.0`.
+- An assembly named in `expect` is measured by activating it for the measurement
+  and restoring the previous active document, because `catia_get_inertia(
+  document=…)` needs a Part. Verified: an assembly's volume now compares, instead
+  of answering "exposes no 'Part'".
+- `area_mm2` on a Product (`"n/a (Product document)"`) and a `cog` with a missing
+  component are failures too, not skips.
+
+### Fixed — a part an open assembly references closes with a state, not an error
+
+- `catia_close_document` reported `CLOSE NOT CONFIRMED` when the document was a
+  component of an assembly in the same session. That is CATIA's ordinary
+  semantics - the caller did nothing wrong by opening the assembly first - so it
+  is now a normal reply: `is STILL OPEN (closed: false). This is not a failure:
+  CATIA keeps a document that an open assembly references, and
+  'P00_Assembly.CATProduct' does.` The genuine anomaly (still open, and nothing
+  references it) stays an error, and now says that is what it means.
+
+### Fixed — frame sketches land in the body, datum points included
+
+- 0.3.20 kept the frame plane's three datum points in a geometrical set. Measured
+  on B30 2026-10-26: a pad on such a sketch built 400 mm3 and then REFUSED a
+  R1 fillet on its own edge (`AddNewSolidEdgeFilletWithConstantRadius failed`),
+  while the same pad with the points and the plane inserted into the body takes
+  the fillet (`[applied Edge.1@R1]`). One tree, one update order.
+- The B32 SP6 report of a frame pad that creates and never updates (faces 0,
+  volume 0.0, `UpdateObject 失败`) is the same fault one step earlier, so this is
+  the fix that addresses it directly rather than by refusing the feature on a
+  version. Verified after the change on B30: frame sketch at
+  O(10, -20, 20), u(0.970143, 0, -0.242536), v(0, 1, 0) -> pad 1 000.0 mm3, and
+  a R1 fillet on Edge.1 applies with the anchor at 0.0000 mm.
+
+### Added — edge anchors: every miss reported, and a mode to use the rest
+
+- `catia_fillet` / `catia_chamfer` list ALL anchors that are beyond `anchor_tol`
+  or ambiguous, with each one's nearest edge, its length and the measured
+  distance - not just the first. Twenty anchors with one bad coordinate used to
+  cost one round trip per bad anchor, and the report that hit it collapsed twenty
+  to nine by hand.
+- `on_anchor_miss: "fail" | "skip"` (default `fail`, unchanged semantics). With
+  `skip`, the anchors that do match are filleted and the misses come back as
+  `SKIPPED (on_anchor_miss='skip'): 1 anchor(s) beyond anchor_tol=0.5: [999, 999,
+  999] is 1710.727 mm from the nearest edge (Edge.3, L20.0)`.
+
+### Changed — a fillet refusal names a cause it can read
+
+- The retry explanation blamed `catia_gsd_close_surface` for edges that come out
+  of it. The reporter's four rejected edges were all bounded by `Sketch.N` and
+  `Pad.N` - no GSD surface anywhere - while an existing R2.5 fillet met them at a
+  corner. The fingerprint carries the bounding faces, so the reply now reads
+  them: an edge bounded by `Fillet.N` / `Chamfer.N` is called out as a round
+  meeting an existing one at a corner, and GSD surfaces are named only when the
+  fingerprint actually contains them.
+
+### Added — a purely outward shell
+
+- `catia_shell` accepts `thickness: 0` together with `external_thickness > 0`,
+  which is the only way to say "the wall grows outside the envelope and the
+  original surface stays hollow". Measured on a 60x40x40 box (96 000 mm3) with
+  one face removed: `thickness 0 / external 5` gives 61 500.0 mm3, exactly the
+  analytic 70x50x45 minus 60x40x40. The 0.3.20 workaround was
+  `thickness: 0.001`, which left a 10.4 mm3 inner membrane on a 10 400 mm2 wall.
+- The reply names the side the wall grew on: `5 mm OUTWARD wall (the original
+  surface stays hollow)` instead of `0.0 mm wall`, and
+  `2.5 mm inward + 2.5 mm outward wall` for the symmetric case.
+
+### Fixed — the small things the same reports listed
+
+- `catia_activate_document` accepts `document` / `document_name` as well as
+  `name`; a plan step that uses either validates (`BAD_ARGS` now understands a
+  schema whose requirement is `anyOf: [{required: [name]}, …]` and names the
+  shortest unsatisfied branch).
+- `catia_get_inertia` adds `tensor_reason_code: "no_own_window"` beside
+  `tensor_reason`, so nine parts in a row do not repeat nine identical sentences
+  to say one word.
+- `catia_close_sketch` warns when the sketch holds several closed loops that
+  overlap: `this sketch holds 2 closed loops and 1 pair(s) of them overlap: loop
+  1 (rectangle, 600.0 mm2) overlaps loop 2 (rectangle, 200.0 mm2) … Total loop
+  area 800.0 mm2 is NOT the profile area when they overlap.` Two separate
+  rectangles stay silent - that is a legitimate profile. `catia_sketch_rectangle`
+  now says that ONE call draws the complete rectangle.
+- `catia_run_plan` documents which tools cannot be nested
+  (`catia_run_plan`, `catia_measure_topology`) and that each step is validated
+  against its own schema before anything runs.
+- Fixed a `//n` typo and a doubled full stop in the pad failure text.
+
 ## [0.3.20] — 2026-10-26 · a sketch on any plane, an edge by coordinate
 
 ### Added — sketch on an arbitrary plane (`{"type": "frame"}`)

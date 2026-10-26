@@ -201,7 +201,12 @@ class SketcherTools:
                 "name": "catia_sketch_rectangle",
                 "description": (
                     "Draw a rectangle in the active sketch defined by two opposite corners. "
-                    "Creates 4 lines forming a closed profile. Coordinates in mm."
+                    "Creates 4 lines forming a closed profile. Coordinates in mm. "
+                    "ONE call draws the COMPLETE rectangle - calling it twice draws a "
+                    "second rectangle in the same sketch, and overlapping or nested "
+                    "rectangles self-intersect (a rectangular frame is four "
+                    "catia_sketch_line calls, not two rectangle calls). "
+                    "catia_close_sketch warns when the closed loops it recorded overlap."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -583,9 +588,11 @@ class SketcherTools:
         the form: a spec's numbers go in unchanged, with no frame conversion.
 
         Two traps, both measured: ``HybridShapeFactory.AddNewPlane`` does not
-        exist (the three-point form is ``AddNewPlane3Points``), and the plane has
-        to be inserted INTO THE BODY - ``AddNewPad`` refuses a sketch whose
-        support lives in a geometrical set (E_FAIL from the factory).
+        exist (the three-point form is ``AddNewPlane3Points``), and everything the
+        plane depends on has to be inserted INTO THE BODY. A plane in a geometrical
+        set still lets the sketch be drawn, but the pad built on it cannot be
+        filleted afterwards (measured 2026-10-26), and on B32 SP6 the pad itself
+        creates and then fails to update - so the points go into the body too.
         """
         origin = plane.get("origin")
         first = plane.get("u")
@@ -620,20 +627,24 @@ class SketcherTools:
             [o[i] + along_v[i] for i in range(3)],
         ]
         factory = part.HybridShapeFactory
-        collector = part.HybridBodies.Add()
-        collector.Name = f"SketchFrame_{abs(hash((tuple(o), tuple(u), tuple(v)))) % 100000}"
+        # Points, plane and sketch all live in the BODY. A geometrical set looks
+        # tidier and is what 0.3.20 did, but it poisons everything built on the
+        # sketch: measured on B30 2026-10-26, a pad on a frame sketch with its
+        # points in a set built 400 mm3 and then REFUSED a R1 fillet on its own
+        # edge ("AddNewSolidEdgeFilletWithConstantRadius failed"), while the same
+        # pad with points and plane inserted into the body took the fillet
+        # ([applied Edge.1@R1]). One tree means one update order, and the B32 SP6
+        # report of a frame pad that creates and never updates is the same fault
+        # one step earlier.
+        part.InWorkObject = body
         points = []
         for coords in corners:
             point = factory.AddNewPointCoord(*coords)
-            collector.AppendHybridShape(point)
+            body.InsertHybridShape(point)
             part.UpdateObject(point)
             points.append(part.CreateReferenceFromObject(point))
         plane_feature = factory.AddNewPlane3Points(points[0], points[1], points[2])
         plane_feature.Name = "Datum_frame"
-        # The work object has to be the BODY while the plane goes in: creating the
-        # collector set left it pointing at that set, and InsertHybridShape then
-        # fails with a bare E_FAIL (measured 2026-10-25).
-        part.InWorkObject = body
         body.InsertHybridShape(plane_feature)
         part.UpdateObject(plane_feature)
         return part.CreateReferenceFromObject(plane_feature)
@@ -886,6 +897,68 @@ class SketcherTools:
             parts.append("outline %.3f mm" % length)
         return " Profile: " + "; ".join(parts) + "." if parts else ""
 
+    def _loop_warning(self, sketch_name: str | None = None) -> str:
+        """Warn when one sketch holds several closed loops that overlap.
+
+        Reported 2026-10-26: four ``catia_sketch_rectangle`` calls were used to
+        draw ONE rectangular frame, which stacked four rectangles in one sketch.
+        ``close_sketch`` reported "4 rectangle(s); outline 440.000 mm" and said
+        nothing, and the pad failed at update - so the self-intersection was only
+        discovered through a failed feature. Two separate rectangles are a
+        legitimate profile (pad both); two that overlap are not, and that is what
+        this checks, because the bounding boxes are known from the drawing calls.
+        """
+        import math
+
+        if sketch_name is None:
+            try:
+                sketch_name = str(self._active_sketch.Name)
+            except Exception:  # noqa: BLE001
+                sketch_name = None
+        drawn = self._drawn.get(self._sketch_key(sketch_name), [])
+        loops: list[dict[str, Any]] = []
+        for item in drawn:
+            if item["kind"] == "rectangle":
+                left, right = sorted((item["x1"], item["x2"]))
+                bottom, top = sorted((item["y1"], item["y2"]))
+                loops.append({
+                    "kind": "rectangle",
+                    "box": (left, bottom, right, top),
+                    "area": abs((right - left) * (top - bottom)),
+                })
+            elif item["kind"] == "circle":
+                r = item["radius"]
+                loops.append({
+                    "kind": "circle",
+                    "box": (item["cx"] - r, item["cy"] - r, item["cx"] + r, item["cy"] + r),
+                    "area": math.pi * r * r,
+                })
+        if len(loops) < 2:
+            return ""
+        overlapping = []
+        for i in range(len(loops)):
+            for j in range(i + 1, len(loops)):
+                a, b = loops[i]["box"], loops[j]["box"]
+                if a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]:
+                    overlapping.append((i, j))
+        if not overlapping:
+            return ""
+        pairs = "; ".join(
+            f"loop {i + 1} ({loops[i]['kind']}, {loops[i]['area']:.1f} mm2) overlaps "
+            f"loop {j + 1} ({loops[j]['kind']}, {loops[j]['area']:.1f} mm2)"
+            for i, j in overlapping[:4]
+        )
+        total = sum(loop["area"] for loop in loops)
+        return (
+            f" WARNING: this sketch holds {len(loops)} closed loops and "
+            f"{len(overlapping)} pair(s) of them overlap: {pairs}. Overlapping or "
+            "nested closed loops make a self-intersecting profile - the pad/pocket "
+            "either fails at update or builds a solid nobody meant. Total loop area "
+            f"{total:.1f} mm2 is NOT the profile area when they overlap. Note that "
+            "catia_sketch_rectangle already draws a COMPLETE rectangle, so a "
+            "rectangular frame is four LINES, not two rectangle calls."
+        )
+
     def _profile_warning(self) -> str:
         """Name every breakpoint that will make pad/pocket fail.
 
@@ -1014,11 +1087,12 @@ class SketcherTools:
         self.conn.refresh_display()
         summary = self._profile_summary(name)
         warning = self._profile_warning()
+        loops = self._loop_warning(name)
         self._profile_ends = []
         return (
             f"Sketch '{name}' closed. You can now apply Part Design features "
             "(pad, pocket, user pattern on its points, etc.)."
-            + summary + warning
+            + summary + warning + loops
         )
 
     def _draw_line(self, x1: float, y1: float, x2: float, y2: float,

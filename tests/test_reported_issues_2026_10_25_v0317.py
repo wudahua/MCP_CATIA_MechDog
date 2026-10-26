@@ -358,17 +358,23 @@ def test_save_as_onto_an_open_file_names_the_holder():
 # --------------------------------------------------------------------------
 
 def test_pad_no_material_checks_the_direction_before_blaming_the_profile():
-    """0.3.19 replaced the blanket "retry once" with a measurement: pad the same
-    sketch the other way and see whether it grows. A wrong direction cannot be
-    fixed by retrying, so the old advice sent users round a loop."""
+    """0.3.19 replaced the blanket "retry once" with a measurement. 0.3.20 went
+    further and got it wrong: the measurement was a SECOND pad built from a sketch
+    the failed pad had already consumed, so it answered "nothing either way" for a
+    direction that works, and removing it took the sketch with it (reported
+    2026-10-26). It now flips the SAME node and re-measures, and a flip that
+    produces material is a success, not a diagnosis."""
     from catia_mcp.tools.part_design import PartDesignTools
 
     source = inspect.getsource(PartDesignTools._pad)
-    assert "_pad_other_direction" in source
-    assert "THE PROFILE IS FINE" in source
-    assert "in EITHER direction" in source
-    assert "self-intersects" in source
+    assert "DirectionOrientation = 0 if direction == \"reverse\" else 1" in source
+    assert "auto-flipped to reach material" in source
+    assert "Both directions were MEASURED" in source
+    assert "_sketch_present" in source
+    # The throwaway probe is what destroyed the caller's sketch.
+    assert "_pad_other_direction" not in source
     assert "this once more" not in source
+    assert "//n" not in source
 
 
 def test_the_three_face_hint_names_the_previous_fillet():

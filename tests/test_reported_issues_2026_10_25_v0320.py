@@ -174,8 +174,11 @@ def test_anchors_are_measured_against_a_point_reference():
 
     source = inspect.getsource(part_design.PartDesignTools._anchors_to_edges)
     assert "GetMinimumDistance(point_ref)" in source
-    assert "ambiguous" in source
-    assert "beyond anchor_tol" in source
+    assert "on_miss" in source
+    # Every bad anchor is listed at once, not just the first (reported 2026-10-26).
+    trouble = inspect.getsource(part_design.PartDesignTools._anchor_trouble_text)
+    assert "beyond anchor_tol" in trouble
+    assert "ambiguous" in trouble
 
 
 def test_the_probe_point_set_is_deleted_again():
