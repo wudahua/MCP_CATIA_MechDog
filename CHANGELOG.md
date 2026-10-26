@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [0.3.21] — 2026-10-26 · a pad that flips, an assertion that cannot vanish
 
 ### Fixed — a failed pad no longer deletes its input sketch
 
@@ -1858,7 +1858,7 @@ See `README.md` for the diff table and `FORK.md` for measurements.
   now independent of the environment. No server code changed.
 - **78 offline tests** in total, none of which start CATIA.
 
-## [Unreleased]
+## [Unreleased] (upstream, pre-0.2.2 — kept as history, never dated)
 
 ### Changed
 - CATIA calls and connection cleanup run serially on one STA worker. Ordinary
