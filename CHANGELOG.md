@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [0.3.25] — 2026-10-26 · a part is not an assembly
 
 ### Fixed — "Open assemblies" listed .CATPart files as assemblies
 
