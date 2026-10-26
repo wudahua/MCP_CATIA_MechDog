@@ -198,6 +198,28 @@ the reply says whether the sketch survived.
 
 ---
 
+### Measuring an assembly without owning ActiveDocument
+
+Two clients can drive one CATIA, and `ActiveDocument` is theirs to change between
+your calls. Everything that can name its target should:
+
+```jsonc
+{"tool": "catia_get_bounding_box",
+ "args": {"document": "M113_asm.CATProduct", "method": "vertices"}}
+// -> {"document": "M113_asm.CATProduct", "part_boxes": 28,
+//     "instances": {"total": 70, "measured": 70, "skipped": 0}, ...}
+```
+
+The world box is arithmetic on each component's placement, so it never needed the
+assembly to be active. Each PART is bounded once and only the placement repeated —
+70 instances of 28 parts is 28 boxes, not 70. The reply states `part_boxes` so the
+cost model is visible, and the part branch names the document it measured rather
+than letting a bare `MainBody failed` look like a broken model.
+
+`catia_list_components` filters before reading any placement, and
+`names_only: true` skips them entirely (measured: 370 ms → 32 ms on a 5-instance
+assembly) — "are the instances all there" should not cost one pose read each.
+
 ## Requirements
 
 * Windows (COM automation; `pywin32` is a hard dependency)

@@ -615,7 +615,8 @@ class DocumentTools:
                     "not a failure: CATIA keeps a document that an open assembly "
                     "references, and "
                     + ", ".join(f"'{user}'" for user in users)
-                    + " does. The close request was accepted and deferred.\n"
+                    + (" does. " if len(users) == 1 else " do. ")
+                    + "The close request was accepted and deferred.\n"
                     "Next step: close the referencing assembly first "
                     "(catia_activate_document, then catia_close_document) - this "
                     "part goes with it. Until then a Save As of this part fails "

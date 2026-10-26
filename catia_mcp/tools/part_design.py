@@ -134,8 +134,18 @@ class PartDesignTools:
             {
                 "name": "catia_pad",
                 "description": (
-                    "Create a Pad (extrusion) from the last sketch. "
-                    "Extrudes a 2D profile into a 3D solid along the normal to the sketch plane."
+                    "Create a Pad (extrusion) from the last sketch: a 2D profile "
+                    "extruded along the sketch plane's normal. `direction` picks the "
+                    "side ('normal', 'reverse', or 'both' with symmetric=true). "
+                    "A pad that adds no material in the requested direction is "
+                    "FLIPPED and re-measured, and if that side grows the body the "
+                    "feature is KEPT and the reply says "
+                    "'direction auto-flipped to reach material' - the same behaviour "
+                    "catia_pocket has had since 0.3.4, because a seed sketch sitting "
+                    "on the material boundary is the common case, not an error. Only "
+                    "when BOTH orientations add nothing is the pad rolled back, and "
+                    "then the reply states that both were measured and whether your "
+                    "sketch is still in the tree."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1453,6 +1463,14 @@ class PartDesignTools:
             # failed. Only the pad is removed: the sketch was in the tree before
             # this call and is none of this rollback's business.
             gone = self._remove_feature(part, pad)
+            # Put the body back in work. Deleting the pad leaves InWorkObject on
+            # whatever CATIA picks - on B32 it was the sketch's datum plane
+            # (reported 2026-10-26), and the very next Part Design call then fails
+            # with a bare "method failed" that reads like a bad sketch.
+            try:
+                part.InWorkObject = body
+            except Exception:  # noqa: BLE001 - the message is the payload
+                pass
             survived = self._sketch_present(body, sketch)
             stayed = (f"Volume stayed {before:.1f} mm3." if before is not None
                       else f"The volume could not be measured ({volume_note}).")
@@ -1484,7 +1502,7 @@ class PartDesignTools:
                 "so calling it twice draws two).\n"
                 "Retrying the SAME call changes none of these; changing the offset "
                 "or the profile does."
-                + (f" Original error: {update_error}" if update_error else ".")
+                + (f" Original error: {update_error}" if update_error else "")
             )
         self.conn.refresh_display()
         span = "total %.3f mm, %0.3f each side" % (height, height / 2.0) if symmetric \
@@ -2750,14 +2768,21 @@ class PartDesignTools:
                     f"dir1_axis and dir2_axis are both '{first}'; a pattern needs two "
                     "different directions."
                 )
-            # Right-handed or nothing: CATIA answers a left-handed frame with a bare
-            # "UpdateObject failed". Measured on B30 2026-10-24: (x,y), (y,z) and
-            # (z,x) build; (x,z), (z,y) and (y,x) do not. A reversal flips the
-            # handedness too, so it is part of the test. Rather than refuse the
-            # caller's axes, swap the two slots (counts and spacings with them) -
-            # the resulting geometry is identical.
-            right_handed = ((first, second) in (("x", "y"), ("y", "z"), ("z", "x"))
-                            and reverse1 == reverse2)
+            # Right-handed or nothing: CATIA answers a left-handed AXIS PAIR with
+            # a bare "UpdateObject failed". Measured on B30 2026-10-24: (x,y),
+            # (y,z) and (z,x) build; (x,z), (z,y) and (y,x) do not. Rather than
+            # refuse the caller's axes, swap the two slots (counts and spacings
+            # with them) - the resulting geometry is identical.
+            #
+            # A REVERSAL is not part of that test, which 0.3.21 got wrong by
+            # ANDing `reverse1 == reverse2` in: reversing one direction made the
+            # tool swap the axes, the reversed axis landed in dir2, and
+            # AddNewRectPattern then failed at update. Measured on B30
+            # 2026-10-26: `reverse_dir1` with no axis builds (-1005.31 mm3),
+            # `dir1_axis:"x" + reverse_dir1` was rolled back, and reversing BOTH
+            # sides built again. So `(x-, y+)` is legal; only the axis pair
+            # decides handedness.
+            right_handed = (first, second) in (("x", "y"), ("y", "z"), ("z", "x"))
             swapped = False
             if not right_handed:
                 first, second = second, first
@@ -3699,11 +3724,35 @@ class PartDesignTools:
             part.InWorkObject = body
         except Exception:
             pass
+        # Read the assignment back. Setting InWorkObject reports no error while
+        # CATIA keeps pointing somewhere else (reported 2026-10-26: after a rolled
+        # back pad the status line still said "in_work_object=Datum_xy_20" even
+        # though this call had just claimed the body), and a Part Design factory
+        # called with a datum plane in work fails with a bare "method failed" -
+        # the exact shape the diagnostic reports blame on the sketch.
+        in_work = self._in_work_name(part)
         self.conn.refresh_display()
+        if in_work and in_work != str(body.Name):
+            return (
+                f"Body '{body.Name}' is now active ({body.Shapes.Count} feature(s)) "
+                f"and later features go into it, but CATIA still reports "
+                f"in_work_object='{in_work}'. Re-run this call, or close the "
+                "sketch that is still in edition (catia_close_sketch) - a Part "
+                "Design factory called with anything but a body in work fails with "
+                "a bare 'method failed'."
+            )
         return (
             f"Body '{body.Name}' is now active ({body.Shapes.Count} feature(s)). "
             "Later pad / pocket / hole / fillet features go into it."
         )
+
+    @staticmethod
+    def _in_work_name(part: Any) -> str:
+        """Name of part.InWorkObject, or '' when it cannot be read."""
+        try:
+            return str(part.InWorkObject.Name)
+        except Exception:  # noqa: BLE001
+            return ""
 
     def _list_bodies(self) -> str:
         self.conn.ensure_connected()

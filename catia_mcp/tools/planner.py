@@ -22,7 +22,7 @@ import time
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
-from catia_mcp.topo_search import is_construction, nls_of, search_topology
+from catia_mcp.topo_search import topology_cells
 
 #: Result text longer than this is truncated in the per-step report, so a plan
 #: with fifty steps does not return a megabyte of chatter.
@@ -508,39 +508,36 @@ class PlannerTools:
         try:
             for kind, key in (("Face", "faces"), ("Edge", "edges"),
                               ("Vertex", "vertices")):
-                # Same definition as catia_list_faces / catia_list_edges, which is
-                # what Face.N / Edge.N address. This counter used to apply its own
-                # filter (dynamic type starts with 'Selection_Wire') while the
-                # listings filtered on the NLS, so one part reported 18 edges here
-                # and 14 there - 109 vs 101 on the reporter's part, three releases
-                # running (2026-10-24). The two rules differ by exactly the datum
-                # planes' own borders ('Selection_BorderREdge' on
-                # 'Brp:(GSMPlane.N;k)'), which are not edges of any solid: a plain
-                # 40x20x10 block with a boss reported 18 here and 14 in
-                # catia_list_edges, and the four extra were GSMPlane borders.
-                sel.Clear()
-                sel.Add(body)
-                search_topology(sel, kind)
-                raw = sel.Count
-                solid = 0
-                wire = 0
-                borders = 0
-                for index in range(1, raw + 1):
-                    item = sel.Item(index)
-                    if not is_construction(nls_of(item)):
-                        solid += 1
-                    elif self._is_wireframe(item):
-                        wire += 1
-                    else:
-                        borders += 1
-                counts[key] = solid
-                if raw != solid:
+                # Same enumeration as catia_list_faces / catia_list_edges, which is
+                # what Face.N / Edge.N address - now literally the same function,
+                # because this counter used to apply its own filter and the two
+                # drifted apart (reported three releases running, 2026-10-24).
+                # It also handles the two failure modes reported on 2026-10-26: a
+                # selection CATIA refuses to hand over, and a transient state in
+                # which nearly every solid cell looks like construction (the same
+                # untouched part answered "edges 1" and then "edges 12").
+                stats: dict[str, Any] = {}
+                cells = topology_cells(self.conn, body, kind, stats=stats)
+                counts[key] = len(cells)
+                if stats.get("raw", len(cells)) != len(cells):
+                    by_reason = dict(stats.get("excluded") or {})
                     counts[f"{key}_excluded"] = {
-                        "total": raw - solid,
-                        "sketch_wire": wire,
-                        "datum_plane_borders": borders,
-                        "raw_total": raw,
+                        "total": stats["raw"] - len(cells),
+                        "sketch_wire": sum(v for reason, v in by_reason.items()
+                                           if "wire" in reason),
+                        "datum_plane_borders": sum(v for reason, v in by_reason.items()
+                                                   if "border" in reason
+                                                   or "corner" in reason),
+                        "raw_total": stats["raw"],
+                        "by_reason": by_reason,
                     }
+                if stats.get("retried"):
+                    counts[f"{key}_retried"] = (
+                        "the first enumeration of this part made almost every cell "
+                        "look like construction geometry, so it was repeated and "
+                        "the larger answer kept. The number below is the second "
+                        "one - if it disagrees with an earlier reading of the same "
+                        "untouched part, treat the earlier one as the broken one.")
         finally:
             try:
                 sel.Clear()

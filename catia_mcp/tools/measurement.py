@@ -266,7 +266,13 @@ class MeasurementTools:
                     "curved face is under-reported there - revolved or not. The true "
                     "per-part box comes from get_bounding_box(document='<part>"
                     ".CATPart', method='mesh'), which opens the part by path when it "
-                    "exists only as a component."
+                    "exists only as a component. "
+                    "document='<assembly>.CATProduct' works too: the world box never "
+                    "needed the assembly to be ACTIVE (it is arithmetic on each "
+                    "component's placement), and naming it is the only unambiguous "
+                    "route when a second client can change ActiveDocument between "
+                    "two calls. Each PART is bounded once and only the placement is "
+                    "repeated, so the cost is per part, not per instance."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -299,6 +305,10 @@ class MeasurementTools:
                                 "assembly. A part that exists only as a component is "
                                 "not in the Documents collection, so it is opened by "
                                 "path here (it stays open; the reply says so). "
+                                "A Product document is accepted as well - its world "
+                                "box is aggregated from the named document, so no "
+                                "activation is involved (method='mesh' is refused "
+                                "for one, because a mesh box is per part). "
                                 "Alias: document_name."
                             ),
                         },
@@ -931,6 +941,48 @@ class MeasurementTools:
         points, _dropped = self._bounded(raw)
         return points, len(points)
 
+    @staticmethod
+    def _part_identity(part: Any) -> Any:
+        """A cache key that is the same for every instance of one part.
+
+        ``Document.FullName`` when the part has been saved (all instances of the
+        same reference share one PartDocument), otherwise the part number plus the
+        body name. Two different parts never share a key, because a wrong cache
+        hit would move a component's box to another component's geometry.
+        """
+        doc = None
+        try:
+            doc = part.Parent
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            return ("file", str(doc.FullName).casefold())
+        except Exception:  # noqa: BLE001 - never saved
+            pass
+        try:
+            return ("part", str(part.Name), str(part.MainBody.Name))
+        except Exception:  # noqa: BLE001
+            return ("object", id(part))
+
+    @staticmethod
+    def _is_product_document(doc: Any) -> bool:
+        """Whether ``doc`` is an assembly, decided by its type - not by ``.Product``.
+
+        ``PartDocument`` answers ``.Product`` too (a stub for its single
+        component), so probing the property proves nothing - the same trap that
+        made ``add_component`` fail on a Part document.
+        """
+        try:
+            kind = str(doc.Type)
+        except Exception:  # noqa: BLE001
+            kind = ""
+        if kind:
+            return "PRODUCT" in kind.upper()
+        try:
+            return str(doc.FullName).upper().endswith(".CATPRODUCT")
+        except Exception:  # noqa: BLE001
+            return False
+
     def _assembly_box(self, doc: Any, method: str,
                       only: str | None = None) -> str:
         rows = self._components_doc(doc)
@@ -944,25 +996,41 @@ class MeasurementTools:
                 )
 
         entries, corners, skipped = [], [], []
+        # One local box per PART, not per instance. Reported 2026-10-26: the box
+        # cost ~6 s per component plus ~0.07 s per vertex, so 70 instances of 28
+        # parts took 11 min 37 s - the same part scanned two to ten times over.
+        # The local box does not depend on the placement, so it is computed once
+        # and only the world transform is repeated.
+        local_boxes: dict[Any, Any] = {}
         for row in rows:
             label = row["part_number"] or row["name"] or f"#{row['index']}"
             if row["part"] is None or row["matrix"] is None:
                 skipped.append({"component": label, "error": "; ".join(row["problems"])})
                 continue
             body = row["part"].MainBody
-            try:
-                points, used = self._local_box(row["part"], body)
-            except Exception as exc:  # noqa: BLE001
-                skipped.append({"component": label,
-                                "error": f"local box: {str(exc).splitlines()[0][:80]}"})
-                continue
-            if not points:
-                skipped.append({"component": label,
-                                "error": "no vertices (fully curved part), so a "
-                                         "vertex sweep cannot bound it; measure it by "
-                                         "name: get_bounding_box(document='" + label +
-                                         "', method='mesh')"})
-                continue
+            key = self._part_identity(row["part"])
+            if key in local_boxes:
+                points, used = local_boxes[key]
+                if isinstance(points, str):
+                    skipped.append({"component": label, "error": points})
+                    continue
+            else:
+                try:
+                    points, used = self._local_box(row["part"], body)
+                except Exception as exc:  # noqa: BLE001
+                    message = f"local box: {str(exc).splitlines()[0][:80]}"
+                    local_boxes[key] = (message, 0)
+                    skipped.append({"component": label, "error": message})
+                    continue
+                if not points:
+                    message = ("no vertices (fully curved part), so a vertex "
+                               "sweep cannot bound it; measure it by name: "
+                               "get_bounding_box(document='" + label +
+                               "', method='mesh')")
+                    local_boxes[key] = (message, 0)
+                    skipped.append({"component": label, "error": message})
+                    continue
+                local_boxes[key] = (points, used)
             world = [self._to_world(row["matrix"], row["translation"], p)
                      for p in points]
             xs = [p[0] for p in world]
@@ -1017,6 +1085,15 @@ class MeasurementTools:
             bounds="lower bound: each component's VERTEX box, so any part whose "
                    "extremum lies on a curved face is under-reported"))
         payload["components"] = entries
+        try:
+            payload["document"] = str(doc.Name)
+        except Exception:  # noqa: BLE001 - the numbers are the point
+            pass
+        payload["part_boxes"] = len(local_boxes)
+        payload["note_scope"] = (
+            f"{len(entries)} instance(s) of {len(local_boxes)} part(s): each part's "
+            "local box is computed once and only the placement is repeated, so the "
+            "cost is per part, not per instance.")
         # Say whether the box covers the whole assembly. 'skipped' sat beside
         # min/max as a sibling key, so a caller reading only the numbers never
         # learned that 6 of 70 instances were left out and the box is a lower
@@ -1229,12 +1306,28 @@ class MeasurementTools:
         if document:
             self.opened_for_measurement = None
             doc = self._resolve_open_document(document)
+            if self._is_product_document(doc):
+                # A Product has no Part, but the world box never needed one: it is
+                # each component's own box moved by that component's placement, so
+                # it can be computed from the NAMED document alone. That matters
+                # because "activate it first" is the one thing a second client on
+                # the same CATIA can invalidate between two calls (reported
+                # 2026-10-26, twice).
+                if method == "mesh":
+                    raise RuntimeError(
+                        f"method='mesh' is not available for an assembly ('{document}'): "
+                        "a mesh box is per part, and the aggregation reads each "
+                        "component's vertices. Two working routes: (a) "
+                        "get_bounding_box(document='<part>.CATPart', method='mesh') "
+                        "per component, then apply its placement; or (b) drop "
+                        "method for the vertex-based aggregation."
+                    )
+                return self._assembly_box(doc, method, component)
             try:
                 part = self.conn.part_of(doc)
             except Exception as exc:  # noqa: BLE001
                 raise RuntimeError(
-                    f"'{document}' is not a Part document ({exc}); a Product can "
-                    "only be measured without 'document' (world aggregation)."
+                    f"'{document}' is neither a Part nor a Product document ({exc})."
                 ) from exc
             reply = self._part_bbox(part, method)
             if self.opened_for_measurement:
@@ -1263,10 +1356,26 @@ class MeasurementTools:
                     "with a curved extremum is stated in the reply."
                 )
             return self._assembly_box(self.conn.active_document, method, component)
-        part = self.conn.get_active_part()
-        body = self.conn.get_active_part_body()
-        if body.Shapes.Count == 0:
-            raise RuntimeError("The active body has no solid shape yet.")
+        # From here on this measures the ACTIVE document's part. With two clients on
+        # one CATIA that is not a given: a bare "MainBody failed" reads like a
+        # broken model while the real story is "I measured the wrong document"
+        # (reported 2026-10-26). Name it before and after.
+        try:
+            active_name = str(self.conn.active_document.Name)
+        except Exception:  # noqa: BLE001
+            active_name = "?"
+        try:
+            part = self.conn.get_active_part()
+            body = self.conn.get_active_part_body()
+            if body.Shapes.Count == 0:
+                raise RuntimeError("The active body has no solid shape yet.")
+        except Exception as exc:  # noqa: BLE001 - name the document, then re-raise
+            raise RuntimeError(
+                f"this measured '{active_name}', which is not a part with a solid "
+                "body (" + str(exc).splitlines()[0][:120] + "). If you meant the "
+                "assembly, pass document='<assembly>.CATProduct' - the world box no "
+                "longer needs it to be active."
+            ) from exc
         method, auto_note = self._auto_method(method, body)
 
         if method in ("auto", "vertices"):
@@ -1274,9 +1383,9 @@ class MeasurementTools:
             if points:
                 return self._bbox_json(
                     points,
-                    f"vertex sweep over {len(points)} of {total} vertices of the "
-                    "final shape; exact for planar-faced solids, curved faces may "
-                    "extend beyond these bounds"
+                    f"vertex sweep over {len(points)} of {total} vertices of "
+                    f"'{active_name}'; exact for planar-faced solids, curved faces "
+                    "may extend beyond these bounds"
                     + (" (capped at 200)" if truncated else "")
                     + (f"; {dropped} construction point(s) ignored (sketch wires "
                        f"and wireframe ends at 1e7 mm are not the solid)" if dropped else ""),
@@ -1294,7 +1403,8 @@ class MeasurementTools:
         corners, triangles, copy_note = self._mesh_corners(part)
         return self._bbox_json(
             corners,
-            f"STL mesh sweep over {triangles} triangle vertices; the mesh chords "
+            f"STL mesh sweep of '{active_name}' over {triangles} triangle vertices; "
+            "the mesh chords "
             "curved faces, so these bounds are a LOWER bound on the true envelope "
             "(measured 0.47-0.73 % small)" + copy_note + auto_note,
             bounds=("lower bound: mesh chording, measured 0.47-0.73 % small on "

@@ -190,7 +190,9 @@ def test_topology_count_uses_the_same_rule_as_the_listings():
     from catia_mcp.tools.planner import PlannerTools
 
     source = inspect.getsource(PlannerTools._count_topology)
-    assert "is_construction" in source
+    # Since 2026-10-26 the counter calls the very same enumeration the listings
+    # use, instead of re-implementing the filter beside it.
+    assert "topology_cells(self.conn, body, kind" in source
     assert "datum_plane_borders" in source
     assert "same set" in source
 

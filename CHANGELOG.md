@@ -2,6 +2,80 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Fixed — a reversed pattern direction is not a left-handed axis pair
+
+- `catia_rect_pattern` decided handedness with
+  `(x,y)|(y,z)|(z,x)` AND `reverse_dir1 == reverse_dir2`. Reversing ONE
+  direction therefore looked left-handed, the tool swapped the two slots, the
+  reversed axis landed in dir2, and `AddNewRectPattern` refused it at update -
+  so the two recommendations the tool itself prints ("prefer dir1_axis",
+  "set reverse_dir1 to flip that side") could not be combined. Reported
+  2026-10-26 with a full matrix; reproduced on B30 the same day:
+  `reverse_dir1` alone builds (-1 005.31 mm3), `dir1_axis:"x" + reverse_dir1`
+  was rolled back, reversing BOTH sides built again.
+- Only the axis pair now decides handedness; the swap stays for genuinely
+  left-handed pairs, with counts, spacings and reversals travelling with their
+  slot. Re-measured after the fix: `dir1_axis:"x" + reverse_dir1` -1 005.31 mm3,
+  `dir1_axis:"z" + reverse_dir1` -502.65 mm3, `(x,z)` still swapped.
+
+### Fixed — the topology counter can no longer answer two numbers for one part
+
+- `catia_measure_topology` kept its own copy of the construction filter beside
+  `catia_list_edges`. It now calls the same enumeration, so a count, an
+  `Edge.N` and an edge fingerprint always describe the same set - and the
+  exclusion breakdown is reported per reason (`by_reason`) instead of a single
+  total.
+- An enumeration that makes almost everything look like construction (1 of 20
+  cells) is repeated and the larger answer kept, flagged as `edges_retried` with
+  a sentence saying which reading to distrust. Reported 2026-10-26: the same
+  untouched part answered `edges 1` and then `edges 12` in one session, which
+  makes `expect.vertices` unusable as a gate. Verified after the change: five
+  consecutive counts on one part, all `6 / 12 / 8`.
+- A `Selection.Item` failure is retried once and then reported as what it is:
+  "the SELECTION being unavailable, not the model having no edges: a modal
+  dialog (often a '闭合' prompt raised while a sketch is still in edition) can
+  hold it". It used to read like a broken model.
+
+### Fixed — an assembly can be measured by name, and each part only once
+
+- `catia_get_bounding_box(document='<assembly>.CATProduct')` works. The world box
+  never needed the assembly to be active - it is arithmetic on each component's
+  placement - so naming it is now the unambiguous route even when a second
+  client changes `ActiveDocument` between two calls (reported 2026-10-26, twice:
+  the failure surfaced as a bare `CATIAPart.MainBody failed` with the real
+  document name only in the session line). `method='mesh'` is still refused for
+  an assembly, because a mesh box is per part.
+- The per-component box is computed once per PART, not once per instance: 70
+  instances of 28 parts took 11 min 37 s at ~6 s per component. The reply now
+  states `part_boxes` and `note_scope`, so the cost model is visible. Measured:
+  5 instances of 2 parts -> `part_boxes: 2`.
+- The part branch names the document it measured, in the reply and in the
+  failure: "this measured 'V21_fillet.CATPart', which is not a part with a solid
+  body ... If you meant the assembly, pass document='<assembly>.CATProduct'".
+
+### Fixed — `list_components` no longer reads 70 placements to answer a filter
+
+- `part_number` filters BEFORE the placement is read (a pose read costs ~70 ms,
+  so "list just P24" out of 70 instances took 5 s), and `names_only: true`
+  returns index / name / part_number / occurrence without any pose read at all.
+  Measured on a 5-instance assembly: all+poses 370 ms, `part_number` 233 ms,
+  `names_only` 32 ms.
+
+### Fixed — the small ones from the same three reports
+
+- `catia_pad`'s tool description now states the auto-flip, because an AI caller
+  picks its arguments from `tools/list`, not from the runtime reply: a pad that
+  adds nothing in the requested direction is flipped, kept, and reported as
+  `direction auto-flipped to reach material`; only both-sides-empty rolls back.
+- After a rolled-back pad, `part.InWorkObject` is put back to the body (on B32 it
+  stayed on the sketch's datum plane, and the next Part Design call then failed
+  with a bare "method failed" that reads like a bad sketch). `set_active_body`
+  now reads `InWorkObject` back and says so when CATIA did not take it.
+- `...or the profile does..` lost its second full stop, and a close of a part
+  referenced by two assemblies says `'A', 'B' do.` instead of `does.`
+
 ## [0.3.21] — 2026-10-26 · a pad that flips, an assertion that cannot vanish
 
 ### Fixed — a failed pad no longer deletes its input sketch

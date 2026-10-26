@@ -247,7 +247,11 @@ class AssemblyTools:
                     "pass rotation_convention='basis'. Each entry says so in its own "
                     "'convention' field, so a first comparison does not look like a "
                     "wrong placement (reported 2026-10-25). Pass 'part_number' to "
-                    "see just the instances of one part."
+                    "see just the instances of one part - it filters before reading "
+                    "any placement, so 'which instances exist' no longer costs one "
+                    "pose read per component. 'names_only' skips the placements "
+                    "entirely for the same question (reported 2026-10-26: a "
+                    "two-component listing took 5 s on a 70-instance assembly)."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -258,7 +262,17 @@ class AssemblyTools:
                                 "Only list components whose PartNumber or "
                                 "instance-name stem matches this (e.g. 'P02_motor')."
                             ),
-                        }
+                        },
+                        "names_only": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Return index, name, part_number and occurrence only - "
+                                "no position, no rotation, no broken-link check. Use it "
+                                "to confirm that the instances are all there; each "
+                                "placement costs about 70 ms."
+                            ),
+                        },
                     },
                 },
             },
@@ -442,7 +456,8 @@ class AssemblyTools:
             case "catia_rename_component":
                 return self._rename_component(arguments)
             case "catia_list_components":
-                return self._list_components(arguments.get("part_number"))
+                return self._list_components(arguments.get("part_number"),
+                                             bool(arguments.get("names_only", False)))
             case "catia_copy_component":
                 return self._copy_component(arguments)
             case "catia_list_constraints":
@@ -1284,7 +1299,8 @@ class AssemblyTools:
                     continue
         return names
 
-    def _list_components(self, part_number: str | None = None) -> str:
+    def _list_components(self, part_number: str | None = None,
+                         names_only: bool = False) -> str:
         """Every component with its placement, surviving broken links.
 
         One dead link used to abort the whole listing (reported 2026-10-24:
@@ -1311,37 +1327,42 @@ class AssemblyTools:
                 except Exception as exc:  # noqa: BLE001 - reported per field
                     entry[key] = None
                     problems.append(f"{key}: {str(exc).splitlines()[0][:80]}")
-            try:
-                matrix = self._position_components(comp.Position)
-                entry["position"] = {
-                    "x": round(matrix[9], 3),
-                    "y": round(matrix[10], 3),
-                    "z": round(matrix[11], 3),
-                }
-                # A = the three axis images: columns 0/3/6, 1/4/7, 2/5/8.
-                entry["rotation"] = [
-                    [round(matrix[0], 6), round(matrix[3], 6), round(matrix[6], 6)],
-                    [round(matrix[1], 6), round(matrix[4], 6), round(matrix[7], 6)],
-                    [round(matrix[2], 6), round(matrix[5], 6), round(matrix[8], 6)],
-                ]
-            except Exception as exc:  # noqa: BLE001
-                entry["position"] = None
-                entry["rotation"] = None
-                problems.append(f"position: {str(exc).splitlines()[0][:80]}")
-            try:
-                ref = comp.ReferenceProduct
-                _ = ref.Parent
-            except Exception as exc:  # noqa: BLE001 - the classic dead link
-                problems.append(f"reference: {str(exc).splitlines()[0][:80]}")
-            if problems:
-                entry["broken"] = True
-                entry["error"] = "; ".join(problems)
-                broken += 1
+            # Filter BEFORE reading the placement. The name and the part number are
+            # cheap; the 12 numbers cost about 70 ms each, so filtering afterwards
+            # made "list just P24" take 5 s on a 70-instance assembly (reported
+            # 2026-10-26).
             if wanted is not None:
                 stem = (entry.get("name") or "").rsplit(".", 1)[0].casefold()
                 pn = (entry.get("part_number") or "").casefold()
                 if wanted not in (stem, pn):
                     continue
+            if not names_only:
+                try:
+                    matrix = self._position_components(comp.Position)
+                    entry["position"] = {
+                        "x": round(matrix[9], 3),
+                        "y": round(matrix[10], 3),
+                        "z": round(matrix[11], 3),
+                    }
+                    # A = the three axis images: columns 0/3/6, 1/4/7, 2/5/8.
+                    entry["rotation"] = [
+                        [round(matrix[0], 6), round(matrix[3], 6), round(matrix[6], 6)],
+                        [round(matrix[1], 6), round(matrix[4], 6), round(matrix[7], 6)],
+                        [round(matrix[2], 6), round(matrix[5], 6), round(matrix[8], 6)],
+                    ]
+                except Exception as exc:  # noqa: BLE001
+                    entry["position"] = None
+                    entry["rotation"] = None
+                    problems.append(f"position: {str(exc).splitlines()[0][:80]}")
+                try:
+                    ref = comp.ReferenceProduct
+                    _ = ref.Parent
+                except Exception as exc:  # noqa: BLE001 - the classic dead link
+                    problems.append(f"reference: {str(exc).splitlines()[0][:80]}")
+            if problems:
+                entry["broken"] = True
+                entry["error"] = "; ".join(problems)
+                broken += 1
             entry["occurrence"] = len(components) + 1
             components.append(entry)
 

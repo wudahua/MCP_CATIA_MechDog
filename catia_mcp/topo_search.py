@@ -110,18 +110,38 @@ def nls_of(cell: Any) -> str:
         return ""
 
 
-def is_construction(nls: str) -> bool:
-    """True when the NLS path describes geometry that is not the solid."""
+def construction_reason(nls: str) -> str | None:
+    """Why the NLS path says this cell is not the solid, or None when it is.
+
+    The reason, not just the verdict: a count that excludes 19 of 20 cells and one
+    that excludes 8 are very different answers, and the reply used to give the
+    total only (reported 2026-10-26, which had to infer the breakdown itself).
+    """
     if not nls:
-        return False
-    if nls.startswith(_CONSTRUCTION_PREFIXES):
-        return True
+        # No path, no verdict: a cell CATIA will not name is still measured, and
+        # guessing "construction" here would silently shrink the model.
+        return None
+    if nls.startswith("Selection_BorderREdge"):
+        return "datum_plane_border_edge"
+    if nls.startswith("Selection_WireREdge"):
+        return "sketch_wire_edge"
+    if nls.startswith("Selection_BorderRSur"):
+        return "datum_plane_border_face"
+    if nls.startswith("Selection_WireFVertex"):
+        return "sketch_wire_vertex"
+    if nls.startswith("Selection_BorderRVertex"):
+        return "datum_plane_corner"
     head = nls.split(":", 1)[0]
     if any(marker in head for marker in _CONSTRUCTION_MARKERS):
-        return True
-    # A face/edge whose defining feature is a datum plane is the plane's own
-    # border, not part of any solid.
-    return "Brp:(GSMPlane." in nls
+        return "construction_" + head.replace("Selection_", "").lower()
+    if "Brp:(GSMPlane." in nls:
+        return "datum_plane_border"
+    return None
+
+
+def is_construction(nls: str) -> bool:
+    """True when the NLS path describes geometry that is not the solid."""
+    return construction_reason(nls) is not None
 
 
 def nls_features(nls: str) -> list[str]:
@@ -169,7 +189,8 @@ def edge_fingerprint(faces: list[str], length: float | None) -> str:
     return "L" + stamp + "|" + "|".join(faces)
 
 
-def topology_cells(conn: Any, body: Any, kind: str) -> list[Any]:
+def topology_cells(conn: Any, body: Any, kind: str,
+                   stats: dict[str, Any] | None = None) -> list[Any]:
     """Every *solid* cell of ``kind`` on the body's final shape, in CATIA order.
 
     Construction geometry is filtered out so that ``<kind>.N`` means the same
@@ -177,17 +198,71 @@ def topology_cells(conn: Any, body: Any, kind: str) -> list[Any]:
     resolve ``Edge.N`` / ``Face.N`` afterwards. The search itself is left alone
     (it is the only way to enumerate), and the selection is kept alive because
     a Reference belongs to the selection that produced it.
+
+    ``stats`` is filled with ``raw``, ``retried`` and the ``excluded`` breakdown.
+    Two things make it worth carrying:
+
+    * a transient state can make nearly every solid cell look like construction -
+      reported 2026-10-26 on B32, where the same untouched part answered
+      ``edges 1`` and then ``edges 12``. One enumeration decides the numbering of
+      every ``Edge.N`` the caller is about to use, so a suspiciously small result
+      is enumerated a second time rather than published;
+    * ``Selection.Item`` occasionally fails while CATIA has a modal window up
+      (also 2026-10-26). That is not "the model has no edges", so it is retried
+      once and then reported as what it is.
     """
-    sel = conn.hso
-    sel.Clear()
-    sel.Add(body)
-    search_topology(sel, kind)
-    cells = []
-    for i in range(1, sel.Count + 1):
-        cell = sel.Item(i)
-        if not is_construction(nls_of(cell)):
-            cells.append(cell)
+    cells, reasons, raw, retried = _enumerate_cells(conn, body, kind)
+    if len(cells) <= 1 and raw >= 8:
+        # 1 of 20 is not a model, it is an enumeration that went wrong.
+        again_cells, again_reasons, again_raw, _ = _enumerate_cells(conn, body, kind)
+        if len(again_cells) > len(cells):
+            cells, reasons, raw = again_cells, again_reasons, again_raw
+            retried = True
+    if stats is not None:
+        breakdown: dict[str, int] = {}
+        for reason in reasons:
+            if reason:
+                breakdown[reason] = breakdown.get(reason, 0) + 1
+        stats.update(raw=raw, retried=retried, excluded=breakdown,
+                     kept=len(cells))
     return cells
+
+
+def _enumerate_cells(conn: Any, body: Any, kind: str
+                     ) -> tuple[list[Any], list[str | None], int, bool]:
+    """One search + filter pass, retried once if ``Selection.Item`` fails."""
+    for attempt in (1, 2):
+        sel = conn.hso
+        sel.Clear()
+        sel.Add(body)
+        search_topology(sel, kind)
+        cells: list[Any] = []
+        reasons: list[str | None] = []
+        try:
+            for i in range(1, sel.Count + 1):
+                cell = sel.Item(i)
+                reason = construction_reason(nls_of(cell))
+                reasons.append(reason)
+                if reason is None:
+                    cells.append(cell)
+        except Exception as error:  # noqa: BLE001 - reported as a busy selection
+            if attempt == 1:
+                try:
+                    sel.Clear()
+                except Exception:  # noqa: BLE001
+                    pass
+                continue
+            raise RuntimeError(
+                f"CATIA refused to hand over {kind} number "
+                f"{len(reasons) + 1} of {sel.Count} ({error}). That is the "
+                "SELECTION being unavailable, not the model having no "
+                f"{kind.lower()}s: a modal dialog (often a '闭合' prompt raised "
+                "while a sketch is still in edition) can hold it. Dismiss the "
+                "dialog, or catia_activate_document the part again, and repeat "
+                "the call - the geometry is untouched."
+            ) from error
+        return cells, reasons, sel.Count, False
+    raise RuntimeError("unreachable")
 
 
 def topology_reference(conn: Any, body: Any, kind: str, index: int,

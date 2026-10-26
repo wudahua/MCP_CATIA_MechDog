@@ -403,7 +403,9 @@ def test_edge_and_face_indices_come_from_the_body_not_the_last_feature():
 
     assert "topology_cells(self.conn, body, kind)" in \
         inspect.getsource(PartDesignTools._topology_cells)
-    assert "sel.Add(body)" in inspect.getsource(ts.topology_cells)
+    # The search itself lives in one place, and the retry that keeps a transient
+    # CATIA state from renumbering every Edge.N lives with it (2026-10-26).
+    assert "sel.Add(body)" in inspect.getsource(ts._enumerate_cells)
     assert "topology_cells(conn, body, kind)" in inspect.getsource(ts.topology_reference)
     assert "topology_cells(conn, body, kind)" in inspect.getsource(ts.topology_references)
 
