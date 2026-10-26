@@ -226,7 +226,7 @@ def test_the_same_part_is_bounded_once_per_assembly():
              "part_number": "PA", "index": i + 1, "problems": []}
             for i in range(4)]
 
-    def local_box(_part, _body):
+    def local_box(_part, _body, _stats=None):
         calls.append(1)
         return [[0, 0, 0], [10, 10, 10]], 2
 

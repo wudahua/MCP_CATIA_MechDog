@@ -10,21 +10,26 @@ import os
 import re
 import struct
 import tempfile
+import uuid
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
 from catia_mcp.topo_search import is_construction, nls_of, search_topology
 
 
-def _stl_extent(path: str) -> tuple[list[list[float]], int]:
-    """Min/max corner and vertex count from an STL (binary or ASCII).
+def _stl_scan(path: str, limit: int | None = None
+              ) -> tuple[list[float], list[float], list[float] | None, int]:
+    """Extent - and optionally the cloud - of an STL (binary or ASCII).
 
-    Streams the file and only tracks extremes, because a dense part exports
-    hundreds of thousands of triangles and keeping them all buys nothing for a
-    bounding box.
+    Streams the file and tracks extremes, because a dense part exports hundreds
+    of thousands of triangles. ``limit`` also keeps up to that many vertices as a
+    flat ``[x, y, z, x, y, z, …]`` list: the assembly route needs the points, not
+    the extent, because a box taken from two opposite corners and then rotated is
+    NOT the box of the rotated part (see ``_mesh_cloud``).
     """
     lo = [float("inf")] * 3
     hi = [float("-inf")] * 3
+    cloud: list[float] | None = [] if limit is not None else None
     seen = 0
 
     def add(x: float, y: float, z: float) -> None:
@@ -42,6 +47,8 @@ def _stl_extent(path: str) -> tuple[list[list[float]], int]:
         if z > hi[2]:
             hi[2] = z
         seen += 1
+        if cloud is not None and len(cloud) < 3 * limit:
+            cloud.extend((x, y, z))
 
     size = os.path.getsize(path)
     with open(path, "rb") as handle:
@@ -68,6 +75,12 @@ def _stl_extent(path: str) -> tuple[list[list[float]], int]:
                         add(float(parts[1]), float(parts[2]), float(parts[3]))
     if not seen:
         raise RuntimeError("STL export contained no triangles")
+    return lo, hi, cloud, seen
+
+
+def _stl_extent(path: str) -> tuple[list[list[float]], int]:
+    """Min/max corner and vertex count from an STL (binary or ASCII)."""
+    lo, hi, _cloud, seen = _stl_scan(path)
     return [lo, hi], seen
 
 # CATIA V5's SPAWorkbench Measurable API returns every value in MKS units
@@ -78,6 +91,13 @@ def _stl_extent(path: str) -> tuple[list[list[float]], int]:
 _M_TO_MM = 1000.0
 _M2_TO_MM2 = 1e6
 _M3_TO_MM3 = 1e9
+
+# How many STL vertices a part's cloud may hold while an assembly is being
+# measured. The cloud is kept per PART and transformed once per INSTANCE, so the
+# memory is bounded by this and the time by the instance count. Typical parts in
+# the acceptance assemblies are 500-5 400 vertices; 200 000 is far above that and
+# still only 4.8 MB per part as a flat list of floats.
+_MESH_CLOUD_LIMIT = 200_000
 
 
 def _sig(value: float, digits: int = 6) -> float:
@@ -170,24 +190,41 @@ _BATCH_POINTS = (
 
 
 def read_measurable_points(app: Any, spa: Any, refs: list[Any],
-                           fallback: Any = None) -> list[list[float]]:
+                           fallback: Any = None,
+                           stats: dict[str, Any] | None = None
+                           ) -> list[list[float]]:
     """Every point's coordinates in ONE call, falling back to one call each.
 
     ``refs`` are topology references; ``spa`` is the document's SPAWorkbench and
     is passed INTO the engine so the Python side does not pay a COM round trip
     per vertex either. ``fallback`` is the per-point reader to use if the batched
     form is refused (it takes a reference and returns three floats).
+
+    The batch is retried once before falling back, because the failure is not a
+    property of the model: measured on B30 2026-10-26, the same 335 references
+    went through this call in 424 ms on a warm session - and in 27.3 s (the
+    per-point route, 335 x 82 ms) right after an assembly had been opened, when
+    CATIA refused the script once and the silent fallback took over. A 60x
+    slowdown that reports nothing is worse than a slow path that says so, hence
+    ``stats["route"]``.
     """
     if not refs:
         return []
-    try:
-        flat = list(app.SystemService.Evaluate(_BATCH_POINTS, 0, "catia_mcp_points",
-                                               [spa, list(refs)]))
-        if len(flat) == 3 * len(refs):
-            values = [float(v) for v in flat]
-            return [values[i:i + 3] for i in range(0, len(values), 3)]
-    except Exception:  # noqa: BLE001 - the slow route still works
-        pass
+    for attempt in (1, 2):
+        try:
+            flat = list(app.SystemService.Evaluate(_BATCH_POINTS, 0,
+                                                   "catia_mcp_points",
+                                                   [spa, list(refs)]))
+            if len(flat) == 3 * len(refs):
+                values = [float(v) for v in flat]
+                if stats is not None:
+                    stats["route"] = "batch" if attempt == 1 else "batch_retried"
+                return [values[i:i + 3] for i in range(0, len(values), 3)]
+        except Exception:  # noqa: BLE001 - the slow route still works
+            if attempt == 1:
+                continue
+    if stats is not None:
+        stats["route"] = "per_point"
     if fallback is None:
         return []
     return [fallback(ref) for ref in refs]
@@ -719,12 +756,22 @@ class MeasurementTools:
                 "no own window: CATIA computes the tensor only for the active "
                 "document, and this part is a component of an open assembly, so it "
                 "cannot be activated where it is. Fix: catia_open_document + "
-                "catia_activate_document, then get_inertia without 'document'.\n"
-                "Partial route: a plan's expect can name this document - "
-                '{"expect": [{"document": "<name>", "volume_mm3": ...}]} - and it '
-                "borrows the activation itself; that answers volume, area and "
-                "centroid, but not the tensor."
+                "catia_activate_document, then get_inertia without 'document'."
             )
+            # The partial route is a FACT, not prose: it says which fields a plan
+            # can still assert on and which it cannot. Nine identical sentences in
+            # a nine-part sweep were the second-longest block in the reply
+            # (reported 2026-10-26); the same information in one object is
+            # readable by a caller and costs 4 lines instead of 7.
+            payload["tensor_partial_route"] = {
+                "code": "plan_expect_document",
+                "tool": "catia_run_plan",
+                "shape": {"expect": [{"document": "<name>"}]},
+                "borrows_activation": True,
+                "answers": ["volume_mm3", "area_mm2", "center_of_gravity_mm",
+                            "mass_kg (with density)"],
+                "does_not_answer": ["inertia_tensor"],
+            }
             payload["note"] = (
                 "measured on this document's own Part, independent of which document "
                 "CATIA reports as active. The inertia tensor is missing - see "
@@ -977,15 +1024,24 @@ class MeasurementTools:
             rows.append(row)
         return rows
 
-    def _local_box(self, part: Any, body: Any) -> tuple[list[list[float]], int]:
+    def _local_box(self, part: Any, body: Any,
+                   stats: dict[str, Any] | None = None
+                   ) -> tuple[list[list[float]], int]:
         """The part's own bounding corners and the number of points used.
 
         Uses that document's selection (not the active one) and skips
         construction geometry, which otherwise drags sketch wires into the box.
+
+        The coordinates are read in ONE script call (measured on B30, 2026-10-26:
+        335 vertices took 424 ms this way and 27.3 s one at a time - the batched
+        form is 60x, not the 6x that 8 vertices suggested). ``stats`` receives
+        ``cells`` and ``points_route`` so a caller can see which reader ran and
+        how much work the construction filter had to do.
         """
         doc = part.Parent
         sel = doc.Selection
         refs = []
+        read_stats: dict[str, Any] = {}
         try:
             sel.Clear()
             sel.Add(body)
@@ -995,14 +1051,21 @@ class MeasurementTools:
                 if is_construction(nls_of(cell)):
                     continue
                 refs.append(cell.Reference)
+            if stats is not None:
+                stats["cells"] = int(sel.Count)
             spa = doc.GetWorkbench("SPAWorkbench")
-            raw = [self._read_measurable_array(spa.GetMeasurable(ref), "GetPoint", 3)
-                   for ref in refs]
+            raw = read_measurable_points(
+                self.conn.app, spa, refs,
+                fallback=lambda ref: self._read_measurable_array(
+                    spa.GetMeasurable(ref), "GetPoint", 3),
+                stats=read_stats)
         finally:
             try:
                 sel.Clear()
             except Exception:
                 pass
+        if stats is not None:
+            stats["points_route"] = read_stats.get("route", "batch")
         points, _dropped = self._bounded(raw)
         return points, len(points)
 
@@ -1059,27 +1122,30 @@ class MeasurementTools:
         2026-10-26: the tool could already do this by name and made the caller do
         it instead).
         """
+        stats: dict[str, Any] = {}
         try:
-            points, used = self._local_box(part, body)
+            points, used = self._local_box(part, body, stats)
         except Exception as exc:  # noqa: BLE001 - reported per component
             return {"error": f"local box: {str(exc).splitlines()[0][:80]}"}
         if points:
             return {"points": points, "used": used, "source": "vertices",
-                    "mesh_vertices": None, "copy_note": ""}
+                    "mesh_vertices": None, "copy_note": "",
+                    "cells": stats.get("cells"), "points_route": stats.get("points_route")}
         if not include_curved:
             return {"error": "no vertices (fully curved part), so a vertex sweep "
                              "cannot bound it; include_curved=true (the default) "
                              "lets this tool use the part's mesh box instead"}
         try:
-            mesh_points, mesh_vertices, copy_note = self._mesh_corners(part)
+            cloud, mesh_vertices, copy_note = self._mesh_cloud(part)
         except Exception as exc:  # noqa: BLE001
             return {"error": "mesh fallback failed: "
                              + str(exc).splitlines()[0][:90]}
-        if not mesh_points:
+        if not cloud:
             return {"error": "no vertices and no mesh: neither route could bound "
                              "this part"}
-        return {"points": mesh_points, "used": len(mesh_points),
+        return {"points": cloud, "used": len(cloud) // 3,
                 "source": "mesh_fallback", "mesh_vertices": mesh_vertices,
+                "truncated": mesh_vertices > len(cloud) // 3,
                 "copy_note": copy_note or ""}
 
     def _assembly_box(self, doc: Any, method: str,
@@ -1118,14 +1184,25 @@ class MeasurementTools:
             if "error" in cached:
                 skipped.append({"component": label, "error": cached["error"]})
                 continue
-            points, used = cached["points"], cached["used"]
-            world = [self._to_world(row["matrix"], row["translation"], p)
-                     for p in points]
-            xs = [p[0] for p in world]
-            ys = [p[1] for p in world]
-            zs = [p[2] for p in world]
-            entry_min = [min(xs), min(ys), min(zs)]
-            entry_max = [max(xs), max(ys), max(zs)]
+            if cached["source"] == "mesh_fallback":
+                # Transform EVERY mesh vertex, not the local box's two corners.
+                # The corners are a diagonal; rotate a diagonal and it becomes a
+                # line with almost no extent across it, so the aggregated box came
+                # out too narrow in one axis and too wide in another while still
+                # claiming complete:true (reported 2026-10-26: a disc whose true
+                # world box is ±72.5/±72.5 read as ±100.29/±21.32).
+                entry_min, entry_max = self._world_extent(
+                    cached["points"], row["matrix"], row["translation"])
+                world = [[entry_min[0], entry_min[1], entry_min[2]],
+                         [entry_max[0], entry_max[1], entry_max[2]]]
+            else:
+                world = [self._to_world(row["matrix"], row["translation"], p)
+                         for p in cached["points"]]
+                xs = [p[0] for p in world]
+                ys = [p[1] for p in world]
+                zs = [p[2] for p in world]
+                entry_min = [min(xs), min(ys), min(zs)]
+                entry_max = [max(xs), max(ys), max(zs)]
             entry = {
                 "component": label,
                 "name": row["name"],
@@ -1140,19 +1217,30 @@ class MeasurementTools:
                 # its part (a lower bound on curved faces), not from a vertex
                 # sweep, so a reader can tell a mixed box from a uniform one.
                 # `vertices_used` is deliberately absent here: the mesh route
-                # returns its two extent corners, and reporting those as "2
-                # vertices used" would read like a nearly empty part (measured on
-                # the drone assembly 2026-10-26).
+                # works on the mesh's vertex cloud, and reporting that count as
+                # "vertices used" would read like a part with a handful of them.
                 entry["mesh_vertices"] = cached["mesh_vertices"]
                 entry["source_note"] = (
                     "no vertex lies at this part's extremum, so its box came from "
                     "the mesh - a lower bound on curved faces, measured 0.47-0.73 % "
-                    "small" + ("; it also came from the SAVED file rather than the "
-                               "loaded state: "
-                               + cached["copy_note"].lstrip("; ").strip()
-                               if cached["copy_note"] else ""))
+                    "small" + ("; the cloud was capped at %d of %d vertices"
+                               % (cached["used"], cached["mesh_vertices"])
+                               if cached.get("truncated") else "")
+                    + ("; it also came from the SAVED file rather than the "
+                       "loaded state: "
+                       + cached["copy_note"].lstrip("; ").strip()
+                       if cached["copy_note"] else ""))
             else:
-                entry["vertices_used"] = used
+                entry["vertices_used"] = cached["used"]
+                # The cost model made visible: the construction filter walks every
+                # topology cell of the body (~15 ms each on B30), which is the
+                # "6 s per part" the acceptance report measured - not the vertex
+                # count. Reported so a caller can correlate cost with cell count
+                # instead of guessing from the part's size.
+                if cached.get("cells") is not None:
+                    entry["cells_scanned"] = cached["cells"]
+                if cached.get("points_route") not in (None, "batch"):
+                    entry["points_route"] = cached["points_route"]
             if cached["copy_note"] and key not in warned:
                 # Once per PART: four instances of one faceplate used to repeat
                 # the same 180-character sentence four times. The note is written
@@ -1216,6 +1304,17 @@ class MeasurementTools:
         except Exception:  # noqa: BLE001 - the numbers are the point
             pass
         payload["part_boxes"] = len(local_boxes)
+        # The route actually taken, per PART, as numbers a caller can assert on.
+        # 0.3.23 only said it in the `bounds` sentence, so "how many curved parts
+        # should this assembly have" could not be checked without parsing prose
+        # (reported 2026-10-26).
+        by_route = {"vertices": 0, "mesh_fallback": 0}
+        for cached in local_boxes.values():
+            source = cached.get("source")
+            if source in by_route:
+                by_route[source] += 1
+        payload["part_boxes_by_vertices"] = by_route["vertices"]
+        payload["part_boxes_by_mesh"] = by_route["mesh_fallback"]
         payload["note_scope"] = (
             f"{len(entries)} instance(s) of {len(local_boxes)} part(s): each part's "
             "local box is computed once and only the placement is repeated, so the "
@@ -1227,7 +1326,12 @@ class MeasurementTools:
         payload["complete"] = not skipped
         payload["include_curved"] = include_curved
         if from_mesh:
-            payload["mesh_fallback"] = from_mesh
+            # Parts, not instances: `warnings` is per part, and two fields in one
+            # reply counting different things made 6-vs-2 look like a defect
+            # (reported 2026-10-26). The per-instance answer is on each entry
+            # (`source`) and in the count beside it.
+            payload["mesh_fallback"] = sorted(set(from_mesh))
+            payload["mesh_fallback_instances"] = len(from_mesh)
         if fallback_warnings:
             payload["warnings"] = fallback_warnings
         payload["instances"] = {"total": len(entries) + len(skipped),
@@ -1612,7 +1716,8 @@ class MeasurementTools:
             kept.append(point)
         return kept, dropped
 
-    def _mesh_corners(self, part: Any) -> tuple[list[list[float]], int, str]:
+    def _mesh_export(self, part: Any, limit: int | None = None
+                    ) -> tuple[list[float], list[float], list[float] | None, int, str]:
         """Bounding corners from an STL export of that part's document.
 
         ExportData activates the document it exports, so a measurement aimed at a
@@ -1637,6 +1742,11 @@ class MeasurementTools:
         document. Measured on V5-6R2020 B30: a block that is a component of an
         open product exports 3244 bytes as a standalone document and 0 bytes in
         context; the copy route writes the same 3244 bytes from the same state.
+
+        Returns ``(lo, hi, cloud, seen, copy_note)``. ``cloud`` is a flat
+        ``[x, y, z, …]`` list of at most ``limit`` vertices when a limit is given,
+        and ``None`` otherwise - the extent is all a standalone part needs, but the
+        assembly route must transform every vertex (0.3.24).
         """
         doc = part.Parent
         previous = None
@@ -1646,9 +1756,10 @@ class MeasurementTools:
             previous = None
         # ExportData raises an overwrite prompt when the target exists, and that
         # dialog blocks the worker thread forever. mkstemp would create the file
-        # up front, so make a directory and hand over a name that does not exist.
+        # up front, so make a directory and hand over a name that does not exist -
+        # and a unique one, so two concurrent measurements cannot collide on it.
         folder = tempfile.mkdtemp(prefix="catia_bbox_")
-        path = os.path.join(folder, "part.stl")
+        path = os.path.join(folder, "part_%s.stl" % uuid.uuid4().hex[:8])
         try:
             # Measured on V5-6R2020 B30, 2026-10-24: ExportData writes a 37-byte
             # EMPTY STL unless the part has been updated first - on a block and on
@@ -1663,20 +1774,20 @@ class MeasurementTools:
             if not in_context:
                 try:
                     # ExportData rejects forward-slash paths (E_FAIL).
-                    doc.ExportData(os.path.normpath(path), "stl")
+                    self._export_stl(doc, path)
                 except Exception as exc:  # noqa: BLE001 - the file check decides
                     export_error = exc
                 if (os.path.getsize(path) if os.path.exists(path) else 0) >= 128:
-                    corners, triangles = _stl_extent(path)
-                    return corners, triangles, ""
+                    lo, hi, cloud, seen = _stl_scan(path, limit)
+                    return lo, hi, cloud, seen, ""
             # In context the export is REFUSED with a modal dialog that nobody
             # can answer, and on one B32 session it still wrote a valid STL - so
             # the size check could not tell us, and every measurement left a
             # dialog plus an event report behind (reported 2026-10-24, 6 parts =
             # 6 clicks). Detect the state first and never attempt the in-place
             # export there.
-            corners, triangles = self._mesh_from_copy(doc, path)
-            return corners, triangles, (
+            lo, hi, cloud, seen = self._mesh_from_copy(doc, path, limit)
+            return lo, hi, cloud, seen, (
                 "; measured from a temporary copy of the saved file, because the "
                 "part is loaded inside the assembly and CATIA refuses to export a "
                 "part edited in context - unsaved edits are not included")
@@ -1704,6 +1815,92 @@ class MeasurementTools:
                 except Exception:  # noqa: BLE001 - best effort
                     pass
 
+    def _mesh_corners(self, part: Any) -> tuple[list[list[float]], int, str]:
+        """The local box of a part from its STL: two opposite corners + count."""
+        lo, hi, _cloud, seen, note = self._mesh_export(part)
+        return [lo, hi], seen, note
+
+    def _mesh_cloud(self, part: Any) -> tuple[list[float], int, str]:
+        """Every mesh vertex (flat, capped) - what a world box actually needs.
+
+        Two opposite corners are enough for a local box, but NOT for a rotated
+        one: transforming only the diagonal and taking its extent gives a box that
+        is far too narrow in one direction and, once several instances are
+        aggregated, too wide in another. Reported 2026-10-26 with the numbers: a
+        disc whose true world box is ±72.5 in x and y came back as ±100.29 / ±21.32
+        - the diagonal of the local box, rotated, is a line, and a line has almost
+        no extent across it. Rotating the vertices is the only answer that stays
+        exact for an arbitrary placement.
+        """
+        lo, hi, cloud, seen, note = self._mesh_export(part, _MESH_CLOUD_LIMIT)
+        if cloud is None or not cloud:
+            # No cloud (or an empty export) - fall back to the two corners, which
+            # is still a valid LOWER bound, and say so by returning the corners.
+            return [lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]], seen, note
+        return cloud, seen, note
+
+    @staticmethod
+    def _world_extent(cloud: list[float], matrix: list[list[float]],
+                      translation: list[float]) -> tuple[list[float], list[float]]:
+        """min/max of ``A·p + T`` over a flat point cloud, without building points.
+
+        A flat cloud of a few thousand vertices is transformed in milliseconds,
+        and nothing is allocated per point - which matters because this runs once
+        per INSTANCE of a curved part (an assembly can hold dozens).
+        """
+        a = matrix
+        tx, ty, tz = translation[0], translation[1], translation[2]
+        lo = [float("inf")] * 3
+        hi = [float("-inf")] * 3
+        for i in range(0, len(cloud) - 2, 3):
+            x, y, z = cloud[i], cloud[i + 1], cloud[i + 2]
+            for axis in range(3):
+                value = a[axis][0] * x + a[axis][1] * y + a[axis][2] * z
+                if axis == 0:
+                    value += tx
+                elif axis == 1:
+                    value += ty
+                else:
+                    value += tz
+                if value < lo[axis]:
+                    lo[axis] = value
+                if value > hi[axis]:
+                    hi[axis] = value
+        return lo, hi
+
+    def _export_stl(self, doc: Any, path: str) -> None:
+        """``doc.ExportData(..., "stl")`` without CATIA's file alerts.
+
+        ExportData is a SAVE, so CATIA runs its file-alert path: on V5-6R2022 B32
+        it puts up a modal "另存为 / 保存操作失败：导入的数据位于会话中…" for a
+        document that has unsaved modifications, and it does that whether or not
+        the STL itself gets written. Nobody answers a dialog raised on the
+        automation thread, so the call sat there for **89.4 s** before returning
+        (reported 2026-10-26, with the raw-COM control: ``DisplayFileAlerts =
+        False`` -> 0 dialogs, 0.00 s, same 16 071-byte STL). Every bounding box
+        that reached the mesh route left one on the user's desktop - and since
+        0.3.23 that route runs once per curved part of an assembly, so a silent
+        occasional annoyance became a guaranteed one.
+
+        The same switch already guards ``add_component``; this is the second file
+        operation in the tool that needs it. Restored in ``finally`` because
+        leaving it off would make the NEXT interactive operation fail silently.
+        """
+        previous = None
+        try:
+            previous = self.conn.app.DisplayFileAlerts
+            self.conn.app.DisplayFileAlerts = False
+        except Exception:  # noqa: BLE001 - not every build exposes it
+            previous = None
+        try:
+            doc.ExportData(os.path.normpath(path), "stl")
+        finally:
+            if previous is not None:
+                try:
+                    self.conn.app.DisplayFileAlerts = previous
+                except Exception:  # noqa: BLE001
+                    pass
+
     def _edited_in_context(self, doc: Any) -> bool:
         """True when the document has no window of its own.
 
@@ -1720,7 +1917,8 @@ class MeasurementTools:
         except Exception:  # noqa: BLE001 - assume the risky state
             return True
 
-    def _mesh_from_copy(self, doc: Any, path: str) -> tuple[list[list[float]], int]:
+    def _mesh_from_copy(self, doc: Any, path: str, limit: int | None = None
+                        ) -> tuple[list[float], list[float], list[float] | None, int]:
         """Export from a temporary copy of the file, opened as its own document.
 
         The copy has no link to the assembly, so CATIA treats it as a standalone
@@ -1753,12 +1951,12 @@ class MeasurementTools:
                 self.conn.part_of(opened).Update()
             except Exception:  # noqa: BLE001 - the export reports it
                 pass
-            opened.ExportData(os.path.normpath(path), "stl")
+            self._export_stl(opened, path)
             size = os.path.getsize(path) if os.path.exists(path) else 0
             if size < 128:
                 raise RuntimeError(
                     f"the copy opened as its own document still exported {size} bytes")
-            return _stl_extent(path)
+            return _stl_scan(path, limit)
         finally:
             try:
                 opened.Close()

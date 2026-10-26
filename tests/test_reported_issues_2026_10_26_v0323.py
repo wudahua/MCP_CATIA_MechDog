@@ -244,14 +244,16 @@ def _assembly_box_tools(rows, curved):
     tools._to_world = lambda matrix, translation, point: list(point)
     tools._part_identity = lambda part: part.Name
 
-    def local_box(part, body):
+    def local_box(part, body, stats=None):
         if part.Name in curved:
             return [], 0
         return [[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]], 8
 
     tools._local_box = local_box
-    tools._mesh_corners = lambda part: ([[0.0, 0.0, 0.0], [4.0, 5.0, 6.0]],
-                                        4_620, "measured from a COPY")
+    # 0.3.24: the assembly route takes the vertex CLOUD, not two corners, so that
+    # a rotated instance gets the true box of its rotated part.
+    tools._mesh_cloud = lambda part: ([0.0, 0.0, 0.0, 4.0, 5.0, 6.0],
+                                      4_620, "measured from a COPY")
     return tools
 
 
@@ -261,7 +263,7 @@ def _row(name, index, part=None):
         "name": f"{name} I{index:03d}",
         "part_number": name,
         "part": part or _BoxPart(name),
-        "matrix": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        "matrix": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
         "translation": [0.0, 0.0, 0.0],
         "problems": [],
     }
@@ -276,7 +278,10 @@ def test_a_mesh_bounded_part_reports_mesh_vertices_not_a_bogus_count():
     assert payload["complete"] is True
     assert payload["include_curved"] is True
     assert payload["part_boxes"] == 2
-    assert payload["mesh_fallback"] == ["curved plate", "curved plate"]
+    # Part-level list + instance count (0.3.24): `warnings` is per part, and two
+    # fields counting different things read as a defect.
+    assert payload["mesh_fallback"] == ["curved plate"]
+    assert payload["mesh_fallback_instances"] == 2
     assert payload["bounds"].startswith("mixed: 2 instance(s)")
 
     mesh = [e for e in payload["components"] if e["source"] == "mesh_fallback"]
@@ -310,7 +315,7 @@ def test_the_copy_warning_is_repeated_once_per_part_not_once_per_instance():
 def test_without_include_curved_a_curved_part_is_reported_not_guessed():
     rows = [_row("curved plate", 1), _row("block", 2)]
     tools = _assembly_box_tools(rows, curved={"curved plate"})
-    tools._mesh_corners = lambda part: pytest.fail("mesh route must not be taken")
+    tools._mesh_cloud = lambda part: pytest.fail("mesh route must not be taken")
     payload = json.loads(tools._assembly_box(SimpleNamespace(Name="ASM.CATProduct"),
                                              "vertices", include_curved=False))
     assert payload["complete"] is False
@@ -554,5 +559,6 @@ def test_the_tensor_reason_points_at_the_plan_route():
     from catia_mcp.tools.measurement import MeasurementTools
 
     source = inspect.getsource(MeasurementTools._part_inertia)
-    assert "borrows the activation" in source
-    assert '{"expect": [{"document"' in source
+    # Since 0.3.24 the route is a structured field, not a seventh prose line.
+    assert '"tensor_partial_route"' in source
+    assert '"borrows_activation"' in source

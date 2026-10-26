@@ -1300,6 +1300,39 @@ class AssemblyTools:
                     continue
         return names
 
+    def _no_active_assembly_text(self) -> str:
+        """Why a component listing cannot be answered right now, and what is open."""
+        name = "?"
+        try:
+            name = str(self.conn.active_document.Name)
+        except Exception:  # noqa: BLE001 - nothing active
+            name = "none"
+        open_products: list[str] = []
+        try:
+            docs = self.conn.documents
+            for i in range(1, docs.Count + 1):
+                doc = docs.Item(i)
+                try:
+                    self.conn.product_of(doc)
+                    open_products.append(str(doc.Name))
+                except Exception:  # noqa: BLE001 - not a product
+                    continue
+        except Exception:  # noqa: BLE001 - listing is best effort
+            open_products = []
+        if open_products:
+            return (
+                f"The active document is '{name}', a Part - a component list needs "
+                "an assembly (Product) document to be active. Open assemblies: "
+                + ", ".join(f"'{p}'" for p in open_products)
+                + ". Activate one (catia_activate_document) and repeat."
+            )
+        return (
+            f"The active document is '{name}', a Part - a component list needs an "
+            "assembly (Product) document to be active, and no assembly is open. "
+            "Open one with catia_open_document (or build one with "
+            "catia_new_product), then list again."
+        )
+
     def _list_components(self, part_number: str | None = None,
                          names_only: bool = False) -> str:
         """Every component with its placement, surviving broken links.
@@ -1311,6 +1344,18 @@ class AssemblyTools:
         broken with the reason, and the rotation is published next to the
         translation - a placement is not a translation.
         """
+        self.conn.ensure_connected()
+        # A PartDocument HAS a Product (the part's own node in the tree) whose
+        # Products collection is empty, so asking it for components answered
+        # "No components in the active assembly" - which reads like "the assembly
+        # is empty" when in fact no assembly was active at all (reported
+        # 2026-10-26).
+        try:
+            self.conn.part_of(self.conn.active_document)
+        except Exception:  # noqa: BLE001 - not a Part, i.e. the expected case
+            pass
+        else:
+            raise RuntimeError(self._no_active_assembly_text())
         product = self.conn.get_active_product()
         products = product.Products
 

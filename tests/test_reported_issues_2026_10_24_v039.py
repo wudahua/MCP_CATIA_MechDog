@@ -58,7 +58,7 @@ def test_auto_takes_the_mesh_and_says_why() -> None:
     assert '"mesh"' in source
     assert "method='vertices'" in source
 
-    mesh = inspect.getsource(MT._mesh_corners)
+    mesh = inspect.getsource(MT._mesh_export)
     # ExportData writes an empty STL unless the part is updated first (37 bytes).
     assert "part.Update()" in mesh
     assert "37-byte" in mesh or "37 bytes" in mesh

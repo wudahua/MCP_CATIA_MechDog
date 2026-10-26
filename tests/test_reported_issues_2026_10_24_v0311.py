@@ -117,7 +117,9 @@ def test_mesh_export_checks_the_file_and_falls_back_to_a_copy():
     """
     from catia_mcp.tools.measurement import MeasurementTools as MT
 
-    mesh = inspect.getsource(MT._mesh_corners)
+    # The export lives in _mesh_export now: _mesh_corners is the thin wrapper
+    # that reduces the cloud to two corners (0.3.24).
+    mesh = inspect.getsource(MT._mesh_export)
     assert "getsize" in mesh
     assert "_mesh_from_copy" in mesh
     assert "editing in context" in mesh

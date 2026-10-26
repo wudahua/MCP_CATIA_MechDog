@@ -111,7 +111,7 @@ def test_mesh_never_exports_a_part_in_context():
     tell, and every measurement left a dialog behind."""
     from catia_mcp.tools.measurement import MeasurementTools as MT
 
-    source = inspect.getsource(MT._mesh_corners)
+    source = inspect.getsource(MT._mesh_export)
     assert "_edited_in_context" in source
     assert "if not in_context:" in source
     detector = inspect.getsource(MT._edited_in_context)

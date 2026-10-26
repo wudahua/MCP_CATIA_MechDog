@@ -2,6 +2,88 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Fixed — a mesh-bounded part was being rotated as a diagonal, not as a part
+
+- The mesh fallback took the local box's **two opposite corners**, transformed
+  those two points and used their extent as the instance's world box. A diagonal,
+  rotated, is a line: its extent across the rotation is almost nothing, so a disc
+  whose true world box is ±72.5 in x and y came back as **±100.29 / ±21.32** - and
+  because one axis grew, the aggregate min/max still looked like a full cover with
+  `complete: true`, `skipped: 0` and no warning (reported 2026-10-26). A part with
+  an identity placement was unaffected, which is why it survived the previous
+  round's checks.
+- The mesh route now returns the **vertex cloud** (`_mesh_cloud`, capped at
+  200 000 vertices per part, ~1.2 MB flat) and `_world_extent` transforms every
+  vertex, per instance, without materialising points. On the 24-instance drone
+  assembly one faceplate's world box shrank from a 26.57 mm to a 19.21 mm x-span -
+  the previous number was 38 % too wide - while the assembly envelope stayed
+  bit-identical (it is driven by vertex-bounded parts).
+
+### Fixed — the STL export no longer leaves a modal "Save As" on the desktop
+
+- `ExportData` is a save, so CATIA ran its file-alert path: every mesh
+  measurement put up a modal "另存为 / 保存操作失败：导入的数据位于会话中…" and, with
+  nobody to answer it on the automation thread, **blocked the call for 89.4 s**
+  (reported 2026-10-26, with the raw-COM control: `DisplayFileAlerts = False` → 0
+  dialogs, 0.00 s, same 16 071-byte STL). Since 0.3.23 the mesh route runs once per
+  curved part of an assembly, so an occasional annoyance became a guaranteed one -
+  in the reporter's words, "按默认参数调一次包围盒，CATIA 里就会留下一个没人点的框".
+- Both export sites now go through `_export_stl`, which sets `DisplayFileAlerts =
+  False` and restores it in `finally` (the same switch `add_component` has used
+  since 0.3.9). The temporary STL also gets a unique name. Measured on B30:
+  export 13.1 ms, zero #32770 windows before and after, flag still `True`
+  afterwards. B30 does not raise the dialog at all - it refuses in place and writes
+  0 bytes - so this fix is only observable on B32, where the report measured it.
+
+### Changed — the assembly vertex route reads its points in one call, and says when it cannot
+
+- `_local_box` was still on the per-vertex reader: 0.3.23's batch reached the
+  single-part route but not the assembly one. Measured on B30, 335 vertices:
+  **27.3 s one at a time, 424 ms batched** (60x, not the 6x that 8 vertices
+  suggested).
+- The batch is retried once before falling back, and the route is reported: an
+  entry whose points came one-by-one carries `points_route: "per_point"`. The
+  silent fallback is how a 60x slowdown once went unnoticed - 335 references took
+  27.3 s right after an assembly opened and 424 ms on a warm session, with nothing
+  in the reply to tell the two apart.
+- Vertex entries now carry `cells_scanned`. The remaining per-part cost is the
+  construction filter, not the vertices: on B30 each topology cell costs ~15 ms
+  (`Selection.Item` 2.9 ms, `Value.Name` 9.6 ms to read the NLS path,
+  `Reference` 2.5 ms), so a 535-cell body pays ~8 s before a single coordinate is
+  read. That is the "6 s per part entry fee" the acceptance report measured on a
+  16-vertex block. Whole assembly: 137.9 s → **106.8 s** for 24 instances
+  (6 vertex-bounded parts, 5 mesh-bounded).
+
+### Changed — route counts are numbers, and `mesh_fallback` counts parts
+
+- `part_boxes_by_vertices` / `part_boxes_by_mesh` state the split that used to
+  live only in the `bounds` sentence, so "this assembly should have 2 curved
+  parts" is now an assertion instead of a parsing job.
+- `mesh_fallback` lists **parts** (unique) and `mesh_fallback_instances` gives the
+  instance count: it used to list instances while `warnings` listed parts, and
+  6-versus-2 in one reply read like a defect.
+- `tensor_partial_route` replaces the seventh line of `tensor_reason` prose with
+  a `{code, tool, shape, answers, does_not_answer}` object - nine identical
+  paragraphs in a nine-part sweep was the second-longest block in the reply.
+
+### Fixed — `list_components` on a Part says no assembly is active
+
+- A `PartDocument` has a `Product` (the part's own tree node) whose `Products`
+  collection is empty, so asking it for components answered "No components in the
+  active assembly" - which reads like "the assembly is empty". It now says which
+  document is active, that a component list needs a Product document, and which
+  assemblies ARE open (reported 2026-10-26).
+
+### Note — `by_reason` keys need re-baselining
+
+- 0.3.23 renamed one fall-through value: `construction_borderfvertex` →
+  `construction_border_f_vertex` (CATIA's letters `BorderFVertex`, our missing
+  separators). Every explicitly named reason is unchanged, but a stored comparison
+  table keyed on the old string will not match (reported 2026-10-26 by an
+  acceptance harness that keeps one).
+
 ## [0.3.23] — 2026-10-26 · a box that covers the curved parts
 
 ### Fixed — an assembly box now bounds curved parts instead of skipping them
