@@ -252,8 +252,22 @@ a reference), so its price is set by the *cell* count, not the vertex count — 
 |---|---|
 | one part, 24 cells / 16 vertices | ~1.5 s |
 | one part, 535 cells / 335 vertices | ~5.2 s |
-| 24 instances / 11 parts (drone) | 106.8 s |
+| 24 instances / 11 parts (drone), warm | 94.4 s |
+| the same call right after opening the assembly | 130.0 s (1.38×) |
 | 70 instances / 28 parts (acceptance model) | 203.9 s |
+
+Two things dominate, and neither is the vertex reader itself:
+
+* **The first sweep of a part pays for its update.** `drone body` (535 cells) took
+  36.1 s cold and 5.9 s warm (6.2×); the small parts differ by 1.2–2.1×, and the
+  whole call by 1.38×. Numbers from two calls in one session are not comparable
+  across a session boundary unless you say which one it was.
+* **In an assembly with curved parts, the mesh fallback costs more than the vertex
+  work.** Parts that have to be bounded from STL are in context, so each one is
+  copied to a temp file, opened, updated, exported and closed: 12–17 s per part,
+  unchanged by warming (5 parts = 74.2 s of the 94.4 s warm total). If you only
+  need `complete: true`, `include_curved: false` is far cheaper and lists those
+  instances in `skipped` instead.
 
 Tools run on a single worker thread, so a long box blocks every other MCP call
 until it finishes. The reply states `elapsed_ms` (total) and `elapsed_ms` per part

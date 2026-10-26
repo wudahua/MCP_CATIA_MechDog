@@ -62,6 +62,17 @@ All notable changes to this project are documented here.
   further means either reading the NLS path only for cells near an extreme or
   bounding from the mesh - both change what "exact" means, so neither is done
   here.
+- **Two calls on the same assembly are not the same measurement.** One 24-instance
+  drone assembly: 130.0 s right after opening it, 94.4 s on an immediate second
+  call (1.38x). Per part, the difference is concentrated: `drone body` (535 cells)
+  36.1 s cold / 5.9 s warm (6.2x), the small parts 1.2-2.1x - the first sweep of a
+  part pays for its update.
+- **In an assembly with curved parts, the mesh fallback costs more than the vertex
+  work.** Those parts are in context, so each is copied to a temp file, opened,
+  updated, exported to STL and closed: 12-17 s per part, and warming does not help
+  (5 parts = 74.2 s of that 94.4 s; the 6 vertex-bounded parts are 13.1 s
+  together). `include_curved: false` is the cheap route when `complete: true` is
+  not needed - it reports those instances in `skipped` instead of measuring them.
 
 ## [0.3.24] — 2026-10-26 · a diagonal is not a box
 
