@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [0.3.24] — 2026-10-26 · a diagonal is not a box
 
 ### Fixed — a mesh-bounded part was being rotated as a diagonal, not as a part
 
