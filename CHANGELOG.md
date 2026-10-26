@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [0.3.22] — 2026-10-26 · a pattern that keeps its reversal
 
 ### Fixed — a reversed pattern direction is not a left-handed axis pair
 
