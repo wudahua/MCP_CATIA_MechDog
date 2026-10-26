@@ -10,6 +10,7 @@ import os
 import re
 import struct
 import tempfile
+import time
 import uuid
 from typing import Any
 
@@ -370,7 +371,16 @@ class MeasurementTools:
                     "component's placement), and naming it is the only unambiguous "
                     "route when a second client can change ActiveDocument between "
                     "two calls. Each PART is bounded once and only the placement is "
-                    "repeated, so the cost is per part, not per instance."
+                    "repeated, so the cost is per part, not per instance. "
+                    "Exactness has a price: the vertex route walks every topology "
+                    "cell of each part (about 15 ms per cell on V5-6R2020 B30, more "
+                    "on a slower build), so a 500-cell part costs ~5 s and a "
+                    "70-instance assembly costs MINUTES, not seconds - and the server "
+                    "runs tools one at a time, so nothing else runs meanwhile. "
+                    "'cells_scanned' and 'elapsed_ms' (total, and per part in "
+                    "'parts') report what it actually cost. Measure the instances you "
+                    "need with 'component' rather than the whole assembly when you "
+                    "can."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1197,6 +1207,7 @@ class MeasurementTools:
     def _assembly_box(self, doc: Any, method: str,
                       only: str | None = None,
                       include_curved: bool = True) -> str:
+        started = time.perf_counter()
         rows = self._components_doc(doc, only)
         if only and not rows:
             names = ", ".join(str(r["name"]) for r in self._components_doc(doc))
@@ -1222,8 +1233,16 @@ class MeasurementTools:
             body = row["part"].MainBody
             key = self._part_identity(row["part"])
             if key not in local_boxes:
+                part_started = time.perf_counter()
                 local_boxes[key] = self._part_box_entry(row["part"], body,
                                                         include_curved)
+                # What this part actually cost, once. `cells_scanned` is the work
+                # estimate; this is the measured price of it, which is the number
+                # a caller budgets with - 1 207 cells and 24 cells differ by 40x
+                # and the estimate alone does not say which part to fix
+                # (reported 2026-10-26).
+                local_boxes[key]["elapsed_ms"] = round(
+                    (time.perf_counter() - part_started) * 1000, 1)
             cached = local_boxes[key]
             if "error" in cached:
                 skipped.append({"component": label, "error": cached["error"]})
@@ -1270,6 +1289,8 @@ class MeasurementTools:
                     "local_dimensions": self._local_dimensions(cached["points"],
                                                                cached["source"]),
                 }
+                if cached.get("elapsed_ms") is not None:
+                    detail["elapsed_ms"] = cached["elapsed_ms"]
                 if cached["source"] == "mesh_fallback":
                     detail["mesh_vertices"] = cached["mesh_vertices"]
                     detail["source_note"] = (
@@ -1319,6 +1340,7 @@ class MeasurementTools:
                 "max": None,
                 "components": [],
                 "complete": False,
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
                 "instances": {"total": len(skipped), "measured": 0,
                               "skipped": len(skipped)},
                 "skipped": skipped,
@@ -1354,6 +1376,11 @@ class MeasurementTools:
                       "small), the rest from vertices")
         payload = json.loads(self._bbox_json(corners, note, bounds=bounds))
         payload["components"] = entries
+        # What this call cost, measured. The box is exact and single-threaded, so a
+        # caller that budgets "seconds" for a 70-instance assembly waits three
+        # minutes with the whole server behind it; the number makes that visible
+        # instead of surprising (reported 2026-10-26).
+        payload["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
         try:
             payload["document"] = str(doc.Name)
         except Exception:  # noqa: BLE001 - the numbers are the point

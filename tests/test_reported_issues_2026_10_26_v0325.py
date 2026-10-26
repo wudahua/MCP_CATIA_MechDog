@@ -276,6 +276,34 @@ def test_the_single_part_box_publishes_the_route_too():
     assert source.count('"points_route"') + active.count('"points_route"') == 2
 
 
+def test_every_call_says_what_it_cost():
+    """`cells_scanned` is the work estimate; `elapsed_ms` is the measured price."""
+    rows = _rows("bracket", 2) + _rows("plinth", 1)
+    payload = json.loads(_box_tools(rows)._assembly_box(
+        SimpleNamespace(Name="A.CATProduct"), "vertices"))
+
+    assert isinstance(payload["elapsed_ms"], float)
+    assert payload["elapsed_ms"] >= 0
+    by_part = {p["part"]: p for p in payload["parts"]}
+    assert len(by_part) == 2
+    for detail in by_part.values():
+        assert isinstance(detail["elapsed_ms"], float)
+        assert detail["elapsed_ms"] >= 0
+    # The total is a wall clock, so it cannot be shorter than any single part.
+    assert payload["elapsed_ms"] >= max(p["elapsed_ms"] for p in payload["parts"])
+
+
+def test_the_tool_description_warns_about_the_price():
+    from catia_mcp.tools.measurement import MeasurementTools
+
+    description = [d for d in MeasurementTools(connection=None).get_tool_definitions()
+                   if d["name"] == "catia_get_bounding_box"][0]["description"]
+    assert "MINUTES, not seconds" in description
+    assert "elapsed_ms" in description
+    assert "cells_scanned" in description
+    assert "one at a time" in description
+
+
 # --------------------------------------------------------------------------
 # 5. component= does not read 70 placements to answer about one.
 # --------------------------------------------------------------------------

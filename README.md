@@ -242,6 +242,25 @@ instances from the mesh, 106.8 s.
 The STL export behind that route runs with `DisplayFileAlerts` off — on B32 it
 otherwise puts up a modal "另存为" that, unanswered, holds the call for 89 s.
 
+### What an exact box costs
+
+The vertex route calls COM once per topology cell (to read its NLS path and to get
+a reference), so its price is set by the *cell* count, not the vertex count — a
+16-vertex plate can still have hundreds of cells. Measured on B30:
+
+| call | time |
+|---|---|
+| one part, 24 cells / 16 vertices | ~1.5 s |
+| one part, 535 cells / 335 vertices | ~5.2 s |
+| 24 instances / 11 parts (drone) | 106.8 s |
+| 70 instances / 28 parts (acceptance model) | 203.9 s |
+
+Tools run on a single worker thread, so a long box blocks every other MCP call
+until it finishes. The reply states `elapsed_ms` (total) and `elapsed_ms` per part
+in `parts`, next to `cells_scanned`, so the cost is attributable instead of
+surprising. To bound one instance, pass `component=`; for a lower bound on curved
+faces instead of an exact box, `method='mesh'` is the cheaper route.
+
 `catia_list_components` filters before reading any placement, and
 `names_only: true` skips them entirely (measured: 370 ms → 32 ms on a 5-instance
 assembly, 94.4 ms for 24 instances) — "are the instances all there" should not
