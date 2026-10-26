@@ -2,6 +2,94 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Fixed — an assembly box now bounds curved parts instead of skipping them
+
+- `catia_get_bounding_box(document='<assembly>.CATProduct')` took
+  `include_curved` (default `true`): a part with no vertex at any extremum is
+  bounded from its STL mesh instead of being left out, so `complete: true` now
+  means every instance is inside the box. Measured on the 24-instance drone
+  assembly (B30, 2026-10-26): `complete: true`, 11 of 24 instances came from
+  the mesh, 137.9 s. Before this, those 11 instances were `skipped` and the box
+  was a lower bound in six directions.
+- A mesh-bounded instance says so in its own entry - `source: "mesh_fallback"`,
+  `source_note`, and `mesh_vertices` - and the reply lists it in
+  `mesh_fallback`. `bounds` distinguishes the two cases: "lower bound: each
+  component's box came from its vertices…" or "mixed: N instance(s) are
+  bounded from their mesh…".
+- The mesh route returns two extent corners, so the entry used to publish
+  `vertices_used: 2` for a 474-vertex part. `vertices_used` now exists only for
+  a vertex-bounded entry; a mesh entry reports `mesh_vertices`.
+- The "measured from a copy of the saved file" warning is repeated once per
+  PART, not once per instance (11 identical sentences -> 5), and no longer
+  starts with the `"; "` it was written to be appended with.
+- `incomplete_because` and `method` no longer tell the caller to "place the box
+  with `catia_get_component_transform`" - that tool READS a placement. Both now
+  say to read the placement (`catia_list_components` /
+  `catia_get_component_transform`) and apply the rotation/translation yourself.
+
+### Changed — a vertex sweep is one CATScript call, not one per vertex
+
+- `Measurable.GetPoint` only answers through `SystemService.Evaluate`, so a
+  vertex sweep paid one round trip per vertex. `read_measurable_points` batches
+  the whole list into a single script call: measured on B30 (2026-10-26), 8
+  vertices took 605 ms one by one and 98 ms batched (6.2x, identical
+  coordinates).
+
+### Fixed — a plan that kept going now names every failed step
+
+- `run_plan{stop_on_error: false}` marked each failed step in `data.steps` but
+  the top-level `message` named only the last one, so a 5-step plan with two
+  failures read as one failure wherever `message` is the only field that
+  reaches a log. Measured after the change: "2 of 3 steps failed: step 2
+  (catia_activate_document), step 3 (catia_activate_document)". A stopping plan
+  keeps the plain "Step 2 (…) failed", because the steps after it never ran.
+
+### Fixed — `names_only` no longer names a rotation it did not read
+
+- `list_components{names_only: true}` put `"convention": "matrix"` on every
+  entry next to a rotation that was deliberately skipped. The key now exists
+  exactly when a rotation does, at both levels, and the reply carries a `read`
+  line saying what was omitted. Measured on the 24-instance assembly: 94.4 ms,
+  entries are `index / name / part_number / occurrence` only.
+
+### Fixed — `by_reason` keeps CATIA's letters and adds the separators back
+
+- `Selection_BorderFVertex` fell through to the generic branch and produced
+  `construction_borderfvertex`, which a report read as a typo (the extra letter
+  is CATIA's, the missing underscores were ours). The fall-through now splits
+  camel-case: `construction_border_f_vertex`. Every explicitly named reason
+  (`sketch_wire_edge`, `datum_plane_border_edge`, `datum_plane_corner`, …) is
+  unchanged, so existing diffs keep working.
+
+### Fixed — a deferred close says where the focus went
+
+- `catia_close_document` on a part that an open assembly references returns
+  `closed: false` and now adds `active_document_now: '<assembly>'` - "which
+  document will the next tool act on" stopped being answerable from the reply
+  once the close was deferred.
+- `catia_activate_document`'s refusal no longer asserts "no window of its own"
+  about a part that has one. Measured on B30 the same day: `Application.Windows`
+  answers and its caption is the document name without the extension (`'Part1'`
+  for `Part1.CATPart`), while `Document.Windows` raises `Add.Windows` - which is
+  what an earlier probe had concluded "not exposed" from. The refusal now says
+  either "HAS a window of its own, so this is a foreground/focus refusal" or "has
+  no window of its own", and falls back to "CATIA reported no usable window
+  list, so the cause cannot be told apart" when it cannot tell. Captions are
+  compared whole, never as substrings (`'P1'` must not match `'P10_prop'`).
+
+### Fixed — `new_part` says which name a plan has to assert on
+
+- `catia_new_part(name=…, file_path=…)` now ends with "expect.document (and
+  every document= argument) must use the FILE name '<file>.CATPart', not the
+  part name '<part-number>'" - two round trips in a 2026-10-26 acceptance run
+  went into discovering exactly that.
+- `get_inertia`'s `tensor_reason` ("no own window") now also names the route
+  that does work without opening anything: a plan's `expect` can name the
+  document and borrows the activation itself, which answers volume, area and
+  centroid (not the tensor).
+
 ## [0.3.22] — 2026-10-26 · a pattern that keeps its reversal
 
 ### Fixed — a reversed pattern direction is not a left-handed axis pair

@@ -110,6 +110,22 @@ def nls_of(cell: Any) -> str:
         return ""
 
 
+def _snake_token(text: str) -> str:
+    """``BorderFVertex`` -> ``border_f_vertex``.
+
+    CATIA writes its NLS labels without separators (``Selection_BorderFVertex``),
+    and lowercasing them straight produced ``construction_borderfvertex`` - which a
+    report read as a typo ("多了个 f"). The extra letter was CATIA's, the missing
+    underscores were ours, so the fix is to keep CATIA's letters and add the
+    separators back.
+    """
+    import re
+
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", text)
+    spaced = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", "_", spaced)
+    return spaced.lower()
+
+
 def construction_reason(nls: str) -> str | None:
     """Why the NLS path says this cell is not the solid, or None when it is.
 
@@ -133,7 +149,7 @@ def construction_reason(nls: str) -> str | None:
         return "datum_plane_corner"
     head = nls.split(":", 1)[0]
     if any(marker in head for marker in _CONSTRUCTION_MARKERS):
-        return "construction_" + head.replace("Selection_", "").lower()
+        return "construction_" + _snake_token(head.replace("Selection_", ""))
     if "Brp:(GSMPlane." in nls:
         return "datum_plane_border"
     return None

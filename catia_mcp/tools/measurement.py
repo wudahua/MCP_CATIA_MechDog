@@ -147,6 +147,52 @@ def read_min_distance_points(app: Any, measurable: Any,
     return values[:3], values[3:]
 
 
+_BATCH_POINTS = (
+    # Reading one point per SystemService.Evaluate call costs about 75 ms per
+    # vertex, because each call compiles a fresh CATScript. Measured on B30
+    # 2026-10-26: 8 vertices took 605 ms one at a time and 98 ms through this
+    # function (6.2x), with identical coordinates - and the assembly bounding box
+    # (2 049 vertices over 26 parts) spent 149 s of its 304 s in that loop.
+    "Public Function catia_mcp_points(spa, refs)\n"
+    "    Dim i, n, a(2)\n"
+    "    n = UBound(refs) + 1\n"
+    "    Dim out()\n"
+    "    ReDim out(3 * n - 1)\n"
+    "    For i = 0 To n - 1\n"
+    "        spa.GetMeasurable(refs(i)).GetPoint a\n"
+    "        out(3 * i) = a(0)\n"
+    "        out(3 * i + 1) = a(1)\n"
+    "        out(3 * i + 2) = a(2)\n"
+    "    Next\n"
+    "    catia_mcp_points = out\n"
+    "End Function\n"
+)
+
+
+def read_measurable_points(app: Any, spa: Any, refs: list[Any],
+                           fallback: Any = None) -> list[list[float]]:
+    """Every point's coordinates in ONE call, falling back to one call each.
+
+    ``refs`` are topology references; ``spa`` is the document's SPAWorkbench and
+    is passed INTO the engine so the Python side does not pay a COM round trip
+    per vertex either. ``fallback`` is the per-point reader to use if the batched
+    form is refused (it takes a reference and returns three floats).
+    """
+    if not refs:
+        return []
+    try:
+        flat = list(app.SystemService.Evaluate(_BATCH_POINTS, 0, "catia_mcp_points",
+                                               [spa, list(refs)]))
+        if len(flat) == 3 * len(refs):
+            values = [float(v) for v in flat]
+            return [values[i:i + 3] for i in range(0, len(values), 3)]
+    except Exception:  # noqa: BLE001 - the slow route still works
+        pass
+    if fallback is None:
+        return []
+    return [fallback(ref) for ref in refs]
+
+
 def _pick(arguments: dict[str, Any], *names: str) -> str:
     """First present alias, or a message naming every accepted spelling.
 
@@ -296,6 +342,19 @@ class MeasurementTools:
                                 "(see catia_list_components). Omit for all of them."
                             ),
                         },
+                        "include_curved": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": (
+                                "Assembly mode only. A fully curved part has no "
+                                "vertex at its extremum, so a vertex sweep cannot "
+                                "bound it; with this on (the default) that part "
+                                "falls back to its own STL mesh box and the "
+                                "instance is marked source='mesh_fallback', which is "
+                                "what makes 'complete' mean what it says. Turn it "
+                                "off to keep every instance on the vertex route."
+                            ),
+                        },
                         "document": {
                             "type": "string",
                             "description": (
@@ -378,7 +437,9 @@ class MeasurementTools:
                 return self._get_bounding_box(arguments.get("method", "auto"),
                                               arguments.get("component"),
                                               arguments.get("document")
-                                              or arguments.get("document_name"))
+                                              or arguments.get("document_name"),
+                                              bool(arguments.get("include_curved",
+                                                                 True)))
             case "catia_get_parameters":
                 return self._get_parameters(arguments.get("filter"))
             case "catia_set_parameter":
@@ -656,9 +717,13 @@ class MeasurementTools:
             payload["tensor_reason_code"] = "no_own_window"
             payload["tensor_reason"] = (
                 "no own window: CATIA computes the tensor only for the active "
-                "document and this part cannot be activated where it is. Fix: "
-                "catia_open_document + catia_activate_document, then get_inertia "
-                "without 'document'."
+                "document, and this part is a component of an open assembly, so it "
+                "cannot be activated where it is. Fix: catia_open_document + "
+                "catia_activate_document, then get_inertia without 'document'.\n"
+                "Partial route: a plan's expect can name this document - "
+                '{"expect": [{"document": "<name>", "volume_mm3": ...}]} - and it '
+                "borrows the activation itself; that answers volume, area and "
+                "centroid, but not the tensor."
             )
             payload["note"] = (
                 "measured on this document's own Part, independent of which document "
@@ -983,8 +1048,43 @@ class MeasurementTools:
         except Exception:  # noqa: BLE001
             return False
 
+    def _part_box_entry(self, part: Any, body: Any,
+                        include_curved: bool) -> dict[str, Any]:
+        """One part's local box: vertices when possible, mesh when not.
+
+        The mesh fallback is what makes ``complete`` mean something. A fully
+        curved part has no vertex at its extremum, so a vertex sweep cannot bound
+        it - but its mesh can, and that box is per PART, so it costs one extra
+        call for the two parts that need it, not one per instance (reported
+        2026-10-26: the tool could already do this by name and made the caller do
+        it instead).
+        """
+        try:
+            points, used = self._local_box(part, body)
+        except Exception as exc:  # noqa: BLE001 - reported per component
+            return {"error": f"local box: {str(exc).splitlines()[0][:80]}"}
+        if points:
+            return {"points": points, "used": used, "source": "vertices",
+                    "mesh_vertices": None, "copy_note": ""}
+        if not include_curved:
+            return {"error": "no vertices (fully curved part), so a vertex sweep "
+                             "cannot bound it; include_curved=true (the default) "
+                             "lets this tool use the part's mesh box instead"}
+        try:
+            mesh_points, mesh_vertices, copy_note = self._mesh_corners(part)
+        except Exception as exc:  # noqa: BLE001
+            return {"error": "mesh fallback failed: "
+                             + str(exc).splitlines()[0][:90]}
+        if not mesh_points:
+            return {"error": "no vertices and no mesh: neither route could bound "
+                             "this part"}
+        return {"points": mesh_points, "used": len(mesh_points),
+                "source": "mesh_fallback", "mesh_vertices": mesh_vertices,
+                "copy_note": copy_note or ""}
+
     def _assembly_box(self, doc: Any, method: str,
-                      only: str | None = None) -> str:
+                      only: str | None = None,
+                      include_curved: bool = True) -> str:
         rows = self._components_doc(doc)
         if only:
             rows = [r for r in rows if (r["name"] or "").lower() == only.lower()
@@ -996,6 +1096,8 @@ class MeasurementTools:
                 )
 
         entries, corners, skipped = [], [], []
+        fallback_warnings: list[str] = []
+        warned: set[Any] = set()
         # One local box per PART, not per instance. Reported 2026-10-26: the box
         # cost ~6 s per component plus ~0.07 s per vertex, so 70 instances of 28
         # parts took 11 min 37 s - the same part scanned two to ten times over.
@@ -1009,28 +1111,14 @@ class MeasurementTools:
                 continue
             body = row["part"].MainBody
             key = self._part_identity(row["part"])
-            if key in local_boxes:
-                points, used = local_boxes[key]
-                if isinstance(points, str):
-                    skipped.append({"component": label, "error": points})
-                    continue
-            else:
-                try:
-                    points, used = self._local_box(row["part"], body)
-                except Exception as exc:  # noqa: BLE001
-                    message = f"local box: {str(exc).splitlines()[0][:80]}"
-                    local_boxes[key] = (message, 0)
-                    skipped.append({"component": label, "error": message})
-                    continue
-                if not points:
-                    message = ("no vertices (fully curved part), so a vertex "
-                               "sweep cannot bound it; measure it by name: "
-                               "get_bounding_box(document='" + label +
-                               "', method='mesh')")
-                    local_boxes[key] = (message, 0)
-                    skipped.append({"component": label, "error": message})
-                    continue
-                local_boxes[key] = (points, used)
+            if key not in local_boxes:
+                local_boxes[key] = self._part_box_entry(row["part"], body,
+                                                        include_curved)
+            cached = local_boxes[key]
+            if "error" in cached:
+                skipped.append({"component": label, "error": cached["error"]})
+                continue
+            points, used = cached["points"], cached["used"]
             world = [self._to_world(row["matrix"], row["translation"], p)
                      for p in points]
             xs = [p[0] for p in world]
@@ -1038,15 +1126,42 @@ class MeasurementTools:
             zs = [p[2] for p in world]
             entry_min = [min(xs), min(ys), min(zs)]
             entry_max = [max(xs), max(ys), max(zs)]
-            entries.append({
+            entry = {
                 "component": label,
                 "name": row["name"],
                 "min": {k: round(v, 4) for k, v in zip("xyz", entry_min)},
                 "max": {k: round(v, 4) for k, v in zip("xyz", entry_max)},
                 "dimensions": {f"length_{k}": round(mx - mn, 4)
                                for k, mn, mx in zip("xyz", entry_min, entry_max)},
-                "vertices_used": used,
-            })
+                "source": cached["source"],
+            }
+            if cached["source"] == "mesh_fallback":
+                # Say it out loud: this instance's box came from the STL mesh of
+                # its part (a lower bound on curved faces), not from a vertex
+                # sweep, so a reader can tell a mixed box from a uniform one.
+                # `vertices_used` is deliberately absent here: the mesh route
+                # returns its two extent corners, and reporting those as "2
+                # vertices used" would read like a nearly empty part (measured on
+                # the drone assembly 2026-10-26).
+                entry["mesh_vertices"] = cached["mesh_vertices"]
+                entry["source_note"] = (
+                    "no vertex lies at this part's extremum, so its box came from "
+                    "the mesh - a lower bound on curved faces, measured 0.47-0.73 % "
+                    "small" + ("; it also came from the SAVED file rather than the "
+                               "loaded state: "
+                               + cached["copy_note"].lstrip("; ").strip()
+                               if cached["copy_note"] else ""))
+            else:
+                entry["vertices_used"] = used
+            if cached["copy_note"] and key not in warned:
+                # Once per PART: four instances of one faceplate used to repeat
+                # the same 180-character sentence four times. The note is written
+                # to be appended to a sentence, so its leading "; " is dropped
+                # here - "drone fin capp: ; measured from a copy" read as a typo.
+                warned.add(key)
+                fallback_warnings.append(
+                    f"{label}: " + cached["copy_note"].lstrip("; ").strip())
+            entries.append(entry)
             corners.extend(world)
 
         if not corners:
@@ -1070,20 +1185,31 @@ class MeasurementTools:
                            "catia_get_bounding_box(document='<part>.CATPart', "
                            "method='mesh')"),
             }, indent=2)
-        note = ("world coordinates: each component's local VERTEX box transformed "
-                "by its placement, then aggregated. A vertex sweep is exact only "
-                "when every face is planar: any part whose extremum lies on a "
-                "curved face is under-reported here, and that is not limited to "
-                "revolved parts - an arched or cylindrical face loses the same way "
+        note = ("world coordinates: each component's local box transformed by its "
+                "placement, then aggregated. A vertex sweep is exact only when "
+                "every face is planar: any part whose extremum lies on a curved "
+                "face is under-reported by it, and that is not limited to revolved parts"
+                " - an arched or cylindrical face loses the same way "
                 "(measured: a camera bracket's arch, 33.27 mm reported against "
-                "41.40 mm true, -19.6 %). For a true per-part box open the part "
-                "(catia_open_document) and call get_bounding_box(document="
-                "'<part>.CATPart', method='mesh'), then place it with "
-                "catia_get_component_transform.")
-        payload = json.loads(self._bbox_json(
-            corners, note,
-            bounds="lower bound: each component's VERTEX box, so any part whose "
-                   "extremum lies on a curved face is under-reported"))
+                "41.40 mm true, -19.6 %). A part with no vertex at an extremum is "
+                "bounded from its mesh instead, and its entry says "
+                "source='mesh_fallback'. To bound one part on its own, open it "
+                "(catia_open_document) and call "
+                "catia_get_bounding_box(document='<part>.CATPart', method='mesh'). "
+                "catia_get_component_transform READS an instance's placement; it "
+                "does not place a box, so to move one into world coordinates read "
+                "the placement (catia_list_components or "
+                "catia_get_component_transform) and apply rotation/translation "
+                "yourself.")
+        from_mesh = [entry["component"] for entry in entries
+                     if entry.get("source") == "mesh_fallback"]
+        bounds = ("lower bound: each component's box came from its vertices, so any "
+                  "part whose extremum lies on a curved face is under-reported")
+        if from_mesh:
+            bounds = (f"mixed: {len(from_mesh)} instance(s) are bounded from their "
+                      "mesh (a lower bound on curved faces, measured 0.47-0.73 % "
+                      "small), the rest from vertices")
+        payload = json.loads(self._bbox_json(corners, note, bounds=bounds))
         payload["components"] = entries
         try:
             payload["document"] = str(doc.Name)
@@ -1099,6 +1225,11 @@ class MeasurementTools:
         # learned that 6 of 70 instances were left out and the box is a lower
         # bound in the directions they could have driven (reported 2026-10-25).
         payload["complete"] = not skipped
+        payload["include_curved"] = include_curved
+        if from_mesh:
+            payload["mesh_fallback"] = from_mesh
+        if fallback_warnings:
+            payload["warnings"] = fallback_warnings
         payload["instances"] = {"total": len(entries) + len(skipped),
                                 "measured": len(entries),
                                 "skipped": len(skipped)}
@@ -1106,11 +1237,13 @@ class MeasurementTools:
             payload["skipped"] = skipped
             payload["incomplete_because"] = (
                 f"{len(skipped)} of {len(entries) + len(skipped)} instance(s) could "
-                "not be bounded from their vertices (fully curved parts have no "
-                "vertex at an extremum), so this box is exact only for the ones "
-                "measured and is a LOWER BOUND in any direction they extend. "
-                "Measure those by name with method='mesh' and place them with "
-                "catia_get_component_transform."
+                "not be bounded at all - neither their vertices nor (with "
+                "include_curved=true) their mesh gave a box, so this box is a LOWER "
+                "BOUND in any direction they extend. What to try: read each "
+                "instance's placement with catia_list_components or "
+                "catia_get_component_transform, measure the part on its own with "
+                "get_bounding_box(document='<part>.CATPart', method='mesh'), and "
+                "apply the rotation/translation yourself."
             )
         return json.dumps(payload, indent=2)
 
@@ -1296,7 +1429,8 @@ class MeasurementTools:
 
     def _get_bounding_box(self, method: str = "auto",
                           component: str | None = None,
-                          document: str | None = None) -> str:
+                          document: str | None = None,
+                          include_curved: bool = True) -> str:
         # Measurable has no bounding-box method in any V5 release. Two sources
         # are available instead: the final shape's vertices (exact for
         # planar-faced solids) and an exported STL mesh (the only thing that
@@ -1322,7 +1456,8 @@ class MeasurementTools:
                         "per component, then apply its placement; or (b) drop "
                         "method for the vertex-based aggregation."
                     )
-                return self._assembly_box(doc, method, component)
+                return self._assembly_box(doc, method, component,
+                                          include_curved)
             try:
                 part = self.conn.part_of(doc)
             except Exception as exc:  # noqa: BLE001
@@ -1355,7 +1490,8 @@ class MeasurementTools:
                     "vertex-based aggregation, whose under-reporting on any part "
                     "with a curved extremum is stated in the reply."
                 )
-            return self._assembly_box(self.conn.active_document, method, component)
+            return self._assembly_box(self.conn.active_document, method,
+                                      component, include_curved)
         # From here on this measures the ACTIVE document's part. With two clients on
         # one CATIA that is not a given: a bare "MainBody failed" reads like a
         # broken model while the real story is "I measured the wrong document"
@@ -1458,8 +1594,10 @@ class MeasurementTools:
         if not refs:
             return [], False, total, construction
         spa = self._spa_workbench()
-        raw = [self._read_measurable_array(spa.GetMeasurable(ref), "GetPoint", 3)
-               for ref in refs]
+        raw = read_measurable_points(
+            self.conn.app, spa, refs,
+            fallback=lambda ref: self._read_measurable_array(
+                spa.GetMeasurable(ref), "GetPoint", 3))
         points, dropped = self._bounded(raw)
         return points, total > 200, total, dropped + construction
 

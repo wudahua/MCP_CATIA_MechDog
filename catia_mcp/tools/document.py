@@ -346,6 +346,18 @@ class DocumentTools:
         hint = (" Save it now - catia_save_document(file_path='...') - because a "
                 "part that has geometry but no path cannot be saved later."
                 if not file_path else "")
+        if file_path:
+            # The name a plan asserts on is the document CAPTION, i.e. the file
+            # name - not PartNumber, and not Part.Name. Two round trips were spent
+            # on this in a 2026-10-26 acceptance run: the part was created as
+            # name='V322test' with file_path='..._v322_test.CATPart', and
+            # expect.document='V322test.CATPart' was refused.
+            file_name = str(file_path).replace("\\", "/").rsplit("/", 1)[-1]
+            shown = part_number or part_name
+            hint = (f" expect.document (and every document= argument) must use the "
+                    f"FILE name '{file_name}', not the part name"
+                    + (f" '{shown}'" if shown and shown != file_name else "")
+                    + ".")
         return (f"Created new Part document: '{part_name}'"
                 + (f" [{part_number}]" if part_number else "")
                 + f".{note}{saved}{hint}")
@@ -610,14 +622,33 @@ class DocumentTools:
                 # "CLOSE NOT CONFIRMED" made a correct workflow look broken
                 # (reported 2026-10-26). The state is still reported exactly:
                 # closed: false, and who holds it.
+                # Focus moves on its own here, so say where it went: "the next tool
+                # acts on the active document" stopped being answerable from this
+                # reply once the close was deferred (reported 2026-10-26).
+                here = None
+                try:
+                    here = str(self.conn.active_document.Name)
+                except Exception:  # noqa: BLE001 - nothing active afterwards
+                    here = None
+                if here:
+                    focus = (
+                        f"active_document_now: '{here}' ("
+                        + ("CATIA moved focus to the assembly that references it"
+                           if here in users
+                           else "the document the next tool will act on")
+                        + "). "
+                    )
+                else:
+                    focus = "active_document_now: none (no document is active). "
                 return (
                     f"Document '{name}' is STILL OPEN (closed: false). This is "
                     "not a failure: CATIA keeps a document that an open assembly "
                     "references, and "
                     + ", ".join(f"'{user}'" for user in users)
                     + (" does. " if len(users) == 1 else " do. ")
-                    + "The close request was accepted and deferred.\n"
-                    "Next step: close the referencing assembly first "
+                    + "The close request was accepted and deferred. "
+                    + focus
+                    + "\nNext step: close the referencing assembly first "
                     "(catia_activate_document, then catia_close_document) - this "
                     "part goes with it. Until then a Save As of this part fails "
                     "with '方法 SaveAs 失败', and that error looks unrelated to "
@@ -747,24 +778,84 @@ class DocumentTools:
         except Exception:  # noqa: BLE001 - nothing active at all
             active = ""
         if active and active != str(target.Name):
-            if active.casefold().endswith(".catproduct"):
+            window = self._window_state(str(target.Name))
+            routes = (
+                f" Two routes that work: (a) measure it by name without activating "
+                f"anything - catia_get_inertia(document='{target.Name}') or "
+                f"catia_get_bounding_box(document='{target.Name}', method='mesh'); "
+                f"(b) open the part as its own document with catia_open_document, "
+                "then activate it."
+            )
+            if window is True:
+                # It HAS its own window - so this is a focus problem, not a
+                # "component with no window" one. 0.3.19 wrote the latter here
+                # unconditionally, and 0.3.22 was still asserting it about a part
+                # the caller had just opened and closed by name (reported
+                # 2026-10-26), which sends them off to re-open a document that is
+                # already open.
                 raise RuntimeError(
                     f"CATIA did not switch to '{target.Name}': ActiveDocument is "
-                    f"still '{active}'. A part that exists only as a component of "
-                    "the open product cannot be made active by name on this build - "
-                    "it is being edited in context, not opened as a window. Two "
-                    "routes that work: (a) measure it by name without activating "
-                    f"anything - catia_get_inertia(document='{target.Name}') or "
-                    f"catia_get_bounding_box(document='{target.Name}', "
-                    "method='mesh'); (b) open the part as its own document with "
-                    f"catia_open_document, then activate it."
+                    f"still '{active}'. '{target.Name}' HAS a window of its own "
+                    "(CATIA lists it), so this is a foreground/focus refusal - most "
+                    "often because an open assembly still references it, and CATIA "
+                    "refused the close that was asked for just before."
+                    + routes
                 )
+            if window is False:
+                raise RuntimeError(
+                    f"CATIA did not switch to '{target.Name}': ActiveDocument is "
+                    f"still '{active}'. '{target.Name}' has no window of its own - "
+                    "it is being edited in context as a component of an open "
+                    "product." + routes
+                )
+            # None: no usable window list (not exposed, or no windows at all), so
+            # neither cause can be ruled out - say both instead of picking one.
             raise RuntimeError(
-                f"CATIA accepted Activate() but ActiveDocument is '{active}', not "
-                f"'{target.Name}'. The document was not switched, so any call you "
-                "make now acts on the wrong document."
+                f"CATIA did not switch to '{target.Name}': ActiveDocument is "
+                f"still '{active}'. CATIA reported no usable window list, so the "
+                "cause cannot be told apart: either the part has no window of its "
+                "own (a component of an open assembly, edited in context), or "
+                "CATIA refused it the foreground while the assembly still "
+                "references it." + routes
             )
         return f"Activated document: '{target.Name}'"
+
+    def _window_state(self, name: str) -> bool | None:
+        """True/False when this build can tell whether ``name`` has a window.
+
+        ``None`` means "cannot tell", and the callers must not guess: a wrong
+        guess here sends the caller to re-open a document that is already open.
+
+        Measured on B30 (2026-10-26): ``Application.Windows`` answers, and its
+        caption is the document name WITHOUT the extension (``'Part1'`` for
+        ``Part1.CATPart``) - while ``Document.Windows`` raises ``Add.Windows``,
+        which is what a probe that only tried the per-document route concluded
+        "not exposed" from. A caption is compared as a whole, never as a
+        substring: ``'P1'`` must not match ``'P10_prop'``.
+        """
+        try:
+            windows = self.conn.app.Windows
+            count = int(windows.Count)
+        except Exception:  # noqa: BLE001 - not exposed on this build
+            return None
+        if count <= 0:
+            return None
+        wanted = name.strip()
+        targets = {wanted.casefold(), wanted.rsplit(".", 1)[0].casefold()}
+        for i in range(1, count + 1):
+            try:
+                caption = str(windows.Item(i).Caption)
+            except Exception:  # noqa: BLE001 - one unreadable window
+                continue
+            # '*' marks an unsaved document in CATIA's caption, '[ ]' a path.
+            clean = caption.strip().strip("[]").strip().rstrip("*").strip()
+            if not clean:
+                continue
+            if clean.casefold() in targets:
+                return True
+            if "." in clean and clean.rsplit(".", 1)[0].casefold() in targets:
+                return True
+        return False
 
     def _set_part_number(self, part_number: str, component_name: str | None = None) -> str:
         """Set 零件编号 on the active part, or on one component of the active product."""

@@ -383,7 +383,7 @@ class PlannerTools:
         ok = failed_at is None and not failed_assertions
         if failed_at is not None:
             code = "STEP_FAILED"
-            message = f"Step {failed_at} ({report[failed_at - 1]['tool']}) failed"
+            message = self._failure_summary(report, stop_on_error)
         elif failed_assertions:
             code = "ASSERTION_FAILED"
             message = "; ".join(self._assertion_line(a) for a in failed_assertions)
@@ -407,6 +407,25 @@ class PlannerTools:
                 "planned": len(steps),
             },
         }
+
+    @staticmethod
+    def _failure_summary(report: list[dict[str, Any]], stop_on_error: bool) -> str:
+        """Name every failed step, not just the last one, when the plan ran on.
+
+        ``stop_on_error: false`` means "keep going after a failure", so a plan can
+        finish with two or three broken steps. ``data.steps`` always listed them
+        all, but the top-level ``message`` named one - and the message is often the
+        only field that reaches a log (reported 2026-10-26: a 5-step plan with two
+        failures read as one failure).
+        """
+        failed = [entry for entry in report if not entry["ok"]]
+        first = failed[0]
+        if len(failed) == 1 or stop_on_error:
+            # A stopping plan never reached the steps after the first failure, so
+            # "the step that stopped it" is the whole truth.
+            return f"Step {first['index']} ({first['tool']}) failed"
+        listed = ", ".join(f"step {e['index']} ({e['tool']})" for e in failed)
+        return f"{len(failed)} of {len(report)} steps failed: {listed}"
 
     def _topology_target(self, document: str | None) -> tuple[Any, Any]:
         """The part and body to count: the named open document, or the active one."""

@@ -268,9 +268,10 @@ class AssemblyTools:
                             "default": False,
                             "description": (
                                 "Return index, name, part_number and occurrence only - "
-                                "no position, no rotation, no broken-link check. Use it "
-                                "to confirm that the instances are all there; each "
-                                "placement costs about 70 ms."
+                                "no position, no rotation, no broken-link check, and "
+                                "no 'convention' (it describes a rotation that is not "
+                                "in the reply). Use it to confirm that the instances "
+                                "are all there; each placement costs about 70 ms."
                             ),
                         },
                     },
@@ -1318,7 +1319,7 @@ class AssemblyTools:
         wanted = (part_number or "").strip().casefold() or None
         for i in range(1, products.Count + 1):
             comp = products.Item(i)
-            entry: dict[str, Any] = {"index": i, "convention": "matrix"}
+            entry: dict[str, Any] = {"index": i}
             problems = []
             for key, getter in (("name", lambda c: str(c.Name)),
                                 ("part_number", lambda c: str(c.PartNumber))):
@@ -1359,6 +1360,11 @@ class AssemblyTools:
                     _ = ref.Parent
                 except Exception as exc:  # noqa: BLE001 - the classic dead link
                     problems.append(f"reference: {str(exc).splitlines()[0][:80]}")
+                # The convention belongs to the rotation that sits next to it. In
+                # names_only mode there is no rotation, so naming a convention
+                # described something that was not in the reply (reported
+                # 2026-10-26).
+                entry["convention"] = "matrix"
             if problems:
                 entry["broken"] = True
                 entry["error"] = "; ".join(problems)
@@ -1368,25 +1374,29 @@ class AssemblyTools:
 
         if not components:
             return "No components in the active assembly"
+        # Same shape in both branches, and the same rule for the convention key:
+        # it is present exactly when a rotation is present. A caller that knows
+        # names_only was asked for can rely on that instead of guessing whether
+        # "matrix" describes something.
+        payload: dict[str, Any] = {"components": components, "count": len(components)}
         if broken:
-            return json.dumps({
-                "components": components,
-                "count": len(components),
-                "broken": broken,
-                "note": ("Components marked broken cannot resolve their part "
-                         "(the file was moved, or rebuilt and re-referenced). "
-                         "Replace them with catia_add_component, or re-create the "
-                         "assembly - the good components listed here are intact."),
-            }, indent=2, ensure_ascii=False)
-        # Always an object, never a bare list: the broken case answers an object,
-        # and a caller that has to branch on the SHAPE of a listing before it can
-        # read it will one day branch wrong (the same drift the 2026-10-25
-        # reports describe for plan results).
-        return json.dumps({
-            "components": components,
-            "count": len(components),
-            "convention": "matrix",
-        }, indent=2, ensure_ascii=False)
+            payload["broken"] = broken
+            payload["note"] = (
+                "Components marked broken cannot resolve their part "
+                "(the file was moved, or rebuilt and re-referenced). "
+                "Replace them with catia_add_component, or re-create the "
+                "assembly - the good components listed here are intact."
+            )
+        if names_only:
+            payload["read"] = ("index, name, part_number and occurrence only - "
+                               "no position, no rotation, no broken-link check, "
+                               "so no 'convention' anywhere in this reply")
+        else:
+            payload["convention"] = "matrix"
+        # Always an object, never a bare list: a caller that has to branch on the
+        # SHAPE of a listing before it can read it will one day branch wrong (the
+        # same drift the 2026-10-25 reports describe for plan results).
+        return json.dumps(payload, indent=2, ensure_ascii=False)
 
     def _list_constraints(self) -> str:
         product = self.conn.get_active_product()

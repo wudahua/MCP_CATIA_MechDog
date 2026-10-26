@@ -205,9 +205,12 @@ your calls. Everything that can name its target should:
 
 ```jsonc
 {"tool": "catia_get_bounding_box",
- "args": {"document": "M113_asm.CATProduct", "method": "vertices"}}
-// -> {"document": "M113_asm.CATProduct", "part_boxes": 28,
-//     "instances": {"total": 70, "measured": 70, "skipped": 0}, ...}
+ "args": {"document": "M113_asm.CATProduct"}}          // include_curved defaults to true
+// -> {"document": "M113_asm.CATProduct", "part_boxes": 28, "complete": true,
+//     "mesh_fallback": ["P09_cam_lens_body"], "bounds": "mixed: 6 instance(s) …",
+//     "instances": {"total": 70, "measured": 70, "skipped": 0},
+//     "components": [{"component": "P03_prop", "source": "vertices",
+//                     "vertices_used": 64, …}, …]}
 ```
 
 The world box is arithmetic on each component's placement, so it never needed the
@@ -216,9 +219,19 @@ assembly to be active. Each PART is bounded once and only the placement repeated
 cost model is visible, and the part branch names the document it measured rather
 than letting a bare `MainBody failed` look like a broken model.
 
+A part with no vertex at any extremum (a fully curved part) cannot be bounded by a
+vertex sweep. It is bounded from its STL mesh instead — `include_curved: false`
+turns that off and reports those instances in `skipped` — and its entry says
+`source: "mesh_fallback"` with `mesh_vertices`. A mesh box chords curved faces, so
+`bounds` says "mixed: N instance(s) are bounded from their mesh" rather than
+claiming an exact envelope. Measured on a 24-instance drone assembly: `complete:
+true`, 11 of 24 instances from the mesh, 137.9 s.
+
 `catia_list_components` filters before reading any placement, and
 `names_only: true` skips them entirely (measured: 370 ms → 32 ms on a 5-instance
-assembly) — "are the instances all there" should not cost one pose read each.
+assembly, 94.4 ms for 24 instances) — "are the instances all there" should not
+cost one pose read each. With `names_only`, no entry carries a `convention`: the
+key describes a rotation, and there is none in the reply.
 
 ## Requirements
 

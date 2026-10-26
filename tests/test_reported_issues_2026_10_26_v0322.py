@@ -200,7 +200,7 @@ def test_bbox_document_routes_a_product_to_the_world_aggregation():
 
     source = inspect.getsource(MeasurementTools._get_bounding_box)
     assert "_is_product_document(doc)" in source
-    assert "self._assembly_box(doc, method, component)" in source
+    assert "self._assembly_box(doc, method, component," in source
     # The Part-branch refusal must still exist for anything that is neither.
     assert "is neither a Part nor a Product document" in source
 

@@ -266,7 +266,10 @@ def test_list_components_labels_the_rotation_convention():
     from catia_mcp.tools.assembly import AssemblyTools
 
     source = inspect.getsource(AssemblyTools._list_components)
-    assert '"convention": "matrix"' in source
+    # The convention is still published - but only next to a rotation, so the
+    # names_only reply no longer names a matrix it does not contain (2026-10-26).
+    assert 'payload["convention"] = "matrix"' in source
+    assert "if names_only" in source
     assert '"occurrence"' in source
     doc = [d for d in AssemblyTools(connection=None).get_tool_definitions()
            if d["name"] == "catia_list_components"][0]
