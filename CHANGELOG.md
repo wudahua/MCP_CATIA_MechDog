@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [0.3.23] — 2026-10-26 · a box that covers the curved parts
 
 ### Fixed — an assembly box now bounds curved parts instead of skipping them
 
