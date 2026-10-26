@@ -2,6 +2,67 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Fixed — "Open assemblies" listed .CATPart files as assemblies
+
+- `catia_list_components`'s refusal on a Part document offered the caller a list
+  of "Open assemblies" built by probing `.Product` - which a `PartDocument`
+  answers with a stub. On a session with 16 documents it printed **13 .CATPart
+  files as assemblies**, and following that advice (`catia_activate_document`)
+  gets refused again (reported 2026-10-26). It now uses `_is_product_document`,
+  the type-based judgement `add_component` has used since 0.3.15 - the same
+  question answered twice in one file, once right and once wrong.
+
+### Fixed — `occurrence` meant two different numbers
+
+- In a full listing `occurrence` was the component's position in the assembly
+  (1..70), while `{"part_number": ..., "occurrence": n}` resolved against the
+  ordinal within that part. The 3rd component overall was labelled occurrence 3,
+  but resolving `P02_motor` with occurrence 3 found the THIRD motor, not the one
+  listed (reported 2026-10-26). `occurrence` is now per part everywhere, `index`
+  keeps the assembly position (which is what a bare index resolves against), and
+  the reply states `occurrence_scope: "per_part"`. Verified on a 24-instance
+  assembly: motors are 1..4, and occurrence 2 resolves to exactly the instance
+  listed as occurrence 2.
+
+### Changed — the per-part cost model is published per part
+
+- `vertices_used` / `cells_scanned` are properties of the PART, and they were
+  repeated on every instance entry: 70 entries carried 28 distinct values, 20 of
+  them duplicated ten times over (reported 2026-10-26). They now live in
+  `parts[]` (one entry per part, with `instances`, `local_dimensions`, `source`
+  and, for curved parts, the mesh caveat); instance entries keep the geometry.
+- `cells_scanned` also says what it counts: topology cells returned by the vertex
+  search **before** construction geometry was filtered out (sketch-wire vertices,
+  datum-plane corners). It is not a mesh grid count - an acceptance report read it
+  as one, because the field name did not say.
+- `points_route` is now published on the happy path (`"batched"`), not only when
+  the reader degraded to `"per_point"`: "the batch worked" and "this build has no
+  such field" used to look identical. It appears on the single-part branch too,
+  next to `vertices_used` and `cells_scanned`.
+
+### Fixed — `component=` no longer reads every placement to answer about one
+
+- `catia_get_bounding_box(component='P24.1')` built the component list with all
+  its placements before filtering, so a one-component question on a 70-instance
+  assembly paid ~70 pose reads (~5 s on B30, and exactly the "5.8 s per part
+  entry fee" a report measured on a 16-vertex block). `_components_doc` now
+  filters by name/part number before the pose is read - the same rule
+  `list_components` has followed since 0.3.22. Measured: one pose read instead of
+  70.
+
+### Note — where the remaining per-part time goes (measured, B30)
+
+- A 535-cell / 335-vertex part: `_local_box` takes **5.2 s**, of which the vertex
+  search is ~1 s, the construction filter ~4 s (`Selection.Item` 2.9 ms +
+  `Value.Name` 9.6 ms + `Reference` 2.5 ms per cell) and the batched coordinate
+  read 0.4 s. That cell loop is the "entry fee" the acceptance reports keep
+  measuring; it is not the vertex count and it is not a mesh step. Cutting it
+  further means either reading the NLS path only for cells near an extreme or
+  bounding from the mesh - both change what "exact" means, so neither is done
+  here.
+
 ## [0.3.24] — 2026-10-26 · a diagonal is not a box
 
 ### Fixed — a mesh-bounded part was being rotated as a diagonal, not as a part

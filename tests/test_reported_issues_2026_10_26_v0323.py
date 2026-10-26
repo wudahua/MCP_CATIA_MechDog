@@ -240,7 +240,7 @@ def _assembly_box_tools(rows, curved):
     from catia_mcp.tools.measurement import MeasurementTools
 
     tools = MeasurementTools(connection=None)
-    tools._components_doc = lambda doc: rows
+    tools._components_doc = lambda doc, only=None: rows
     tools._to_world = lambda matrix, translation, point: list(point)
     tools._part_identity = lambda part: part.Name
 
@@ -287,15 +287,18 @@ def test_a_mesh_bounded_part_reports_mesh_vertices_not_a_bogus_count():
     mesh = [e for e in payload["components"] if e["source"] == "mesh_fallback"]
     assert len(mesh) == 2
     for entry in mesh:
-        # The mesh route returns two extent corners; "vertices_used: 2" would
-        # read like a nearly empty part.
+        # 0.3.25: the counts belong to the PART and live in `parts`, once.
         assert "vertices_used" not in entry
-        assert entry["mesh_vertices"] == 4_620
-        assert entry["source_note"].startswith("no vertex lies at this part's extremum")
+
+    parts = {p["part"]: p for p in payload["parts"]}
+    assert parts["curved plate"]["mesh_vertices"] == 4_620
+    assert parts["curved plate"]["instances"] == 2
+    assert parts["curved plate"]["source_note"].startswith(
+        "no vertex lies at this part's extremum")
 
     straight = [e for e in payload["components"] if e["source"] == "vertices"]
-    assert straight[0]["vertices_used"] == 8
     assert "mesh_vertices" not in straight[0]
+    assert parts["block"]["vertices_used"] == 8
 
 
 def test_the_copy_warning_is_repeated_once_per_part_not_once_per_instance():

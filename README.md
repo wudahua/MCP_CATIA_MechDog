@@ -211,16 +211,20 @@ your calls. Everything that can name its target should:
 //     "mesh_fallback": ["P09_cam_lens_body"], "mesh_fallback_instances": 6,
 //     "bounds": "mixed: 6 instance(s) …",
 //     "instances": {"total": 70, "measured": 70, "skipped": 0},
-//     "components": [{"component": "P03_prop", "source": "vertices",
-//                     "vertices_used": 64, "cells_scanned": 214, …}, …]}
+//     "components": [{"component": "P03_prop", "min": {…}, "max": {…},
+//                     "dimensions": {…}, "source": "vertices"}, …],
+//     "parts": [{"part": "P03_prop", "source": "vertices", "instances": 10,
+//                "vertices_used": 64, "cells_scanned": 214,
+//                "points_route": "batched", …}, …]}
 ```
 
 The world box is arithmetic on each component's placement, so it never needed the
 assembly to be active. Each PART is bounded once and only the placement repeated —
-70 instances of 28 parts is 28 boxes, not 70. The reply states `part_boxes` and the
-per-route split so the cost model is visible, and the part branch names the
-document it measured rather than letting a bare `MainBody failed` look like a
-broken model.
+70 instances of 28 parts is 28 boxes, not 70. The cost counters (`vertices_used`,
+`cells_scanned`, `points_route`) are per PART and are published once in `parts`,
+not on every instance entry; `cells_scanned` counts CATIA topology cells before
+construction geometry was filtered, and the per-part time is dominated by that
+filter, not by the vertices. `component='P24.1'` reads one placement, not seventy.
 
 A part with no vertex at any extremum (a fully curved part) cannot be bounded by a
 vertex sweep. It is bounded from its STL mesh instead — `include_curved: false`
@@ -244,7 +248,9 @@ assembly, 94.4 ms for 24 instances) — "are the instances all there" should not
 cost one pose read each. With `names_only`, no entry carries a `convention`: the
 key describes a rotation, and there is none in the reply. On a Part document it
 says that no assembly is active (and which ones are) instead of "No components
-in the active assembly".
+in the active assembly". `occurrence` there is the ordinal within the part
+(`occurrence_scope: "per_part"`), which is what `{part_number, occurrence}`
+resolves against; `index` is the position in the assembly.
 
 ## Requirements
 

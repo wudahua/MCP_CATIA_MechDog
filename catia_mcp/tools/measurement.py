@@ -189,6 +189,21 @@ _BATCH_POINTS = (
 )
 
 
+def _route_name(route: Any) -> str:
+    """Name the reader that ran, in the reply - including when nothing went wrong.
+
+    ``points_route`` used to appear only on the degraded path, so a caller could
+    not tell "the batch worked" from "this build has no such field" (reported
+    2026-10-26). ``_local_box`` reports CATIA's half of it; this maps the internal
+    value onto the published one.
+    """
+    if route == "per_point":
+        return "per_point"
+    if route == "batch_retried":
+        return "batched_retried"
+    return "batched"
+
+
 def read_measurable_points(app: Any, spa: Any, refs: list[Any],
                            fallback: Any = None,
                            stats: dict[str, Any] | None = None
@@ -997,9 +1012,20 @@ class MeasurementTools:
         return [sum(matrix[i][j] * point[j] for j in range(3)) + translation[i]
                 for i in range(3)]
 
-    def _components_doc(self, doc: Any) -> list[dict[str, Any]]:
-        """Every child of the assembly with placement, part and problems."""
+    def _components_doc(self, doc: Any, only: str | None = None
+                        ) -> list[dict[str, Any]]:
+        """Every child of the assembly with placement, part and problems.
+
+        ``only`` filters by component name or part number BEFORE the placement is
+        read. A pose costs ~70 ms on V5-6R2020 and the filter used to run after
+        all of them had been read, so ``component='P24.1'`` on a 70-instance
+        assembly paid ~5 s to answer a question about one instance - which is
+        exactly the "5.8 s per part entry fee" an acceptance report measured on a
+        16-vertex block (reported 2026-10-26). Same rule as `list_components`
+        since 0.3.22: read a pose only for the components that will be reported.
+        """
         product = self.conn.product_of(doc)
+        wanted = (only or "").strip().casefold() or None
         rows: list[dict[str, Any]] = []
         products = product.Products
         for i in range(1, products.Count + 1):
@@ -1013,6 +1039,12 @@ class MeasurementTools:
                     row[key] = getter(child)
                 except Exception as exc:  # noqa: BLE001
                     row["problems"].append(f"{key}: {str(exc).splitlines()[0][:70]}")
+            if wanted is not None:
+                # Two cheap string reads decide; the expensive reads below only
+                # happen for a component that will actually be reported.
+                if (row["name"] or "").casefold() != wanted and \
+                        (row["part_number"] or "").casefold() != wanted:
+                    continue
             try:
                 row["matrix"], row["translation"] = self._placement(child)
             except Exception as exc:  # noqa: BLE001
@@ -1148,21 +1180,33 @@ class MeasurementTools:
                 "truncated": mesh_vertices > len(cloud) // 3,
                 "copy_note": copy_note or ""}
 
+    @staticmethod
+    def _local_dimensions(points: Any, source: str) -> dict[str, float]:
+        """The part's own box size, so a part detail needs no second call."""
+        if source == "mesh_fallback":
+            xs = points[0::3]
+            ys = points[1::3]
+            zs = points[2::3]
+        else:
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
+            zs = [p[2] for p in points]
+        return {f"length_{k}": round(max(v) - min(v), 4)
+                for k, v in zip("xyz", (xs, ys, zs))}
+
     def _assembly_box(self, doc: Any, method: str,
                       only: str | None = None,
                       include_curved: bool = True) -> str:
-        rows = self._components_doc(doc)
-        if only:
-            rows = [r for r in rows if (r["name"] or "").lower() == only.lower()
-                    or (r["part_number"] or "").lower() == only.lower()]
-            if not rows:
-                names = ", ".join(str(r["name"]) for r in self._components_doc(doc))
-                raise RuntimeError(
-                    f"No component matches '{only}'. Components: {names or 'none'}."
-                )
+        rows = self._components_doc(doc, only)
+        if only and not rows:
+            names = ", ".join(str(r["name"]) for r in self._components_doc(doc))
+            raise RuntimeError(
+                f"No component matches '{only}'. Components: {names or 'none'}."
+            )
 
         entries, corners, skipped = [], [], []
         fallback_warnings: list[str] = []
+        parts_detail: dict[Any, dict[str, Any]] = {}
         warned: set[Any] = set()
         # One local box per PART, not per instance. Reported 2026-10-26: the box
         # cost ~6 s per component plus ~0.07 s per vertex, so 70 instances of 28
@@ -1212,35 +1256,41 @@ class MeasurementTools:
                                for k, mn, mx in zip("xyz", entry_min, entry_max)},
                 "source": cached["source"],
             }
-            if cached["source"] == "mesh_fallback":
-                # Say it out loud: this instance's box came from the STL mesh of
-                # its part (a lower bound on curved faces), not from a vertex
-                # sweep, so a reader can tell a mixed box from a uniform one.
-                # `vertices_used` is deliberately absent here: the mesh route
-                # works on the mesh's vertex cloud, and reporting that count as
-                # "vertices used" would read like a part with a handful of them.
-                entry["mesh_vertices"] = cached["mesh_vertices"]
-                entry["source_note"] = (
-                    "no vertex lies at this part's extremum, so its box came from "
-                    "the mesh - a lower bound on curved faces, measured 0.47-0.73 % "
-                    "small" + ("; the cloud was capped at %d of %d vertices"
-                               % (cached["used"], cached["mesh_vertices"])
-                               if cached.get("truncated") else "")
-                    + ("; it also came from the SAVED file rather than the "
-                       "loaded state: "
-                       + cached["copy_note"].lstrip("; ").strip()
-                       if cached["copy_note"] else ""))
-            else:
-                entry["vertices_used"] = cached["used"]
-                # The cost model made visible: the construction filter walks every
-                # topology cell of the body (~15 ms each on B30), which is the
-                # "6 s per part" the acceptance report measured - not the vertex
-                # count. Reported so a caller can correlate cost with cell count
-                # instead of guessing from the part's size.
-                if cached.get("cells") is not None:
-                    entry["cells_scanned"] = cached["cells"]
-                if cached.get("points_route") not in (None, "batch"):
-                    entry["points_route"] = cached["points_route"]
+            if key not in parts_detail:
+                # Per PART, from the part's own local box: the vertex count, the
+                # cell count the construction filter walked, the mesh caveat.
+                # These are properties of the PART, and on a 70-instance assembly
+                # the instance entries repeated 28 distinct values 70 times
+                # (reported 2026-10-26: "20 multi-instance parts answer the same
+                # thing on every entry").
+                detail: dict[str, Any] = {
+                    "part": label,
+                    "source": cached["source"],
+                    "instances": 0,
+                    "local_dimensions": self._local_dimensions(cached["points"],
+                                                               cached["source"]),
+                }
+                if cached["source"] == "mesh_fallback":
+                    detail["mesh_vertices"] = cached["mesh_vertices"]
+                    detail["source_note"] = (
+                        "no vertex lies at this part's extremum, so its box came "
+                        "from the mesh - a lower bound on curved faces, measured "
+                        "0.47-0.73 % small"
+                        + ("; the cloud was capped at %d of %d vertices"
+                           % (cached["used"], cached["mesh_vertices"])
+                           if cached.get("truncated") else "") + ".")
+                else:
+                    detail["vertices_used"] = cached["used"]
+                    if cached.get("cells") is not None:
+                        detail["cells_scanned"] = cached["cells"]
+                        detail["cells_note"] = (
+                            "topology cells the vertex search returned for this "
+                            "part's body, BEFORE construction geometry was filtered "
+                            "out (sketch-wire vertices, datum-plane corners) - a "
+                            "count of CATIA cells, not of mesh elements")
+                    detail["points_route"] = _route_name(cached.get("points_route"))
+                parts_detail[key] = detail
+            parts_detail[key]["instances"] += 1
             if cached["copy_note"] and key not in warned:
                 # Once per PART: four instances of one faceplate used to repeat
                 # the same 180-character sentence four times. The note is written
@@ -1249,6 +1299,11 @@ class MeasurementTools:
                 warned.add(key)
                 fallback_warnings.append(
                     f"{label}: " + cached["copy_note"].lstrip("; ").strip())
+                base = parts_detail[key].get("source_note") or ""
+                parts_detail[key]["source_note"] = (
+                    (base + " " if base else "")
+                    + "It also came from the SAVED file rather than the loaded "
+                    "state: " + cached["copy_note"].lstrip("; ").strip())
             entries.append(entry)
             corners.extend(world)
 
@@ -1315,10 +1370,16 @@ class MeasurementTools:
                 by_route[source] += 1
         payload["part_boxes_by_vertices"] = by_route["vertices"]
         payload["part_boxes_by_mesh"] = by_route["mesh_fallback"]
+        # Per PART, once: the counts and caveats are properties of the part, and
+        # repeating them on every instance entry meant 70 entries carried 28
+        # distinct values (reported 2026-10-26). The instance entries keep the
+        # geometry; this list keeps the cost model and the caveats.
+        payload["parts"] = list(parts_detail.values())
         payload["note_scope"] = (
             f"{len(entries)} instance(s) of {len(local_boxes)} part(s): each part's "
             "local box is computed once and only the placement is repeated, so the "
-            "cost is per part, not per instance.")
+            "cost is per part, not per instance. Per-part counts are in 'parts', "
+            "not on every instance entry.")
         # Say whether the box covers the whole assembly. 'skipped' sat beside
         # min/max as a sibling key, so a caller reading only the numbers never
         # learned that 6 of 70 instances were left out and the box is a lower
@@ -1486,7 +1547,8 @@ class MeasurementTools:
             raise RuntimeError("That part has no solid shape yet.")
         method, auto_note = self._auto_method(method, body)
         if method in ("auto", "vertices"):
-            points, truncated, total, dropped = self._vertex_points(body)
+            stats: dict[str, Any] = {}
+            points, truncated, total, dropped = self._vertex_points(body, stats)
             if points:
                 return self._bbox_json(
                     points,
@@ -1498,6 +1560,15 @@ class MeasurementTools:
                     bounds="exact for a planar-faced solid; a curved face has no "
                            "vertex at its extremum, so read 'bounds' as a lower "
                            "bound there - use method='mesh' for those",
+                    extra={
+                        # Which reader ran, and what the filter walked - the same
+                        # two facts the assembly reply publishes per part, so a
+                        # single-part call cannot look like a build without them
+                        # (reported 2026-10-26).
+                        "points_route": _route_name(stats.get("route")),
+                        "vertices_used": len(points),
+                        "cells_scanned": stats.get("cells"),
+                    },
                 )
             if method == "vertices":
                 raise RuntimeError(
@@ -1619,7 +1690,8 @@ class MeasurementTools:
         method, auto_note = self._auto_method(method, body)
 
         if method in ("auto", "vertices"):
-            points, truncated, total, dropped = self._vertex_points(body)
+            stats: dict[str, Any] = {}
+            points, truncated, total, dropped = self._vertex_points(body, stats)
             if points:
                 return self._bbox_json(
                     points,
@@ -1632,6 +1704,11 @@ class MeasurementTools:
                     bounds="exact for a planar-faced solid; a curved face has no "
                            "vertex at its extremum, so read 'bounds' as a lower "
                            "bound there - use method='mesh' for those",
+                    extra={
+                        "points_route": _route_name(stats.get("route")),
+                        "vertices_used": len(points),
+                        "cells_scanned": stats.get("cells"),
+                    },
                 )
             if method == "vertices":
                 raise RuntimeError(
@@ -1659,7 +1736,9 @@ class MeasurementTools:
     # beyond this limit is construction geometry, not a vertex of the shape.
     _UNBOUNDED = 1.0e6
 
-    def _vertex_points(self, body: Any) -> tuple[list[list[float]], bool, int, int]:
+    def _vertex_points(self, body: Any,
+                       stats: dict[str, Any] | None = None
+                       ) -> tuple[list[list[float]], bool, int, int]:
         """Reference vertex coordinates, capped at 200 points.
 
         Returns ``(points, capped, total, dropped)`` where ``dropped`` counts the
@@ -1698,10 +1777,15 @@ class MeasurementTools:
         if not refs:
             return [], False, total, construction
         spa = self._spa_workbench()
+        read_stats: dict[str, Any] = {}
         raw = read_measurable_points(
             self.conn.app, spa, refs,
             fallback=lambda ref: self._read_measurable_array(
-                spa.GetMeasurable(ref), "GetPoint", 3))
+                spa.GetMeasurable(ref), "GetPoint", 3),
+            stats=read_stats)
+        if stats is not None:
+            stats["route"] = read_stats.get("route", "batch")
+            stats["cells"] = total
         points, dropped = self._bounded(raw)
         return points, total > 200, total, dropped + construction
 
@@ -1965,7 +2049,8 @@ class MeasurementTools:
 
     @staticmethod
     def _bbox_json(points: list[list[float]], method_note: str,
-                   bounds: str | None = None) -> str:
+                   bounds: str | None = None,
+                   extra: dict[str, Any] | None = None) -> str:
         xs = [p[0] for p in points]
         ys = [p[1] for p in points]
         zs = [p[2] for p in points]
@@ -1984,6 +2069,8 @@ class MeasurementTools:
             "bounds": bounds or "exact (no curved-face chording involved)",
             "method": method_note,
         }
+        if extra:
+            result.update(extra)
         return json.dumps(result, indent=2)
 
     def _get_parameters(self, name_filter: str | None = None) -> str:

@@ -231,7 +231,7 @@ def test_the_same_part_is_bounded_once_per_assembly():
         return [[0, 0, 0], [10, 10, 10]], 2
 
     tools._local_box = local_box
-    tools._components_doc = lambda doc: rows
+    tools._components_doc = lambda doc, only=None: rows
     payload = json.loads(tools._assembly_box(object(), "vertices"))
     assert len(calls) == 1, "one part must be bounded once"
     assert payload["part_boxes"] == 1

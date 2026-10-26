@@ -251,7 +251,12 @@ class AssemblyTools:
                     "any placement, so 'which instances exist' no longer costs one "
                     "pose read per component. 'names_only' skips the placements "
                     "entirely for the same question (reported 2026-10-26: a "
-                    "two-component listing took 5 s on a 70-instance assembly)."
+                    "two-component listing took 5 s on a 70-instance assembly). "
+                    "'occurrence' is the ordinal of the instance AMONG INSTANCES OF "
+                    "THE SAME PART (occurrence 2 of P02_motor), which is what "
+                    "'{part_number, occurrence}' resolves against; 'index' is the "
+                    "position in the assembly and is what a bare index resolves "
+                    "against. The reply also states 'occurrence_scope'."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1312,11 +1317,13 @@ class AssemblyTools:
             docs = self.conn.documents
             for i in range(1, docs.Count + 1):
                 doc = docs.Item(i)
-                try:
-                    self.conn.product_of(doc)
+                # By document TYPE, not by ".Product answers": a PartDocument
+                # returns a Product stub, so probing the property listed 13
+                # .CATPart files as "Open assemblies" and sent the caller to
+                # activate documents that cannot hold components (reported
+                # 2026-10-26). Same judgement, same helper as add_component.
+                if self._is_product_document(doc):
                     open_products.append(str(doc.Name))
-                except Exception:  # noqa: BLE001 - not a product
-                    continue
         except Exception:  # noqa: BLE001 - listing is best effort
             open_products = []
         if open_products:
@@ -1361,6 +1368,7 @@ class AssemblyTools:
 
         components = []
         broken = 0
+        per_part: dict[str, int] = {}
         wanted = (part_number or "").strip().casefold() or None
         for i in range(1, products.Count + 1):
             comp = products.Item(i)
@@ -1414,7 +1422,17 @@ class AssemblyTools:
                 entry["broken"] = True
                 entry["error"] = "; ".join(problems)
                 broken += 1
-            entry["occurrence"] = len(components) + 1
+            # PER-PART ordinal, not the position in this reply. `occurrence` is
+            # what {"part_number": ..., "occurrence": n} resolves against, so a
+            # full listing that numbered instances 1..70 made occurrence mean two
+            # things: the 3rd component overall was reported as occurrence 3 but
+            # resolving P02_motor with occurrence 3 found the THIRD motor, not the
+            # one listed (reported 2026-10-26). `index` keeps the assembly
+            # position, which is what a bare index resolves against.
+            group = (entry.get("part_number") or "").strip() or \
+                    (entry.get("name") or "").rsplit(".", 1)[0]
+            per_part[group] = per_part.get(group, 0) + 1
+            entry["occurrence"] = per_part[group]
             components.append(entry)
 
         if not components:
@@ -1423,7 +1441,8 @@ class AssemblyTools:
         # it is present exactly when a rotation is present. A caller that knows
         # names_only was asked for can rely on that instead of guessing whether
         # "matrix" describes something.
-        payload: dict[str, Any] = {"components": components, "count": len(components)}
+        payload: dict[str, Any] = {"components": components, "count": len(components),
+                                   "occurrence_scope": "per_part"}
         if broken:
             payload["broken"] = broken
             payload["note"] = (

@@ -90,7 +90,7 @@ def test_a_rotated_mesh_part_gets_the_true_world_box_in_the_aggregate():
         MainBody = object()
 
     tools = MeasurementTools(connection=None)
-    tools._components_doc = lambda doc: [{
+    tools._components_doc = lambda doc, only=None: [{
         "index": 1, "name": "disc I001", "part_number": "disc", "part": _Part(),
         "matrix": _rotation_z(30), "translation": [0.0, 0.0, 0.0], "problems": [],
     }]
@@ -310,7 +310,7 @@ def test_route_counts_are_explicit_fields():
     from catia_mcp.tools.measurement import MeasurementTools
 
     tools = MeasurementTools(connection=None)
-    tools._components_doc = lambda doc: _rows(3, 2)
+    tools._components_doc = lambda doc, only=None: _rows(3, 2)
     tools._part_identity = lambda part: part.Name
     tools._local_box = lambda part, body, stats=None: (
         ([], 0) if part.Name == "disc" else ([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], 8))
@@ -336,6 +336,8 @@ def _assembly_tools(active_name, open_products):
     class _Doc:
         def __init__(self, name):
             self.Name = name
+            self.FullName = name
+            self.Type = "Product" if name.endswith(".CATProduct") else "Part"
             self.Part = object() if name.endswith(".CATPart") else None
             self.Product = None if name.endswith(".CATPart") else object()
 
