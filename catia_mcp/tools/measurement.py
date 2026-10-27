@@ -480,7 +480,11 @@ class MeasurementTools:
                     "component's placement), and naming it is the only unambiguous "
                     "route when a second client can change ActiveDocument between "
                     "two calls. Each PART is bounded once and only the placement is "
-                    "repeated, so the cost is per part, not per instance. "
+                    "repeated, so the cost is per part, not per instance. A "
+                    "sub-assembly is EXPANDED, not skipped: its parts are bounded as "
+                    "if they had been placed directly here (the two placements "
+                    "composed) and every entry says which level it came from with "
+                    "'path' and 'depth'. "
                     "Exactness has a price: the vertex route walks every topology "
                     "cell of each part, and the per-cell cost grows with the part "
                     "(measured 17-93 ms per cell across two acceptance models - a "
@@ -1388,23 +1392,228 @@ class MeasurementTools:
         if only and not rows:
             names = ", ".join(str(r["name"]) for r in self._components_doc(doc))
             raise RuntimeError(
-                f"No component matches '{only}'. Components: {names or 'none'}."
+                f"No component matches '{only}'. Components: {names or 'none'}. "
+                "This matches TOP-LEVEL components only - a component that lives "
+                "inside a sub-assembly has to be measured through that "
+                "sub-assembly, or by naming the part's document."
             )
 
-        entries, corners, skipped = [], [], []
-        fallback_warnings: list[str] = []
-        parts_detail: dict[Any, dict[str, Any]] = {}
-        warned: set[Any] = set()
-        # One local box per PART, not per instance. Reported 2026-10-26: the box
-        # cost ~6 s per component plus ~0.07 s per vertex, so 70 instances of 28
-        # parts took 11 min 37 s - the same part scanned two to ten times over.
-        # The local box does not depend on the placement, so it is computed once
-        # and only the world transform is repeated.
-        local_boxes: dict[Any, Any] = {}
+        # The walk below is recursive: a sub-assembly gets its own level with the
+        # placement composed on the way down. Everything it accumulates lives in
+        # this context so one part is still bounded once per identity, however
+        # many levels deep it appears.
+        ctx: dict[str, Any] = {
+            "entries": [], "corners": [], "skipped": [], "warnings": [],
+            "parts_detail": {}, "warned": set(), "local_boxes": {},
+            "include_curved": include_curved,
+        }
+        self._box_walk(rows, [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                       [0.0, 0.0, 0.0], 1, "", ctx)
+        entries = ctx["entries"]
+        corners = ctx["corners"]
+        skipped = ctx["skipped"]
+        parts_detail = ctx["parts_detail"]
+        local_boxes = ctx["local_boxes"]
+        fallback_warnings = ctx["warnings"]
+
+        if not corners:
+            # Every component failed: return the partial result instead of an
+            # exception. "Which parts could not be measured, and why" is itself
+            # the answer a caller needs, and it was previously thrown away
+            # (reported 2026-10-24: an assembly holding only a fully curved part
+            # failed the whole call).
+            return json.dumps({
+                "dimensions": None,
+                "min": None,
+                "max": None,
+                "components": [],
+                "complete": False,
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
+                "instances": {"total": len(skipped), "measured": 0,
+                              "skipped": len(skipped)},
+                "assembly_depth_max": max((entry.get("depth", 1)
+                                           for entry in skipped), default=1),
+                "skipped": skipped,
+                "method": ("no component could be measured from its vertices; each "
+                           "one's reason is in 'skipped'. A fully curved part has no "
+                           "vertex at any extremum, so measure it by name - "
+                           "catia_get_bounding_box(document='<part>.CATPart', "
+                           "method='mesh')"),
+            }, indent=2)
+        note = ("world coordinates: each component's local box transformed by its "
+                "placement, then aggregated. A vertex sweep is exact only when "
+                "every face is planar: any part whose extremum lies on a curved "
+                "face is under-reported by it, and that is not limited to revolved parts"
+                " - an arched or cylindrical face loses the same way "
+                "(measured: a camera bracket's arch, 33.27 mm reported against "
+                "41.40 mm true, -19.6 %). A part with no vertex at an extremum is "
+                "bounded from its mesh instead, and its entry says "
+                "source='mesh_fallback'. To bound one part on its own, open it "
+                "(catia_open_document) and call "
+                "catia_get_bounding_box(document='<part>.CATPart', method='mesh'). "
+                "catia_get_component_transform READS an instance's placement; it "
+                "does not place a box, so to move one into world coordinates read "
+                "the placement (catia_list_components or "
+                "catia_get_component_transform) and apply rotation/translation "
+                "yourself. A sub-assembly is expanded rather than skipped: its "
+                "parts are bounded as if they had been placed directly in this "
+                "assembly (the two placements composed), and each entry says which "
+                "level it came from with 'path' and 'depth'.")
+        from_mesh = [entry["component"] for entry in entries
+                     if entry.get("source") == "mesh_fallback"]
+        bounds = ("lower bound: each component's box came from its vertices, so any "
+                  "part whose extremum lies on a curved face is under-reported")
+        if from_mesh:
+            bounds = (f"mixed: {len(from_mesh)} instance(s) are bounded from their "
+                      "mesh (a lower bound on curved faces, measured 0.47-0.73 % "
+                      "small), the rest from vertices")
+        payload = json.loads(self._bbox_json(corners, note, bounds=bounds))
+        payload["components"] = entries
+        # What this call cost, measured. The box is exact and single-threaded, so a
+        # caller that budgets "seconds" for a 70-instance assembly waits three
+        # minutes with the whole server behind it; the number makes that visible
+        # instead of surprising (reported 2026-10-26).
+        payload["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        try:
+            payload["document"] = str(doc.Name)
+        except Exception:  # noqa: BLE001 - the numbers are the point
+            pass
+        payload["part_boxes"] = len(local_boxes)
+        # The route actually taken, per PART, as numbers a caller can assert on.
+        # 0.3.23 only said it in the `bounds` sentence, so "how many curved parts
+        # should this assembly have" could not be checked without parsing prose
+        # (reported 2026-10-26).
+        by_route = {"vertices": 0, "mesh_fallback": 0}
+        for cached in local_boxes.values():
+            source = cached.get("source")
+            if source in by_route:
+                by_route[source] += 1
+        payload["part_boxes_by_vertices"] = by_route["vertices"]
+        payload["part_boxes_by_mesh"] = by_route["mesh_fallback"]
+        # Per PART, once: the counts and caveats are properties of the part, and
+        # repeating them on every instance entry meant 70 entries carried 28
+        # distinct values (reported 2026-10-26). The instance entries keep the
+        # geometry; this list keeps the cost model and the caveats.
+        payload["parts"] = list(parts_detail.values())
+        payload["note_scope"] = (
+            f"{len(entries)} instance(s) of {len(local_boxes)} part(s): each part's "
+            "local box is computed once and only the placement is repeated, so the "
+            "cost is per part, not per instance. Per-part counts are in 'parts', "
+            "not on every instance entry. A sub-assembly is EXPANDED, so its parts "
+            "appear with their 'path' ('ASM/PART.1') and 'depth', and both counts "
+            "include them.")
+        # Say whether the box covers the whole assembly. 'skipped' sat beside
+        # min/max as a sibling key, so a caller reading only the numbers never
+        # learned that 6 of 70 instances were left out and the box is a lower
+        # bound in the directions they could have driven (reported 2026-10-25).
+        payload["complete"] = not skipped
+        payload["include_curved"] = include_curved
+        if from_mesh:
+            # Parts, not instances: `warnings` is per part, and two fields in one
+            # reply counting different things made 6-vs-2 look like a defect
+            # (reported 2026-10-26). The per-instance answer is on each entry
+            # (`source`) and in the count beside it.
+            payload["mesh_fallback"] = sorted(set(from_mesh))
+            payload["mesh_fallback_instances"] = len(from_mesh)
+        if fallback_warnings:
+            payload["warnings"] = fallback_warnings
+        payload["instances"] = {"total": len(entries) + len(skipped),
+                                "measured": len(entries),
+                                "skipped": len(skipped)}
+        if skipped:
+            payload["skipped"] = skipped
+            payload["incomplete_because"] = (
+                f"{len(skipped)} of {len(entries) + len(skipped)} instance(s) could "
+                "not be bounded at all - neither their vertices nor (with "
+                "include_curved=true) their mesh gave a box, so this box is a LOWER "
+                "BOUND in any direction they extend. What to try: read each "
+                "instance's placement with catia_list_components or "
+                "catia_get_component_transform, measure the part on its own with "
+                "get_bounding_box(document='<part>.CATPart', method='mesh'), and "
+                "apply the rotation/translation yourself."
+            )
+        depths = [entry["depth"] for entry in entries] + [entry["depth"] for entry in skipped]
+        payload["assembly_depth_max"] = max(depths, default=1)
+        # A sub-assembly is ONE entry in 'instances' until it is expanded, and two
+        # of them can hide twenty parts - so say which counting rule produced the
+        # numbers, instead of letting 2 mean "two parts" (reported 2026-10-27).
+        payload["instances_note"] = (
+            "counts COMPONENTS at any level: a nested part's instance is one entry "
+            "(it carries 'path' and 'depth'), and a sub-assembly that could NOT be "
+            "expanded counts as one, not as the instances it would have added")
+        return json.dumps(payload, indent=2)
+
+    _BOX_MAX_DEPTH = 8
+
+    def _box_walk(self, rows: list[dict[str, Any]], matrix: list[list[float]],
+                  translation: list[float], depth: int, prefix: str,
+                  ctx: dict[str, Any]) -> None:
+        """One level of the world box, recursing into sub-assemblies.
+
+        ``matrix``/``translation`` are the placement accumulated on the way down,
+        so a part two levels below is placed by the composition of both - the same
+        rule the inertia route follows. Until 0.3.29 a sub-assembly was dropped
+        here with "part not loaded" and the reply said `complete: false`: honest,
+        but it left a nested assembly unbounded while `get_inertia` on the same
+        document had started expanding it (reported 2026-10-27). Both aggregators
+        now understand the same structure.
+
+        A part is still bounded ONCE per identity, however many levels it appears
+        at: the local box does not depend on the placement, so the cache is shared
+        across the whole walk.
+        """
+        entries = ctx["entries"]
+        corners = ctx["corners"]
+        skipped = ctx["skipped"]
+        parts_detail = ctx["parts_detail"]
+        local_boxes = ctx["local_boxes"]
+        warned = ctx["warned"]
+        fallback_warnings = ctx["warnings"]
+        include_curved = ctx["include_curved"]
         for row in rows:
             label = row["part_number"] or row["name"] or f"#{row['index']}"
-            if row["part"] is None or row["matrix"] is None:
-                skipped.append({"component": label,
+            name = row["name"] or label
+            path = f"{prefix}/{name}" if prefix else name
+            if row["matrix"] is None or row["translation"] is None:
+                skipped.append({"component": label, "name": name, "path": path,
+                                "depth": depth,
+                                "kind": row.get("kind", "unknown"),
+                                "error": "; ".join(row["problems"])
+                                         or "its placement could not be read"})
+                continue
+            # A sub-assembly's own placement goes ON TOP of the accumulated one.
+            world_matrix = self._mat_mul(matrix, row["matrix"])
+            world_t = [sum(matrix[i][k] * row["translation"][k] for k in range(3))
+                       + translation[i] for i in range(3)]
+            if row.get("kind") == "sub_assembly":
+                nested = row.get("nested_doc")
+                if nested is None:
+                    skipped.append({
+                        "component": label, "name": name, "path": path,
+                        "depth": depth, "kind": "sub_assembly",
+                        "error": "sub-assembly, but its document could not be read, "
+                                 "so its components are not in this box"})
+                    continue
+                if depth >= self._BOX_MAX_DEPTH:
+                    skipped.append({
+                        "component": label, "name": name, "path": path,
+                        "depth": depth, "kind": "sub_assembly",
+                        "error": f"nested deeper than {self._BOX_MAX_DEPTH} levels, "
+                                 "so this branch was not expanded"})
+                    continue
+                sub_rows = self._components_doc(nested)
+                if not sub_rows:
+                    skipped.append({
+                        "component": label, "name": name, "path": path,
+                        "depth": depth, "kind": "sub_assembly",
+                        "error": "the sub-assembly holds no components, so it "
+                                 "contributes nothing to this box"})
+                    continue
+                self._box_walk(sub_rows, world_matrix, world_t, depth + 1, path, ctx)
+                continue
+            if row["part"] is None:
+                skipped.append({"component": label, "name": name, "path": path,
+                                "depth": depth,
                                 "kind": row.get("kind", "unknown"),
                                 "error": "; ".join(row["problems"])})
                 continue
@@ -1423,7 +1632,9 @@ class MeasurementTools:
                     (time.perf_counter() - part_started) * 1000, 1)
             cached = local_boxes[key]
             if "error" in cached:
-                skipped.append({"component": label, "error": cached["error"]})
+                skipped.append({"component": label, "name": name, "path": path,
+                                "depth": depth, "kind": "part",
+                                "error": cached["error"]})
                 continue
             if cached["source"] == "mesh_fallback":
                 # Transform EVERY mesh vertex, not the local box's two corners.
@@ -1433,11 +1644,11 @@ class MeasurementTools:
                 # claiming complete:true (reported 2026-10-26: a disc whose true
                 # world box is ±72.5/±72.5 read as ±100.29/±21.32).
                 entry_min, entry_max = self._world_extent(
-                    cached["points"], row["matrix"], row["translation"])
+                    cached["points"], world_matrix, world_t)
                 world = [[entry_min[0], entry_min[1], entry_min[2]],
                          [entry_max[0], entry_max[1], entry_max[2]]]
             else:
-                world = [self._to_world(row["matrix"], row["translation"], p)
+                world = [self._to_world(world_matrix, world_t, p)
                          for p in cached["points"]]
                 xs = [p[0] for p in world]
                 ys = [p[1] for p in world]
@@ -1446,7 +1657,9 @@ class MeasurementTools:
                 entry_max = [max(xs), max(ys), max(zs)]
             entry = {
                 "component": label,
-                "name": row["name"],
+                "name": name,
+                "path": path,
+                "depth": depth,
                 "min": {k: round(v, 4) for k, v in zip("xyz", entry_min)},
                 "max": {k: round(v, 4) for k, v in zip("xyz", entry_max)},
                 "dimensions": {f"length_{k}": round(mx - mn, 4)
@@ -1519,117 +1732,6 @@ class MeasurementTools:
                     "state: " + cached["copy_note"].lstrip("; ").strip())
             entries.append(entry)
             corners.extend(world)
-
-        if not corners:
-            # Every component failed: return the partial result instead of an
-            # exception. "Which parts could not be measured, and why" is itself
-            # the answer a caller needs, and it was previously thrown away
-            # (reported 2026-10-24: an assembly holding only a fully curved part
-            # failed the whole call).
-            return json.dumps({
-                "dimensions": None,
-                "min": None,
-                "max": None,
-                "components": [],
-                "complete": False,
-                "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
-                "instances": {"total": len(skipped), "measured": 0,
-                              "skipped": len(skipped)},
-                "skipped": skipped,
-                "method": ("no component could be measured from its vertices; each "
-                           "one's reason is in 'skipped'. A fully curved part has no "
-                           "vertex at any extremum, so measure it by name - "
-                           "catia_get_bounding_box(document='<part>.CATPart', "
-                           "method='mesh')"),
-            }, indent=2)
-        note = ("world coordinates: each component's local box transformed by its "
-                "placement, then aggregated. A vertex sweep is exact only when "
-                "every face is planar: any part whose extremum lies on a curved "
-                "face is under-reported by it, and that is not limited to revolved parts"
-                " - an arched or cylindrical face loses the same way "
-                "(measured: a camera bracket's arch, 33.27 mm reported against "
-                "41.40 mm true, -19.6 %). A part with no vertex at an extremum is "
-                "bounded from its mesh instead, and its entry says "
-                "source='mesh_fallback'. To bound one part on its own, open it "
-                "(catia_open_document) and call "
-                "catia_get_bounding_box(document='<part>.CATPart', method='mesh'). "
-                "catia_get_component_transform READS an instance's placement; it "
-                "does not place a box, so to move one into world coordinates read "
-                "the placement (catia_list_components or "
-                "catia_get_component_transform) and apply rotation/translation "
-                "yourself.")
-        from_mesh = [entry["component"] for entry in entries
-                     if entry.get("source") == "mesh_fallback"]
-        bounds = ("lower bound: each component's box came from its vertices, so any "
-                  "part whose extremum lies on a curved face is under-reported")
-        if from_mesh:
-            bounds = (f"mixed: {len(from_mesh)} instance(s) are bounded from their "
-                      "mesh (a lower bound on curved faces, measured 0.47-0.73 % "
-                      "small), the rest from vertices")
-        payload = json.loads(self._bbox_json(corners, note, bounds=bounds))
-        payload["components"] = entries
-        # What this call cost, measured. The box is exact and single-threaded, so a
-        # caller that budgets "seconds" for a 70-instance assembly waits three
-        # minutes with the whole server behind it; the number makes that visible
-        # instead of surprising (reported 2026-10-26).
-        payload["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
-        try:
-            payload["document"] = str(doc.Name)
-        except Exception:  # noqa: BLE001 - the numbers are the point
-            pass
-        payload["part_boxes"] = len(local_boxes)
-        # The route actually taken, per PART, as numbers a caller can assert on.
-        # 0.3.23 only said it in the `bounds` sentence, so "how many curved parts
-        # should this assembly have" could not be checked without parsing prose
-        # (reported 2026-10-26).
-        by_route = {"vertices": 0, "mesh_fallback": 0}
-        for cached in local_boxes.values():
-            source = cached.get("source")
-            if source in by_route:
-                by_route[source] += 1
-        payload["part_boxes_by_vertices"] = by_route["vertices"]
-        payload["part_boxes_by_mesh"] = by_route["mesh_fallback"]
-        # Per PART, once: the counts and caveats are properties of the part, and
-        # repeating them on every instance entry meant 70 entries carried 28
-        # distinct values (reported 2026-10-26). The instance entries keep the
-        # geometry; this list keeps the cost model and the caveats.
-        payload["parts"] = list(parts_detail.values())
-        payload["note_scope"] = (
-            f"{len(entries)} instance(s) of {len(local_boxes)} part(s): each part's "
-            "local box is computed once and only the placement is repeated, so the "
-            "cost is per part, not per instance. Per-part counts are in 'parts', "
-            "not on every instance entry.")
-        # Say whether the box covers the whole assembly. 'skipped' sat beside
-        # min/max as a sibling key, so a caller reading only the numbers never
-        # learned that 6 of 70 instances were left out and the box is a lower
-        # bound in the directions they could have driven (reported 2026-10-25).
-        payload["complete"] = not skipped
-        payload["include_curved"] = include_curved
-        if from_mesh:
-            # Parts, not instances: `warnings` is per part, and two fields in one
-            # reply counting different things made 6-vs-2 look like a defect
-            # (reported 2026-10-26). The per-instance answer is on each entry
-            # (`source`) and in the count beside it.
-            payload["mesh_fallback"] = sorted(set(from_mesh))
-            payload["mesh_fallback_instances"] = len(from_mesh)
-        if fallback_warnings:
-            payload["warnings"] = fallback_warnings
-        payload["instances"] = {"total": len(entries) + len(skipped),
-                                "measured": len(entries),
-                                "skipped": len(skipped)}
-        if skipped:
-            payload["skipped"] = skipped
-            payload["incomplete_because"] = (
-                f"{len(skipped)} of {len(entries) + len(skipped)} instance(s) could "
-                "not be bounded at all - neither their vertices nor (with "
-                "include_curved=true) their mesh gave a box, so this box is a LOWER "
-                "BOUND in any direction they extend. What to try: read each "
-                "instance's placement with catia_list_components or "
-                "catia_get_component_transform, measure the part on its own with "
-                "get_bounding_box(document='<part>.CATPart', method='mesh'), and "
-                "apply the rotation/translation yourself."
-            )
-        return json.dumps(payload, indent=2)
 
     def _document_kind(self) -> str:
         """'part', 'assembly' or 'other' for the active document."""

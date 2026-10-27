@@ -2,6 +2,37 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Changed — the bounding box expands sub-assemblies too
+
+- 0.3.28 taught `get_inertia` to expand a sub-assembly; `get_bounding_box` on the
+  same document still listed it in `skipped` (`complete: false`, `kind:
+  "sub-assembly"`). Honest, but it left a nested assembly unbounded and made the
+  two aggregators differ in capability (reported 2026-10-27). The walk is
+  recursive now: placements compose on the way down, every entry carries `path`
+  (`ASM/PART.1`) and `depth`, and `assembly_depth_max` says how deep the reply
+  went.
+- A part is still bounded ONCE per identity, however many levels it appears at -
+  the local box does not depend on the placement - so nesting adds no cost for a
+  part that is used twice.
+- Verified live on B30 with a two-level fixture: a plate at the origin plus a
+  40x40x40 block inside a sub-assembly placed at (200,0,0) whose own instance sits
+  at (150,0,0) returns `min (-50, -30, 0)` / `max (370, 30, 40)` - **bit-identical
+  to the same block placed flat at (350,0,0)**, with `instances 2/2`, `part_boxes
+  2`, `assembly_depth_max 2` and paths `Part1.1` / `Product1.1/Part2.1`.
+- `skipped[]` entries now carry `path` and `depth` as well, so a branch that could
+  not be expanded is named by where it sits, not just by its part number.
+- `component=` still matches TOP-LEVEL components; the "no component matches"
+  error now says that a nested instance has to be measured through its
+  sub-assembly instead of reading as "this instance does not exist".
+- Not covered: the acceptance model (`M113_asm_v21`, 70 instances) could not be
+  re-measured here - it was written by CATIA **B32** (V5-6R2022) and this machine
+  runs **B30** (V5-6R2020, release 30), which refuses its parts ("不能打开文件 …
+  P12.CATPart"; the product opens, its 28 part links do not). The flat numbers are
+  unaffected by construction - at depth 1 the composition is the identity, and
+  `_mat_mul(I, A) = A` exactly - and the unit tests assert the depth-1 path.
+
 ## [0.3.28] — 2026-10-27 · a sub-assembly is not a part, and a partial sum is not a total
 
 ### Fixed — a sub-assembly was a partial sum wearing the assembly's name

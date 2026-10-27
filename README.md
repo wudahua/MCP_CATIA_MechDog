@@ -34,7 +34,9 @@ by `tests/test_readme_tool_counts.py`, so it cannot drift from the code again.
   a path (`ASM/PART.1`) and their placement composed, so `components` adds up to
   the totals. The totals carry `complete`, `instances` and, when anything was left
   out, `incomplete_because`: a partial sum says so instead of wearing the
-  assembly's name. `catia_get_bounding_box` reports per-component world boxes.
+  assembly's name. `catia_get_bounding_box` reports per-component world boxes and
+  expands sub-assemblies the same way, so a nested assembly is bounded rather
+  than listed as skipped.
 * **Out of range is `UNVERIFIED:`, not a success.** When a measurement cannot be
   made the reply says which one failed and why.
 
@@ -514,11 +516,12 @@ is a modal dialog, and reads as a bare `[WinError 2]`). Place the result with
   tensor is also only computed for the ACTIVE document, and with the part's
   material density - `get_inertia(density=...)` does not change it, which is why
   the reply reports both masses.
-* `catia_get_inertia` expands sub-assemblies; `catia_get_bounding_box` does
-  **not** yet. A box over an assembly that holds a sub-assembly lists it in
-  `skipped` with `kind: "sub-assembly"` and says so with `complete: false` — it
-  never claims to be the whole envelope, but the missing branch is still missing
-  (measure the sub-assembly by name for its own world box).
+* `catia_get_inertia` expands sub-assemblies; `catia_get_bounding_box` does too
+  since 0.3.29. Both compose the two placements and report every leaf with a
+  `path` (`ASM/PART.1`) and a `depth`, so one part is still bounded and measured
+  once however many levels it appears at. `component=` still matches TOP-LEVEL
+  components only — a nested instance has to be asked for through its
+  sub-assembly, and the refusal says so.
 * A part that CATIA is editing **in context** (loaded inside an assembly, no window
   of its own) cannot be exported to STL. The mesh box falls back to a copy of the
   saved file, so it measures the file, not unsaved edits; the reply says when that
