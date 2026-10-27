@@ -429,17 +429,22 @@ class MeasurementTools:
                     "two calls. Each PART is bounded once and only the placement is "
                     "repeated, so the cost is per part, not per instance. "
                     "Exactness has a price: the vertex route walks every topology "
-                    "cell of each part (about 15 ms per cell on V5-6R2020 B30, more "
-                    "on a slower build), so a 500-cell part costs ~5 s and a "
-                    "70-instance assembly costs MINUTES, not seconds - and the server "
-                    "runs tools one at a time, so nothing else runs meanwhile. "
-                    "'cells_scanned' and 'elapsed_ms' (total, and per part in "
-                    "'parts') report what it actually cost. Measure the instances you "
-                    "need with 'component' rather than the whole assembly when you "
-                    "can. A curved part's mesh box comes from its SAVED file and is "
-                    "reused while that file's size and modified time are unchanged "
-                    "(its source_note says 'reused'), so the second call on one "
-                    "assembly is much cheaper than the first."
+                    "cell of each part, and the per-cell cost grows with the part "
+                    "(measured 17-93 ms per cell across two acceptance models - a "
+                    "24-cell plate is ~0.5 s, a 500-cell body can be 45 s, and one "
+                    "1200-cell part dominated an assembly at 84 s). A 70-instance "
+                    "assembly costs MINUTES, not seconds - and the server runs tools "
+                    "one at a time, so nothing else runs meanwhile. 'cells_scanned' "
+                    "and 'elapsed_ms' (total, and per part in 'parts') report what it "
+                    "actually cost, which is how you find the one part that eats 40% "
+                    "of the call. Measure the instances you need with 'component' "
+                    "rather than the whole assembly when you can. A curved part's "
+                    "mesh box is read from its SAVED file and reused while that "
+                    "file's size and modified time are unchanged (its source_note "
+                    "says 'reused') - that saves one export per curved part (~5-17 s "
+                    "each), and only applies when the part has no window of its own; "
+                    "a part opened as its own document is exported in place every "
+                    "time."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -933,7 +938,21 @@ class MeasurementTools:
         if document:
             self.opened_for_measurement = None
             doc = self._resolve_open_document(document)
-            reply = self._part_inertia(self.conn.part_of(doc), density, str(doc.Name))
+            if self._is_product_document(doc):
+                # A Product has no Part, but its mass properties are exactly what
+                # the no-argument route returns when the assembly is active - and
+                # naming it is the only unambiguous way to ask (a second client can
+                # change ActiveDocument between two calls). Reaching for `.Part`
+                # here produced "Active document 'X' exposes no 'Part'" about a
+                # document the caller had just NAMED (reported 2026-10-27).
+                return self._assembly_inertia(density, doc)
+            try:
+                part = self.conn.part_of(doc)
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    f"'{doc.Name}' is neither a Part nor a Product document ({exc})."
+                ) from exc
+            reply = self._part_inertia(part, density, str(doc.Name))
             if self.opened_for_measurement:
                 payload = json.loads(reply)
                 payload["opened"] = (
@@ -1352,6 +1371,7 @@ class MeasurementTools:
                     detail["elapsed_ms"] = cached["elapsed_ms"]
                 if cached["source"] == "mesh_fallback":
                     detail["mesh_vertices"] = cached["mesh_vertices"]
+                    detail["points_route"] = "mesh"
                     detail["source_note"] = (
                         "no vertex lies at this part's extremum, so its box came "
                         "from the mesh - a lower bound on curved faces, measured "
@@ -1512,7 +1532,8 @@ class MeasurementTools:
         except Exception:  # noqa: BLE001
             return "other"
 
-    def _assembly_inertia(self, density: float | None = None) -> str:
+    def _assembly_inertia(self, density: float | None = None,
+                          doc: Any | None = None) -> str:
         """Volume and centre of gravity of an assembly, weighted per component.
 
         Each component's own volume and COG are read from its part document and
@@ -1520,8 +1541,11 @@ class MeasurementTools:
         weighted sums. That is the number a placement script has to hit, and on
         a Product document it used to be unavailable (get_inertia required a
         Part).
+
+        ``doc`` names the assembly to measure; without it the active document is
+        used (the older behaviour, and the only one before 0.3.27).
         """
-        doc = self.conn.active_document
+        doc = doc if doc is not None else self.conn.active_document
         rows = self._components_doc(doc)
         entries, skipped = [], []
         total = 0.0
@@ -1672,6 +1696,7 @@ class MeasurementTools:
             bounds=("lower bound: mesh chording, measured 0.47-0.73 % small on "
                     "curved faces. Exact for a solid whose diameter runs through "
                     "a planar edge or a vertex"),
+            extra={"points_route": "mesh", "mesh_vertices": triangles},
         )
         if copy_note:
             # The caveat used to live only inside the prose of `method`, where a
@@ -1688,6 +1713,69 @@ class MeasurementTools:
             reply = json.dumps(payload, indent=2)
         return reply
 
+    @staticmethod
+    def _stamp_elapsed(reply: str, started: float) -> str:
+        """Add ``elapsed_ms`` to a reply that was already serialised.
+
+        The part branches build their JSON in several places (and `_part_bbox`
+        again), so this stamps the one field at the exit instead of threading a
+        timer through all of them. A caller needs it exactly here: the single-part
+        route is the one measured at 5.2 s for 535 cells, and without the field
+        "0.05 s" and "5.2 s" look identical in a reply (reported 2026-10-27).
+        """
+        try:
+            payload = json.loads(reply)
+        except Exception:  # noqa: BLE001 - a non-JSON reply is not ours to touch
+            return reply
+        payload.setdefault("elapsed_ms",
+                           round((time.perf_counter() - started) * 1000, 1))
+        return json.dumps(payload, indent=2)
+
+    def _assembly_box_checked(self, doc: Any, method: str, component: str | None,
+                              include_curved: bool) -> str:
+        """`_assembly_box` with the one refusal that belongs to every caller."""
+        if method == "mesh":
+            # Refuse instead of silently returning vertex-sweep numbers:
+            # a wrong number that looks plausible is worse than an error.
+            raise RuntimeError(
+                f"method='mesh' is not available for an assembly "
+                f"('{getattr(doc, 'Name', '<assembly>')}'): a per-component world "
+                "box would need every component's own mesh, and the aggregated "
+                "path only reads the vertices the assembly exposes. Two working "
+                "routes: (a) get_bounding_box(document='<part>.CATPart', "
+                "method='mesh') per component - the part does not have to be open "
+                "first, it is opened by path if it exists only as a component - "
+                "then apply the placement from catia_get_component_transform; or "
+                "(b) omit method for the vertex-based aggregation, whose "
+                "under-reporting on any part with a curved extremum is stated in "
+                "the reply."
+            )
+        return self._assembly_box(doc, method, component, include_curved)
+
+    def _assemblies_with_component(self, component: str) -> list[Any]:
+        """Open assemblies that hold a component with that name (or part number)."""
+        found: list[Any] = []
+        try:
+            docs = self.conn.documents
+        except Exception:  # noqa: BLE001 - nothing open
+            return found
+        for i in range(1, docs.Count + 1):
+            doc = docs.Item(i)
+            if not self._is_product_document(doc):
+                continue
+            try:
+                if self._components_doc(doc, component):
+                    found.append(doc)
+            except Exception:  # noqa: BLE001 - a broken assembly is not this one
+                continue
+        return found
+
+    def _active_name(self) -> str:
+        try:
+            return str(self.conn.active_document.Name)
+        except Exception:  # noqa: BLE001
+            return "<none>"
+
     def _get_bounding_box(self, method: str = "auto",
                           component: str | None = None,
                           document: str | None = None,
@@ -1697,6 +1785,7 @@ class MeasurementTools:
         # planar-faced solids) and an exported STL mesh (the only thing that
         # works on a fully curved solid - a cylinder is one face, zero
         # vertices - at the cost of chording the surface).
+        started = time.perf_counter()
         self.conn.ensure_connected()
         if document:
             self.opened_for_measurement = None
@@ -1733,26 +1822,44 @@ class MeasurementTools:
                     "an open assembly, so it was opened as its own document to be "
                     "measured; it stays open (close it with catia_close_document)."
                 )
-                return json.dumps(payload, indent=2)
-            return reply
+                reply = json.dumps(payload, indent=2)
+            return self._stamp_elapsed(reply, started)
         if self._document_kind() == "assembly":
-            if method == "mesh":
-                # Refuse instead of silently returning vertex-sweep numbers:
-                # a wrong number that looks plausible is worse than an error.
+            return self._assembly_box_checked(self.conn.active_document, method,
+                                              component, include_curved)
+        if component:
+            # `component` used to be accepted and IGNORED here: the call returned
+            # the active part's box, with no error, no warning and no mention of
+            # the name, so a loop over instances produced N identical plausible
+            # wrong numbers (reported 2026-10-27). A component lives in a Product,
+            # so look for it in the open assemblies - and if that is ambiguous,
+            # say which ones rather than pick.
+            candidates = self._assemblies_with_component(str(component))
+            if len(candidates) == 1:
+                reply = self._assembly_box_checked(candidates[0], method,
+                                                   component, include_curved)
+                payload = json.loads(reply)
+                payload["measured_in"] = (
+                    f"'{candidates[0].Name}' - the active document is not an "
+                    f"assembly, so '{component}' was looked up in the open assembly "
+                    "that contains it, and its world box was measured there")
+                return json.dumps(payload, indent=2)
+            if len(candidates) > 1:
+                names = ", ".join(f"'{str(doc.Name)}'" for doc in candidates)
                 raise RuntimeError(
-                    "method='mesh' is not available in Product mode: a per-component "
-                    "world box would need every component's own mesh, and the "
-                    "aggregated path only reads the vertices the assembly exposes. "
-                    "Two working routes: (a) get_bounding_box(document='<part>"
-                    ".CATPart', method='mesh') per component - the part does not "
-                    "have to be open first, it is opened by path if it exists only "
-                    "as a component - then apply the placement from "
-                    "catia_get_component_transform; or (b) omit method for the "
-                    "vertex-based aggregation, whose under-reporting on any part "
-                    "with a curved extremum is stated in the reply."
+                    f"component='{component}' exists in more than one open assembly "
+                    f"({names}), and the active document is not an assembly. Pass "
+                    "document='<assembly>.CATProduct' to say which one - guessing "
+                    "would give N plausible numbers from the wrong assembly."
                 )
-            return self._assembly_box(self.conn.active_document, method,
-                                      component, include_curved)
+            raise RuntimeError(
+                f"component='{component}' was NOT measured: the active document is "
+                "'" + self._active_name() + "', which is not an assembly, and no "
+                "open assembly has a component by that name. Two routes: pass "
+                "document='<assembly>.CATProduct' (the world box does not need the "
+                "assembly to be active), or activate the assembly "
+                "(catia_activate_document) and repeat."
+            )
         # From here on this measures the ACTIVE document's part. With two clients on
         # one CATIA that is not a given: a bare "MainBody failed" reads like a
         # broken model while the real story is "I measured the wrong document"
@@ -1779,7 +1886,7 @@ class MeasurementTools:
             stats: dict[str, Any] = {}
             points, truncated, total, dropped = self._vertex_points(body, stats)
             if points:
-                return self._bbox_json(
+                reply = self._bbox_json(
                     points,
                     f"vertex sweep over {len(points)} of {total} vertices of "
                     f"'{active_name}'; exact for planar-faced solids, curved faces "
@@ -1796,6 +1903,7 @@ class MeasurementTools:
                         "cells_scanned": stats.get("cells"),
                     },
                 )
+                return self._stamp_elapsed(reply, started)
             if method == "vertices":
                 raise RuntimeError(
                     "UNSUPPORTED_CAPABILITY: the final shape exposes no vertices "
@@ -1804,7 +1912,7 @@ class MeasurementTools:
                 )
 
         corners, triangles, copy_note = self._mesh_corners(part)
-        return self._bbox_json(
+        reply = self._bbox_json(
             corners,
             f"STL mesh sweep of '{active_name}' over {triangles} triangle vertices; "
             "the mesh chords "
@@ -1813,7 +1921,16 @@ class MeasurementTools:
             bounds=("lower bound: mesh chording, measured 0.47-0.73 % small on "
                     "curved faces (P02 Y 219.6278 against a true 220). Exact for "
                     "a solid whose diameter lies on a planar edge or vertex"),
+            extra={
+                # The mesh route has no "vertices used" and no per-cell reader, but
+                # the key stays present so a caller can read `points_route` without
+                # asking whether this reply was built by a version that has it
+                # (reported 2026-10-27).
+                "points_route": "mesh",
+                "mesh_vertices": triangles,
+            },
         )
+        return self._stamp_elapsed(reply, started)
 
     # A wireframe element's "infinite" end point is stored as 1e7 mm. Sweeping
     # the body's vertices therefore picks up coordinates that belong to an axis

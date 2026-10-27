@@ -375,15 +375,30 @@ class PlannerTools:
         measure = arguments.get("measure", True) or bool(arguments.get("expect"))
         measurements: dict[str, Any] = {}
         assertions: list[dict[str, Any]] = []
+        assertions_skipped_because = None
         if measure and failed_at is None:
             measurements = self._measure_part()
             assertions = self._check_all(arguments.get("expect"), measurements)
+        elif arguments.get("expect") and failed_at is not None:
+            # Say it out loud. Returning an empty `assertions` after a failed step
+            # is correct - the plan is already broken - but a caller doing
+            # `assert r["assertions"][0]["pass"]` then gets an IndexError, and one
+            # reading `if r["assertions"]` reads it as "no assertions were asked
+            # for" (reported 2026-10-27).
+            failed = sum(1 for entry in report if not entry["ok"])
+            assertions_skipped_because = (
+                f"{failed} step(s) failed, so the plan's expect was not evaluated - "
+                "'assertions' is empty because it was skipped, not because none "
+                "were requested")
 
         failed_assertions = [a for a in assertions if not a["pass"]]
         ok = failed_at is None and not failed_assertions
         if failed_at is not None:
             code = "STEP_FAILED"
             message = self._failure_summary(report, stop_on_error)
+            if assertions_skipped_because:
+                message += f" (assertions not evaluated: {len(report)} step(s) ran, " \
+                           f"{sum(1 for e in report if not e['ok'])} failed)"
         elif failed_assertions:
             code = "ASSERTION_FAILED"
             message = "; ".join(self._assertion_line(a) for a in failed_assertions)
@@ -394,18 +409,22 @@ class PlannerTools:
                 + (f", {len(assertions)} assertions passed" if assertions else "")
             )
 
+        data: dict[str, Any] = {
+            "steps": report,
+            "measurements": measurements,
+            "assertions": assertions,
+            "executed": len(report),
+            "planned": len(steps),
+        }
+        if assertions_skipped_because:
+            data["assertions_status"] = "skipped"
+            data["assertions_skipped_because"] = assertions_skipped_because
         return {
             "ok": ok,
             "code": code,
             "tool": "catia_run_plan",
             "message": message,
-            "data": {
-                "steps": report,
-                "measurements": measurements,
-                "assertions": assertions,
-                "executed": len(report),
-                "planned": len(steps),
-            },
+            "data": data,
         }
 
     @staticmethod
@@ -420,11 +439,13 @@ class PlannerTools:
         """
         failed = [entry for entry in report if not entry["ok"]]
         first = failed[0]
-        if len(failed) == 1 or stop_on_error:
+        if stop_on_error:
             # A stopping plan never reached the steps after the first failure, so
             # "the step that stopped it" is the whole truth.
             return f"Step {first['index']} ({first['tool']}) failed"
         listed = ", ".join(f"step {e['index']} ({e['tool']})" for e in failed)
+        # One failure gets the same shape as two, because a script that parses this
+        # message should not have to handle two grammars (reported 2026-10-27).
         return f"{len(failed)} of {len(report)} steps failed: {listed}"
 
     def _topology_target(self, document: str | None) -> tuple[Any, Any]:

@@ -246,37 +246,51 @@ otherwise puts up a modal "另存为" that, unanswered, holds the call for 89 s.
 
 The vertex route calls COM once per topology cell (to read its NLS path and to get
 a reference), so its price is set by the *cell* count, not the vertex count — a
-16-vertex plate can still have hundreds of cells. Measured on B30:
+16-vertex plate can still have hundreds of cells. The per-cell cost is not a
+constant either: it rises with the part (17 ms/cell on a 24-cell plate, 93 ms/cell
+on a 504-cell body, measured on two acceptance models), because the parts with the
+most cells also have the most faces behind each `Selection.Item` call.
 
 | call | time |
 |---|---|
-| one part, 24 cells / 16 vertices | ~1.5 s |
-| one part, 535 cells / 335 vertices | ~5.2 s |
+| one part, 24 cells / 16 vertices | ~0.5–1.5 s |
+| one part, 535 cells / 335 vertices (B30) | ~5.2 s |
+| one part, 1 207 cells (acceptance model, B32) | 84 s |
+| one part, 504 cells (same model, B32) | 47 s |
 | 24 instances / 11 parts (drone), warm | 94.4 s |
 | the same call right after opening the assembly | 130.0 s (1.38×) |
 | the same call again, same session (mesh boxes reused) | **16.0 s (8.1×)** |
-| 70 instances / 28 parts (acceptance model) | 203.9 s |
+| 70 instances / 28 parts (acceptance model) | 203.9–216.8 s |
 
-Two things dominate, and neither is the vertex reader itself:
+Three things dominate, and none of them is "one fixed cost per part":
 
+* **Cost concentrates in a few parts.** On the 70-instance model: `P05` 84.2 s
+  (38.8 %), `P01` 46.8 s (21.6 %), `P07` 15.9 s, `P02` 13.1 s — four parts are
+  73.8 % of the call; the 17 lightest parts (≤ 34 cells) together are 4.5 %, at
+  ~574 ms each. `elapsed_ms` in `parts` is what makes that visible.
 * **The first sweep of a part pays for its update.** `drone body` (535 cells) took
   36.1 s cold and 5.9 s warm (6.2×); the small parts differ by 1.2–2.1×, and the
   whole call by 1.38×. Numbers from two calls in one session are not comparable
   across a session boundary unless you say which one it was.
-* **In an assembly with curved parts, the mesh fallback costs more than the vertex
-  work.** Parts that have to be bounded from STL are in context, so each one is
-  copied to a temp file, opened, updated, exported and closed: 12–17 s per part,
-  unchanged by warming. They are now reused from that file's identity (path, size,
-  mtime), which is why a second call on the same assembly costs 16 s instead of
-  94 s — and why the number is the same either way. If you only need
-  `complete: true`, `include_curved: false` is cheaper still and lists those
-  instances in `skipped` instead.
+* **The mesh fallback costs more than the vertex work when the assembly has curved
+  parts.** Parts bounded from STL are in context, so each one is copied to a temp
+  file, opened, updated, exported and closed: 12–17 s per part, unchanged by
+  warming, and independent of the mesh size. They are now reused from that file's
+  identity (path, size, mtime) — that saves one export per curved part (in the
+  drone assembly, 5 parts ≈ 74 s), which is why a second call there costs 16 s
+  instead of 94 s. In the 70-instance model only 2 of 28 parts are curved, so the
+  saving is ~10 s (4.6 %), not a step change. The cache applies only when the part
+  has no window of its own; a part opened as its own document is exported in place
+  every time. If you only need `complete: true`, `include_curved: false` is cheaper
+  still and lists those instances in `skipped` instead.
 
 Tools run on a single worker thread, so a long box blocks every other MCP call
-until it finishes. The reply states `elapsed_ms` (total) and `elapsed_ms` per part
-in `parts`, next to `cells_scanned`, so the cost is attributable instead of
-surprising. To bound one instance, pass `component=`; for a lower bound on curved
-faces instead of an exact box, `method='mesh'` is the cheaper route.
+until it finishes. The reply states `elapsed_ms` (total and per part, `parts[]`),
+`cells_scanned`, and `points_route` (`batched` / `batched_retried` / `per_point`
+for a vertex sweep, `mesh` for an STL extent), so the cost is attributable instead
+of surprising. To bound one instance, pass `component=` — with or without an
+assembly active: if the active document is a Part, the component is looked up in
+the open assembly that contains it, and the reply says so (`measured_in`).
 
 `catia_list_components` filters before reading any placement, and
 `names_only: true` skips them entirely (measured: 370 ms → 32 ms on a 5-instance

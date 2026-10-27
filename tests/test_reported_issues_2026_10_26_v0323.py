@@ -83,10 +83,12 @@ def test_three_failures_are_all_named():
         assert step in result["message"]
 
 
-def test_a_single_failure_keeps_the_plain_sentence():
-    """The count form would read like a summary of several when there is one."""
+def test_a_single_failure_uses_the_same_count_form():
+    """One grammar, not two: a script that parses this message should not have to
+    branch on how many steps failed (reported 2026-10-27 - 2-of-15 read as
+    "2 of 15 steps failed", 1-of-8 as "Step 6 (…) failed")."""
     result, _ = _plan_with({3: "nope"}, total=4, stop_on_error=False)
-    assert result["message"] == "Step 3 (catia_step3) failed"
+    assert result["message"] == "1 of 4 steps failed: step 3 (catia_step3)"
 
 
 def test_a_stopping_plan_names_the_step_that_stopped_it():

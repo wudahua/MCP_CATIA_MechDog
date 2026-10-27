@@ -2,6 +2,73 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Fixed — `component=` was accepted and ignored when a Part was active
+
+- `catia_get_bounding_box(component='P26B.1')` measured the ACTIVE PART and
+  returned its box: no error, no warning, not even the name in the reply. A loop
+  over instances produced N identical, plausible, wrong numbers — and the tool
+  already refuses `method='mesh'` in Product mode because "a wrong number that
+  looks plausible is worse than an error" (reported 2026-10-27).
+- `component=` now looks the name up in the open assemblies when the active
+  document is not one: one match is measured there and the reply says so
+  (`measured_in: "'ASM.CATProduct' - the active document is not an assembly, so
+  'X' was looked up in the open assembly that contains it"); two matches are named
+  and refused rather than guessed; no match is refused with the active document's
+  name and the two routes that work. Verified live: with a standalone part active,
+  `component='drone body I001'` returned the drone body's 227×132×227 box (not the
+  active part's 139.7×41.4×76.2) plus `measured_in`.
+
+### Fixed — `elapsed_ms` on the single-part replies too
+
+- The field existed only on assembly replies, so the route that costs 5.2 s for
+  535 cells said nothing about its cost and a batch script could not find its slow
+  part (reported 2026-10-27). All three part exits (named document, active part
+  vertices, active part mesh) now stamp it: `elapsed_ms: 165.4` on a small part.
+
+### Changed — `points_route` is present on every route
+
+- The default single-part call (`auto` → mesh) published neither `points_route`
+  nor any of the vertex counters, so "the batch worked" and "this build has no
+  such field" were again indistinguishable - on the path most calls take. The mesh
+  branches now report `points_route: "mesh"` with `mesh_vertices`, and every entry
+  of `parts[]` carries `points_route` (`batched` / `batched_retried` /
+  `per_point` for a vertex sweep, `mesh` for an STL extent).
+
+### Fixed — `run_plan`: one grammar for failures, and a skipped `expect` says so
+
+- A plan with ONE failed step reverted to "Step 6 (catia_fillet) failed" while a
+  plan with two used "2 of 15 steps failed: …", so a script parsing the message
+  had to handle both. One failure now reads "1 of 8 steps failed: step 6 (…)";
+  a stopping plan keeps "Step 2 (…) failed", where the steps after it never ran
+  (reported 2026-10-27).
+- When a step failed, `expect` was skipped and the reply carried
+  `measurements: {}` / `assertions: []` with nothing saying so — `assert
+  r["assertions"][0]["pass"]` then raised IndexError, and `if r["assertions"]`
+  read as "none were asked for". The reply now carries
+  `assertions_status: "skipped"` with the reason, and the message ends
+  "(assertions not evaluated: N step(s) ran, M failed)".
+
+### Fixed — `get_inertia(document='<assembly>.CATProduct')`
+
+- It reached for `.Part` on a Product and failed with "Active document 'X'
+  exposes no 'Part'. Open or create a Part document first." — about a document the
+  caller had just NAMED, with advice that is backwards for "measure the assembly"
+  (reported 2026-10-27). A Product document is now measured through the same
+  per-component path the no-argument call uses when the assembly is active.
+
+### Note — the cost calibration was too optimistic
+
+- The tool description said "about 15 ms per cell … a 500-cell part costs ~5 s".
+  Measured on two acceptance models the per-cell cost rises with the part: 17 ms
+  on a 24-cell plate, 41–49 ms on 220–246-cell parts, 93 ms on a 504-cell body
+  (47 s), 70 ms on a 1 207-cell part (84 s, 38.8 % of a 70-instance call). The
+  description and the README now give the range and the "cost concentrates in a
+  few parts" structure that `elapsed_ms` makes visible, and the mesh-cache claim is
+  scoped: it saves one export per curved part (≈10 s of a 204 s call when only 2
+  of 28 parts are curved), not "the second call is much cheaper" in general.
+
 ## [0.3.26] — 2026-10-27 · a saved file's box does not change
 
 ### Added — the reply says what the box cost, and the docs say it before you wait

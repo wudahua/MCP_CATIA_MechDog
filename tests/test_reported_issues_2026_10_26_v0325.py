@@ -270,10 +270,12 @@ def test_the_single_part_box_publishes_the_route_too():
     from catia_mcp.tools import measurement as M
 
     source = __import__("inspect").getsource(M.MeasurementTools._part_bbox)
-    assert source.count('"points_route"') == 1
+    # Both branches publish it: "vertices" says which reader ran, "mesh" says the
+    # coordinates came from an STL extent (0.3.27 - the key is never missing).
+    assert source.count('"points_route"') == 2
     assert '"cells_scanned"' in source
     active = __import__("inspect").getsource(M.MeasurementTools._get_bounding_box)
-    assert source.count('"points_route"') + active.count('"points_route"') == 2
+    assert '"points_route"' in active
 
 
 def test_every_call_says_what_it_cost():
