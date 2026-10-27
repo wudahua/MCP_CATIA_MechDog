@@ -76,8 +76,11 @@ def test_an_unknown_section_names_the_listings_that_help():
     from catia_mcp.tools.part_design import PartDesignTools
 
     source = inspect.getsource(PartDesignTools._section_reference)
-    assert "catia_list_sketches" in source
+    # 0.3.33: the message named catia_list_sketches, which this server does not
+    # have - the one remedy it offered did not exist (reported 2026-10-28).
+    assert "catia_list_features" in source
     assert "catia_gsd_list_elements" in source
+    assert "catia_list_sketches" not in source
 
 
 def test_a_failed_solid_loft_rolls_back_and_says_so():

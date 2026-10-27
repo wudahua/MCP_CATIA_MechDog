@@ -1173,8 +1173,7 @@ class PartDesignTools:
                     "List the faces of a body's final solid shape as indexed "
                     "names (Face.N) for catia_measure_distance, shell, draft, "
                     "thickness and face-driven drawing views. Defaults to the "
-                    "main body; pass body_name to enumerate another body "
-                    "(use the same body_name in catia_drawing_add_view)."
+                    "main body; pass body_name to enumerate another body."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -3918,8 +3917,9 @@ class PartDesignTools:
         if feature is None:
             raise RuntimeError(
                 f"No feature or sketch named '{target}' in any body of the active "
-                "part. Use catia_list_features to see feature names; sketches are "
-                "reported by catia_list_sketches."
+                "part. Use catia_list_features to see feature names; it lists the "
+                "sketches too, in 'sketches', each with the aliases a rebuild gave "
+                "it."
             )
         # Deleting a solid feature takes its support sketch with it (CATIA
         # cascades), and the old reply said nothing about it - the reporter lost
@@ -4204,24 +4204,35 @@ class PartDesignTools:
             kind = cleaned.split(".")[0].capitalize()
             index = int(cleaned.split(".")[1])
             return topology_reference(self.conn, body, kind, index).reference
-        for i in range(1, part.Bodies.Count + 1):
-            candidate = part.Bodies.Item(i)
-            try:
-                return part.CreateReferenceFromObject(candidate.Sketches.Item(cleaned))
-            except Exception:  # noqa: BLE001 - not this body
-                pass
-        for i in range(1, part.HybridBodies.Count + 1):
-            hb = part.HybridBodies.Item(i)
-            for collection in ("HybridShapes", "HybridSketches"):
+        # A rebuilt sketch is the same profile under a new name, so a section may
+        # name it by either - the same rule catia_pad and the sketcher follow
+        # (reported 2026-10-28: the resolver reached every tool except this one).
+        wanted = [cleaned]
+        alias = self._sketch_alias(cleaned)
+        if alias and alias != cleaned:
+            wanted.append(alias)
+        for target in wanted:
+            for i in range(1, part.Bodies.Count + 1):
+                candidate = part.Bodies.Item(i)
                 try:
-                    element = getattr(hb, collection).Item(cleaned)
-                except Exception:  # noqa: BLE001
-                    continue
-                return part.CreateReferenceFromObject(element)
+                    return part.CreateReferenceFromObject(
+                        candidate.Sketches.Item(target))
+                except Exception:  # noqa: BLE001 - not this body
+                    pass
+            for i in range(1, part.HybridBodies.Count + 1):
+                hb = part.HybridBodies.Item(i)
+                for collection in ("HybridShapes", "HybridSketches"):
+                    try:
+                        element = getattr(hb, collection).Item(target)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    return part.CreateReferenceFromObject(element)
         raise RuntimeError(
             f"No sketch or geometrical element named '{name}' to use as a loft "
-            "section. catia_list_sketches and catia_gsd_list_elements both report "
-            "the names this accepts."
+            "section. catia_list_features (its 'sketches' array) and "
+            "catia_gsd_list_elements both report the names this accepts."
+            + (f" '{cleaned}' was re-created as '{alias}', which is not in the "
+               "tree either." if alias and alias != cleaned else "")
         )
 
     def _delete_body(self, name: str, force: bool = False) -> str:

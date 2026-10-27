@@ -2,6 +2,73 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.33] — 2026-10-28 · the remedies in the errors point at tools that exist
+
+### Fixed — three error messages offered `catia_list_sketches`, which is not a tool
+
+- This server serves 101 tools and `catia_list_sketches` is not one of them, yet
+  three messages sent the caller there: `gsd.py` ("Run catia_list_sketches and use
+  the name it reports"), and two in `part_design.py` (the delete-feature failure and
+  the unknown loft section). The caller - an agent, most likely - followed the only
+  remedy offered and got "unknown tool", in exactly the situation 0.3.31 had
+  created: a sketch deleted by a rollback and rebuilt under a new name (reported
+  2026-10-28).
+- All three now name `catia_list_features`, whose `sketches[]` carries the rebuilt
+  name and its aliases, and say which array to read.
+- **There is a guard now**, because this class of defect is invisible to reading and
+  to every earlier test: `tests/test_reported_issues_2026_10_28_v0333.py` scans every
+  string constant in `catia_mcp/**/*.py` for `catia_*` and fails unless the name is
+  a served tool (or a known structural name: the package, the VBScript entry points
+  the sweep injects, the `catia_gsd_` / `catia_bbox_` prefix templates). Its first
+  run found a fourth phantom nobody had reported: `catia_list_faces`' description
+  told the caller to "use the same body_name in catia_drawing_add_view" - a tool this
+  lite fork dropped. That sentence is gone.
+
+### Fixed — GSD did not resolve a rebuilt sketch's old name
+
+- `catia_gsd_spline(element='草图.2')` searched the tree verbatim
+  (`hb.HybridSketches.Item(name)`, `bodies.Item(i).Sketches.Item(name)`), and
+  `_sketch_exists` compared names literally, so after a rollback rebuilt 草图.2 as
+  草图.4 it answered "No outline recorded for sketch '草图.2'" and then suggested
+  three things that were all wrong: the sketch was in the tree, the record existed
+  (under the new name), and nothing needed redrawing - one alias lookup was missing
+  (reported 2026-10-28). This contradicted 0.3.32's own release note, which said
+  every read path goes through the resolver.
+- `_find_element`, `_sketch_exists` and `_outline_points` all resolve through
+  `conn.sketch_alias` now. The outline record is looked up under both the old and
+  the rebuilt name (a rebuild keeps the old record and copies it to the new key), and
+  the success note says which name was used: "Corners taken from sketch '草图.2'
+  (rebuilt as '草图.3')".
+- Measured on B30 2026-10-28: `gsd_spline(element='草图.2')` → 4 points, spline
+  created; then `pad` failed and rebuilt 草图.3; the **same call** then produced
+  样条线.2 from "草图.2 (rebuilt as 草图.3)" instead of the "No outline recorded"
+  error. `catia_sketch_get_geometry('草图.2')` answered `by alias '草图.3'` in the
+  same state.
+- The "no outline" message now also names the rebuild when there is one ("'草图.2'
+  was re-created as '草图.3' after a rollback; no outline was recorded for either
+  name"), instead of implying the caller never drew it.
+
+- The guard found a second path while it was being written: `_section_reference`
+  (a loft section) also looked names up verbatim. A rebuilt sketch is the same
+  profile under a new name, so a section may now name it by either; the failure
+  message names the rebuild when there is one.
+
+### Verified
+
+- 613 tests pass (`pytest tests -q`), 11 of them new - including the tool-name guard,
+  which is the part that keeps this from coming back.
+- On B30 2026-10-28, through the tool layer (`catia_probe/probe_v0333a`): the
+  before/after of `gsd_spline(element='草图.2')` around a rollback, the alias read,
+  the listing with aliases, and the error path with no phantom name.
+
+### Not fixed
+
+- **The guard reads string constants, not message templates.** A name assembled at
+  runtime (`f"catia_{verb}_sketch"`) would slip through; none exists today (the only
+  f-string prefixes are `catia_gsd_` / `catia_bbox_`, both allowlisted explicitly).
+- **The loft-section path is covered by a unit test only** - the real-machine run
+  exercised `gsd_spline(element=… )`, not `catia_loft` with a rebuilt section.
+
 ## [0.3.32] — 2026-10-28 · one meaning for a sketch name, and the cost no part owns
 
 ### Fixed — a rebuilt sketch's old name was only understood by Part Design

@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.32** · [what changed](CHANGELOG.md) ·
+**0.3.33** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -252,6 +252,14 @@ catia_pad {sketch_name: "草图.99"}
 The rebuild's own reply also repeats what the sketch held (`It held: rectangle
 (-10, -5) .. (10, 5) on plane 'xy' at offset 0`), so the profile is visible even to
 a caller that never asks again.
+
+Every tool that takes a sketch name resolves it that way — Part Design, the
+sketcher's read/edit calls, GSD's `element=` (measured: `catia_gsd_spline
+{element: "草图.2"}` answered "No outline recorded" before 0.3.33 and returns the
+4 corners as "草图.2 (rebuilt as 草图.3)" after) and a loft section. And the error
+messages are checked against the tool list: every `catia_*` name in a message has
+to be a tool this server actually serves, because three of them used to send the
+caller to `catia_list_sketches`, which does not exist.
 
 
 ### A pad that adds nothing tries the other side

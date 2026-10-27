@@ -858,19 +858,16 @@ class GSDTools:
         if key in PLANE_MAP:
             return getattr(part.OriginElements, PLANE_MAP[key])
 
-        for hb in self._iter_geosets(part.HybridBodies):
-            for collection in ("HybridShapes", "HybridSketches"):
-                try:
-                    return getattr(hb, collection).Item(name)
-                except Exception:
-                    pass
-
-        bodies = part.Bodies
-        for i in range(1, bodies.Count + 1):
-            try:
-                return bodies.Item(i).Sketches.Item(name)
-            except Exception:
-                pass
+        # A sketch rebuilt after a rollback answers to the name the caller used
+        # before it, in the Part Design tools and in the sketcher. GSD searched
+        # the tree verbatim, so an element that `catia_pad` could resolve was
+        # "not found" here (reported 2026-10-28).
+        alias = self._sketch_alias(name)
+        candidates = [name] if not alias or alias == name else [name, alias]
+        for candidate in candidates:
+            found = self._lookup_element(part, candidate)
+            if found is not None:
+                return found
 
         # Not found. A bare "not found" was a lie often enough (a 2026-10-23
         # report: after three new_part/close_document rounds in one session,
@@ -894,9 +891,34 @@ class GSDTools:
                 f"{', '.join(elsewhere)}. Bring that document to the front with "
                 "catia_activate_document and retry. "
             ) + message
+        elif alias:
+            message += (f" '{name}' was re-created as '{alias}' after a rollback, "
+                        f"and '{alias}' is not in the tree either.")
         else:
             message += " Use catia_gsd_list_elements to see available names."
         raise RuntimeError(message)
+
+    def _lookup_element(self, part: Any, name: str) -> Any | None:
+        """One pass over the tree for that exact name, or None."""
+        for hb in self._iter_geosets(part.HybridBodies):
+            for collection in ("HybridShapes", "HybridSketches"):
+                try:
+                    return getattr(hb, collection).Item(name)
+                except Exception:  # noqa: BLE001 - the next collection may have it
+                    pass
+
+        bodies = part.Bodies
+        for i in range(1, bodies.Count + 1):
+            try:
+                return bodies.Item(i).Sketches.Item(name)
+            except Exception:  # noqa: BLE001 - keep looking
+                pass
+        return None
+
+    def _sketch_alias(self, name: str) -> str | None:
+        """What this sketch name was rebuilt as, from the connection's table."""
+        resolve = getattr(self.conn, "sketch_alias", None)
+        return resolve(name) if resolve is not None else None
 
     def _element_names(self, part: Any) -> list[str]:
         """Every name the resolver can see in this part, for error messages."""
@@ -1227,8 +1249,14 @@ class GSDTools:
             document = str(self.conn.active_document.Name)
         except Exception:  # noqa: BLE001 - no document, no record either
             document = "?"
-        key = f"{document}::{name}"
-        recorded = outlines.get(key)
+        # A rebuild records the outline under the NEW name and keeps the old
+        # record, so both keys can hit; the alias covers the case where only the
+        # new one does (reported 2026-10-28: gsd_spline(element='草图.2') said
+        # "No outline recorded" while pad and get_geometry both resolved it).
+        alias = self._sketch_alias(name)
+        recorded = outlines.get(f"{document}::{name}")
+        if not recorded and alias and alias != name:
+            recorded = outlines.get(f"{document}::{alias}")
         if not recorded:
             raise RuntimeError(
                 f"No outline recorded for sketch '{name}' in '{document}'. This "
@@ -1239,13 +1267,18 @@ class GSDTools:
                 "(Falling back to the sketch's own geometry is not possible: a "
                 "CATIA Point2D exposes no readable X/Y through automation, which "
                 "is why the numbers are remembered at drawing time.)"
+                + (f" ('{name}' was re-created as '{alias}' after a rollback; no "
+                   "outline was recorded for either name.)" if alias else "")
             )
         if not self._sketch_exists(name):
             raise RuntimeError(
                 f"Sketch '{name}' is not in '{document}', although this session "
                 "drew an outline under that name - the sketch was renamed or "
-                "deleted. Run catia_list_sketches and use the name it reports, or "
-                "pass 'points'."
+                "deleted. Run catia_list_features and read its 'sketches' array "
+                "(each entry lists the aliases a rebuild gave it), or pass "
+                "'points'."
+                + (f" '{name}' was re-created as '{alias}', which is not in the "
+                   "tree either." if alias and alias != name else "")
             )
         placement = recorded.get("placement")
         if not placement:
@@ -1264,7 +1297,9 @@ class GSDTools:
                 "least 2."
             )
         coords = [self._to_global(placement, u, v) for u, v in loop]
-        return coords, (f" Corners taken from sketch '{name}' in "
+        label = (f"'{name}'" if not alias or alias == name
+                 else f"'{name}' (rebuilt as '{alias}')")
+        return coords, (f" Corners taken from sketch {label} in "
                         f"{placement['base']} plane order, z={placement['distance']:g}.")
 
     def _sketch_exists(self, name: str) -> bool:
@@ -1273,12 +1308,21 @@ class GSDTools:
         Cheap guard against a record outliving its sketch: the outline is keyed
         by document and name, and CATIA renumbers sketches when one is deleted,
         so a hit in memory is not proof that the sketch is still there.
+
+        A rebuilt sketch is in the tree under a new name with the old one aliased
+        to it, so "by that name" has to mean the same thing here as it means in
+        `catia_pad` - otherwise this guard turned a live sketch into
+        "the sketch was renamed or deleted" (reported 2026-10-28).
         """
+        wanted = {name}
+        alias = self._sketch_alias(name)
+        if alias:
+            wanted.add(alias)
         try:
             body = self.conn.get_active_part_body()
             sketches = body.Sketches
             for i in range(1, sketches.Count + 1):
-                if str(sketches.Item(i).Name) == name:
+                if str(sketches.Item(i).Name) in wanted:
                     return True
         except Exception:  # noqa: BLE001 - cannot check, do not block the call
             return True
