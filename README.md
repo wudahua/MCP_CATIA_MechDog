@@ -287,10 +287,23 @@ Three things dominate, and none of them is "one fixed cost per part":
   identity (path, size, mtime) — that saves one export per curved part (in the
   drone assembly, 5 parts ≈ 74 s), which is why a second call there costs 16 s
   instead of 94 s. In the 70-instance model only 2 of 28 parts are curved, so the
-  saving is ~10 s (4.6 %), not a step change. The cache applies only when the part
-  has no window of its own; a part opened as its own document is exported in place
-  every time. If you only need `complete: true`, `include_curved: false` is cheaper
-  still and lists those instances in `skipped` instead.
+  saving is ~10 s (4.6 %), not a step change. The cache belongs to the copy route,
+  and the copy route is what runs when the part has no window of its own — the test
+  is whether activating it changes `ActiveDocument`. A part that does change it is
+  exported in place and never cached, because its loaded state may hold unsaved
+  edits that no file identity can describe; `catia_open_document` cannot put an
+  already-loaded component into that state (it activates it instead). If you only
+  need `complete: true`, `include_curved: false` is cheaper still and lists those
+  instances in `skipped` instead.
+* **The two tiers are not explained yet.** On the 70-instance model every part sat
+  at either 17–31 ms/cell or 66–92 ms/cell — and the three in the slow tier are
+  exactly the three biggest contributors. Cell count cannot be the reason: `P27`
+  (246 cells) and `P07` (239 cells) differ by 2.18×, and `P31`/`P30` (both 12
+  cells, same call, adjacent) by 1.89×. `nls_chars` in `parts` is the number that
+  tests the remaining explanation (path length), so the comparison takes one run.
+* **Do not use a small part's ~400 ms as a regression baseline.** In that model
+  twelve-cell parts sat at 398–424 ms, but `P30` was 776 ms, `P20` 732 ms and `P24`
+  635 ms — per-part jitter of +20 % to +90 % on a field that reads like a constant.
 
 Tools run on a single worker thread, so a long box blocks every other MCP call
 until it finishes. The reply states `elapsed_ms` (total and per part, `parts[]`),
