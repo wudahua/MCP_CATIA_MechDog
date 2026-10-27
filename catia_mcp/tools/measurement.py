@@ -100,6 +100,59 @@ _M3_TO_MM3 = 1e9
 # still only 4.8 MB per part as a flat list of floats.
 _MESH_CLOUD_LIMIT = 200_000
 
+# Mesh boxes measured from the SAVED file, keyed by that file's identity. The copy
+# route (the only one used for an in-context part) reads the file, so an unchanged
+# file gives the same box - and the route costs 12-17 s per part on B30 (measured
+# 2026-10-26). Only this route is cached: an in-place export may include unsaved
+# edits, which no file identity can describe.
+_MESH_CACHE: dict[tuple[str, int, int], dict[str, Any]] = {}
+_MESH_CACHE_LIMIT = 48
+# A cloud bigger than this is not kept (it would be 1.2 MB+ each); the extent still
+# is, so an extent-only caller keeps hitting the cache.
+_MESH_CACHE_CLOUD_LIMIT = 50_000
+
+
+def _file_identity(path: str) -> tuple[str, int, int] | None:
+    """``(path, size, mtime_ns)`` - what makes a saved file's box reproducible."""
+    try:
+        stat = os.stat(path)
+    except OSError:  # deleted, moved, or unreadable: do not cache
+        return None
+    return (os.path.normcase(os.path.abspath(path)), stat.st_size, stat.st_mtime_ns)
+
+
+def _mesh_cache_get(identity: tuple[str, int, int], want_cloud: bool
+                    ) -> tuple[list[float], list[float], list[float] | None,
+                               int] | None:
+    entry = _MESH_CACHE.get(identity)
+    if entry is None:
+        return None
+    if not want_cloud:
+        return list(entry["lo"]), list(entry["hi"]), None, entry["seen"]
+    cloud = entry.get("cloud")
+    if cloud is None:
+        # The stored entry has no cloud (it was too big to keep). Do NOT fake one
+        # from the two corners: that is the diagonal bug of 0.3.23.
+        return None
+    return list(entry["lo"]), list(entry["hi"]), cloud, entry["seen"]
+
+
+def _mesh_cache_put(identity: tuple[str, int, int],
+                    result: tuple[list[float], list[float], list[float] | None, int],
+                    want_cloud: bool) -> None:
+    lo, hi, cloud, seen = result
+    entry = _MESH_CACHE.get(identity)
+    if entry is None:
+        if len(_MESH_CACHE) >= _MESH_CACHE_LIMIT:
+            _MESH_CACHE.pop(next(iter(_MESH_CACHE)))
+        entry = _MESH_CACHE[identity] = {"lo": list(lo), "hi": list(hi),
+                                         "seen": seen, "cloud": None}
+    else:
+        entry["lo"], entry["hi"], entry["seen"] = list(lo), list(hi), seen
+    if want_cloud and cloud is not None and len(cloud) // 3 == seen \
+            and seen <= _MESH_CACHE_CLOUD_LIMIT:
+        entry["cloud"] = cloud
+
 
 def _sig(value: float, digits: int = 6) -> float:
     """Round to significant digits, not decimal places.
@@ -271,6 +324,9 @@ class MeasurementTools:
         # Set when a measurement had to open a component's part to reach it, so
         # the reply can say the session gained a document.
         self.opened_for_measurement: str | None = None
+        # "hit" / "miss" for the last mesh export, so the reply can state whether
+        # the box was read from the file this time or reused from an earlier call.
+        self._mesh_last_cache: str | None = None
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         return [
@@ -380,7 +436,10 @@ class MeasurementTools:
                     "'cells_scanned' and 'elapsed_ms' (total, and per part in "
                     "'parts') report what it actually cost. Measure the instances you "
                     "need with 'component' rather than the whole assembly when you "
-                    "can."
+                    "can. A curved part's mesh box comes from its SAVED file and is "
+                    "reused while that file's size and modified time are unchanged "
+                    "(its source_note says 'reused'), so the second call on one "
+                    "assembly is much cheaper than the first."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1898,13 +1957,19 @@ class MeasurementTools:
             # 6 clicks). Detect the state first and never attempt the in-place
             # export there.
             lo, hi, cloud, seen = self._mesh_from_copy(doc, path, limit)
+            cached = (self._mesh_last_cache == "hit")
             return lo, hi, cloud, seen, (
                 "; measured from a temporary copy of the saved file, because the "
                 "part is loaded inside the assembly and CATIA refuses to export a "
-                "part edited in context - unsaved edits are not included")
+                "part edited in context - unsaved edits are not included"
+                + (" (reused: the same file was already measured in this session and "
+                   "its size and modified time have not changed)" if cached else ""))
         except Exception as exc:  # noqa: BLE001
+            # `part.Name` is not guaranteed (a Part from PartDocument has one, but
+            # the error path must not raise a second error while formatting).
+            label = getattr(doc, "Name", None) or getattr(part, "Name", "<part>")
             raise RuntimeError(
-                f"STL export failed for '{getattr(doc, 'Name', part.Name)}', so its "
+                f"STL export failed for '{label}', so its "
                 "mesh bounding box cannot be measured. This is what CATIA does when "
                 "the part is loaded inside an open assembly and has no window of its "
                 "own (it refuses to save as stl while editing in context), and the "
@@ -2036,6 +2101,14 @@ class MeasurementTools:
         part and the in-context restriction does not apply. Its cost is stated in
         the reply: it reads the SAVED file, so a part edited since its last save
         is measured as it was on disk.
+
+        Because it reads the saved FILE, the answer is a function of that file -
+        so it is cached under the file's identity (path, size, mtime) and an
+        unchanged file is not copied, opened, updated, exported and closed again.
+        That lifecycle is what an in-context part costs: measured on B30
+        2026-10-26, 12-17 s per curved part, and 5 of them were 74.2 s of a 94.4 s
+        assembly box. Only this route is cached - an in-place export may include
+        unsaved edits, which no file identity can describe.
         """
         import shutil
 
@@ -2052,6 +2125,13 @@ class MeasurementTools:
                 "file to copy and it cannot be exported while editing in context; "
                 "save it first (catia_save_document)"
             )
+        identity = _file_identity(full)
+        if identity is not None:
+            hit = _mesh_cache_get(identity, want_cloud=limit is not None)
+            if hit is not None:
+                self._mesh_last_cache = "hit"
+                return hit
+        self._mesh_last_cache = "miss"
         folder = os.path.dirname(path)
         stem = os.path.splitext(os.path.basename(full))[0]
         copy_path = os.path.join(folder, f"{stem}__bbox_copy.CATPart")
@@ -2067,12 +2147,15 @@ class MeasurementTools:
             if size < 128:
                 raise RuntimeError(
                     f"the copy opened as its own document still exported {size} bytes")
-            return _stl_scan(path, limit)
+            result = _stl_scan(path, limit)
         finally:
             try:
                 opened.Close()
             except Exception:  # noqa: BLE001
                 pass
+        if identity is not None:
+            _mesh_cache_put(identity, result, want_cloud=limit is not None)
+        return result
 
     @staticmethod
     def _bbox_json(points: list[list[float]], method_note: str,

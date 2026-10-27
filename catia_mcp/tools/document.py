@@ -88,7 +88,13 @@ class DocumentTools:
             },
             {
                 "name": "catia_open_document",
-                "description": "Open an existing CATIA document from a file path (.CATPart, .CATProduct, .CATDrawing).",
+                "description": (
+                    "Open an existing CATIA document from a file path (.CATPart, "
+                    ".CATProduct, .CATDrawing). A document that is already open is "
+                    "ACTIVATED instead of opened again: CATIA would ask whether to "
+                    "reload it, and a reload discards unsaved edits. Opening a "
+                    "product brings its components in without windows of their own."
+                ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -413,6 +419,19 @@ class DocumentTools:
     def _open_document(self, file_path: str) -> str:
         self.conn.ensure_connected()
         docs = self.conn.documents
+        # Opening a file CATIA already holds raises "the document is already open,
+        # reopen?" - a modal on the automation thread, and its Yes answer RELOADS
+        # the document, discarding unsaved edits. Answering it is not our call, so
+        # do not ask: activate the open document instead (measured 2026-10-26: a
+        # call on an open assembly sat there until the caller was killed).
+        existing = self._document_at_path(file_path)
+        if existing is not None:
+            existing.Activate()
+            self.conn.last_sketch = None
+            self.conn.active_body = None
+            return (f"Document '{existing.Name}' is already open - activated it "
+                    "instead of opening it again (CATIA would ask whether to reload "
+                    "it, and a reload discards unsaved edits).")
         # CATIA's Documents.Open rejects forward-slash paths (E_FAIL);
         # normalize to native Windows separators first.
         doc = docs.Open(os.path.normpath(file_path))

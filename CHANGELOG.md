@@ -2,6 +2,38 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Changed — a mesh box measured from a saved file is reused
+
+- The copy route reads the SAVED file (it has to: CATIA refuses to export a part
+  that is edited in context), so its answer is a function of that file. It is now
+  cached under the file's identity - path, size, modified time to the nanosecond -
+  and an unchanged file is not copied, opened, updated, exported and closed again.
+  That lifecycle was the whole cost: 12-17 s per curved part on B30.
+  Measured on the 24-instance drone assembly (5 curved parts): **129.5 s for the
+  first call, 15.96 s for the second (8.1x)**, with `dims`, `min` and `max`
+  bit-identical. Per part, the curved ones went 11.9-16.9 s -> 44-564 ms.
+- Only the copy route is cached. An in-place export may include unsaved edits, and
+  no file identity describes those, so that path is measured every time.
+- The reply says which happened: a reused box carries "reused: the same file was
+  already measured in this session and its size and modified time have not
+  changed" in its `source_note`.
+- Bounded and conservative: 48 entries, vertex clouds kept only up to 50 000
+  points, and a truncated cloud is never stored. A cached entry that has no cloud
+  cannot answer a world-box request - falling back to its two corners would be the
+  diagonal bug of 0.3.23, so that request goes back to the file instead.
+
+### Fixed — `open_document` on a file CATIA already holds
+
+- `catia_open_document` called `Documents.Open` unconditionally. For a file that is
+  already open CATIA raises "the document is already open, reopen?" - a modal on
+  the automation thread, and its **Yes reloads the document, discarding unsaved
+  edits**. Nobody answers a dialog raised there, so the call never returns
+  (measured 2026-10-26: a probe sat on it until it was killed at 300 s). It now
+  finds the open document by path (the helper `save_document` already used),
+  activates it, and says so instead of asking the question.
+
 ## [0.3.25] — 2026-10-26 · a part is not an assembly
 
 ### Fixed — "Open assemblies" listed .CATPart files as assemblies
