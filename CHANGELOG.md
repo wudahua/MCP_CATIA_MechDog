@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [0.3.27] — 2026-10-27 · a component that was not looked for, and a cost that was not reported
 
 ### Fixed — `component=` was accepted and ignored when a Part was active
 
