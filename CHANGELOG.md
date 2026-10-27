@@ -2,6 +2,102 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Fixed — a sub-assembly was a partial sum wearing the assembly's name
+
+- `get_inertia` on an assembly that holds a SUB-ASSEMBLY summed the components it
+  could read and returned that as `volume_mm3` / `center_of_gravity_mm`: a
+  two-level model holding 60 000 + 60 000 mm3 answered `60000.0` with the centroid
+  at the wrong end, no `complete`, no count of what was left out, and a `note`
+  that described the aggregation as if it were the whole. The same assembly's
+  `get_bounding_box` said `complete: false`, so the two aggregators disagreed
+  about what "complete" means (reported 2026-10-27).
+- Root cause: `_components_doc` reached for `part_of(child.ReferenceProduct.Parent)`
+  and a sub-assembly's parent is a ProductDocument. Fifth time this project read a
+  Product as a Part (0.3.15 `add_component`, 0.3.20 `run_plan`, 0.3.25
+  `list_components`, 0.3.27 top level) - this one was one level DOWN.
+- The recursion composes the two placements and reports each leaf with a path, so
+  `components` now adds up to the totals. Verified live on B30: a 100x60x10 plate
+  (60 000 mm3, COG in its centre) plus the same plate inside a sub-assembly moved
+  to x=100 returns `120000.0` and `center_of_gravity_mm.x = 50.0`
+  (`assembly_depth_max: 2`, `instances: {2, 2, 0}`, paths `Part1.1` and
+  `Product1.1/Part1.1`), identical through `document=` and through the no-argument
+  route.
+- `skipped[].error` for that case no longer says "part not loaded" - which sent the
+  caller to `catia_open_document`, where opening the file changes nothing, because
+  the component really is an assembly. It says "sub-assembly, not a part", names
+  the two routes that work, and carries `kind`.
+
+### Fixed — the totals now say whether they are the whole assembly
+
+- `complete`, `instances: {total, measured, skipped}`, `incomplete_because` and
+  `assembly_depth_max` on the inertia reply, the same vocabulary the bounding box
+  uses. When anything is missing, `incomplete_because` says the number is a
+  PARTIAL sum and names the alternatives; a 0 total is still `null` rather than 0.
+- Surface area is aggregated too (`area_mm2` / `area_cm2`): it is additive for
+  disjoint solids and it was missing from the assembly route entirely, although the
+  tool description listed it as an output. Per component: `area_mm2` on each entry.
+- One part is measured once, not once per instance: volume / area / COG are
+  properties of the PART, so 70 instances of 28 parts pay 28 reads.
+
+### Fixed — `get_inertia` published a different key set per call shape
+
+- `volume_cm3`, `area_cm2`, `mass_g`, `density_kg_m3` and `mass_note` existed only
+  on the active-part route; `document='<part>.CATPart'` returned the same numbers
+  without them, so `r["area_cm2"]` worked in one call shape and raised KeyError in
+  the other (reported 2026-10-27). Both routes now read through one function
+  (`_measured_quantities`) and publish one key table.
+- A quantity that cannot be read is `null` with `volume_error` / `area_error` /
+  `center_of_gravity_error` beside it - never absent, and no longer the string
+  `"unavailable: …"` in a field a caller compares as a number.
+
+### Fixed — `catia_diagnose` now reports the session state messages point at
+
+- Every `execute`-stage failure ends with "catia_diagnose reports both" and a
+  `Session state:` line - while `catia_diagnose` returned six keys, none of them
+  document, in_work_object, body or selection (reported 2026-10-27). It has a
+  `session` block now: document, document kind, part, in_work_object, body, shape
+  count, selection size, geometrical-set count, a one-line `line` form, and a
+  `note` wherever a reading has no meaning (no document, or no Part open).
+- Both presentations read the same function (`connection.session_snapshot`), so the
+  line in an error message and the block in a diagnosis cannot drift apart.
+
+### Changed — the mesh-cache claim states the condition it depends on
+
+- "a part opened as its own document is exported in place every time" was not
+  reproducible: an acceptance run opened a component, activated the assembly, then
+  measured it and still got `(reused: …)` in 551 ms (reported 2026-10-27). The
+  cause is that opening an ALREADY-LOADED component does not give it a window -
+  `catia_open_document` activates it instead (0.3.26) - so the copy route, and its
+  cache, still runs.
+- The description now states the test the code actually makes (does `Activate()`
+  change `ActiveDocument`), says that a part which does change it is exported in
+  place and never cached, and says that `catia_open_document` cannot put a loaded
+  component into that state. Same claim, one that can be checked.
+
+### Added — `nls_chars`: what the construction filter actually costs
+
+- `parts[]` and the single-part reply publish the total length of the NLS paths the
+  construction filter read (one path per cell, free to collect - the string is
+  already in hand). Two parts with 239 and 246 cells cost 66.4 and 30.5 ms per
+  cell, so cell count does not explain the spread; path length is the candidate
+  that does, and now the comparison needs no extra run (reported 2026-10-27, §3.4).
+  The single-part route caps its sweep at 200 cells, so there it also publishes
+  `nls_chars_cells` when the number is a sample.
+
+### Note — two things this version does NOT do
+
+- `get_bounding_box` still does not recurse into sub-assemblies. It keeps saying
+  `complete: false` with `kind: "sub-assembly"` in `skipped` (honest, and unchanged
+  behaviour), but the branch is still missing; `get_inertia` now does recurse, so
+  the two aggregators differ in capability, not in honesty.
+- P05 / P01 / P07 were not profiled here: the acceptance model they come from
+  (`E:\WB_CATIA_M113\parts\`) is not on this machine. What was added instead is the
+  number the comparison needs (`nls_chars`), and the fact that the three parts
+  cost 66-92 ms per cell against 17-31 for the rest of the same batch is recorded
+  in the README rather than explained away.
+
 ## [0.3.27] — 2026-10-27 · a component that was not looked for, and a cost that was not reported
 
 ### Fixed — `component=` was accepted and ignored when a Part was active

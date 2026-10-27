@@ -29,8 +29,12 @@ by `tests/test_readme_tool_counts.py`, so it cannot drift from the code again.
   sketch, `catia_sketch_delete_element` removes one wrong element, and the part
   rebuilds. A wrong profile is no longer a full rebuild.
 * **Assemblies are measurable.** `catia_get_inertia` on a Product aggregates the
-  components' volumes and world centroids (verified to 0.009 mm on a 9-part
-  assembly); `catia_get_bounding_box` reports per-component world boxes.
+  components' volumes, areas and world centroids (verified to 0.009 mm on a
+  9-part assembly) and **expands sub-assemblies** — their leaves are reported with
+  a path (`ASM/PART.1`) and their placement composed, so `components` adds up to
+  the totals. The totals carry `complete`, `instances` and, when anything was left
+  out, `incomplete_because`: a partial sum says so instead of wearing the
+  assembly's name. `catia_get_bounding_box` reports per-component world boxes.
 * **Out of range is `UNVERIFIED:`, not a success.** When a measurement cannot be
   made the reply says which one failed and why.
 
@@ -221,10 +225,14 @@ your calls. Everything that can name its target should:
 The world box is arithmetic on each component's placement, so it never needed the
 assembly to be active. Each PART is bounded once and only the placement repeated —
 70 instances of 28 parts is 28 boxes, not 70. The cost counters (`vertices_used`,
-`cells_scanned`, `points_route`) are per PART and are published once in `parts`,
-not on every instance entry; `cells_scanned` counts CATIA topology cells before
-construction geometry was filtered, and the per-part time is dominated by that
-filter, not by the vertices. `component='P24.1'` reads one placement, not seventy.
+`cells_scanned`, `nls_chars`, `points_route`) are per PART and are published once
+in `parts`, not on every instance entry; `cells_scanned` counts CATIA topology
+cells before construction geometry was filtered, and the per-part time is dominated
+by that filter, not by the vertices. `nls_chars` is the total length of the NLS
+paths that filter read (one per cell): two parts with 239 and 246 cells were
+measured at 66.4 and 30.5 ms per cell, so cell count is not the driver — path
+length is the candidate that fits, and publishing it makes the comparison free.
+`component='P24.1'` reads one placement, not seventy.
 
 A part with no vertex at any extremum (a fully curved part) cannot be bounded by a
 vertex sweep. It is bounded from its STL mesh instead — `include_curved: false`
@@ -488,11 +496,16 @@ is a modal dialog, and reads as a bare `[WinError 2]`). Place the result with
 
 * No lump-count check (upstream has none either) — the only reliable detector for
   an isolated floating boss.
-* Assembly **inertia tensors** are not aggregated (volumes and centroids are); a
-  tensor would have to be rotated into world space per component. The tensor is
-  also only computed for the ACTIVE document, and with the part's material density
-  - `get_inertia(density=...)` does not change it, which is why the reply reports
-  both masses.
+* Assembly **inertia tensors** are not aggregated (volumes, areas and centroids
+  are); a tensor would have to be rotated into world space per component. The
+  tensor is also only computed for the ACTIVE document, and with the part's
+  material density - `get_inertia(density=...)` does not change it, which is why
+  the reply reports both masses.
+* `catia_get_inertia` expands sub-assemblies; `catia_get_bounding_box` does
+  **not** yet. A box over an assembly that holds a sub-assembly lists it in
+  `skipped` with `kind: "sub-assembly"` and says so with `complete: false` — it
+  never claims to be the whole envelope, but the missing branch is still missing
+  (measure the sub-assembly by name for its own world box).
 * A part that CATIA is editing **in context** (loaded inside an assembly, no window
   of its own) cannot be exported to STL. The mesh box falls back to a copy of the
   saved file, so it measures the file, not unsaved edits; the reply says when that

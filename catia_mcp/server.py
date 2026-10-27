@@ -156,35 +156,18 @@ class CATIAMCPServer:
         reference that had been invalidated by clearing the selection, and a
         body whose last feature had not been rebuilt yet. None of them produced
         a message that pointed at the state.
+
+        The readings live in ``connection.session_snapshot`` so that
+        ``catia_diagnose`` publishes the SAME state this line quotes - the
+        message used to say "catia_diagnose reports both" while diagnose
+        reported neither (reported 2026-10-27).
         """
-        bits: list[str] = []
+        from catia_mcp.connection import session_line
+
         try:
-            doc = self.connection.app.ActiveDocument
-            bits.append("document=%s" % doc.Name)
-        except Exception:
-            bits.append("document=<none>")
-        try:
-            part = self.connection.get_active_part()
-        except Exception:
-            return " | ".join(bits) + " | no part document"
-        try:
-            bits.append("in_work_object=%s" % part.InWorkObject.Name)
-        except Exception:
-            bits.append("in_work_object=<unknown>")
-        try:
-            body = self.connection.get_active_part_body()
-            bits.append("body=%s(shape_count=%d)" % (body.Name, body.Shapes.Count))
-        except Exception:
-            bits.append("body=<none>")
-        try:
-            bits.append("selected=%d" % self.connection.hso.Count)
-        except Exception:
-            pass
-        try:
-            bits.append("geometrical_sets=%d" % part.HybridBodies.Count)
-        except Exception:
-            pass
-        return " | ".join(bits)
+            return session_line(self.connection)
+        except Exception:  # noqa: BLE001 - a message must never fail here
+            return "document=<unknown>"
 
     def _execute_tool(self, name: str, arguments: dict[str, Any]) -> CallToolResult:
         module = self._tool_router.get(name)
@@ -227,7 +210,9 @@ class CATIAMCPServer:
                     "reading that as a bad sketch, bad edge or bad argument, check the state "
                     "above: a Part Design factory called while in_work_object is a geometrical "
                     "set fails exactly this way, and so does a topology reference whose "
-                    "selection has been cleared. catia_diagnose reports both."
+                    "selection has been cleared. catia_diagnose reports the same state in its "
+                    "'session' block, with the reasons next to the readings that could not be "
+                    "taken."
                 )
             return failure(code, message, stage, False if stage == "connect" else None, name,
                            rolled_back=getattr(error, "rolled_back", None))

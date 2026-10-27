@@ -93,6 +93,18 @@ _M_TO_MM = 1000.0
 _M2_TO_MM2 = 1e6
 _M3_TO_MM3 = 1e9
 
+# Said once, in both part routes, whenever a mass was computed from a density the
+# caller passed: the number is density x volume, and it is NOT the tensor's mass
+# when the part carries a material. Measured 2026-10-24 on an 8000 mm3 block.
+_MASS_NOTE = (
+    "mass_kg = the density you passed x volume; mass_from_material_kg = the mass "
+    "CATIA gets from the part's own material, and that is also the density the "
+    "inertia tensor is computed with - so when the two masses differ, the tensor "
+    "and mass_kg differ by the same ratio (measured 2026-10-24: a 8000 mm3 block "
+    "reported 0.0628 kg for density 7850, 0.008 kg from the material, and Ixx "
+    "3.33e-7 = 0.008/12*(0.02^2+0.01^2))."
+)
+
 # How many STL vertices a part's cloud may hold while an assembly is being
 # measured. The cloud is kept per PART and transformed once per INSTANCE, so the
 # memory is bounded by this and the time by the instance count. Typical parts in
@@ -258,6 +270,28 @@ def _route_name(route: Any) -> str:
     return "batched"
 
 
+def _nls_fields(stats: dict[str, Any]) -> dict[str, Any]:
+    """``nls_chars`` (and how many cells it covers) when the filter counted them.
+
+    Characters of NLS path read by the construction filter: the only per-part
+    number that measures the FILTER rather than the geometry. Two parts with 239
+    and 246 cells cost 66.4 and 30.5 ms per cell, so cell count does not explain
+    the spread; path length is what is left. Free to collect - the string is
+    already in hand - so it rides along instead of needing a second run
+    (reported 2026-10-27).
+    """
+    if stats.get("nls_chars") is None:
+        return {}
+    fields: dict[str, Any] = {"nls_chars": stats["nls_chars"]}
+    cells, walked = stats.get("cells"), stats.get("nls_chars_cells")
+    if walked is not None and cells is not None and walked < cells:
+        # The single-part route walks at most 200 cells, so on a big part the
+        # number is a SAMPLE. Say so rather than let it be compared with the
+        # assembly route's full count.
+        fields["nls_chars_cells"] = walked
+    return fields
+
+
 def read_measurable_points(app: Any, spa: Any, refs: list[Any],
                            fallback: Any = None,
                            stats: dict[str, Any] | None = None
@@ -369,11 +403,23 @@ class MeasurementTools:
             {
                 "name": "catia_get_inertia",
                 "description": (
-                    "Get inertia properties of the active part: volume (mm3 and cm3), "
-                    "surface area (mm2 and cm2), center of gravity (mm), mass in kg "
-                    "(if a density is passed), inertia matrix (kg.m2, from the material "
-                    "density defined in CATIA). All values are converted server-side "
-                    "from CATIA's internal MKS measurement units."
+                    "Get inertia properties: volume (mm3 and cm3), surface area (mm2 "
+                    "and cm2), center of gravity (mm), mass in kg/g (if a density is "
+                    "passed), and - for the active part only - the inertia matrix "
+                    "(kg.m2, computed from the material density defined in CATIA). "
+                    "All values are converted server-side from CATIA's internal MKS "
+                    "measurement units. "
+                    "On an assembly it aggregates per component: each component's own "
+                    "volume / area / centre of gravity moved into world space by its "
+                    "placement, summed volume-weighted, plus a 'components' list. "
+                    "Sub-assemblies are expanded, not skipped: their leaves appear "
+                    "with a path ('ASM/PART.1') and their placement composed, so "
+                    "'components' adds up to the totals. The totals carry 'complete', "
+                    "'instances' {total, measured, skipped} and, when anything was "
+                    "left out, 'incomplete_because' - read that before using "
+                    "volume_mm3 as the whole assembly's mass: it is then a PARTIAL "
+                    "sum. Surface area is summed too (it is additive for disjoint "
+                    "solids). The inertia matrix is not aggregated."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -392,10 +438,17 @@ class MeasurementTools:
                                 "depends on whether that part has a window of its "
                                 "own (reported both ways on B32), while naming the "
                                 "document is unambiguous. A part that exists only as "
-                                "a component is opened by path here. Note that the "
-                                "inertia TENSOR is only computed for the active "
-                                "document, so this route returns volume / area / "
-                                "centroid without a matrix."
+                                "a component is opened by path here. A "
+                                "'<assembly>.CATProduct' is accepted too and measured "
+                                "through the same per-component aggregation as an "
+                                "active assembly. Every part route returns the same "
+                                "keys (volume_mm3/cm3, area_mm2/cm2, "
+                                "center_of_gravity_mm), whatever the call shape; a "
+                                "quantity that could not be read is null with a "
+                                "'<name>_error' beside it. Note that the inertia "
+                                "TENSOR is only computed for the active document, so "
+                                "this route returns volume / area / centroid without "
+                                "a matrix."
                             ),
                         },
                     },
@@ -442,9 +495,15 @@ class MeasurementTools:
                     "mesh box is read from its SAVED file and reused while that "
                     "file's size and modified time are unchanged (its source_note "
                     "says 'reused') - that saves one export per curved part (~5-17 s "
-                    "each), and only applies when the part has no window of its own; "
-                    "a part opened as its own document is exported in place every "
-                    "time."
+                    "each). The cache belongs to the COPY route, and the copy route "
+                    "is what runs when the part has no window of its own - the test "
+                    "is whether activating it changes ActiveDocument. A part that "
+                    "DOES change it is exported in place and never cached, because "
+                    "its loaded state may hold edits that were not saved and no file "
+                    "identity can describe them. catia_open_document cannot give an "
+                    "already-loaded component a window (it activates it instead), so "
+                    "a component always takes the cached route; the in-place route "
+                    "is for a part opened from disk on its own."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -803,23 +862,12 @@ class MeasurementTools:
         spa = doc.GetWorkbench("SPAWorkbench")
         measurable = spa.GetMeasurable(part.CreateReferenceFromObject(body))
         payload: dict[str, Any] = {"document": label}
-        try:
-            payload["volume_mm3"] = round(measurable.Volume * _M3_TO_MM3, 4)
-        except Exception as exc:  # noqa: BLE001
-            payload["volume_mm3"] = None
-            payload["volume_error"] = str(exc).splitlines()[0][:90]
-        try:
-            payload["area_mm2"] = round(measurable.Area * _M2_TO_MM2, 4)
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            cog = self._read_measurable_array(measurable, "GetCOG", 3)
-            payload["center_of_gravity_mm"] = {k: round(v, 4)
-                                              for k, v in zip("xyz", cog)}
-        except Exception:  # noqa: BLE001
-            pass
-        if density and payload.get("volume_mm3"):
-            payload["mass_kg"] = round(density * payload["volume_mm3"] / 1e9, 6)
+        payload.update(self._measured_quantities(measurable))
+        volume_mm3 = payload.get("volume_mm3")
+        if density and volume_mm3 is not None:
+            payload["mass_kg"] = round(density * volume_mm3 / 1e9, 6)
+            payload["mass_g"] = round(density * volume_mm3 / 1e6, 3)
+            payload["density_kg_m3"] = density
         # The tensor is only computed for the ACTIVE document, so this route used
         # to return volume/area/centroid without one - and getting nine parts'
         # tensors took 18 calls (open + activate each). CATIA's activation is
@@ -827,6 +875,8 @@ class MeasurementTools:
         tensor = self._tensor_for(part)
         if tensor:
             payload.update(tensor)
+            if "mass_kg" in payload:
+                payload["mass_note"] = _MASS_NOTE
             payload["note"] = (
                 "measured on this document's own Part. The inertia tensor came from "
                 "activating it for the measurement and restoring the previous active "
@@ -857,8 +907,8 @@ class MeasurementTools:
                 "tool": "catia_run_plan",
                 "shape": {"expect": [{"document": "<name>"}]},
                 "borrows_activation": True,
-                "answers": ["volume_mm3", "area_mm2", "center_of_gravity_mm",
-                            "mass_kg (with density)"],
+                "answers": ["volume_mm3", "volume_cm3", "area_mm2", "area_cm2",
+                            "center_of_gravity_mm", "mass_kg/mass_g (with density)"],
                 "does_not_answer": ["inertia_tensor"],
             }
             payload["note"] = (
@@ -866,6 +916,46 @@ class MeasurementTools:
                 "CATIA reports as active. The inertia tensor is missing - see "
                 "tensor_reason.")
         return json.dumps(payload, indent=2)
+
+    def _measured_quantities(self, measurable: Any) -> dict[str, Any]:
+        """`volume` / `area` / `center_of_gravity`, in one key table.
+
+        Both part routes (`document=<part>` and "the active part") read the SAME
+        measurable, and until 0.3.28 they published different subsets of it:
+        `volume_cm3` / `area_cm2` / `mass_g` existed only on the active-part
+        route, so `r["area_cm2"]` worked in one call shape and raised KeyError in
+        the other - for the same document and the same numbers (reported
+        2026-10-27). One reader, one set of keys, for both.
+
+        A quantity that cannot be read is ``None`` with ``<name>_error`` beside
+        it: never absent (a KeyError is not a diagnosis) and never a sentence
+        where a number belongs (``"unavailable: …"`` in a float field broke the
+        caller that tried to compare it).
+        """
+        fields: dict[str, Any] = {}
+        volume_mm3 = None
+        try:
+            volume_mm3 = measurable.Volume * _M3_TO_MM3
+        except Exception as exc:  # noqa: BLE001 - reported as a field
+            fields["volume_error"] = str(exc).splitlines()[0][:90]
+        fields["volume_mm3"] = None if volume_mm3 is None else round(volume_mm3, 4)
+        fields["volume_cm3"] = (None if volume_mm3 is None
+                                else round(volume_mm3 / 1000.0, 4))
+        area_mm2 = None
+        try:
+            area_mm2 = measurable.Area * _M2_TO_MM2
+        except Exception as exc:  # noqa: BLE001
+            fields["area_error"] = str(exc).splitlines()[0][:90]
+        fields["area_mm2"] = None if area_mm2 is None else round(area_mm2, 4)
+        fields["area_cm2"] = None if area_mm2 is None else round(area_mm2 / 100.0, 4)
+        try:
+            cog = self._read_measurable_array(measurable, "GetCOG", 3)
+            fields["center_of_gravity_mm"] = {k: round(v, 4)
+                                              for k, v in zip("xyz", cog)}
+        except Exception as exc:  # noqa: BLE001
+            fields["center_of_gravity_mm"] = None
+            fields["center_of_gravity_error"] = str(exc).splitlines()[0][:90]
+        return fields
 
     def _tensor_for(self, part: Any) -> dict[str, Any] | None:
         """Inertia tensor of a specific part, by borrowing the activation.
@@ -982,38 +1072,14 @@ class MeasurementTools:
         measurable = spa.GetMeasurable(ref)
 
         result: dict[str, Any] = {}
-        volume_m3: float | None = None
+        # Same reader as the `document=` route: one key table for the same
+        # reading (reported 2026-10-27 - `area_cm2` existed on this route only).
+        result.update(self._measured_quantities(measurable))
+        volume_mm3 = result.get("volume_mm3")
 
-        try:
-            volume_m3 = measurable.Volume  # m3
-            result["volume_mm3"] = round(volume_m3 * _M3_TO_MM3, 4)
-            result["volume_cm3"] = round(volume_m3 * 1e6, 4)
-        except Exception:
-            pass
-
-        try:
-            area_m2 = measurable.Area  # m2
-            result["area_mm2"] = round(area_m2 * _M2_TO_MM2, 4)
-            result["area_cm2"] = round(area_m2 * 1e4, 4)
-        except Exception:
-            pass
-
-        try:
-            # GetCOG coordinates come back in the document's length unit
-            # (mm), not MKS: field-observed on V5R20 for GetPlane/GetCOG.
-            cog = self._read_measurable_array(measurable, "GetCOG", 3)
-            result["center_of_gravity_mm"] = {
-                "x": round(cog[0], 4),
-                "y": round(cog[1], 4),
-                "z": round(cog[2], 4),
-            }
-        except Exception as e:
-            result["center_of_gravity_mm"] = f"unavailable: {e}"
-
-        if density and volume_m3 is not None:
-            mass_kg = density * volume_m3
-            result["mass_kg"] = round(mass_kg, 6)
-            result["mass_g"] = round(mass_kg * 1000, 3)
+        if density and volume_mm3 is not None:
+            result["mass_kg"] = round(density * volume_mm3 / 1e9, 6)
+            result["mass_g"] = round(density * volume_mm3 / 1e6, 3)
             result["density_kg_m3"] = density
 
         try:
@@ -1022,15 +1088,7 @@ class MeasurementTools:
             vals = self._evaluate_floats(self._VBS_INERTIA, "catia_mcp_inertia", [body])
             result.update(self._matrix_fields(vals))
             if "mass_kg" in result:
-                result["mass_note"] = (
-                    "mass_kg = the density you passed x volume; "
-                    "mass_from_material_kg = the mass CATIA gets from the part's own "
-                    "material, and that is also the density the inertia tensor is "
-                    "computed with - so when the two masses differ, the tensor and "
-                    "mass_kg differ by the same ratio (measured 2026-10-24: a 8000 "
-                    "mm3 block reported 0.0628 kg for density 7850, 0.008 kg from "
-                    "the material, and Ixx 3.33e-7 = 0.008/12*(0.02^2+0.01^2))."
-                )
+                result["mass_note"] = _MASS_NOTE
         except Exception as e:
             result["inertia_matrix_kg_m2"] = f"unavailable: {e}"
 
@@ -1120,7 +1178,8 @@ class MeasurementTools:
             child = products.Item(i)
             row: dict[str, Any] = {"index": i, "name": None, "part_number": None,
                                    "matrix": None, "translation": None,
-                                   "part": None, "problems": []}
+                                   "part": None, "nested_doc": None,
+                                   "kind": "unknown", "problems": []}
             for key, getter in (("name", lambda c: str(c.Name)),
                                 ("part_number", lambda c: str(c.PartNumber))):
                 try:
@@ -1139,8 +1198,35 @@ class MeasurementTools:
                 row["problems"].append(f"placement: {str(exc).splitlines()[0][:70]}")
             try:
                 row["part"] = self.conn.part_of(child.ReferenceProduct.Parent)
+                row["kind"] = "part"
             except Exception as exc:  # noqa: BLE001 - the classic dead link
-                row["problems"].append(f"part not loaded: {str(exc).splitlines()[0][:70]}")
+                # A SUB-ASSEMBLY reached this way says "part not loaded: Active
+                # document 'X' exposes no 'Part'", which reads as "the file is
+                # not open" and sends the caller to catia_open_document - where
+                # opening it changes nothing, because the component really is an
+                # assembly. Fifth time this project mistook a Product for a Part
+                # (0.3.15 add_component, 0.3.20 run_plan, 0.3.25 list_components,
+                # 0.3.27 get_inertia top level); this one is one level DOWN
+                # (reported 2026-10-27).
+                parent = None
+                try:
+                    parent = child.ReferenceProduct.Parent
+                except Exception:  # noqa: BLE001
+                    parent = None
+                if parent is not None and self._is_product_document(parent):
+                    row["kind"] = "sub_assembly"
+                    row["nested_doc"] = parent
+                    row["problems"].append(
+                        "sub-assembly, not a part: '%s' is an assembly of its own, "
+                        "so it has no single main body to sweep or measure. Its "
+                        "components are aggregated only where the tool says it "
+                        "recurses (catia_get_inertia does); for its own box, measure "
+                        "it by name: get_bounding_box(document='%s')"
+                        % (getattr(parent, "Name", "<sub-assembly>"),
+                           getattr(parent, "Name", "<sub-assembly>.CATProduct")))
+                else:
+                    row["problems"].append(
+                        f"part not loaded: {str(exc).splitlines()[0][:70]}")
             rows.append(row)
         return rows
 
@@ -1162,17 +1248,27 @@ class MeasurementTools:
         sel = doc.Selection
         refs = []
         read_stats: dict[str, Any] = {}
+        nls_chars = 0
         try:
             sel.Clear()
             sel.Add(body)
             search_topology(sel, "Vertex")
             for i in range(1, sel.Count + 1):
                 cell = sel.Item(i)
-                if is_construction(nls_of(cell)):
+                nls = nls_of(cell)
+                nls_chars += len(nls)
+                if is_construction(nls):
                     continue
                 refs.append(cell.Reference)
             if stats is not None:
                 stats["cells"] = int(sel.Count)
+                # Characters of NLS path the construction filter read, summed.
+                # Free (the string is already in hand) and the only per-part
+                # number that measures the FILTER rather than the geometry: two
+                # parts with 239 and 246 cells cost 66.4 and 30.5 ms per cell,
+                # and path length is the candidate that "cell count" cannot
+                # explain (reported 2026-10-27, §3.4).
+                stats["nls_chars"] = nls_chars
             spa = doc.GetWorkbench("SPAWorkbench")
             raw = read_measurable_points(
                 self.conn.app, spa, refs,
@@ -1250,7 +1346,9 @@ class MeasurementTools:
         if points:
             return {"points": points, "used": used, "source": "vertices",
                     "mesh_vertices": None, "copy_note": "",
-                    "cells": stats.get("cells"), "points_route": stats.get("points_route")}
+                    "cells": stats.get("cells"),
+                    "nls_chars": stats.get("nls_chars"),
+                    "points_route": stats.get("points_route")}
         if not include_curved:
             return {"error": "no vertices (fully curved part), so a vertex sweep "
                              "cannot bound it; include_curved=true (the default) "
@@ -1306,7 +1404,9 @@ class MeasurementTools:
         for row in rows:
             label = row["part_number"] or row["name"] or f"#{row['index']}"
             if row["part"] is None or row["matrix"] is None:
-                skipped.append({"component": label, "error": "; ".join(row["problems"])})
+                skipped.append({"component": label,
+                                "kind": row.get("kind", "unknown"),
+                                "error": "; ".join(row["problems"])})
                 continue
             body = row["part"].MainBody
             key = self._part_identity(row["part"])
@@ -1388,6 +1488,19 @@ class MeasurementTools:
                             "part's body, BEFORE construction geometry was filtered "
                             "out (sketch-wire vertices, datum-plane corners) - a "
                             "count of CATIA cells, not of mesh elements")
+                    if cached.get("nls_chars") is not None:
+                        # The one number that measures the FILTER instead of the
+                        # geometry. Two parts with 239 and 246 cells cost 66.4 and
+                        # 30.5 ms per cell, so cell count is not the driver; NLS
+                        # path length is the candidate that fits, and this makes
+                        # the comparison free (reported 2026-10-27, §3.4).
+                        detail["nls_chars"] = cached["nls_chars"]
+                        detail["nls_chars_note"] = (
+                            "characters of NLS path the construction filter read "
+                            "for this part (one path per cell). Divide by "
+                            "'cells_scanned' to compare two parts whose ms/cell "
+                            "differ - a longer path is a longer string to build and "
+                            "match, and that is the filter's whole per-cell cost")
                     detail["points_route"] = _route_name(cached.get("points_route"))
                 parts_detail[key] = detail
             parts_detail[key]["instances"] += 1
@@ -1534,52 +1647,50 @@ class MeasurementTools:
 
     def _assembly_inertia(self, density: float | None = None,
                           doc: Any | None = None) -> str:
-        """Volume and centre of gravity of an assembly, weighted per component.
+        """Volume, area and centre of gravity of an assembly, per component.
 
-        Each component's own volume and COG are read from its part document and
-        moved into world space by its placement; the totals are the volume-
-        weighted sums. That is the number a placement script has to hit, and on
-        a Product document it used to be unavailable (get_inertia required a
-        Part).
+        Each component's own volume / area / COG are read from its part
+        document and moved into world space by its placement; the totals are the
+        volume-weighted sums. That is the number a placement script has to hit,
+        and on a Product document it used to be unavailable (get_inertia
+        required a Part).
+
+        A SUB-ASSEMBLY is not a Part, and until 0.3.28 a component that was one
+        was dropped with "part not loaded" while the totals kept the assembly's
+        name - a two-level assembly holding 60 000 + 60 000 mm3 reported 60 000
+        and a COG at the wrong end, with nothing in the reply saying so
+        (reported 2026-10-27). It is aggregated now: the recursion composes the
+        two placements, then every leaf is added up as if it had been placed
+        directly. The totals also carry `complete` / `instances` /
+        `incomplete_because`, the same vocabulary the bounding box uses, so a
+        partial sum cannot be read as a total.
 
         ``doc`` names the assembly to measure; without it the active document is
         used (the older behaviour, and the only one before 0.3.27).
         """
+        started = time.perf_counter()
         doc = doc if doc is not None else self.conn.active_document
-        rows = self._components_doc(doc)
-        entries, skipped = [], []
-        total = 0.0
+        leaves: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        part_cache: dict[Any, Any] = {}
+        self._inertia_collect(doc, [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0],
+                                    [0.0, 0.0, 1.0]], [0.0, 0.0, 0.0],
+                              1, "", leaves, skipped, part_cache)
+        total = sum(entry["volume_mm3"] for entry in leaves)
+        total_area = sum(entry["area_mm2"] for entry in leaves)
         acc = [0.0, 0.0, 0.0]
-        for row in rows:
-            label = row["part_number"] or row["name"] or f"#{row['index']}"
-            if row["part"] is None or row["matrix"] is None:
-                skipped.append({"component": label, "error": "; ".join(row["problems"])})
-                continue
-            part = row["part"]
-            try:
-                body = part.MainBody
-                if body.Shapes.Count == 0:
-                    raise RuntimeError("no solid in the main body")
-                doc_i = part.Parent
-                spa = doc_i.GetWorkbench("SPAWorkbench")
-                measurable = spa.GetMeasurable(part.CreateReferenceFromObject(body))
-                volume = measurable.Volume * _M3_TO_MM3
-                cog = self._read_measurable_array(measurable, "GetCOG", 3)
-            except Exception as exc:  # noqa: BLE001 - reported per component
-                skipped.append({"component": label,
-                                "error": str(exc).splitlines()[0][:90]})
-                continue
-            world = self._to_world(row["matrix"], row["translation"], cog)
-            entries.append({
-                "component": label,
-                "name": row["name"],
-                "volume_mm3": round(volume, 4),
-                "center_of_gravity_mm": {k: round(v, 4)
-                                        for k, v in zip("xyz", world)},
-            })
-            total += volume
-            for i in range(3):
-                acc[i] += volume * world[i]
+        for entry in leaves:
+            cog = entry["center_of_gravity_mm"]
+            for i, axis in enumerate("xyz"):
+                acc[i] += entry["volume_mm3"] * cog[axis]
+        elapsed = round((time.perf_counter() - started) * 1000, 1)
+        try:
+            doc_name = str(doc.Name)
+        except Exception:  # noqa: BLE001 - the numbers are the point
+            doc_name = None
+        depth_max = max((entry["depth"] for entry in leaves), default=1)
+        instances = {"total": len(leaves) + len(skipped),
+                     "measured": len(leaves), "skipped": len(skipped)}
 
         if total <= 0:
             # Same shape as the bounding-box path, because a script that measures
@@ -1589,31 +1700,183 @@ class MeasurementTools:
             return json.dumps({
                 "volume_mm3": None,
                 "volume_cm3": None,
+                "area_mm2": None,
+                "area_cm2": None,
                 "center_of_gravity_mm": None,
                 "components": [],
+                "complete": False,
+                "instances": instances,
+                "assembly_depth_max": depth_max,
+                "elapsed_ms": elapsed,
+                **({"document": doc_name} if doc_name else {}),
                 "skipped": skipped or [{"component": "<assembly>",
+                                        "kind": "unknown",
                                         "error": "the assembly has no components"}],
-                "note": ("no component could be measured, so there is no total. A "
-                         "component without a solid (surface-only, or an empty part) "
-                         "has no volume to add; each reason is in 'skipped'."),
+                "incomplete_because": (
+                    "no component could be measured, so there is no total - not "
+                    "even a partial one. A component without a solid "
+                    "(surface-only, or an empty part) has no volume to add; each "
+                    "reason is in 'skipped'."),
+                "note": ("nothing was measured, so every total is null rather than "
+                         "0 - a 0 here would read as 'this assembly weighs "
+                         "nothing'."),
             }, indent=2)
+
         payload: dict[str, Any] = {
             "volume_mm3": round(total, 4),
             "volume_cm3": round(total / 1000.0, 4),
+            "area_mm2": round(total_area, 4),
+            "area_cm2": round(total_area / 100.0, 4),
             "center_of_gravity_mm": {k: round(acc[i] / total, 4)
                                      for i, k in enumerate("xyz")},
-            "components": entries,
+            "components": leaves,
+            "complete": not skipped,
+            "instances": instances,
+            "assembly_depth_max": depth_max,
+            "elapsed_ms": elapsed,
             "note": ("volume-weighted aggregation of the components' own volumes "
                      "and centres of gravity, moved into world space by each "
-                     "component's placement; the inertia matrix is not aggregated "
-                     "(it would need each part's tensor rotated by its placement)"),
+                     "component's placement. Surface area is summed (it is "
+                     "additive for disjoint solids). A sub-assembly is expanded: "
+                     "its leaves are reported with their path ('ASM/PART.1') and "
+                     "its placement composed with theirs, so 'components' sums to "
+                     "the totals. The inertia matrix is not aggregated (it would "
+                     "need each part's tensor rotated by its placement)"),
         }
+        if doc_name:
+            payload["document"] = doc_name
         if density:
             payload["mass_kg"] = round(density * total / 1e9, 6)
+            payload["mass_g"] = round(density * total / 1e6, 3)
             payload["density_kg_m3"] = density
         if skipped:
             payload["skipped"] = skipped
+            payload["incomplete_because"] = (
+                f"{len(skipped)} of {instances['total']} component(s) could not be "
+                "measured, so volume_mm3, area_mm2 and center_of_gravity_mm are the "
+                "sum of the ones that WERE measured - a PARTIAL result, not this "
+                "assembly's total. What to try: read each reason in 'skipped' (a "
+                "sub-assembly that could not be expanded says so), measure that "
+                "component on its own with catia_get_inertia(document=...), and add "
+                "it in yourself.")
         return json.dumps(payload, indent=2)
+
+    _INERTIA_MAX_DEPTH = 8
+
+    def _inertia_collect(self, doc: Any, matrix: list[list[float]],
+                         translation: list[float], depth: int, prefix: str,
+                         leaves: list[dict[str, Any]],
+                         skipped: list[dict[str, Any]],
+                         part_cache: dict[Any, Any]) -> None:
+        """Flatten an assembly into world-space leaves, recursing into sub-assemblies.
+
+        ``matrix``/``translation`` are the accumulated placement of the assembly
+        being walked, so a leaf two levels down is placed by the composition of
+        both, which is what makes a nested assembly's COG land where its parent
+        put it.
+        """
+        rows = self._components_doc(doc)
+        if not rows and depth > 1:
+            skipped.append({"component": f"<sub-assembly {prefix}>", "kind":
+                            "sub_assembly", "path": prefix, "depth": depth,
+                            "error": "the sub-assembly holds no components, so it "
+                                     "contributes nothing to the totals"})
+            return
+        for row in rows:
+            label = row["part_number"] or row["name"] or f"#{row['index']}"
+            name = row["name"] or label
+            path = f"{prefix}/{name}" if prefix else name
+            if row["matrix"] is None or row["translation"] is None:
+                skipped.append({"component": label, "path": path, "depth": depth,
+                                "kind": row.get("kind", "unknown"),
+                                "error": "; ".join(row["problems"])
+                                         or "its placement could not be read"})
+                continue
+            world_matrix = self._mat_mul(matrix, row["matrix"])
+            world_t = [sum(matrix[i][k] * row["translation"][k] for k in range(3))
+                       + translation[i] for i in range(3)]
+            if row.get("kind") == "sub_assembly":
+                nested = row.get("nested_doc")
+                if nested is None:
+                    skipped.append({"component": label, "path": path,
+                                    "depth": depth, "kind": "sub_assembly",
+                                    "error": "sub-assembly, but its document could "
+                                             "not be read, so its components are not "
+                                             "in these totals"})
+                    continue
+                if depth >= self._INERTIA_MAX_DEPTH:
+                    skipped.append({"component": label, "path": path,
+                                    "depth": depth, "kind": "sub_assembly",
+                                    "error": f"nested deeper than "
+                                             f"{self._INERTIA_MAX_DEPTH} levels, so "
+                                             "this branch was not expanded"})
+                    continue
+                self._inertia_collect(nested, world_matrix, world_t, depth + 1,
+                                      path, leaves, skipped, part_cache)
+                continue
+            if row["part"] is None:
+                skipped.append({"component": label, "path": path, "depth": depth,
+                                "kind": row.get("kind", "unknown"),
+                                "error": "; ".join(row["problems"])})
+                continue
+            props = self._part_mass_properties(row["part"], part_cache)
+            if "error" in props:
+                skipped.append({"component": label, "path": path, "depth": depth,
+                                "kind": "part", "error": props["error"]})
+                continue
+            world = self._to_world(world_matrix, world_t, props["cog"])
+            leaves.append({
+                "component": label,
+                "name": name,
+                "path": path,
+                "depth": depth,
+                "volume_mm3": round(props["volume"], 4),
+                "area_mm2": round(props["area"], 4),
+                "center_of_gravity_mm": {k: round(v, 4)
+                                         for k, v in zip("xyz", world)},
+            })
+
+    def _part_mass_properties(self, part: Any,
+                              cache: dict[Any, Any] | None = None
+                              ) -> dict[str, Any]:
+        """Volume, area and local COG of one part, read once per part.
+
+        Once per PART, not per instance: 70 instances of 28 parts used to pay
+        70 volume + 70 COG (and would pay 70 areas) for 28 distinct answers.
+        The values are in the part's own coordinates, so every instance gets the
+        same numbers and only the placement differs.
+        """
+        key = None
+        if cache is not None:
+            try:
+                key = self._part_identity(part)
+            except Exception:  # noqa: BLE001 - just read it again
+                key = None
+            if key is not None and key in cache:
+                return cache[key]
+        try:
+            body = part.MainBody
+            if body.Shapes.Count == 0:
+                raise RuntimeError("no solid in the main body")
+            spa = part.Parent.GetWorkbench("SPAWorkbench")
+            measurable = spa.GetMeasurable(part.CreateReferenceFromObject(body))
+            result = {
+                "volume": measurable.Volume * _M3_TO_MM3,
+                "area": measurable.Area * _M2_TO_MM2,
+                "cog": self._read_measurable_array(measurable, "GetCOG", 3),
+            }
+        except Exception as exc:  # noqa: BLE001 - reported per component
+            result = {"error": str(exc).splitlines()[0][:90]}
+        if key is not None:
+            cache[key] = result
+        return result
+
+    @staticmethod
+    def _mat_mul(a: list[list[float]],
+                 b: list[list[float]]) -> list[list[float]]:
+        """Row-major 3x3 product: the placement of a placement."""
+        return [[sum(a[i][k] * b[k][j] for k in range(3)) for j in range(3)]
+                for i in range(3)]
 
     def _auto_method(self, method: str, body: Any) -> tuple[str, str]:
         """Resolve 'auto' to the mesh.
@@ -1678,6 +1941,7 @@ class MeasurementTools:
                         "points_route": _route_name(stats.get("route")),
                         "vertices_used": len(points),
                         "cells_scanned": stats.get("cells"),
+                        **_nls_fields(stats),
                     },
                 )
             if method == "vertices":
@@ -1960,6 +2224,7 @@ class MeasurementTools:
         refs = []
         total = 0
         construction = 0
+        nls_chars = 0
         try:
             sel.Clear()
             sel.Add(body)
@@ -1968,7 +2233,9 @@ class MeasurementTools:
             count = min(total, 200)
             for i in range(1, count + 1):
                 cell = sel.Item(i)
-                if is_construction(nls_of(cell)):
+                nls = nls_of(cell)
+                nls_chars += len(nls)
+                if is_construction(nls):
                     construction += 1
                     continue
                 refs.append(cell.Reference)
@@ -1989,6 +2256,11 @@ class MeasurementTools:
         if stats is not None:
             stats["route"] = read_stats.get("route", "batch")
             stats["cells"] = total
+            # Only over the cells actually walked (capped at 200), so on a big
+            # part this is a SAMPLE - the assembly route reads every cell and its
+            # number is comparable across parts.
+            stats["nls_chars"] = nls_chars
+            stats["nls_chars_cells"] = count
         points, dropped = self._bounded(raw)
         return points, total > 200, total, dropped + construction
 

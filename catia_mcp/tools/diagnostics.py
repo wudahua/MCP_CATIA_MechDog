@@ -91,7 +91,12 @@ class DiagnosticsTools:
                     "application-level info is reported. The first key, mcp, "
                     "states the server name, version and registered tool count, "
                     "so a bug report can quote both sides without reading "
-                    "pyproject.toml."
+                    "pyproject.toml. The 'session' block answers the state a bare "
+                    "'method failed' is usually about - document, its kind, "
+                    "in_work_object, body and shape count, selection size, "
+                    "geometrical-set count, plus a one-line 'line' form and a "
+                    "'note' wherever a reading has no meaning (no Part open, no "
+                    "document at all)."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -121,11 +126,28 @@ class DiagnosticsTools:
         report: dict[str, Any] = {"mcp": self._server_info()}
         report["python"] = self._python_info(app)
         report["catia"] = self._catia_info(app)
+        # The state a bare "method failed" is usually about. It was printed in
+        # every failure message and reported by NO diagnose call, so the message
+        # pointed here for something this tool did not answer (reported
+        # 2026-10-27). Same reader, so the two can never disagree.
+        report["session"] = self._session_info()
         report["workbenches"] = self._workbench_probe()
         report["factories"] = self._factory_probe()
         report["notes"] = self._notes(report)
 
         return json.dumps(report, indent=2)
+
+    def _session_info(self) -> dict[str, Any]:
+        """Document state: which document, which in-work object, which body, what
+        is selected - the five readings that explain most CATIA failures."""
+        from catia_mcp.connection import session_line, session_snapshot
+
+        try:
+            snapshot = session_snapshot(self.conn)
+        except Exception as e:  # noqa: BLE001 - a diagnosis never fails
+            return {"unavailable": str(e).splitlines()[0][:90]}
+        snapshot["line"] = session_line(self.conn)
+        return snapshot
 
     def _server_info(self) -> dict[str, Any]:
         """Name, version and registered tool count of this server.

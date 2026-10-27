@@ -240,3 +240,112 @@ class CATIAConnection:
             "yz": origin.PlaneYZ,
             "zx": origin.PlaneZX,
         }
+
+
+# ── session state ────────────────────────────────────────────────────────
+#
+# CATIA answers most automation failures with a bare "method failed", and the
+# cause is almost never the arguments - it is the document state: a factory
+# called while InWorkObject sits on a geometrical set, a topology reference that
+# a cleared selection invalidated, a body whose last feature has not rebuilt.
+# Both the failure message and `catia_diagnose` need that state, and they used to
+# read it differently: the message printed five readings while `catia_diagnose`
+# returned none of them, so the message's "catia_diagnose reports both" pointed
+# at an empty place (reported 2026-10-27). One reader, two presentations.
+
+
+def session_snapshot(conn: Any) -> dict[str, Any]:
+    """The document state that explains a bare "method failed", as fields.
+
+    Never raises: a diagnosis that throws is worse than one that says "unknown".
+    A field that cannot be read is ``None`` with the reason in ``note`` - the
+    five readings only mean something together, and half of them are only
+    meaningful when a Part is active.
+    """
+    snapshot: dict[str, Any] = {
+        "document": None,
+        "document_kind": None,
+        "part": None,
+        "in_work_object": None,
+        "body": None,
+        "shape_count": None,
+        "selected": None,
+        "geometrical_sets": None,
+        "note": None,
+    }
+    try:
+        doc = conn.active_document
+        snapshot["document"] = str(doc.Name)
+    except Exception:  # noqa: BLE001 - reported as None
+        snapshot["note"] = ("no active document in CATIA, so there is no state to "
+                            "read - open or create one first")
+        return snapshot
+    try:
+        kind = str(getattr(doc, "Type", "") or "")
+    except Exception:  # noqa: BLE001
+        kind = ""
+    if kind:
+        snapshot["document_kind"] = ("assembly" if "PRODUCT" in kind.upper()
+                                     else "part" if "PART" in kind.upper()
+                                     else kind)
+    try:
+        snapshot["selected"] = int(conn.hso.Count)
+    except Exception:  # noqa: BLE001 - the selection may be unusable
+        pass
+    try:
+        part = conn.get_active_part()
+    except Exception:  # noqa: BLE001 - not a Part document
+        if snapshot["document_kind"] is None:
+            # `Document.Type` is empty or unreadable on some bindings, so fall
+            # back to the question the tools themselves ask.
+            try:
+                conn.product_of(doc)
+                snapshot["document_kind"] = "assembly"
+            except Exception:  # noqa: BLE001
+                pass
+        snapshot["note"] = ("document is open but has no Part, so in_work_object / "
+                            "body / geometrical_sets have nothing to report (an "
+                            "assembly measures per component instead)")
+        return snapshot
+    for key, reader in (
+        ("part", lambda: str(part.Name)),
+        ("in_work_object", lambda: str(part.InWorkObject.Name)),
+        ("body", lambda: str(conn.get_active_part_body().Name)),
+        ("shape_count", lambda: int(conn.get_active_part_body().Shapes.Count)),
+        ("geometrical_sets", lambda: int(part.HybridBodies.Count)),
+    ):
+        try:
+            snapshot[key] = reader()
+        except Exception:  # noqa: BLE001 - a half-read state still helps
+            pass
+    if snapshot["document_kind"] is None:
+        # Reaching `part` proves it IS a part, whatever `Type` said.
+        snapshot["document_kind"] = "part"
+    return snapshot
+
+
+def session_line(conn: Any) -> str:
+    """The same snapshot as one line: the form the failure message carries.
+
+    Kept identical in shape to what it replaced, because a report quotes it
+    verbatim and the fields are read left to right in a terminal.
+    """
+    snap = session_snapshot(conn)
+    bits = ["document=%s" % (snap["document"] or "<none>")]
+    if snap["part"] is None:
+        bits.append("no part document")
+        if snap["selected"] is not None:
+            bits.append("selected=%d" % snap["selected"])
+        return " | ".join(bits)
+    bits.append("in_work_object=%s" % (snap["in_work_object"] or "<unknown>"))
+    if snap["body"] is None:
+        bits.append("body=<none>")
+    else:
+        bits.append("body=%s(shape_count=%s)" % (
+            snap["body"], snap["shape_count"]
+            if snap["shape_count"] is not None else "?"))
+    if snap["selected"] is not None:
+        bits.append("selected=%d" % snap["selected"])
+    if snap["geometrical_sets"] is not None:
+        bits.append("geometrical_sets=%d" % snap["geometrical_sets"])
+    return " | ".join(bits)
