@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [0.3.29] — 2026-10-27 · a sub-assembly is not a hole in the box either
 
 ### Changed — the bounding box expands sub-assemblies too
 
