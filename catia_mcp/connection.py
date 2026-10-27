@@ -50,6 +50,13 @@ class CATIAConnection:
         # server redraws from its record gets the next free name. Remembering the
         # mapping is what lets the caller retry with the name it already used
         # instead of getting SKETCH_NOT_FOUND for its own sketch.
+        #
+        # ONE definition of "what does this name mean" lives here (0.3.32): every
+        # tool that takes a sketch name resolves it through ``sketch_alias``, and
+        # every tool that lists sketches shows the aliases. Until then only Part
+        # Design resolved them, so ``catia_pad`` knew 草图.2 was 草图.3 and
+        # ``catia_sketch_get_geometry`` answered "No sketch named '草图.2'" for
+        # the same live sketch (reported 2026-10-27).
         self.sketch_aliases: dict[str, str] = {}
 
     @property
@@ -169,6 +176,73 @@ class CATIAConnection:
             self.active_window.ActiveViewer.Reframe()
         except Exception:
             pass
+
+    # ── Sketch names: one definition, used by every tool ──
+
+    def sketch_scope(self) -> str:
+        """The document key the sketch records and aliases are scoped by."""
+        try:
+            return str(self.active_document.Name)
+        except Exception:  # noqa: BLE001 - record it anyway, under a catch-all
+            return "?"
+
+    def note_sketch_alias(self, lost: str, new: str,
+                          document: str | None = None) -> None:
+        """Record that ``lost`` was re-created as ``new`` - and re-point the rest.
+
+        The first cut (0.3.31) wrote one hop: ``草图.2 -> 草图.3``. A second
+        rollback then deleted 草图.3, rebuilt it as 草图.4 and wrote ``草图.3 ->
+        草图.4``, so the name the caller actually held stopped resolving on the
+        third retry - while the sketch it wanted was in the tree the whole time
+        (reported 2026-10-27: retry 1 and 2 answered NO_MATERIAL, retry 3 answered
+        SKETCH_NOT_FOUND). Re-pointing every entry that pointed at ``lost`` keeps
+        the caller's original name valid for the rest of the session, and keeps
+        the table one level deep so a lookup never has to walk.
+        """
+        scope = document or self.sketch_scope()
+        aliases = self.sketch_aliases
+        aliases[f"{scope}::{lost}"] = new
+        for key, target in list(aliases.items()):
+            if key != f"{scope}::{lost}" and target == lost:
+                aliases[key] = new
+
+    def sketch_alias(self, name: str, document: str | None = None) -> str | None:
+        """What ``name`` was re-created as, or None. Follows a chain if one exists.
+
+        ``note_sketch_alias`` keeps the table one level deep, so the loop is
+        normally a single step; it is here because a chain can still appear (a
+        mapping written by an older build, or a rebuild whose re-pointing lost a
+        race), and a lookup that silently gives up on a chain would recreate the
+        exact bug this method exists to close.
+        """
+        scope = document or self.sketch_scope()
+        aliases = self.sketch_aliases
+        current = name
+        seen = {name}
+        found = False
+        while True:
+            following = aliases.get(f"{scope}::{current}")
+            if not following or following == current or following in seen:
+                return current if found else None
+            seen.add(following)
+            current = following
+            found = True
+
+    def sketch_aliases_of(self, name: str,
+                          document: str | None = None) -> list[str]:
+        """Every old name that now resolves to ``name``, sorted.
+
+        Used by the listings: a rebuilt sketch is usable under its old name, so a
+        list that prints only the live names tells the caller its sketch is gone
+        (reported 2026-10-27: 草图.4 was missing from both ``sketches[]`` and the
+        error's ``Available:`` line, and yet worked).
+        """
+        scope = document or self.sketch_scope()
+        found = [key.split("::", 1)[1] for key, target in self.sketch_aliases.items()
+                 if key.startswith(f"{scope}::")
+                 and (target == name or self.sketch_alias(key.split("::", 1)[1],
+                                                          document=scope) == name)]
+        return sorted(set(found))
 
     # ── Document type detection ──
 

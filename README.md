@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.31** · [what changed](CHANGELOG.md) ·
+**0.3.32** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -232,6 +232,28 @@ sketch — a reopened file, a support that is not a datum plane, an arc whose st
 angle is not in the record — the message says which of those it is instead of
 leaving a sketch-shaped hole.
 
+0.3.32 makes the name mean the same thing everywhere. Every rebuild **re-points**
+the entries that pointed at the sketch CATIA took, so three rollbacks leave one
+alias (`草图.2 → 草图.5`) rather than a chain that dies on the third retry; the
+alias is resolved by the read and edit tools too, not only by Part Design; and it
+shows in the places a caller looks for "is my sketch still there":
+
+```text
+catia_sketch_get_geometry {sketch_name: "草图.2"}
+  -> {"sketch": "草图.5", "found": "by alias '草图.5'", "elements": [...]}
+
+catia_list_features        -> sketches: [{"name": "草图.6",
+                               "aliases": ["草图.2", "草图.3", "草图.4", "草图.5"]}]
+catia_pad {sketch_name: "草图.99"}
+  -> No sketch named '草图.99'. Available: 草图.1, 草图.6 (alias: 草图.2, 草图.3,
+     草图.4, 草图.5).
+```
+
+The rebuild's own reply also repeats what the sketch held (`It held: rectangle
+(-10, -5) .. (10, 5) on plane 'xy' at offset 0`), so the profile is visible even to
+a caller that never asks again.
+
+
 ### A pad that adds nothing tries the other side
 
 `catia_pad` now behaves the way `catia_pocket` has since 0.3.4: if the requested
@@ -322,12 +344,23 @@ part.** The same 70-instance assembly measured three times in one session:
 
 `cells_scanned`, `vertices_used` and `nls_chars` were **identical** all three
 times, so the work is the same — the first pass pays CATIA's own setup for each
-part. Warm the fit is `≈ 200 ms + 9.5 ms × cells` (8.6–11 ms/cell); cold it is
-16–90 ms/cell and grows with the part. Every number in this section that was
-measured as "one part by name" is a COLD number, and reading it as a property of
-the part is what made an earlier release claim `17–93 ms per cell` as the model.
-`parts[].first_measure`, `cold_parts` and `elapsed_note` say which regime a call
-ran in; compare `elapsed_ms` across sessions only with that in view.
+part. Warm the fit is `≈ 200 ms + 3.2 ms × cells` after 0.3.31's one-call sweep
+(it was 9.5 ms/cell); cold it is 16–90 ms/cell and grows with the part. Every
+number in this section that was measured as "one part by name" is a COLD number,
+and reading it as a property of the part is what made an earlier release claim
+`17–93 ms per cell` as the model. `parts[].first_measure`, `cold_parts` and
+`elapsed_note` say which regime a call ran in; compare `elapsed_ms` across
+sessions only with that in view.
+
+The 0.3.32 acceptance run on the same model measured **cold 173.4 s, warm 22.9 s**
+— the warm side had been cut in half, so the ratio *grew* to 7.6×. That is why the
+cold pass is now something you can **schedule** rather than something that happens
+to you: `catia_get_bounding_box {warm_up: true}` runs the same measurement, throws
+the geometry away and returns what it cost, so the next call that needs the box is
+warm (`cold_parts: 0`). There is no cheaper warm-up: CATIA's first-read setup *is*
+the work, and a per-part vertex box cannot be cached from a `(size, mtime)` the way
+a mesh box is — the mesh box describes a file, the vertex box describes the live
+part, which may hold edits that were never saved.
 
 | call | time |
 |---|---|
@@ -338,15 +371,16 @@ ran in; compare `elapsed_ms` across sessions only with that in view.
 | 24 instances / 11 parts (drone), warm | 94.4 s |
 | the same call right after opening the assembly | 130.0 s (1.38×) |
 | the same call again, same session (mesh boxes reused) | **16.0 s (8.1×)** |
-| 70 instances / 28 parts (acceptance model) | **194.7 s cold / 41.4 s warm** |
+| 70 instances / 28 parts (acceptance model) | **173.4 s cold / 22.9 s warm** |
 
 Three things dominate, and none of them is "one fixed cost per part":
 
-* **Cold vs warm is the biggest single factor.** 194.7 → 41.4 s (−78.7 %) with
+* **Cold vs warm is the biggest single factor.** 173.4 → 22.9 s (−86.8 %) with
   every work counter unchanged. The gap is per PART and it disappears once that
   part has been touched: `P05` 80.0 s cold / 11.4 s warm (7.0×), `P01` 45.5 /
   5.0 s (9.2×), a 12-cell plate 0.33 s warm. It is not "less work" and not the
-  assembly layer — the call overhead is 5 350 ms either way.
+  assembly layer — `overhead_ms` says how much of the call no part owns, and it was
+  identical cold and warm.
 * **Cost concentrates in a few parts — in both regimes.** Cold: `P05` 80.0 s
   (41 %), `P01` 45.5 s, `P07` 15.0 s, `P02` 12.2 s. Warm: `P05` 11.4 s (27 %),
   `P01` 5.0 s, `P02` 2.9 s, `P07` 2.2 s. `elapsed_ms` in `parts` is what makes
@@ -375,14 +409,27 @@ Three things dominate, and none of them is "one fixed cost per part":
 * **Do not use a small part's ~400 ms as a regression baseline.** In that model
   twelve-cell parts sat at 398–424 ms, but `P30` was 776 ms, `P20` 732 ms and `P24`
   635 ms — per-part jitter of +20 % to +90 % on a field that reads like a constant.
+* **The most expensive item may not be in `parts` at all.** Adding up
+  `parts[].elapsed_ms` to find "the one part that eats the call" was working with
+  76.4 % of the number: on the 70-instance model the difference was 5 394.6 ms
+  (23.6 % of a warm call), larger than the most expensive part in the table, and it
+  appeared nowhere. Every reply now carries `parts_ms`, `overhead_ms` and
+  `overhead_breakdown` (`components_doc_ms` / `walk_other_ms` / `report_ms`). On a
+  5-instance product measured here: total 1 308.1 ms, `parts_ms` 856.8,
+  `overhead_ms` 451.3, of which `components_doc_ms` **413.3** — so the residual is
+  dominated by one read of the component tree, not by per-part bookkeeping, which
+  is also why it is identical cold and warm.
 
 Tools run on a single worker thread, so a long box blocks every other MCP call
 until it finishes. The reply states `elapsed_ms` (total and per part, `parts[]`),
 `first_measure` (was this part touched for the first time in this session),
-`cold_parts`, `cells_scanned`, `sweep_route` (`one_call` / `per_cell`) and
+`cold_parts`, `cells_scanned`, `sweep_route` (`one_call` / `per_cell`, or `mesh`
+when no vertex sweep ran), `parts_ms`, `overhead_ms` and
 `points_route` (`batched` / `batched_retried` /
 `per_point` for a vertex sweep, `mesh` for an STL extent), so the cost is
-attributable instead of surprising. To bound one instance, pass `component=` — with
+attributable instead of surprising. `catia_get_bounding_box {warm_up: true}` pays
+the cold pass on purpose and returns only the cost. To bound one instance,
+pass `component=` — with
 or without an assembly active: if the active document is a Part, the component is
 looked up in the open assembly that contains it, and the reply says so
 (`measured_in`).

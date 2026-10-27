@@ -823,15 +823,27 @@ class SketcherTools:
         if fresh is not None:
             fresh["placement"] = placement
             fresh["elements"] = [dict(element) for element in elements]
-        aliases = getattr(self.conn, "sketch_aliases", None)
-        if aliases is None:
-            aliases = {}
+        # One writer, one rule: every name that pointed at the sketch CATIA just
+        # deleted is re-pointed at the rebuild, so a caller that still holds
+        # 草图.2 keeps resolving however many rebuilds happen (reported 2026-10-27:
+        # the mapping only held one hop, so the third retry answered
+        # SKETCH_NOT_FOUND while the sketch was in the tree as 草图.4).
+        linker = getattr(self.conn, "note_sketch_alias", None)
+        if linker is not None:
             try:
-                self.conn.sketch_aliases = aliases
+                linker(name, new_name, document=document)
             except Exception:  # noqa: BLE001 - the mapping is a convenience
-                aliases = None
-        if aliases is not None:
-            aliases[f"{document}::{name}"] = new_name
+                pass
+        else:
+            aliases = getattr(self.conn, "sketch_aliases", None)
+            if aliases is None:
+                aliases = {}
+                try:
+                    self.conn.sketch_aliases = aliases
+                except Exception:  # noqa: BLE001
+                    aliases = None
+            if aliases is not None:
+                aliases[f"{document}::{name}"] = new_name
         try:
             self.conn.last_sketch = sketch
         except Exception:  # noqa: BLE001
@@ -1511,11 +1523,26 @@ class SketcherTools:
             try:
                 return body.Sketches.Item(sketch_name), "by name"
             except Exception:
-                names = ", ".join(str(body.Sketches.Item(i).Name)
-                                  for i in range(1, body.Sketches.Count + 1))
+                # A sketch this server rebuilt answers to the name the caller used
+                # before the rollback. Part Design resolved that (0.3.31) and the
+                # read/edit tools did not, so the same live sketch was readable by
+                # catia_pad and unknown to catia_sketch_get_geometry - which is
+                # exactly the tool a caller reaches for after a rollback
+                # (reported 2026-10-27).
+                alias = self._sketch_alias(sketch_name)
+                if alias is not None:
+                    try:
+                        return body.Sketches.Item(alias), f"by alias '{alias}'"
+                    except Exception:  # noqa: BLE001 - fall through to the error
+                        pass
+                names = self._sketch_names(body)
+                hint = ""
+                if alias:
+                    hint = (f" '{sketch_name}' was re-created as '{alias}', which "
+                            "is no longer in the tree either.")
                 raise RuntimeError(
                     f"No sketch named '{sketch_name}' in the active body. "
-                    f"Sketches: {names or 'none'}."
+                    f"Sketches: {names or 'none'}.{hint}"
                 ) from None
         if self._active_sketch is not None:
             return self._active_sketch, "open in the editor"
@@ -1526,13 +1553,30 @@ class SketcherTools:
                 return remembered, "last sketch created in this session"
             except Exception:
                 self.conn.last_sketch = None
-        names = ", ".join(str(body.Sketches.Item(i).Name)
-                          for i in range(1, body.Sketches.Count + 1))
+        names = self._sketch_names(body)
         raise RuntimeError(
             "No sketch is open and none was created in this session, so there is "
             "nothing to default to. Pass sketch_name explicitly. Sketches in the "
             f"active body: {names or 'none'}."
         )
+
+    def _sketch_alias(self, sketch_name: str) -> str | None:
+        """What this sketch name was re-created as, from the connection's table."""
+        resolve = getattr(self.conn, "sketch_alias", None)
+        return resolve(sketch_name) if resolve is not None else None
+
+    def _sketch_names(self, body: Any) -> str:
+        """The live sketches, with every alias that still resolves to each."""
+        try:
+            finder = getattr(self.conn, "sketch_aliases_of", None)
+            names: list[str] = []
+            for i in range(1, body.Sketches.Count + 1):
+                live = str(body.Sketches.Item(i).Name)
+                olds = finder(live) if finder is not None else []
+                names.append(f"{live} (alias: {', '.join(olds)})" if olds else live)
+            return ", ".join(names)
+        except Exception:  # noqa: BLE001 - a listing must not mask the error
+            return ""
 
     def _get_geometry(self, sketch_name: str | None = None,
                       hide_construction: bool = True) -> str:

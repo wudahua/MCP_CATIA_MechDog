@@ -1277,7 +1277,7 @@ class PartDesignTools:
                         return sketches.Item(replacement)
                     except Exception:  # noqa: BLE001 - fall through to the error
                         pass
-                names = ", ".join(str(sketches.Item(i).Name) for i in range(1, sketches.Count + 1))
+                names = self._sketch_names_with_aliases(body)
                 hint = ""
                 if replacement:
                     hint = (f" '{sketch_name}' was re-created as '{replacement}', "
@@ -2037,12 +2037,33 @@ class PartDesignTools:
 
     def _sketch_alias(self, sketch_name: str) -> str | None:
         """The sketch re-created in place of ``sketch_name``, if there is one."""
+        resolve = getattr(self.conn, "sketch_alias", None)
+        if resolve is not None:
+            return resolve(sketch_name)
         aliases = getattr(self.conn, "sketch_aliases", None) or {}
         try:
             document = str(self.conn.active_document.Name)
         except Exception:  # noqa: BLE001
             document = "?"
         return aliases.get(f"{document}::{sketch_name}")
+
+    def _sketch_names_with_aliases(self, body: Any) -> str:
+        """``Available:`` text that names every usable sketch, aliases included.
+
+        A rebuilt sketch answers to its old name, so a list of live names alone
+        tells the caller the opposite of the truth (reported 2026-10-27).
+        """
+        names: list[str] = []
+        try:
+            sketches = body.Sketches
+            for i in range(1, sketches.Count + 1):
+                live = str(sketches.Item(i).Name)
+                finder = getattr(self.conn, "sketch_aliases_of", None)
+                olds = finder(live) if finder is not None else []
+                names.append(f"{live} (alias: {', '.join(olds)})" if olds else live)
+        except Exception:  # noqa: BLE001 - a listing must not mask the error
+            return ""
+        return ", ".join(names)
 
     def _recover_lost_sketch(self, part: Any, body: Any,
                              sketch_name: str | None,
@@ -2072,7 +2093,14 @@ class PartDesignTools:
                 f"this tool controls. It has been re-created from its recorded "
                 f"definition as '{new_name}' (same plane, same drawing calls), and "
                 f"'{sketch_name}' now resolves to it, so retrying the same call "
-                "works and nothing else in the part changed.")
+                "works and nothing else in the part changed."
+                # The rebuilt sketch IS the answer to "what did I lose", and the
+                # 0.3.31 rebuild path dropped the sentence that says what it holds
+                # - so a rebuilt sketch, an alias no read tool resolved, and a
+                # listing that only printed live names left the caller with no
+                # way to see the profile (reported 2026-10-27).
+                + self._sketch_rebuild_hint(
+                    sketch_name, tail="the rebuilt sketch holds the same elements."))
         return (self._sketch_after_rollback(sketch_name, survived)
                 + f" It could NOT be re-created: {problem}.")
 
@@ -2098,7 +2126,8 @@ class PartDesignTools:
                 "consumed by the feature built on it, so it went with the node."
                 + self._sketch_rebuild_hint(sketch_name))
 
-    def _sketch_rebuild_hint(self, sketch_name: str | None) -> str:
+    def _sketch_rebuild_hint(self, sketch_name: str | None,
+                             tail: str | None = None) -> str:
         """What the lost sketch held, from this session's own drawing record.
 
         A rollback that takes the sketch has to leave the caller something to act
@@ -2107,6 +2136,10 @@ class PartDesignTools:
         (GSD uses it to place outlines in 3D), keyed by document and name, so the
         profile can be echoed verbatim - and that record outlives the sketch
         precisely because it is not read back from CATIA.
+
+        ``tail`` replaces the closing advice: when the sketch has ALREADY been
+        rebuilt, "catia_create_sketch + the same drawing calls rebuilds it" tells
+        the caller to redo work this server just did.
         """
         if not sketch_name:
             return ""
@@ -2149,8 +2182,9 @@ class PartDesignTools:
         if not parts and not where:
             return ""
         drawn = "; ".join(parts) if parts else "no element recorded"
-        return (f" It held: {drawn}{where} - catia_create_sketch + the same drawing "
-                "calls + catia_close_sketch rebuilds it.")
+        closing = tail or ("catia_create_sketch + the same drawing calls + "
+                           "catia_close_sketch rebuilds it.")
+        return f" It held: {drawn}{where} - {closing}"
 
     @staticmethod
     def _try_update(part: Any, feature: Any) -> Exception | None:
@@ -4016,8 +4050,19 @@ class PartDesignTools:
         # channel was itself lying about survival until 0.3.30 (reported
         # 2026-10-27). They are not features and stay out of 'count'.
         try:
-            sketches = [{"index": i, "name": str(body.Sketches.Item(i).Name)}
-                        for i in range(1, body.Sketches.Count + 1)]
+            finder = getattr(self.conn, "sketch_aliases_of", None)
+            sketches = []
+            for i in range(1, body.Sketches.Count + 1):
+                live = str(body.Sketches.Item(i).Name)
+                entry: dict[str, Any] = {"index": i, "name": live}
+                # A rebuilt sketch answers to its old name, so the listing has to
+                # show that name too - otherwise the caller reads "my sketch is
+                # gone" from the one place that is supposed to be authoritative
+                # (reported 2026-10-27: 草图.4 worked and was not listed).
+                olds = finder(live) if finder is not None else []
+                if olds:
+                    entry["aliases"] = olds
+                sketches.append(entry)
         except Exception:  # noqa: BLE001 - a listing must not fail over this
             sketches = []
         if sketches:
@@ -4025,7 +4070,9 @@ class PartDesignTools:
             payload["sketch_count"] = len(sketches)
             payload["sketches_note"] = (
                 "sketches live in the body alongside the features (a sketch "
-                "consumed by a pad is still here), and are not counted in 'count'")
+                "consumed by a pad is still here), and are not counted in 'count'. "
+                "'aliases' lists older names that still resolve to that sketch, "
+                "left by a rollback that deleted it and this server rebuilding it")
         return json.dumps(payload, indent=2)
 
     def _pattern_geoset_inventory(self, part: Any) -> list[dict[str, Any]]:

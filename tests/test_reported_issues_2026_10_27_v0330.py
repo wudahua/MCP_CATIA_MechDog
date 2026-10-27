@@ -209,7 +209,8 @@ def test_the_description_quotes_both_regimes_not_only_the_cold_one():
     description = [d for d in MeasurementTools(connection=None)
                    .get_tool_definitions()
                    if d["name"] == "catia_get_bounding_box"][0]["description"]
-    assert "9.5 ms per topology cell" in description
+    assert "3.2 ms per topology cell" in description
+    assert "9.5 ms" in description  # the 0.3.31 figure, kept as the comparison
     assert "16-90 ms per cell" in description
     assert "first_measure" in description and "cold_parts" in description
 

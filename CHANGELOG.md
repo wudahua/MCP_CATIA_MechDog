@@ -2,6 +2,125 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.32] — 2026-10-28 · one meaning for a sketch name, and the cost no part owns
+
+### Fixed — a rebuilt sketch's old name was only understood by Part Design
+
+- 0.3.31 promised "'草图.2' now resolves to it". It resolved in `catia_pad` /
+  `catia_pocket` / `catia_hole` and nowhere else: for the same live sketch,
+  `catia_sketch_get_geometry` answered "No sketch named '草图.2' in the active
+  body" — the one tool a caller reaches for after a rollback (reported 2026-10-27).
+  There are now four methods on the connection — `sketch_alias`,
+  `note_sketch_alias`, `sketch_aliases_of`, `sketch_scope` — and both tool groups
+  delegate to them; `SketcherTools._locate_sketch` is the single entry every read
+  and edit tool goes through, so "what does this name mean" has one answer.
+- The table held **one hop**: `草图.2 -> 草图.3`. A second rollback deleted 草图.3,
+  rebuilt it as 草图.4 and wrote `草图.3 -> 草图.4`, so the name the caller actually
+  held stopped resolving on the third retry while the sketch was in the tree the
+  whole time (reported: retry 1 and 2 answered NO_MATERIAL, retry 3 answered
+  SKETCH_NOT_FOUND). A rebuild now re-points every entry that pointed at the lost
+  name, so the caller's original name stays valid for the session *and* the table
+  stays one level deep. Lookups still follow a chain when one exists (an older
+  build's table, or a lost re-point), with cycle detection.
+- Measured on B30 2026-10-28, three consecutive rollbacks, only ever naming
+  草图.2: rebuilds 草图.3 → 草图.4 → 草图.5, all three retries resolved (each failed
+  on the geometry, not on the name), and `catia_sketch_get_geometry('草图.2')`
+  answered `found: "by alias '草图.5'"` with the profile's elements.
+
+### Fixed — the rebuilt sketch says what it holds again
+
+- 0.3.31 rebuilt the sketch from its record and then dropped the `It held: …`
+  sentence that 0.3.30 printed on the way out, so the caller could not see the
+  profile from the reply, could not read it from the sketch tools and could not
+  find it in the listing (reported 2026-10-27). The rebuild path prints it now, and
+  with a different tail — "the rebuilt sketch holds the same elements" instead of
+  "catia_create_sketch + the same drawing calls rebuilds it", which told the caller
+  to redo work this server had just done.
+
+### Fixed — a name that works is a name that is listed
+
+- `catia_list_features.sketches[]` entries carry `aliases: ["草图.2", …]`, and the
+  `Available:` line of a `SKETCH_NOT_FOUND` prints `草图.6 (alias: 草图.2, 草图.3,
+  草图.4, 草图.5)`. Until then the listing was the only authoritative place a caller
+  could check "is my sketch still there", and a rebuilt sketch was missing from it
+  while working perfectly (reported 2026-10-27).
+
+### Fixed — `sweep_route` on the assembly route too
+
+- `parts[]` published `points_route` (`batched` / `per_point`) and not
+  `sweep_route`, although 0.3.31's changelog said both routes published it, so
+  "read `sweep_route` to see which reader ran" was false exactly where it mattered
+  (reported 2026-10-27). Every part entry now says `one_call`, `per_cell`, or
+  `mesh` when no vertex sweep ran at all — the third honest value of the same
+  field, rather than a missing key.
+
+### Added — the cost that belongs to no part is published
+
+- On the 70-instance assembly, `elapsed_ms` minus the sum of `parts[].elapsed_ms`
+  was 5 394.6 ms — 23.6 % of a warm call, and larger than the most expensive part
+  in the table — but it appeared nowhere, so a share-of-total analysis built from
+  `parts` was short by that much (reported 2026-10-27). The reply now carries
+  `parts_ms`, `overhead_ms` and `overhead_breakdown`
+  (`components_doc_ms` / `walk_other_ms` / `report_ms`), all ahead of `components`.
+- The breakdown answers the question the report could only guess at. On a 5-instance
+  product measured here: `elapsed_ms` 1 308.1, `parts_ms` 856.8, `overhead_ms`
+  451.3, of which **`components_doc_ms` 413.3** — the component-tree read, once per
+  document, not per part. So the residual scales with the number of instances, and
+  it is identical cold and warm for the same reason; it is one read, not 28 slices.
+
+### Added — `warm_up`: pay the cold pass on purpose
+
+- The first topology read of a part costs 4–7× the later ones, and it lands inside
+  whichever call happens to come first — on the acceptance model 173.4 s against
+  22.9 s for the identical call right after (reported 2026-10-27: "暖态砍 46.3 %，
+  冷态只砍 12.3 %，冷热差拉到 7.6×"). `catia_get_bounding_box{warm_up: true}` runs
+  the same measurement, throws the geometry away and returns what it cost:
+  `parts_measured`, `cold_parts`, `elapsed_ms`, and per part `elapsed_ms` /
+  `first_measure` / `cells_scanned` / `sweep_route`. Warm up after opening an
+  assembly, then measure.
+- Measured on B30: a 2-part / 5-instance product, `warm_up: true` → `cold_parts: 2`,
+  1 345.9 ms; the next ordinary call → `cold_parts: 0`, 1 308.1 ms. On parts this
+  small cold and warm are within 7 % of each other, so the saving shows on a real
+  model, not on a toy one — stated here rather than claimed.
+- The report also asked why the mesh box can be cached from `(size, mtime)` and the
+  vertex box cannot. It cannot because the mesh box describes a **file** and is
+  reused only for a part that is not open, while the vertex box describes the
+  **live** part, whose state includes edits that were never saved; a file-keyed
+  cache would answer for the part as it was on disk. That reasoning is in
+  `warm_up_note`, in the tool description and in the README, so the next reader
+  does not have to rediscover it.
+
+### Changed — the numbers quoted in the cost notes are this release's
+
+- The cold `elapsed_note` and the tool description said "194.7 s for the first call
+  and 41.4 s for the next one". They now quote 173.4 s / 22.9 s, say the ratio
+  **grew** from 4.65× because the warm side got twice as fast, and point at
+  `warm_up=true` (reported 2026-10-27). The warm per-cell model is 3.2 ms/cell
+  after 0.3.31's one-call sweep, not 9.5 ms.
+
+### Verified
+
+- 602 tests pass (`pytest tests -q`), 21 of them new in
+  `tests/test_reported_issues_2026_10_28_v0332.py`.
+- On B30 2026-10-28, through the tool layer (`catia_probe/probe_v0332a`): the three
+  consecutive rollbacks above, the alias read, the alias listing, `It held:` on the
+  rebuild path, `sweep_route` per part, `overhead_ms` reconciling to the millisecond
+  (451.3 = 1 308.1 − 856.8) and `warm_up` turning `cold_parts: 2` into `0`.
+
+### Not fixed
+
+- **CATIA's first-read cost is still there.** 0.3.32 makes it schedulable and
+  legible; it does not remove it, and the 173 s first call on the 28-part
+  acceptance assembly would still be 173 s. What changed is that a caller can now
+  ask for it separately.
+- **`components_doc_ms` is attributed, not optimised.** It was 413 ms of the 451 ms
+  overhead on a 5-instance product; cutting it is a separate job (it is one read of
+  the product tree, and the reply now says so instead of calling it "per part").
+- **The 70-instance `WB_CATIA_M113` assembly still cannot be measured on this
+  machine** (all instances `part not loaded`), so the overhead figures quoted from
+  that model are the report's, and the breakdown above comes from a product built
+  here.
+
 ## [0.3.31] — 2026-10-27 · the bore goes where the profile is, and a lost sketch comes back
 
 ### Fixed — `catia_hole` drilled at the sketch origin, whatever the circle said

@@ -390,7 +390,8 @@ def _cost_first(payload: dict[str, Any]) -> dict[str, Any]:
     reply loses. Nothing is dropped; the order is.
     """
     order = ("dimensions", "min", "max", "complete", "elapsed_ms", "cold_parts",
-             "part_boxes_total", "part_boxes", "elapsed_note", "document",
+             "part_boxes_total", "part_boxes", "parts_ms", "overhead_ms",
+             "overhead_note", "overhead_breakdown", "elapsed_note", "document",
              "assembly_depth_max", "instances", "mesh_fallback_instances",
              "scope", "note_scope")
     head = {key: payload[key] for key in order if key in payload}
@@ -637,21 +638,27 @@ class MeasurementTools:
                     "composed) and every entry says which level it came from with "
                     "'path' and 'depth'. "
                     "Exactness has a price, and there are TWO regimes. Warm, a part "
-                    "costs about 200 ms + 9.5 ms per topology cell (26 parts of one "
-                    "acceptance model: 8.6-11 ms per cell, a 1200-cell part 11.4 s). "
+                    "costs about 200 ms + 3.2 ms per topology cell (0.3.32, after the "
+                    "sweep moved inside CATIA; it was 9.5 ms). "
                     "COLD - the first time a part is touched in a session - the same "
                     "work costs 16-90 ms per cell, because CATIA builds that part's "
-                    "internal representation on the first topology read: one "
-                    "70-instance model measured 194.7 s for the first call and 41.4 s "
-                    "for the next one, with cells_scanned, vertices_used and "
-                    "nls_chars IDENTICAL all three times. 'first_measure' per part "
+                    "internal representation on the first topology read: the 28-part "
+                    "acceptance assembly measured 173.4 s for the first call and 22.9 s "
+                    "for the same call right after, with cells_scanned, vertices_used "
+                    "and nls_chars IDENTICAL both times. 'first_measure' per part "
                     "in 'parts', 'cold_parts' and 'elapsed_note' say which regime a "
                     "number came from; compare elapsed_ms across sessions only with "
-                    "that in view. A 70-instance assembly is MINUTES cold, ~40 s "
-                    "warm, and the server runs tools one at a time. 'cells_scanned' "
-                    "and 'elapsed_ms' (total, and per part in 'parts') report what it "
-                    "actually cost, which is how you find the one part that eats 40% "
-                    "of the call. Measure the instances you need with 'component' "
+                    "that in view. A 70-instance assembly is MINUTES cold, ~23 s "
+                    "warm, and the server runs tools one at a time. warm_up=true runs "
+                    "the same measurement and returns the COST instead of the box, so "
+                    "that first read can be paid when the caller has idle time rather "
+                    "than inside a call that needs the answer. 'cells_scanned', "
+                    "'elapsed_ms' (total, and per part in 'parts'), 'parts_ms' and "
+                    "'overhead_ms' report what it actually cost: overhead_ms is the "
+                    "part no entry in 'parts' owns, so a share-of-total table built "
+                    "from 'parts' alone is short by that much - it was 23.6 % of a "
+                    "warm 70-instance call. Measure the instances you need with "
+                    "'component' "
                     "rather than the whole assembly when you can. A curved part's "
                     "mesh box is read from its SAVED file and reused while that "
                     "file's size and modified time are unchanged (its source_note "
@@ -699,6 +706,24 @@ class MeasurementTools:
                                 "instance is marked source='mesh_fallback', which is "
                                 "what makes 'complete' mean what it says. Turn it "
                                 "off to keep every instance on the vertex route."
+                            ),
+                        },
+                        "warm_up": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Pay the COLD cost on purpose: run the same "
+                                "measurement, discard the geometry, and return what "
+                                "it cost (parts_measured, cold_parts, elapsed_ms, "
+                                "per-part times). The first topology read of a part "
+                                "costs 4-7x the later ones and lands inside whichever "
+                                "call comes first - on a 70-instance assembly 173.4 s "
+                                "against 22.9 s for the identical call right after. "
+                                "Warm up after opening an assembly, then measure. "
+                                "There is no cheaper warm-up: CATIA's first-read "
+                                "setup IS the work, and a per-part vertex box cannot "
+                                "be cached from a file identity the way a mesh box "
+                                "is (the live part may hold unsaved edits)."
                             ),
                         },
                         "document": {
@@ -780,12 +805,17 @@ class MeasurementTools:
                                          arguments.get("document")
                                          or arguments.get("document_name"))
             case "catia_get_bounding_box":
-                return self._get_bounding_box(arguments.get("method", "auto"),
-                                              arguments.get("component"),
-                                              arguments.get("document")
-                                              or arguments.get("document_name"),
-                                              bool(arguments.get("include_curved",
-                                                                 True)))
+                reply = self._get_bounding_box(
+                    arguments.get("method", "auto"),
+                    arguments.get("component"),
+                    arguments.get("document") or arguments.get("document_name"),
+                    bool(arguments.get("include_curved", True)))
+                # warm_up runs the same measurement and throws the geometry away:
+                # the point is to make CATIA pay its first-read cost now rather
+                # than inside the call that needs the answer (reported 2026-10-27).
+                if arguments.get("warm_up"):
+                    return self._warm_up_report(reply)
+                return reply
             case "catia_get_parameters":
                 return self._get_parameters(arguments.get("filter"))
             case "catia_set_parameter":
@@ -1571,6 +1601,14 @@ class MeasurementTools:
                 "inside a sub-assembly has to be measured through that "
                 "sub-assembly, or by naming the part's document."
             )
+        # Where the time goes, in three buckets: reading the component tree,
+        # walking it (which includes each part's own measurement), and building
+        # this reply. `overhead_ms` below is the part of elapsed_ms that no entry
+        # in `parts` accounts for; without the buckets that number is a residual
+        # with no explanation, and a caller cannot tell "assembly traversal" from
+        # "serialising 70 entries" (reported 2026-10-27: 5 394.6 ms, 23.6 % of the
+        # warm call, unchanged for four versions).
+        t_rows = time.perf_counter()
 
         # The walk below is recursive: a sub-assembly gets its own level with the
         # placement composed on the way down. Everything it accumulates lives in
@@ -1583,6 +1621,7 @@ class MeasurementTools:
         }
         self._box_walk(rows, [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
                        [0.0, 0.0, 0.0], 1, "", ctx)
+        t_walk = time.perf_counter()
         entries = ctx["entries"]
         corners = ctx["corners"]
         skipped = ctx["skipped"]
@@ -1660,12 +1699,14 @@ class MeasurementTools:
             payload["elapsed_note"] = (
                 f"{cold_parts} of {len(local_boxes)} part(s) were measured for the "
                 "FIRST time in this session. CATIA builds a part's internal "
-                "representation on the first topology read, and on a 70-instance "
-                "acceptance model that made the first call 194.7 s against 41.4 s "
-                "and 41.5 s for the next two - with cells_scanned, vertices_used "
-                "and nls_chars IDENTICAL all three times, so it is not 'less work'. "
-                "Do not compare a single elapsed_ms across sessions without "
-                "saying which regime it came from.")
+                "representation on the first topology read: on the 28-part "
+                "acceptance assembly the first call cost 173.4 s against 22.9 s for "
+                "the same call right after it (7.6x), with cells_scanned, "
+                "vertices_used and nls_chars IDENTICAL, so it is not 'less work' - "
+                "and the ratio GREW from 4.65x in 0.3.30 because the warm side got "
+                "twice as fast. Do not compare a single elapsed_ms across sessions "
+                "without saying which regime it came from. warm_up=true pays this "
+                "cost in a call that does not need the box.")
         else:
             payload["elapsed_note"] = (
                 "every part here had already been measured once in this session, "
@@ -1694,6 +1735,29 @@ class MeasurementTools:
         # distinct values (reported 2026-10-26). The instance entries keep the
         # geometry; this list keeps the cost model and the caveats.
         payload["parts"] = list(parts_detail.values())
+        # The cost no part owns. A caller adding up `parts[].elapsed_ms` to find
+        # "which part eats the call" was working with 76.4 % of the number: on the
+        # 70-instance assembly the difference was 5 394.6 ms of 22 875.1, and it
+        # would have been the largest single item in that table - except it was not
+        # in the table (reported 2026-10-27). Published, with the phases, so the
+        # attribution is measured rather than guessed.
+        parts_ms = round(sum(float(entry.get("elapsed_ms") or 0.0)
+                             for entry in payload["parts"]), 1)
+        payload["parts_ms"] = parts_ms
+        payload["overhead_ms"] = round(max(payload["elapsed_ms"] - parts_ms, 0.0), 1)
+        payload["overhead_breakdown"] = {
+            "components_doc_ms": round((t_rows - started) * 1000, 1),
+            "walk_other_ms": round((t_walk - t_rows) * 1000 - parts_ms, 1),
+            "report_ms": round((time.perf_counter() - t_walk) * 1000, 1),
+        }
+        payload["overhead_note"] = (
+            "elapsed_ms minus the sum of parts[].elapsed_ms: reading the component "
+            "tree, transforming every instance's points into world coordinates, "
+            "counting instances per part, and building this document. It is not "
+            "attributable to any entry in 'parts', so a share-of-total table built "
+            "from 'parts' alone is short by this much. 'overhead_breakdown' splits "
+            "it into the three phases it was measured in; the JSON that reaches you "
+            "is written after 'report_ms' and is not counted in any of them")
         # `component=` narrows to TOP-LEVEL components. When the same part is ALSO
         # installed inside a sub-assembly, the reply used to say complete: true
         # with instances {total: 1} while its own note_scope claimed sub-assemblies
@@ -1969,6 +2033,10 @@ class MeasurementTools:
                 if cached["source"] == "mesh_fallback":
                     detail["mesh_vertices"] = cached["mesh_vertices"]
                     detail["points_route"] = "mesh"
+                    # No vertex sweep ran for this part, and saying nothing would
+                    # make the key set differ per part again. "mesh" is the third
+                    # honest value of the same field.
+                    detail["sweep_route"] = "mesh"
                     detail["source_note"] = (
                         "no vertex lies at this part's extremum, so its box came "
                         "from the mesh - a lower bound on curved faces, measured "
@@ -1989,6 +2057,12 @@ class MeasurementTools:
                         detail["nls_chars"] = cached["nls_chars"]
                         detail["nls_chars_note"] = _NLS_NOTE
                     detail["points_route"] = _route_name(cached.get("points_route"))
+                    # Which sweep reader ran for this part: one script call inside
+                    # CATIA, or one COM round trip per topology cell. It was
+                    # published on the single-part route only, so "read
+                    # sweep_route to see which route ran" was false exactly where
+                    # it mattered - the 70-instance assembly (reported 2026-10-27).
+                    detail["sweep_route"] = cached.get("sweep_route") or "per_cell"
                 parts_detail[key] = detail
             parts_detail[key]["instances"] += 1
             if cached["copy_note"] and key not in warned:
@@ -2443,6 +2517,61 @@ class MeasurementTools:
             return str(self.conn.active_document.Name)
         except Exception:  # noqa: BLE001
             return "<none>"
+
+    def _warm_up_report(self, reply: str) -> str:
+        """Say what a warm-up call bought, instead of handing back a box it ignores.
+
+        The first topology read of a part costs 4-7x the later ones, and it lands
+        inside whichever call happens to come first - which is why a "just look at
+        the envelope" script pays 173 s and the *same* call right after costs 22.9 s
+        (reported 2026-10-27). ``warm_up`` lets the caller pay it on its own time:
+        this runs the same measurement (there is no cheaper way to make CATIA build
+        its internal representation) and returns the cost, not the geometry.
+
+        A per-part vertex box cannot be cached the way the mesh box is. The mesh box
+        describes a FILE - path, size, mtime - and is reused only for a part that is
+        not open, i.e. for a state that file identity fully describes. The vertex box
+        describes the LIVE part, whose state includes edits that were never saved;
+        a file-keyed cache would answer for the part as it was on disk. That is why
+        the similar-looking shortcut does not exist on this route, and why the fix
+        for the cold pass is to schedule it, not to remember it.
+        """
+        try:
+            payload = json.loads(reply)
+        except Exception:  # noqa: BLE001 - a non-JSON reply is already an error
+            return reply
+        if "error" in payload or payload.get("ok") is False:
+            return reply
+        parts = payload.get("parts")
+        report: dict[str, Any] = {"warm_up": True}
+        if isinstance(parts, list):
+            report["document"] = payload.get("document")
+            report["parts_measured"] = (payload.get("part_boxes_total")
+                                        or payload.get("part_boxes"))
+            report["instances"] = payload.get("instances")
+            report["cold_parts"] = payload.get("cold_parts")
+            report["elapsed_ms"] = payload.get("elapsed_ms")
+            report["parts"] = [
+                {key: entry[key] for key in
+                 ("part", "elapsed_ms", "first_measure", "cells_scanned",
+                  "sweep_route") if key in entry}
+                for entry in parts]
+        else:
+            report["part"] = payload.get("part") or payload.get("document")
+            report["first_measure"] = payload.get("first_measure")
+            report["elapsed_ms"] = payload.get("elapsed_ms")
+            report["cells_scanned"] = payload.get("cells_scanned")
+            report["sweep_route"] = payload.get("sweep_route")
+        report["warm_up_note"] = (
+            "this call measured the same geometry and then threw it away: the point "
+            "was to make CATIA read every part's topology once, outside a call that "
+            "needs the answer. The next catia_get_bounding_box over this document "
+            "should report cold_parts: 0 and run at the warm cost. There is no "
+            "cheaper warm-up: CATIA's first-read setup is the work, and a per-part "
+            "vertex box cannot be cached from a file identity the way a mesh box "
+            "is - the live part may hold edits that were never saved, so a "
+            "file-keyed cache would answer for the part as it was on disk")
+        return json.dumps(report, indent=2)
 
     def _get_bounding_box(self, method: str = "auto",
                           component: str | None = None,
