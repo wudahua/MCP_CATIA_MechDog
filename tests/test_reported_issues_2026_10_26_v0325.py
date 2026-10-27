@@ -274,8 +274,12 @@ def test_the_single_part_box_publishes_the_route_too():
     # coordinates came from an STL extent (0.3.27 - the key is never missing).
     assert source.count('"points_route"') == 2
     assert '"cells_scanned"' in source
+    # 0.3.31: the active-part path no longer has its own copy of this block - it
+    # delegates to _part_bbox, so both single-part routes publish the same
+    # fields, including the cost regime the active path used to drop.
     active = __import__("inspect").getsource(M.MeasurementTools._get_bounding_box)
-    assert '"points_route"' in active
+    assert "_part_bbox(part, method)" in active
+    assert "elapsed_note" in source and "first_measure" in source
 
 
 def test_every_call_says_what_it_cost():

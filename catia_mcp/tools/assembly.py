@@ -11,6 +11,7 @@ import os
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
+from catia_mcp.results import ComponentNotFound
 
 
 # `Position.GetComponents` fills 12 by-ref slots; pywin32 cannot call that
@@ -968,7 +969,8 @@ class AssemblyTools:
             if component.Name == name:
                 return component
         available = [products.Item(i).Name for i in range(1, products.Count + 1)]
-        raise ValueError(f"No component '{name}'. Available: {available}")
+        raise ComponentNotFound(
+            f"No component '{name}'. Available: {available}")
 
     @staticmethod
     def _rotation_components(rows: list[list[float]],

@@ -11,6 +11,7 @@ from typing import Any
 
 from catia_mcp import dialogs
 from catia_mcp.connection import CATIAConnection
+from catia_mcp.results import ComponentNotFound
 
 
 class DocumentTools:
@@ -894,7 +895,8 @@ class DocumentTools:
                     break
             if target is None:
                 available = [products.Item(i).Name for i in range(1, products.Count + 1)]
-                raise ValueError(f"No component '{component_name}'. Available: {available}")
+                raise ComponentNotFound(
+                    f"No component '{component_name}'. Available: {available}")
             old = target.PartNumber
             target.PartNumber = part_number
             note = ""

@@ -94,7 +94,7 @@ def test_pocket_and_hole_say_it_too():
     for name in ("_pocket", "_hole"):
         source = inspect.getsource(getattr(PartDesignTools, name))
         assert "_sketch_present" in source, name
-        assert "_sketch_after_rollback" in source, name
+        assert "_recover_lost_sketch" in source, name
 
 
 # ──────────────────── 2. component= narrowing is not "complete"
@@ -218,7 +218,9 @@ def test_the_description_quotes_both_regimes_not_only_the_cold_one():
 def test_nls_chars_note_no_longer_claims_to_explain_the_time():
     from catia_mcp.tools import measurement as M
 
-    source = inspect.getsource(M.MeasurementTools._box_walk)
+    # 0.3.31 moved the sentence onto one module constant so both routes publish
+    # the same words - the single-part reply used to carry the number alone.
+    source = M._NLS_NOTE
     assert "not a cost predictor" in source or "not how long" in source
     # The exact sentence that was withdrawn (it survives only inside the comment
     # that records WHY it was withdrawn).

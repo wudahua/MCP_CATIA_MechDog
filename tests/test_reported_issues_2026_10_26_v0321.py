@@ -47,7 +47,12 @@ def test_pad_failure_says_whether_the_sketch_survived():
     # 0.3.30: the sentence moved into one helper, because `pocket` and `hole`
     # needed the same three states instead of only `pad` saying anything.
     assert "_sketch_present" in source
-    assert "_sketch_after_rollback" in source
+    # 0.3.31: the three-state sentence is wrapped by _recover_lost_sketch, which
+    # redraws the sketch when CATIA took it, so the state after the error is the
+    # same either way.
+    assert "_recover_lost_sketch" in source
+    assert "_sketch_after_rollback" in inspect.getsource(
+        PartDesignTools._recover_lost_sketch)
     # Both directions are measured now, so the claim is a fact, not an assumption.
     assert "Both directions were MEASURED" in source
     assert "not the problem" not in source

@@ -465,11 +465,16 @@ def test_nls_characters_are_published_beside_the_cell_count():
     from catia_mcp.tools.measurement import _nls_fields
 
     assert _nls_fields({}) == {}
-    assert _nls_fields({"nls_chars": 1234}) == {"nls_chars": 1234}
+    plain = _nls_fields({"nls_chars": 1234})
+    assert plain["nls_chars"] == 1234
+    # Since 0.3.31 the meaning travels with the number on BOTH routes: the
+    # single-part reply published the count without the caveat (report §P3-3).
+    assert "not a cost predictor" in plain["nls_chars_note"]
     # A capped single-part sweep is a SAMPLE, and the reply has to say so.
-    assert _nls_fields({"nls_chars": 500, "cells": 1207,
-                        "nls_chars_cells": 200}) == {"nls_chars": 500,
-                                                     "nls_chars_cells": 200}
+    capped = _nls_fields({"nls_chars": 500, "cells": 1207, "nls_chars_cells": 200})
+    assert capped["nls_chars"] == 500
+    assert capped["nls_chars_cells"] == 200
+    assert "not a cost predictor" in capped["nls_chars_note"]
 
 
 def test_a_part_box_entry_carries_the_nls_count():

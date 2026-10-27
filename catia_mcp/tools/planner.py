@@ -29,15 +29,21 @@ from catia_mcp.topo_search import topology_cells
 MAX_RESULT_CHARS = 600
 
 
-def _failure_code(message: str) -> str:
-    """A code a script can branch on, from the message the tool already wrote.
+def _failure_code(message: str, error: BaseException | None = None) -> str:
+    """A code a script can branch on: the exception's own, else read the message.
 
     Every failed step used to answer ``STEP_EXCEPTION``, so "the sketch went with
     the rollback" and "the licence is missing" looked identical to a caller
-    (reported 2026-10-27). These are the failures this server raises on purpose;
-    anything else keeps the generic code, and the exception class travels in
-    ``error_type`` instead of in front of the sentence.
+    (reported 2026-10-27). The exceptions this server raises on purpose now carry
+    their code (``ComponentNotFound.code``), and that is always preferred: a
+    phrase table is only as good as the last person to edit the wording, and
+    0.3.30 shipped one that missed ``No component 'X'. Available: [...]`` because
+    it only knew ``no component matches`` - reported the same day, with the same
+    name answered COMPONENT_NOT_FOUND by one tool and STEP_EXCEPTION by the next.
     """
+    carried = getattr(error, "code", None)
+    if isinstance(carried, str) and carried and carried != "STEP_EXCEPTION":
+        return carried
     text = message.casefold()
     if "no sketch named" in text or "no sketch" in text and "available" in text:
         return "SKETCH_NOT_FOUND"
@@ -45,7 +51,7 @@ def _failure_code(message: str) -> str:
         return "NO_MATERIAL"
     if message.startswith("UNSUPPORTED_CAPABILITY"):
         return "UNSUPPORTED_CAPABILITY"
-    if "no component matches" in text:
+    if "no component matches" in text or "no component '" in text:
         return "COMPONENT_NOT_FOUND"
     if "part not loaded" in text:
         return "PART_NOT_LOADED"
@@ -372,7 +378,7 @@ class PlannerTools:
                 # failures this server produces on purpose get their own code.
                 entry.update(
                     ok=False,
-                    code=_failure_code(message),
+                    code=_failure_code(message, error),
                     error=message,
                     error_type=type(error).__name__,
                 )
@@ -445,7 +451,7 @@ class PlannerTools:
         ok = failed_at is None and not failed_assertions
         if failed_at is not None:
             code = "STEP_FAILED"
-            message = self._failure_summary(report, stop_on_error)
+            message = self._failure_summary(report, stop_on_error, len(steps))
             if assertions_skipped_because:
                 message += f" (assertions not evaluated: {len(report)} step(s) ran, " \
                            f"{sum(1 for e in report if not e['ok'])} failed)"
@@ -480,7 +486,8 @@ class PlannerTools:
         }
 
     @staticmethod
-    def _failure_summary(report: list[dict[str, Any]], stop_on_error: bool) -> str:
+    def _failure_summary(report: list[dict[str, Any]], stop_on_error: bool,
+                         planned: int | None = None) -> str:
         """Name every failed step, not just the last one, when the plan ran on.
 
         ``stop_on_error: false`` means "keep going after a failure", so a plan can
@@ -488,13 +495,22 @@ class PlannerTools:
         all, but the top-level ``message`` named one - and the message is often the
         only field that reaches a log (reported 2026-10-26: a 5-step plan with two
         failures read as one failure).
+
+        A stopping plan says how many steps it never reached: "Step 13 (catia_pad)
+        failed" leaves a caller unable to tell a 13-step plan from a 60-step one,
+        and the report that asked for the count form asked for this too
+        (2026-10-27, §5.1).
         """
         failed = [entry for entry in report if not entry["ok"]]
         first = failed[0]
         if stop_on_error:
-            # A stopping plan never reached the steps after the first failure, so
-            # "the step that stopped it" is the whole truth.
-            return f"Step {first['index']} ({first['tool']}) failed"
+            total = planned if planned is not None else len(report)
+            not_run = max(total - len(report), 0)
+            message = (f"1 of {total} planned steps failed at step "
+                       f"{first['index']} ({first['tool']})")
+            if not_run:
+                message += f"; {not_run} step(s) were not run"
+            return message
         listed = ", ".join(f"step {e['index']} ({e['tool']})" for e in failed)
         # One failure gets the same shape as two, because a script that parses this
         # message should not have to handle two grammars (reported 2026-10-27).

@@ -265,6 +265,106 @@ _BATCH_POINTS = (
 )
 
 
+_BATCH_SWEEP = (
+    # The whole sweep in ONE script call: enumerate the selection, drop the
+    # construction cells by their NLS name, and read each survivor's coordinates.
+    #
+    # Why it exists: the per-cell route costs about 9.4 ms per topology cell warm
+    # (26 parts, 3 349 cells, 31.5 s of a 43 s call) and 16-90 ms cold, because
+    # every `sel.Item(i)`, `.Value.Name` and `.Reference` is a COM round trip from
+    # Python. The same statements inside CATIA cost a fraction of that, so a
+    # 70-instance assembly pays Python's overhead 3 349 times for no reason
+    # (reported 2026-10-27: "cold 4.65x only annotated, not fixed").
+    #
+    # out(0) = cells returned by the search, out(1) = cells kept, out(2) =
+    # characters of NLS name read (the size indicator), then 3 floats per kept
+    # cell. The filter mirrors topo_search.is_construction: a leading type token
+    # containing Wire/Border is construction, and so is a datum-plane border.
+    "Public Function catia_mcp_sweep(sel, spa, limit)\n"
+    "    Dim i, n, a(2), out(), kept, chars, name, head, skip\n"
+    "    n = sel.Count\n"
+    "    ReDim out(4 + 3 * n)\n"
+    "    kept = 0\n"
+    "    chars = 0\n"
+    "    On Error Resume Next\n"
+    "    For i = 1 To n\n"
+    "        name = sel.Item(i).Value.Name\n"
+    "        chars = chars + Len(name)\n"
+    "        head = name\n"
+    "        If InStr(name, \":\") > 0 Then head = Left(name, InStr(name, \":\") - 1)\n"
+    "        skip = False\n"
+    "        If InStr(head, \"Wire\") > 0 Then skip = True\n"
+    "        If InStr(head, \"Border\") > 0 Then skip = True\n"
+    "        If InStr(name, \"Brp:(GSMPlane.\") > 0 Then skip = True\n"
+    "        If limit > 0 And kept >= limit Then skip = True\n"
+    "        If Not skip Then\n"
+    "            spa.GetMeasurable(sel.Item(i).Reference).GetPoint a\n"
+    "            out(4 + 3 * kept) = a(0)\n"
+    "            out(4 + 3 * kept + 1) = a(1)\n"
+    "            out(4 + 3 * kept + 2) = a(2)\n"
+    "            kept = kept + 1\n"
+    "        End If\n"
+    "    Next\n"
+    "    out(0) = n\n"
+    "    out(1) = kept\n"
+    "    out(2) = chars\n"
+    "    out(3) = 0\n"
+    "    catia_mcp_sweep = out\n"
+    "End Function\n"
+)
+
+
+def batch_vertex_sweep(app: Any, sel: Any, spa: Any,
+                       stats: dict[str, Any] | None = None,
+                       limit: int = 0
+                       ) -> tuple[list[list[float]], int, int] | None:
+    """``(points, cells, nls_chars)`` for a selection, in one script call.
+
+    Returns None when the script route is refused, so the caller keeps its own
+    per-cell reader: the numbers a caller acts on must not depend on whether this
+    build accepts CATScript. ``stats["route"]`` says which route ran.
+
+    ``limit`` caps how many points are READ (0 = all). It is applied inside the
+    script, not afterwards: the single-part route wants at most 200 points, and
+    reading 5 000 of them to throw 4 800 away would cost more than the route it
+    replaced.
+    """
+    try:
+        sel_count = int(sel.Count)
+    except Exception:  # noqa: BLE001
+        return None
+    if sel_count <= 0:
+        return [], 0, 0
+    flat: list[float] = []
+    for attempt in (1, 2):
+        try:
+            raw = app.SystemService.Evaluate(_BATCH_SWEEP, 0, "catia_mcp_sweep",
+                                             [sel, spa, int(limit)])
+            # Unset slots come back as Empty/None: a VBScript array is typed by
+            # its first assignment, and `out(3)` is never written by the script.
+            flat = [float(v) if v is not None else 0.0 for v in raw]
+            break
+        except Exception:  # noqa: BLE001 - the per-cell route still works
+            if attempt == 2:
+                if stats is not None:
+                    stats["sweep_route"] = "per_cell"
+                return None
+            continue
+    if len(flat) < 4:
+        if stats is not None:
+            stats["sweep_route"] = "per_cell"
+        return None
+    cells, kept, chars = int(flat[0]), int(flat[1]), int(flat[2])
+    values = flat[4:4 + 3 * kept]
+    if len(values) != 3 * kept:
+        if stats is not None:
+            stats["sweep_route"] = "per_cell"
+        return None
+    if stats is not None:
+        stats["sweep_route"] = "one_call"
+    return ([values[i:i + 3] for i in range(0, len(values), 3)], cells, chars)
+
+
 def _route_name(route: Any) -> str:
     """Name the reader that ran, in the reply - including when nothing went wrong.
 
@@ -280,6 +380,41 @@ def _route_name(route: Any) -> str:
     return "batched"
 
 
+def _cost_first(payload: dict[str, Any]) -> dict[str, Any]:
+    """Answer first, cost model next, per-component detail last.
+
+    The 197.8-second call in the 2026-10-27 acceptance run came back CUT OFF in
+    the caller's wrapper, and the two fields that say which regime produced that
+    number - ``cold_parts`` and ``elapsed_note`` - sat at the back, behind 28
+    per-part objects. So the most useful fields were exactly the ones a truncated
+    reply loses. Nothing is dropped; the order is.
+    """
+    order = ("dimensions", "min", "max", "complete", "elapsed_ms", "cold_parts",
+             "part_boxes_total", "part_boxes", "elapsed_note", "document",
+             "assembly_depth_max", "instances", "mesh_fallback_instances",
+             "scope", "note_scope")
+    head = {key: payload[key] for key in order if key in payload}
+    for key in head:
+        payload.pop(key)
+    return {**head, **payload}
+
+
+#: What `nls_chars` means, in the same words on both routes.
+#:
+#: A SIZE indicator, not a cost predictor. 0.3.29 claimed it was "the filter's
+#: whole per-cell cost"; an acceptance run over 26 parts falsified that - nls/cell
+#: varied 1.31x while ms/cell varied 5.49x (r = 0.34), and the part with the
+#: longest paths (P10, 267 chars/cell) was the fastest (16.4 ms/cell). 0.3.31 makes
+#: the sentence travel with the number, because the single-part route published the
+#: number without it (reported 2026-10-27, §P3-3).
+_NLS_NOTE = (
+    "characters of NLS path the construction filter read (one path per cell): how "
+    "much construction geometry there was to filter, NOT how long the sweep took. "
+    "Measured on 26 parts: nls/cell varies 1.31x while ms/cell varies 5.49x "
+    "(r = 0.34), and the part with the longest paths was the fastest. Treat this "
+    "as a size indicator, not a cost predictor")
+
+
 def _nls_fields(stats: dict[str, Any]) -> dict[str, Any]:
     """``nls_chars`` (and how many cells it covers) when the filter counted them.
 
@@ -293,7 +428,8 @@ def _nls_fields(stats: dict[str, Any]) -> dict[str, Any]:
     """
     if stats.get("nls_chars") is None:
         return {}
-    fields: dict[str, Any] = {"nls_chars": stats["nls_chars"]}
+    fields: dict[str, Any] = {"nls_chars": stats["nls_chars"],
+                              "nls_chars_note": _NLS_NOTE}
     cells, walked = stats.get("cells"), stats.get("nls_chars_cells")
     if walked is not None and cells is not None and walked < cells:
         # The single-part route walks at most 200 cells, so on a big part the
@@ -1284,6 +1420,17 @@ class MeasurementTools:
             sel.Clear()
             sel.Add(body)
             search_topology(sel, "Vertex")
+            spa = doc.GetWorkbench("SPAWorkbench")
+            swept = batch_vertex_sweep(self.conn.app, sel, spa)
+            if swept is not None:
+                points, cells, nls_chars = swept
+                if stats is not None:
+                    stats["cells"] = cells
+                    stats["nls_chars"] = nls_chars
+                    stats["points_route"] = "batch"
+                    stats["sweep_route"] = "one_call"
+                kept, _dropped = self._bounded(points)
+                return kept, len(kept)
             for i in range(1, sel.Count + 1):
                 cell = sel.Item(i)
                 nls = nls_of(cell)
@@ -1300,7 +1447,6 @@ class MeasurementTools:
                 # and path length is the candidate that "cell count" cannot
                 # explain (reported 2026-10-27, §3.4).
                 stats["nls_chars"] = nls_chars
-            spa = doc.GetWorkbench("SPAWorkbench")
             raw = read_measurable_points(
                 self.conn.app, spa, refs,
                 fallback=lambda ref: self._read_measurable_array(
@@ -1379,7 +1525,8 @@ class MeasurementTools:
                     "mesh_vertices": None, "copy_note": "",
                     "cells": stats.get("cells"),
                     "nls_chars": stats.get("nls_chars"),
-                    "points_route": stats.get("points_route")}
+                    "points_route": stats.get("points_route"),
+                    "sweep_route": stats.get("sweep_route")}
         if not include_curved:
             return {"error": "no vertices (fully curved part), so a vertex sweep "
                              "cannot bound it; include_curved=true (the default) "
@@ -1522,7 +1669,10 @@ class MeasurementTools:
         else:
             payload["elapsed_note"] = (
                 "every part here had already been measured once in this session, "
-                "so this is the warm number")
+                "so this is the warm number. Repeat calls of one assembly vary by a "
+                "few percent, but a single small part can swing much more (12 cells "
+                "measured at 324 ms and then 549 ms in one session), so do not read "
+                "one part's time to three digits")
         try:
             payload["document"] = str(doc.Name)
         except Exception:  # noqa: BLE001 - the numbers are the point
@@ -1638,7 +1788,7 @@ class MeasurementTools:
             "counts COMPONENTS at any level: a nested part's instance is one entry "
             "(it carries 'path' and 'depth'), and a sub-assembly that could NOT be "
             "expanded counts as one, not as the instances it would have added")
-        return json.dumps(payload, indent=2)
+        return json.dumps(_cost_first(payload), indent=2)
 
     _BOX_MAX_DEPTH = 8
 
@@ -1836,21 +1986,8 @@ class MeasurementTools:
                             "out (sketch-wire vertices, datum-plane corners) - a "
                             "count of CATIA cells, not of mesh elements")
                     if cached.get("nls_chars") is not None:
-                        # A SIZE indicator, not a cost predictor. 0.3.29 claimed
-                        # it was "the filter's whole per-cell cost"; 26 parts of
-                        # one acceptance model falsified that - nls/cell varied
-                        # 1.31x while ms/cell varied 5.49x (r = 0.34), and the
-                        # part with the longest paths (P10, 267 chars/cell) was
-                        # the fastest (16.4 ms/cell) (reported 2026-10-27).
                         detail["nls_chars"] = cached["nls_chars"]
-                        detail["nls_chars_note"] = (
-                            "characters of NLS path the construction filter read "
-                            "for this part (one path per cell): how much "
-                            "construction geometry there was to filter, NOT how "
-                            "long the sweep took. Measured on 26 parts: nls/cell "
-                            "varies 1.31x while ms/cell varies 5.49x (r = 0.34), "
-                            "and the part with the longest paths was the fastest. "
-                            "Treat this as a size indicator, not a cost predictor")
+                        detail["nls_chars_note"] = _NLS_NOTE
                     detail["points_route"] = _route_name(cached.get("points_route"))
                 parts_detail[key] = detail
             parts_detail[key]["instances"] += 1
@@ -2164,7 +2301,20 @@ class MeasurementTools:
         regime: dict[str, Any] = {}
         try:
             identity = self._part_identity(part)
-            regime["first_measure"] = identity not in _MEASURED_PARTS
+            first = identity not in _MEASURED_PARTS
+            regime["first_measure"] = first
+            # The assembly route has said which regime it ran in since 0.3.30;
+            # the single-part route published `first_measure` alone, so a caller
+            # reading only the prose of one part's reply could not tell a cold
+            # 1 037 ms from a warm one (reported 2026-10-27, §3.2).
+            regime["elapsed_note"] = (
+                "this part's topology is being read for the FIRST time in this "
+                "session, so the cost includes CATIA building that part's internal "
+                "representation - measured at 4-7x the warm per-cell cost on the "
+                "same work, and not a property of this model"
+                if first else
+                "this part had already been measured in this session, so this is "
+                "the warm number")
             _MEASURED_PARTS.add(identity)
         except Exception:  # noqa: BLE001 - the box matters, the label is a courtesy
             pass
@@ -2191,6 +2341,9 @@ class MeasurementTools:
                         "points_route": _route_name(stats.get("route")),
                         "vertices_used": len(points),
                         "cells_scanned": stats.get("cells"),
+                        # Which reader ran inside the sweep: one script call for
+                        # the whole part, or one COM round trip per topology cell.
+                        "sweep_route": stats.get("sweep_route"),
                         **_nls_fields(stats),
                         **regime,
                     },
@@ -2395,57 +2548,14 @@ class MeasurementTools:
                 "assembly, pass document='<assembly>.CATProduct' - the world box no "
                 "longer needs it to be active."
             ) from exc
-        method, auto_note = self._auto_method(method, body)
-
-        if method in ("auto", "vertices"):
-            stats: dict[str, Any] = {}
-            points, truncated, total, dropped = self._vertex_points(body, stats)
-            if points:
-                reply = self._bbox_json(
-                    points,
-                    f"vertex sweep over {len(points)} of {total} vertices of "
-                    f"'{active_name}'; exact for planar-faced solids, curved faces "
-                    "may extend beyond these bounds"
-                    + (" (capped at 200)" if truncated else "")
-                    + (f"; {dropped} construction point(s) ignored (sketch wires "
-                       f"and wireframe ends at 1e7 mm are not the solid)" if dropped else ""),
-                    bounds="exact for a planar-faced solid; a curved face has no "
-                           "vertex at its extremum, so read 'bounds' as a lower "
-                           "bound there - use method='mesh' for those",
-                    extra={
-                        "points_route": _route_name(stats.get("route")),
-                        "vertices_used": len(points),
-                        "cells_scanned": stats.get("cells"),
-                    },
-                )
-                return self._stamp_elapsed(reply, started)
-            if method == "vertices":
-                raise RuntimeError(
-                    "UNSUPPORTED_CAPABILITY: the final shape exposes no vertices "
-                    "(fully curved solid), so a vertex sweep cannot bound it. "
-                    "Use method='mesh'."
-                )
-
-        corners, triangles, copy_note = self._mesh_corners(part)
-        reply = self._bbox_json(
-            corners,
-            f"STL mesh sweep of '{active_name}' over {triangles} triangle vertices; "
-            "the mesh chords "
-            "curved faces, so these bounds are a LOWER bound on the true envelope "
-            "(measured 0.47-0.73 % small)" + copy_note + auto_note,
-            bounds=("lower bound: mesh chording, measured 0.47-0.73 % small on "
-                    "curved faces (P02 Y 219.6278 against a true 220). Exact for "
-                    "a solid whose diameter lies on a planar edge or vertex"),
-            extra={
-                # The mesh route has no "vertices used" and no per-cell reader, but
-                # the key stays present so a caller can read `points_route` without
-                # asking whether this reply was built by a version that has it
-                # (reported 2026-10-27).
-                "points_route": "mesh",
-                "mesh_vertices": triangles,
-            },
-        )
-        return self._stamp_elapsed(reply, started)
+        # ONE single-part implementation. This block used to be a second, older
+        # copy of _part_bbox: it published points_route / vertices_used /
+        # cells_scanned and nothing else, so the SAME call answered with
+        # first_measure + elapsed_note + nls_chars when it named a document and
+        # without them when it measured the active one - two field sets for one
+        # question, and the cost regime was invisible on the path most callers take
+        # (reported 2026-10-27, §3.2 and §P3-3).
+        return self._stamp_elapsed(self._part_bbox(part, method), started)
 
     # A wireframe element's "infinite" end point is stored as 1e7 mm. Sweeping
     # the body's vertices therefore picks up coordinates that belong to an axis
@@ -2481,6 +2591,22 @@ class MeasurementTools:
             sel.Add(body)
             search_topology(sel, "Vertex")
             total = sel.Count
+            swept = batch_vertex_sweep(self.conn.app, sel, self._spa_workbench(),
+                                       limit=200)
+            if swept is not None:
+                kept, cells, chars = swept
+                points, unbounded = self._bounded(kept)
+                # The cap is applied INSIDE the script, so "more cells than points"
+                # means the limit stopped it, not that the rest was construction.
+                capped = len(kept) >= 200 and cells > len(kept)
+                if stats is not None:
+                    stats["route"] = "batch"
+                    stats["sweep_route"] = "one_call"
+                    stats["cells"] = cells
+                    stats["nls_chars"] = chars
+                    stats["nls_chars_cells"] = cells
+                ignored = unbounded if capped else max(cells - len(kept), 0) + unbounded
+                return points, capped, cells, ignored
             count = min(total, 200)
             for i in range(1, count + 1):
                 cell = sel.Item(i)

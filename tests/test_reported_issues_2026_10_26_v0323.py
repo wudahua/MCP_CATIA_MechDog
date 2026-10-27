@@ -92,9 +92,13 @@ def test_a_single_failure_uses_the_same_count_form():
 
 
 def test_a_stopping_plan_names_the_step_that_stopped_it():
+    """The stopping form carries the total and what never ran: "Step 2 failed"
+    alone cannot tell a 2-step plan from a 60-step one (asked for 2026-10-27)."""
     result, seen = _plan_with({2: "nope", 4: "never reached"}, total=5,
                               stop_on_error=True)
-    assert result["message"] == "Step 2 (catia_step2) failed"
+    assert result["message"] == (
+        "1 of 5 planned steps failed at step 2 (catia_step2); "
+        "3 step(s) were not run")
     assert seen == [1, 2]
 
 

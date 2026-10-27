@@ -7,6 +7,7 @@ RectPattern, CircPattern, Mirror, Rib, Slot, Shell, Thickness, Draft.
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any
 
@@ -121,6 +122,98 @@ class _ProbePoints:
             self.part.Update()
         except Exception:  # noqa: BLE001
             pass
+
+
+# Where a sketch's own (x, y) sits in the part's coordinate system. The same
+# table the sketcher uses for GSD outlines, and the same one an acceptance run
+# verified on B30 2026-10-25 by padding a 20 x 6 rectangle on each plane and
+# reading the box back. ``base: (u, v, normal)`` with origin = normal * offset.
+_SKETCH_BASES: dict[str, tuple[tuple[float, float, float],
+                               tuple[float, float, float],
+                               tuple[float, float, float]]] = {
+    "xy": ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+    "yz": ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0)),
+    "zx": ((0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+}
+
+
+def _sketch_frame(placement: Any) -> tuple[list[float], list[float],
+                                           list[float]] | None:
+    """``(origin, u, v)`` in world mm for a recorded sketch placement."""
+    if not isinstance(placement, dict):
+        return None
+    base = str(placement.get("base") or "").lower()
+    if base in _SKETCH_BASES:
+        u, v, normal = _SKETCH_BASES[base]
+        try:
+            distance = float(placement.get("distance") or 0.0)
+        except (TypeError, ValueError):
+            return None
+        return [c * distance for c in normal], list(u), list(v)
+    if base == "frame":
+        try:
+            origin = [float(c) for c in placement["origin"]]
+            u = [float(c) for c in placement["u"]]
+            v = [float(c) for c in placement["v"]]
+        except (KeyError, TypeError, ValueError):
+            return None
+        if len(origin) != 3 or len(u) != 3 or len(v) != 3:
+            return None
+        return origin, u, v
+    return None
+
+
+def _sketch_point_world(placement: Any, x: float, y: float) -> list[float] | None:
+    """World XYZ of the sketch coordinate ``(x, y)``, or None when unknown."""
+    frame = _sketch_frame(placement)
+    if frame is None:
+        return None
+    origin, u, v = frame
+    return [origin[i] + u[i] * float(x) + v[i] * float(y) for i in range(3)]
+
+
+def _in_plane_distance(first: Any, second: Any, placement: Any) -> float | None:
+    """Distance between two world points measured IN the sketch plane."""
+    frame = _sketch_frame(placement)
+    if frame is None or first is None or second is None:
+        return None
+    _origin, u, v = frame
+    normal = [u[1] * v[2] - u[2] * v[1],
+              u[2] * v[0] - u[0] * v[2],
+              u[0] * v[1] - u[1] * v[0]]
+    span = math.sqrt(sum(c * c for c in normal))
+    if span == 0:
+        return None
+    unit = [c / span for c in normal]
+    delta = [float(first[i]) - float(second[i]) for i in range(3)]
+    along = sum(delta[i] * unit[i] for i in range(3))
+    off = [delta[i] - along * unit[i] for i in range(3)]
+    return math.sqrt(sum(c * c for c in off))
+
+
+def _removed_centroid(v0: Any, g0: Any, v1: Any, g1: Any
+                      ) -> tuple[list[float] | None, float | None]:
+    """Where the vanished material was, from the shift of the centre of gravity.
+
+    ``V0*G0 - V1*G1 = v*g`` for the piece that was cut away, so the volumes and
+    centres of gravity read before and after a cut give the centroid of the cut
+    itself - the only witness that says WHERE a cut went, as opposed to how much
+    it removed. That is exactly the question a bore drilled at the wrong place
+    poses: the volume delta looks right and the feature is somewhere else.
+
+    Returns ``(point, amplification)``; ``amplification`` is ``V1/v``, how much
+    an error in the COG reading is multiplied by. A 5 mm bore in a 16 000 mm3
+    block amplifies by 21 (microns), a 0.1 mm3 nick in a 10 000 000 mm3 part by
+    1e8 - so a caller can tell a meaningful check from an arithmetic artefact.
+    """
+    if v0 is None or v1 is None or g0 is None or g1 is None:
+        return None, None
+    removed = float(v0) - float(v1)
+    if abs(removed) < 1e-9:
+        return None, None
+    point = [(float(v0) * float(g0[i]) - float(v1) * float(g1[i])) / removed
+             for i in range(3)]
+    return point, abs(float(v1) / removed)
 
 
 class PartDesignTools:
@@ -401,10 +494,22 @@ class PartDesignTools:
                     "through AddNewHoleFromSketch's second argument, which CATIA "
                     "ignores - measured 2026-10-23: D4 x 4 in a 10 mm block removes "
                     "50.3 mm3 and D4 x 6 removes 75.4 mm3, both exactly pi*r^2*d. The "
-                    "bottom is flat, so a blind hole has no drill point. The sketch "
-                    "supplies the bore's position; the reply reports the volume "
-                    "actually removed, which is the only trustworthy signal."
-                ),
+                    "bottom is flat, so a blind hole has no drill point. "
+                    "WHERE THE BORE GOES: the Hole feature takes its axis from a "
+                    "POINT in the sketch, not from the circle's centre. A sketch "
+                    "holding only a circle is drilled at the SKETCH ORIGIN - "
+                    "measured 2026-10-27 on B30, circles at (0,0) and at (10,0) "
+                    "produced bit-identical parts, and a circle at (100,100) on a "
+                    "40x20 block drilled a bore through the middle of the block. So "
+                    "when the sketch was drawn in this session and holds a circle "
+                    "with no point at its centre, a construction point is added at "
+                    "that centre first (and the reply says so), and the bore's "
+                    "position is then CHECKED against the material actually removed: "
+                    "a bore that did not land on the profile is rolled back and "
+                    "reported as an error, never left in the tree. "
+                    "`depth` is measured FROM THE SKETCH PLANE, not from the face "
+                    "the bore breaks out of, and the reply converts the removed "
+                    "volume into the bore length it actually drilled."),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -414,7 +519,13 @@ class PartDesignTools:
                         },
                         "depth": {
                             "type": "number",
-                            "description": "Hole depth in mm. Omit when through_all is true.",
+                            "description": (
+                                "Hole depth in mm, measured from the SKETCH PLANE. "
+                                "With the sketch on a datum plane an offset away from "
+                                "the material, the bore is (distance to the face) + "
+                                "depth long; the reply states the length it drilled. "
+                                "Omit when through_all is true."
+                            ),
                         },
                         "through_all": {
                             "type": "boolean",
@@ -1160,10 +1271,21 @@ class PartDesignTools:
             try:
                 return sketches.Item(sketch_name)
             except Exception:
+                replacement = self._sketch_alias(sketch_name)
+                if replacement is not None:
+                    try:
+                        return sketches.Item(replacement)
+                    except Exception:  # noqa: BLE001 - fall through to the error
+                        pass
                 names = ", ".join(str(sketches.Item(i).Name) for i in range(1, sketches.Count + 1))
+                hint = ""
+                if replacement:
+                    hint = (f" '{sketch_name}' was re-created as '{replacement}', "
+                            "which is no longer in the tree either - read "
+                            "catia_list_features.sketches.")
                 raise RuntimeError(
                     f"No sketch named '{sketch_name}' in the active body. "
-                    f"Available: {names or 'none'}."
+                    f"Available: {names or 'none'}.{hint}"
                 )
 
         remembered = getattr(self.conn, "last_sketch", None)
@@ -1493,7 +1615,7 @@ class PartDesignTools:
                 + f" {stayed} Both directions were MEASURED, not assumed: the same "
                 "pad node was flipped and re-updated, and neither orientation grew "
                 "the body."
-                + self._sketch_after_rollback(sketch_name, survived)
+                + self._recover_lost_sketch(part, body, sketch_name, survived)
                 + " Four things do this:\n"
                 "  · the sketch plane sits ON the material boundary and the sweep "
                 "runs INTO the body, so the whole sweep is absorbed - move the "
@@ -1670,7 +1792,7 @@ class PartDesignTools:
                    "left in the tree (the dead feature could NOT be deleted - "
                    "close the document without saving)")
                 + f" (volume stayed {before:.1f} mm3)."
-                + self._sketch_after_rollback(sketch_name, survived)
+                + self._recover_lost_sketch(part, body, sketch_name, survived)
                 + " Two usual causes: the "
                 "profile does not intersect the solid (a face sketch whose "
                 "local coordinates do not land on the material - put the sketch "
@@ -1912,6 +2034,47 @@ class PartDesignTools:
         except Exception:  # noqa: BLE001 - cannot tell, so do not accuse
             return None
         return False
+
+    def _sketch_alias(self, sketch_name: str) -> str | None:
+        """The sketch re-created in place of ``sketch_name``, if there is one."""
+        aliases = getattr(self.conn, "sketch_aliases", None) or {}
+        try:
+            document = str(self.conn.active_document.Name)
+        except Exception:  # noqa: BLE001
+            document = "?"
+        return aliases.get(f"{document}::{sketch_name}")
+
+    def _recover_lost_sketch(self, part: Any, body: Any,
+                             sketch_name: str | None,
+                             survived: bool | None) -> str:
+        """The sentence about the input sketch after a rollback - and the repair.
+
+        0.3.30 learned to READ whether the sketch survived, which ended the false
+        "still in the tree". The 2026-10-27 acceptance run then showed the other
+        half: the same call, on the same geometry, sometimes kept the sketch and
+        sometimes lost it, so ``NO_MATERIAL`` had two different recoveries and a
+        retry with the same name answered ``SKETCH_NOT_FOUND`` - a second error
+        code from the same failure. Redrawing it from the record makes the state
+        AFTER the error constant: the sketch is there, either because CATIA kept
+        it or because this server put it back.
+        """
+        if survived is not False or not sketch_name:
+            return self._sketch_after_rollback(sketch_name, survived)
+        from catia_mcp.tools.sketcher import SketcherTools  # noqa: PLC0415 - cycle
+
+        new_name, problem = SketcherTools(self.conn).rebuild_lost_sketch(
+            part, body, sketch_name)
+        if new_name:
+            return (
+                f" CATIA removed the sketch '{sketch_name}' with the rollback - a "
+                "sketch is consumed by the feature built on it, and whether it goes "
+                "with the node depends on the document's history, not on anything "
+                f"this tool controls. It has been re-created from its recorded "
+                f"definition as '{new_name}' (same plane, same drawing calls), and "
+                f"'{sketch_name}' now resolves to it, so retrying the same call "
+                "works and nothing else in the part changed.")
+        return (self._sketch_after_rollback(sketch_name, survived)
+                + f" It could NOT be re-created: {problem}.")
 
     def _sketch_after_rollback(self, sketch_name: str | None,
                                survived: bool | None) -> str:
@@ -2717,10 +2880,19 @@ class PartDesignTools:
         sf = part.ShapeFactory
 
         sketch = self._get_last_sketch(args.get("sketch_name"))
+        sketch_name = getattr(sketch, "Name", None)
         diameter = args["diameter"]
         through_all = bool(args.get("through_all")) and "depth" not in args
         depth = args.get("depth", 0)
-        before, volume_note = self._volume_probe(part, body)
+
+        # Put the bore where the profile is BEFORE cutting, and say what was
+        # changed to get it there. See _SKETCH_BASES / _place_bore: CATIA takes
+        # the axis from a POINT in the sketch, and a sketch with only a circle
+        # is drilled at the sketch origin - silently, with a correct-looking
+        # volume delta (reported 2026-10-27).
+        placement = self._hole_profile(sketch).get("placement")
+        axis_note, target = self._place_bore(part, sketch)
+        before, cog_before, volume_note = self._mass_probe(part, body)
 
         # AddNewHole takes a support FACE reference; the sketch-positioned
         # form is AddNewHoleFromSketch. Diameter is a read-only Length
@@ -2763,7 +2935,10 @@ class PartDesignTools:
         update_error = self._try_update(part, hole)
         self.conn.refresh_display()
 
-        after, took = self._settle(part, body, before, expect="subtract")
+        after, cog_after, _after_note = self._mass_probe(part, body)
+        took = None
+        if before is not None and after is not None:
+            took = (after - before) < -1e-6
         extent = "through all" if through_all else f"depth {depth} mm"
         if took is False:
             gone = self._remove_feature(part, hole)
@@ -2774,8 +2949,8 @@ class PartDesignTools:
                    "left in the tree (the dead feature could NOT be deleted - "
                    "close the document without saving)")
                 + f" (volume stayed {before:.1f} mm3)."
-                + self._sketch_after_rollback(getattr(sketch, "Name", None),
-                                              survived)
+                + self._recover_lost_sketch(part, body, sketch_name, survived)
+                + self._bore_axis_sentence(target, placement)
                 + " The sketch has to hold a "
                 "closed CIRCLE - the Hole feature takes the bore from the "
                 "profile, so a bare point produces a feature that cannot "
@@ -2786,19 +2961,296 @@ class PartDesignTools:
             ) from (update_error or None)
         if before is not None and after is not None:
             removed = before - after
+            wrong_at = self._bore_off_target(before, cog_before, after, cog_after,
+                                             target, placement, diameter)
+            if wrong_at is not None:
+                # A bore in the wrong place is worse than no bore: the volume
+                # delta is right, so nothing downstream can tell. Take it back
+                # out and say where it went.
+                went = self._remove_feature(part, hole)
+                survived = self._sketch_present(part, sketch)
+                raise RuntimeError(
+                    f"The bore is not where the profile is, so it was "
+                    + ("rolled back" if went else
+                       "left in the tree (it could NOT be deleted - close the "
+                       "document without saving)")
+                    + f". {wrong_at}"
+                    + self._recover_lost_sketch(part, body, sketch_name, survived)
+                ) from None
             note = ""
             if update_error is not None:
                 note = (" (CATIA raised during the update, but the bore is in the "
                         "geometry - kept)")
+            length_note = self._bore_length_note(
+                removed, diameter, depth, through_all, hole_type,
+                args.get("threaded"))
+            position_note = self._bore_position_note(
+                before, cog_before, after, cog_after, target, placement, diameter)
             return (
                 f"Hole created: D{diameter} mm, {extent}. Removed {removed:.1f} mm3 "
                 f"({before:.1f} -> {after:.1f}). Feature: '{hole.Name}'."
-                f"{type_note}{note}"
+                f"{length_note}{position_note}{axis_note}{type_note}{note}"
             )
         why = f" ({volume_note})" if volume_note else ""
         return (
             f"UNVERIFIED: hole '{hole.Name}' created: D{diameter} mm, {extent}, "
-            f"but the bore was not checked against the body volume{why}.{type_note}"
+            f"but the bore was not checked against the body volume{why}."
+            f"{axis_note}{type_note}"
+        )
+
+    def _mass_probe(self, part: Any, body: Any
+                    ) -> tuple[float | None, list[float] | None, str | None]:
+        """``(volume_mm3, centre_of_gravity, note)`` for the body's solid.
+
+        The volume answers "did the feature do anything"; the centre of gravity
+        answers "did it do it HERE". One measurable, two properties, so a bore
+        can be checked for position at the price of the volume probe it already
+        paid.
+        """
+        try:
+            doc = part.Parent
+            try:
+                spa = doc.GetWorkbench("SPAWorkbench")
+            except AttributeError:
+                spa = self.conn.app.GetWorkbench("SPAWorkbench")
+        except Exception as exc:  # noqa: BLE001 - the reason is the payload
+            return None, None, f"the SPAWorkbench (space analysis) would not open: {exc}"
+        try:
+            ref = part.CreateReferenceFromObject(body)
+        except Exception as exc:  # noqa: BLE001
+            return None, None, f"no reference could be made to the body: {exc}"
+        try:
+            measurable = spa.GetMeasurable(ref)
+            volume = measurable.Volume
+        except Exception as exc:  # noqa: BLE001
+            return None, None, f"the measurable's Volume failed: {exc}"
+        if volume is None:
+            return None, None, "the measurable returned no volume"
+        cog = None
+        try:
+            from catia_mcp.tools.measurement import (  # noqa: PLC0415 - cycle
+                read_measurable_array,
+            )
+            cog = [float(v) for v in
+                   read_measurable_array(self.conn.app, measurable, "GetCOG", 3)]
+        except Exception:  # noqa: BLE001 - the volume still stands
+            cog = None
+        return volume * 1e9, cog, None  # m3 -> mm3
+
+    def _hole_profile(self, sketch: Any) -> dict[str, Any]:
+        """What the sketch holds and where it sits, from this session's record.
+
+        Read from ``conn.sketch_outlines`` rather than from CATIA: a Point2D's
+        coordinates cannot be read back through automation on this build, which
+        is why the sketcher records every element it draws. A sketch that came
+        from a reopened file simply has no record - and then nothing is guessed.
+        """
+        name = str(getattr(sketch, "Name", "") or "")
+        outlines = getattr(self.conn, "sketch_outlines", None) or {}
+        try:
+            document = str(self.conn.active_document.Name)
+        except Exception:  # noqa: BLE001
+            document = "?"
+        record = outlines.get(f"{document}::{name}") or {}
+        elements = record.get("elements") or []
+        circles: list[dict[str, float]] = []
+        points: list[dict[str, float]] = []
+        for element in elements:
+            kind = str(element.get("kind"))
+            if kind == "circle":
+                circles.append({"cx": float(element.get("cx", 0.0)),
+                                "cy": float(element.get("cy", 0.0)),
+                                "r": float(element.get("radius", 0.0))})
+            elif kind == "point":
+                points.append({"x": float(element.get("x", 0.0)),
+                               "y": float(element.get("y", 0.0))})
+        placement = record.get("placement")
+        return {"name": name, "placement": placement, "circles": circles,
+                "points": points,
+                "known": bool(circles) and _sketch_frame(placement) is not None}
+
+    def _place_bore(self, part: Any, sketch: Any
+                    ) -> tuple[str, list[float] | None]:
+        """Make sure the sketch has a point where its circle is.
+
+        CATIA's Hole takes the bore's axis from a POINT in the sketch, not from
+        the circle: measured on B30 2026-10-27, a sketch holding one closed
+        circle at (10, 0) gave a part bit-identical to the same circle at (0, 0),
+        and one at (100, 100) - outside a 40 x 20 block - drilled a 15 mm bore
+        through the middle of the block while the reply said "Removed 754.0 mm3".
+        One construction point at the centre moved the bore onto it; a point
+        somewhere else moved the bore to that point instead.
+
+        Returns ``(sentence to append, expected world axis or None)``. Raises
+        when the sketch's own point and its circle disagree, because that bore
+        would be in the wrong place by construction.
+        """
+        profile = self._hole_profile(sketch)
+        if not profile["known"]:
+            return "", None
+        circle = profile["circles"][0]
+        cx, cy = circle["cx"], circle["cy"]
+        placement = profile["placement"]
+        target = _sketch_point_world(placement, cx, cy)
+        for point in profile["points"]:
+            if abs(point["x"] - cx) <= 1e-6 and abs(point["y"] - cy) <= 1e-6:
+                return "", target
+        if profile["points"]:
+            first = profile["points"][0]
+            where = _sketch_point_world(placement, first["x"], first["y"])
+            gap = _in_plane_distance(
+                where, target, placement) if where is not None else None
+            raise RuntimeError(
+                f"Sketch '{profile['name']}' holds a point at ({first['x']:g}, "
+                f"{first['y']:g}) and a circle centred at ({cx:g}, {cy:g})"
+                + (f", {gap:.3f} mm apart" if gap is not None else "")
+                + ". CATIA's Hole feature takes the bore's axis from a POINT in "
+                "the sketch, so this bore would land on that point and not on "
+                "the circle - and the removed volume would look exactly right. "
+                "Nothing was created. Move or delete that point "
+                "(catia_sketch_edit, then the sketch tools), or draw the profile "
+                "so that the point sits at the circle's centre."
+            )
+        problem = self._add_locating_point(part, sketch, cx, cy)
+        if problem is not None:
+            return (f" The bore's position was not anchored: no point could be "
+                    f"added to '{profile['name']}' at ({cx:g}, {cy:g}) ({problem}), "
+                    "and a sketch with no point is drilled at the sketch origin.",
+                    target)
+        return (f" The sketch held a circle at ({cx:g}, {cy:g}) and no point, and "
+                "CATIA's Hole drills at the SKETCH ORIGIN in that case - so a "
+                f"construction point was added at the circle's centre and the bore "
+                "follows it.", target)
+
+    def _add_locating_point(self, part: Any, sketch: Any, x: float,
+                            y: float) -> str | None:
+        """Add a construction point at ``(x, y)`` in a closed sketch.
+
+        ``Factory2D.CreatePoint`` makes a construction point, which is what this
+        is: a locator. Returns the failure reason, or None on success.
+        """
+        try:
+            factory = sketch.OpenEdition()
+        except Exception as exc:  # noqa: BLE001 - reported, then checked later
+            return f"the sketch would not reopen for editing: {str(exc)[:80]}"
+        try:
+            point = factory.CreatePoint(float(x), float(y))
+            try:
+                point.Construction = True
+            except Exception:  # noqa: BLE001 - construction is the default
+                pass
+            sketch.CloseEdition()
+            part.Update()
+        except Exception as exc:  # noqa: BLE001
+            try:
+                sketch.CloseEdition()
+            except Exception:  # noqa: BLE001
+                pass
+            return f"drawing the point failed: {str(exc)[:80]}"
+        return None
+
+    def _bore_off_target(self, before: Any, cog_before: Any, after: Any,
+                         cog_after: Any, target: Any, placement: Any,
+                         diameter: float) -> str | None:
+        """A sentence when the bore landed away from the profile, else None.
+
+        The removed volume alone cannot tell a bore in the right place from one
+        in the wrong place - both remove pi*r^2*h. The centroid of the removed
+        material can: ``V0*G0 - V1*G1 = v*g``. When it disagrees with the sketch
+        by more than a quarter of the bore's own radius, the feature is wrong and
+        the caller has to hear about it.
+        """
+        if target is None:
+            return None
+        point, amplification = _removed_centroid(before, cog_before, after, cog_after)
+        if point is None or amplification is None:
+            return None
+        off = _in_plane_distance(point, target, placement)
+        if off is None:
+            return None
+        # Past this ratio the COG reading is amplified beyond usefulness: the
+        # centroid of a 0.1 mm3 nick in a 10 kg part is arithmetic, not geometry.
+        if amplification > 500:
+            return None
+        tolerance = max(0.5, 0.25 * float(diameter))
+        if off <= tolerance:
+            return None
+        return (
+            "The material was removed around (%.3f, %.3f, %.3f), but the "
+            "sketch's circle is centred on (%.3f, %.3f, %.3f) - %.3f mm away in "
+            "the sketch plane (tolerance %.2f mm). CATIA's Hole feature takes the "
+            "bore's axis from a POINT in the sketch, so a stray point or a "
+            "missing one moves the bore while the removed volume stays right."
+            % (point[0], point[1], point[2], target[0], target[1], target[2],
+               off, tolerance)
+        )
+
+    def _bore_position_note(self, before: Any, cog_before: Any, after: Any,
+                            cog_after: Any, target: Any, placement: Any,
+                            diameter: float) -> str:
+        """One sentence saying the bore's position was checked, or why not."""
+        if target is None:
+            return (" The bore's position was NOT checked: this sketch was not "
+                    "drawn in this session, so where its profile sits is unknown "
+                    "- CATIA's Hole drills at the sketch origin when the profile "
+                    "carries no point.")
+        point, amplification = _removed_centroid(before, cog_before, after, cog_after)
+        if point is None:
+            return (" The bore's position was NOT checked: the centre of gravity "
+                    "could not be read before and after the cut.")
+        off = _in_plane_distance(point, target, placement)
+        if off is None:
+            return ""
+        if amplification is not None and amplification > 500:
+            return (" The bore's position could not be checked: the cut is "
+                    f"{amplification:.0f}x smaller than the body, so the centre-of-"
+                    "gravity shift is not precise enough to locate it.")
+        return (" Bore checked against the material removed: centred on "
+                "(%.3f, %.3f, %.3f), %.3f mm from the profile's circle."
+                % (point[0], point[1], point[2], off))
+
+    def _bore_length_note(self, removed: float, diameter: float, depth: float,
+                          through_all: bool, hole_type: Any,
+                          threaded: Any) -> str:
+        """How long the bore actually is, in mm.
+
+        ``depth`` is measured from the SKETCH PLANE, which is not the face the
+        bore breaks out of unless the sketch sits on that face. A caller who puts
+        the sketch on a datum plane and offsets it - the route this server's own
+        error messages recommend - gets ``distance + depth`` and no warning, so
+        the reply converts the volume it measured into the length it drilled
+        (reported 2026-10-27: depth 5 in a 20 mm block drilled 15 mm).
+        """
+        if hole_type not in (None, "simple") or threaded:
+            return ""
+        area = math.pi * (float(diameter) / 2.0) ** 2
+        if area <= 0 or removed <= 0:
+            return ""
+        length = removed / area
+        if through_all:
+            return (f" Bore length {length:.2f} mm - through all, so that is the "
+                    "wall it crossed.")
+        if abs(length - float(depth)) <= 0.05:
+            return f" Bore length {length:.2f} mm."
+        return (f" Bore length {length:.2f} mm, not {float(depth):g} mm: 'depth' is "
+                f"measured from the SKETCH PLANE, which sits {length - float(depth):.2f} "
+                "mm from the face the bore broke out of, so the two add up.")
+
+    def _bore_axis_sentence(self, target: Any, placement: Any) -> str:
+        """Why a bore that removed nothing may simply have started in air."""
+        where = ""
+        base = str((placement or {}).get("base") or "")
+        if base:
+            distance = float((placement or {}).get("distance") or 0.0)
+            where = f" on plane '{base}' at offset {distance:g}"
+        return (
+            " A bore also removes nothing when the material is on the FAR side of "
+            f"the sketch plane: the bore always runs along the sketch normal, and "
+            f"this sketch sits{where or ' on a face'}. catia_hole has no reverse "
+            "argument - CATIA's Hole feature does not expose one (DirectionOrientation,"
+            " which Pad and Pocket use, does not exist on it; measured on B30 "
+            "2026-10-27) - so put the sketch on the face you want to drill from, or "
+            "pass through_all, which drills the full wall from either side."
         )
 
     def _rect_pattern(self, args: dict[str, Any]) -> str:

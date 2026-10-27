@@ -2,6 +2,127 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.31] — 2026-10-27 · the bore goes where the profile is, and a lost sketch comes back
+
+### Fixed — `catia_hole` drilled at the sketch origin, whatever the circle said
+
+- CATIA's `Hole` feature takes the bore's axis from a **POINT in the sketch**, not
+  from the circle's centre. A sketch holding one circle and nothing else was
+  therefore drilled at (0, 0) - measured on B30 2026-10-27, circles at (0, 0) and
+  at (10, 0) produced **bit-identical parts** (volume 15246.0178, COG
+  (0, 0, −0.1236) in both), and a circle at (100, 100) on a 40 × 20 block drilled
+  a bore through the middle of the block and reported success. The removed volume
+  was exactly `pi*r^2*h` in every one of those cases, so nothing downstream could
+  see it (reported 2026-10-27).
+- When the sketch was drawn in this session and holds a circle with no point, a
+  **construction point is added at the circle's centre** before the hole is built,
+  and the reply says so. Measured after the fix: COG x −0.4945, removed-material
+  centroid (10.000, 0.000, 2.500), `0.000 mm from the profile's circle`.
+- A sketch that holds a point *away* from its circle - the shape that used to move
+  the bore silently - is refused **before** anything is created: "holds a point at
+  (0, 0) and a circle centred at (10, 0), 10.000 mm apart … Nothing was created."
+- The bore's position is now **verified, not assumed**: the centroid of the removed
+  material is recovered from the volume and centre-of-gravity readings taken before
+  and after the cut (`V0·G0 − V1·G1 = v·g`), compared with the profile in the sketch
+  plane, and a bore that missed is rolled back and reported. Amplification above
+  500× (a nick in a large part) is arithmetic rather than geometry, so the check
+  declines to accuse in that case instead of inventing a position error.
+- The tool description no longer claims "The sketch supplies the bore's position."
+  It states where the axis actually comes from, with the measurement behind it.
+
+### Fixed — `depth` is measured from the sketch plane, and the reply converts it
+
+- `depth` is applied through the hole's bottom limit, measured **from the sketch
+  plane**. With the sketch on a datum plane offset away from the material - the
+  route this server's own error messages recommend - `depth 5` in a 20 mm block
+  drilled **15 mm**, and the reply said nothing (reported 2026-10-27). The reply
+  now converts the removed volume into the length it drilled: "Bore length 15.00
+  mm, not 5 mm: 'depth' is measured from the SKETCH PLANE, which sits 10.00 mm
+  from the face the bore broke out of, so the two add up." The schema says it too.
+- A bore that removes nothing on the far side of the sketch plane now lists that
+  as a cause, and says `catia_hole` has **no reverse argument** because CATIA's
+  `Hole` does not expose one (`DirectionOrientation` raises `Property
+  'Item.DirectionOrientation' can not be set.` on B30), and points at `through_all`
+  or a sketch on the face to be drilled.
+
+### Fixed — a rollback that takes the input sketch rebuilds it from its record
+
+- 0.3.30 disclosed that punch-back; the state after the error still differed from
+  run to run, so `NO_MATERIAL` had two recoveries and a retry could answer
+  `SKETCH_NOT_FOUND` (reported 2026-10-27). The sketch is now **re-created from
+  this session's own drawing record** - same plane, same drawing calls, replayed
+  through `body.Sketches.Add` - and the old name is aliased to it: "It has been
+  re-created from its recorded definition as '草图.3' … and '草图.2' now resolves
+  to it, so retrying the same call works." Measured on B30: after a failed pad,
+  retrying with the **old** name answered `NO_MATERIAL` again, not
+  `SKETCH_NOT_FOUND`; a second rollback rebuilt 草图.3 as 草图.4.
+- The rebuild refuses out loud when the record cannot reproduce the sketch: no
+  record (a sketch from a reopened file), a support that is not a datum plane, or
+  an element whose start angle is not in the record (an arc). It never pretends.
+- `catia_sketch_point` gained `construction` (default `false`), so a caller can
+  supply the locating point itself and keep it out of the profile.
+
+### Changed — one script call per part instead of one COM round trip per cell
+
+- The vertex sweep now runs **inside CATIA**: one `SystemService.Evaluate` call
+  enumerates the selection, applies the construction filter by NLS name and reads
+  each survivor's coordinates, instead of paying a Python→COM round trip per
+  topology cell. Measured on B30 2026-10-27, 60 cells with 28 holes:
+  **827 ms one-call vs 1134 ms per-cell (−27 %)**, with identical boxes and the
+  same 8 kept vertices. The per-cell reader stays as the fallback, and
+  `sweep_route` (`one_call` / `per_cell`) publishes which one ran on both routes.
+- A build that refuses CATScript still measures the same numbers: the script route
+  falls back silently, and the tests assert both routes return the same box.
+
+### Fixed — the cold/warm gap is now labelled on every route, and the cost is first
+
+- A part's **first** topology read in a session costs 4–7× the later ones for the
+  same work. That is CATIA building its internal representation, and 0.3.31 cannot
+  remove it; it is now stated where the number is, on the single-part route as well
+  as the assembly route: `first_measure: true` plus `elapsed_note: "this part's
+  topology is being read for the FIRST time in this session …"`. Measured here:
+  86.9 ms cold, 70.1 ms warm on the same block.
+- The assembly reply is **ordered by cost**: `dimensions`, `min`, `max`,
+  `complete`, `elapsed_ms`, `cold_parts`, `part_boxes_total`, `part_boxes`,
+  `elapsed_note`, `document` … come before the 70 `components` entries, so
+  truncation no longer eats the one field that explains the time.
+- `nls_chars` travels with its counter-evidence on both routes (`nls_chars_note`:
+  the 1.31× / 5.49× / r = 0.34 measurement that falsified "NLS length is the
+  per-cell cost"), and the B30-specific constants are labelled as B30's rather than
+  as properties of the model.
+- The warm assembly note warns about jitter: "12 cells measured at 324 ms and then
+  549 ms in one session", so one part's time is not read to three digits.
+
+### Fixed — error codes come from the exception, not from the message
+
+- `COMPONENT_NOT_FOUND` used to fire for `get_bounding_box` only, because the
+  planner matched a phrase that one tool happened to use. A missing component now
+  raises `ComponentNotFound` from all three raise sites (assembly, document,
+  measurement) and the planner prefers `error.code`, so the same failure carries
+  the same code whichever tool produced it.
+- A plan that stops on the first error now says how much of it did not run: "1 of
+  5 planned steps failed at step 2 (catia_pad); 3 step(s) were not run."
+
+### Verified
+
+- 581 tests pass (`pytest tests -q`), 30 of them new in
+  `tests/test_reported_issues_2026_10_27_v0331.py`.
+- On B30 2026-10-27: the hole position, the point-vs-circle refusal, the bore
+  length sentence, the far-side sentence, the pad rollback rebuild and the retry
+  with the old sketch name were all exercised through the tool layer
+  (`catia_probe/probe_v0331d`, `v0331e`), and the sweep A/B and the single-part
+  cost fields on real documents (`v0331i`, `v0331j`).
+
+### Not fixed
+
+- The 70-instance `WB_CATIA_M113` assembly could not be re-measured in this
+  session: opening the product leaves all 70 instances unloaded
+  (`part not loaded: ReferenceProduct failed`), so the box comes back
+  `complete: false` with 70 `skipped` entries. That is the same on 0.3.29
+  (`probe_v0329a`), i.e. a property of this machine's CATIA, not of this version -
+  but it means the assembly-level cold/warm ratio in 0.3.31 is quoted from the
+  report, not re-measured here.
+
 ## [0.3.30] — 2026-10-27 · the rollback took the sketch, so say it took the sketch
 
 ### Fixed — a failed pad/pocket/hole took the sketch, and one of them said it hadn't

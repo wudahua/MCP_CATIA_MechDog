@@ -44,6 +44,13 @@ class CATIAConnection:
         # to be remembered at drawing time. catia_gsd_spline(element=...) reads
         # this; a sketch drawn elsewhere (or a reopened file) has no record.
         self.sketch_outlines: dict[str, dict[str, Any]] = {}
+        # Old sketch name -> the name of the sketch re-created in its place, per
+        # document: {"<document>::<name>": "<new name>"}. A rollback sometimes
+        # takes the sketch that built the feature with it, and the sketch this
+        # server redraws from its record gets the next free name. Remembering the
+        # mapping is what lets the caller retry with the name it already used
+        # instead of getting SKETCH_NOT_FOUND for its own sketch.
+        self.sketch_aliases: dict[str, str] = {}
 
     @property
     def is_connected(self) -> bool:

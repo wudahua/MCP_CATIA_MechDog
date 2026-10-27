@@ -355,12 +355,26 @@ class SketcherTools:
             },
             {
                 "name": "catia_sketch_point",
-                "description": "Create a point in the active sketch. Coordinates in mm.",
+                "description": (
+                    "Create a point in the active sketch. Coordinates in mm. "
+                    "A point on its own carries no material: catia_pad and "
+                    "catia_pocket need a closed outline, and catia_hole takes the "
+                    "bore from a circle. Construction points are the usual "
+                    "locating/axis aid."
+                ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "x": {"type": "number", "description": "X coordinate (mm)"},
                         "y": {"type": "number", "description": "Y coordinate (mm)"},
+                        "construction": {
+                            "type": "boolean", "default": False,
+                            "description": (
+                                "Draw as construction geometry. Default false - a "
+                                "point that a user pattern should use as a "
+                                "locating position has to be real geometry."
+                            ),
+                        },
                     },
                     "required": ["x", "y"],
                 },
@@ -504,7 +518,8 @@ class SketcherTools:
                     arguments["points"], arguments.get("closed", False),
                 )
             case "catia_sketch_point":
-                return self._draw_point(arguments["x"], arguments["y"])
+                return self._draw_point(arguments["x"], arguments["y"],
+                                        bool(arguments.get("construction", False)))
             case "catia_sketch_constraint":
                 return self._add_constraint(arguments)
             case "catia_sketch_get_geometry":
@@ -736,6 +751,115 @@ class SketcherTools:
             f"Unknown plane type {plane.get('type')!r}. Use 'offset', 'face', or "
             "pass plane='xy' | 'yz' | 'zx'."
         )
+
+    def rebuild_lost_sketch(self, part: Any, body: Any,
+                            sketch_name: str | None) -> tuple[str | None, str]:
+        """Re-create a sketch from the record made when it was drawn.
+
+        A failed pad/pocket/hole rolls back, and whether CATIA takes the input
+        sketch with it depends on the document's history: three failures of
+        *identical* geometry in one acceptance run left the sketch in place twice
+        and deleted it once (reported 2026-10-27). Disclosing that is not enough -
+        the same error code then has two different recoveries, and a retry with
+        the same name answers ``SKETCH_NOT_FOUND`` instead of ``NO_MATERIAL``. So
+        the sketch is redrawn here from its recorded placement and drawing calls,
+        the old name is aliased onto the new one, and a retry behaves exactly as
+        it does in the case where the sketch survived.
+
+        Returns ``(new name, "")`` or ``(None, why not)``. Nothing is guessed: a
+        sketch whose support is not a datum plane, or which held an element this
+        server cannot redraw from numbers alone (an arc, whose start angle is not
+        in the record), is left to the caller with the coordinates in the message.
+        """
+        name = str(sketch_name or "")
+        try:
+            document = str(self.conn.active_document.Name)
+        except Exception:  # noqa: BLE001
+            document = "?"
+        if not name:
+            return None, "which sketch was lost could not be read back"
+        record = (getattr(self.conn, "sketch_outlines", None) or {}).get(
+            f"{document}::{name}") or {}
+        elements = record.get("elements") or []
+        placement = record.get("placement")
+        if not elements:
+            return None, ("this session holds no drawing record for it - a sketch "
+                          "that came from a reopened file has none")
+        if not placement:
+            return None, ("it was drawn on a support that is not a datum plane, and "
+                          "whose frame this server cannot reproduce")
+        for element in elements:
+            if str(element.get("kind")) not in ("line", "rectangle", "circle",
+                                                "point"):
+                return None, (f"it held a {element.get('kind')}, which cannot be "
+                              "redrawn from a record")
+        try:
+            if str(placement.get("base")) == "frame":
+                support_ref = self._resolve_support(part, body, placement, None)[0]
+            else:
+                support_ref = self._resolve_support(
+                    part, body, placement["base"], placement.get("distance"))[0]
+        except Exception as exc:  # noqa: BLE001 - nothing was changed
+            return None, f"its plane could not be re-created: {str(exc)[:90]}"
+        sketch = None
+        try:
+            sketch = body.Sketches.Add(support_ref)
+            factory = sketch.OpenEdition()
+            for element in elements:
+                self._replay_element(factory, element)
+            sketch.CloseEdition()
+            part.Update()
+        except Exception as exc:  # noqa: BLE001
+            try:
+                if sketch is not None:
+                    sketch.CloseEdition()
+            except Exception:  # noqa: BLE001
+                pass
+            return None, f"redrawing it failed: {str(exc).splitlines()[0][:90]}"
+        new_name = str(sketch.Name)
+        # Keep the record under the new name too, so a second rollback on the
+        # rebuilt sketch can rebuild it again instead of running out of record.
+        fresh = self._outline_record(self._sketch_key(new_name))
+        if fresh is not None:
+            fresh["placement"] = placement
+            fresh["elements"] = [dict(element) for element in elements]
+        aliases = getattr(self.conn, "sketch_aliases", None)
+        if aliases is None:
+            aliases = {}
+            try:
+                self.conn.sketch_aliases = aliases
+            except Exception:  # noqa: BLE001 - the mapping is a convenience
+                aliases = None
+        if aliases is not None:
+            aliases[f"{document}::{name}"] = new_name
+        try:
+            self.conn.last_sketch = sketch
+        except Exception:  # noqa: BLE001
+            pass
+        return new_name, ""
+
+    @staticmethod
+    def _replay_element(factory: Any, element: dict[str, Any]) -> None:
+        """Redraw one recorded element. Only the kinds the record is exact for."""
+        kind = str(element.get("kind"))
+        if kind == "line":
+            factory.CreateLine(element["x1"], element["y1"],
+                               element["x2"], element["y2"])
+        elif kind == "rectangle":
+            x1, y1 = element["x1"], element["y1"]
+            x2, y2 = element["x2"], element["y2"]
+            for ax, ay, bx, by in ((x1, y1, x2, y1), (x2, y1, x2, y2),
+                                   (x2, y2, x1, y2), (x1, y2, x1, y1)):
+                factory.CreateLine(ax, ay, bx, by)
+        elif kind == "circle":
+            factory.CreateClosedCircle(element["cx"], element["cy"],
+                                       element["radius"])
+        elif kind == "point":
+            point = factory.CreatePoint(element["x"], element["y"])
+            try:
+                point.Construction = bool(element.get("construction", False))
+            except Exception:  # noqa: BLE001 - construction is the default
+                pass
 
     def _create_sketch(self, plane: Any = "xy", offset: float | None = None) -> str:
         self.conn.ensure_connected()
@@ -1272,18 +1396,21 @@ class SketcherTools:
             else ""
         )
 
-    def _draw_point(self, x: float, y: float) -> str:
+    def _draw_point(self, x: float, y: float, construction: bool = False) -> str:
         self._ensure_sketch_open()
         factory = self._active_factory
         point = factory.CreatePoint(x, y)
         self._note_element("point", x=x, y=y)
-        # CreatePoint defaults to construction geometry, which user patterns
-        # (AddFeatureToLocatePositions) ignore. Field-validated on V5R20.
+        # CreatePoint makes a CONSTRUCTION point, and user patterns
+        # (AddFeatureToLocatePositions) ignore construction geometry - so the
+        # default here is real geometry, field-validated on V5R20. The caller can
+        # ask for construction, which is what a locator or axis aid usually wants.
         try:
-            point.Construction = False
+            point.Construction = bool(construction)
         except Exception:
             pass
-        return f"Point created at ({x}, {y}) mm"
+        kind = "Construction point" if construction else "Point"
+        return f"{kind} created at ({x}, {y}) mm"
 
     # CatConstraintType values from the R20 automation reference
     # (MecModInterfaces, enum CatConstraintType): Reference=0, Distance=1,

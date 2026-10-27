@@ -148,16 +148,20 @@ def test_every_single_part_return_is_stamped():
     from catia_mcp.tools.measurement import MeasurementTools
 
     source = __import__("inspect").getsource(MeasurementTools._get_bounding_box)
-    # document= path, active-part vertices, active-part mesh
-    assert source.count("_stamp_elapsed(reply, started)") == 3
+    # document= path and the active-part path (which now shares _part_bbox)
+    assert source.count("_stamp_elapsed(") == 2
+    assert "_stamp_elapsed(self._part_bbox(part, method), started)" in source
 
 
 def test_the_mesh_route_names_itself():
     from catia_mcp.tools.measurement import MeasurementTools
 
-    for name in ("_part_bbox", "_get_bounding_box"):
-        source = __import__("inspect").getsource(getattr(MeasurementTools, name))
-        assert '"points_route": "mesh"' in source
+    source = __import__("inspect").getsource(MeasurementTools._part_bbox)
+    assert '"points_route": "mesh"' in source
+    # One implementation: the active-part path delegates instead of repeating
+    # the mesh block, which is how the two routes drifted apart.
+    assert "_part_bbox(part, method)" in __import__("inspect").getsource(
+        MeasurementTools._get_bounding_box)
 
 
 # --------------------------------------------------------------------------

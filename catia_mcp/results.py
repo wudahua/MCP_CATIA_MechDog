@@ -23,6 +23,36 @@ class FeatureRejected(RuntimeError):
         self.rolled_back = bool(rolled_back)
 
 
+class CodedError(RuntimeError):
+    """A deliberate refusal that carries the code a caller should branch on.
+
+    ``catia_run_plan`` used to classify a failed step by reading the message
+    ("if 'no component matches' in text"), so a wording change silently
+    downgraded the code to ``STEP_EXCEPTION`` - reported 2026-10-27, where
+    ``catia_get_bounding_box`` answered ``COMPONENT_NOT_FOUND`` for a name while
+    ``catia_get_component_transform`` answered ``STEP_EXCEPTION`` for the same
+    name, because only the first phrase was in the table. The raise site knows
+    what it is refusing; the code travels with the exception from now on, and the
+    phrase table stays only for failures CATIA itself produces.
+    """
+
+    code = "STEP_EXCEPTION"
+
+    def __init__(self, message: str, code: str | None = None) -> None:
+        super().__init__(message)
+        if code:
+            self.code = str(code)
+
+
+class ComponentNotFound(CodedError, ValueError):
+    """No component with that name in the active assembly.
+
+    A ``ValueError`` as well, so callers that already catch that keep working.
+    """
+
+    code = "COMPONENT_NOT_FOUND"
+
+
 def operation_result(
     *,
     tool: str,

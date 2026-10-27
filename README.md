@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.30** · [what changed](CHANGELOG.md) ·
+**0.3.31** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -100,6 +100,7 @@ arcs given as their two endpoints, and one plan per several documents.
 | `Topology.Edge` on a body also returns the consumed sketch's lines | A 40×20×10 box counted **16 edges / 12 vertices** instead of 12 / 8 |
 | `catia_shaft` / `catia_groove` called `AddNewShaft(sketch)` and assigned `FirstAngle = angle` | The feature could never be updated (E_FAIL), so **no turned part could be built at all** — piston, cylinder-head cover and front cover had no other route |
 | `catia_hole` with a finite depth reported success while cutting nothing | The depth is stored on `BottomLimit` but not applied on B30; the tree carried a dead feature that poisoned every later measurement |
+| `catia_hole` ignored where the profile was drawn | `AddNewHoleFromSketch` takes the bore's axis from a **point** in the sketch, so a sketch holding one circle was drilled at the sketch origin: circles at (0, 0) and (10, 0) produced bit-identical parts, and a circle outside the material drilled through its middle. The removed volume stayed exactly `pi*r^2*h`, so nothing could see it |
 
 The fixes: reads go through `SystemService.Evaluate` (the same route that fixed
 `GetCOG` upstream in 0.2.2); `connection.part_of()` retries via
@@ -183,6 +184,54 @@ cost 20 round trips because one row is wrong:
 //    [999, 999, 999] is 1710.727 mm from the nearest edge (Edge.3, L20.0).
 ```
 
+### A hole goes where the profile is
+
+CATIA's `Hole` takes the bore's axis from a **point** in the sketch, not from the
+circle's centre, so `catia_hole` on a sketch holding one circle drilled at the
+sketch origin — six positions, one bore, and the volume matched `pi*r^2*h` every
+time. Three things changed:
+
+* A construction point is added **at the circle's centre** before the feature is
+  built when the sketch was drawn in this session and holds no point, and the reply
+  says so. A point that is *away* from the circle is refused before anything is
+  created, with the distance: "holds a point at (0, 0) and a circle centred at
+  (10, 0), 10.000 mm apart … Nothing was created."
+* The bore is **verified after the cut**, not before it: the centroid of the
+  removed material is recovered from the volume and centre-of-gravity readings
+  (`V0·G0 − V1·G1 = v·g`), compared with the profile in the sketch plane, and a
+  bore that missed is deleted and reported — the one failure mode a volume check
+  cannot see. Above 500× amplification (a nick in a heavy part) the check declines
+  to accuse instead of inventing an error.
+* `depth` is measured **from the sketch plane**. With the sketch on an offset
+  datum plane, `depth 5` in a 20 mm block drills 15 mm; the reply converts the
+  removed volume into the length it drilled and says which datum it used. There is
+  no `reverse` argument because `Hole` exposes no direction property
+  (`DirectionOrientation` raises on B30) — a bore that removes nothing on the far
+  side of the sketch plane is reported as such, with `through_all` or a sketch on
+  the face as the way out.
+
+### A rollback that takes the sketch puts it back
+
+A punch consumes its input sketch, and whether CATIA removes it with the failed
+node depends on the document's history — so after `NO_MATERIAL` the same call left
+the sketch in place once and gone twice, and a retry answered `SKETCH_NOT_FOUND`
+(0.3.30 disclosed this; 0.3.31 closes it). The sketch is now re-created from this
+session's own drawing record — same plane, same drawing calls — and the old name is
+aliased to the new one:
+
+```text
+... It has been re-created from its recorded definition as '草图.3' (same plane,
+same drawing calls), and '草图.2' now resolves to it, so retrying the same call
+works and nothing else in the part changed.
+```
+
+`NO_MATERIAL` therefore always means "the sketch is still there". Measured on B30:
+after a failed pad, the retry with the **old** name answered `NO_MATERIAL` again;
+a second rollback rebuilt 草图.3 as 草图.4. When the record cannot reproduce the
+sketch — a reopened file, a support that is not a datum plane, an arc whose start
+angle is not in the record — the message says which of those it is instead of
+leaving a sketch-shaped hole.
+
 ### A pad that adds nothing tries the other side
 
 `catia_pad` now behaves the way `catia_pocket` has since 0.3.4: if the requested
@@ -255,11 +304,15 @@ otherwise puts up a modal "另存为" that, unanswered, holds the call for 89 s.
 
 ### What an exact box costs
 
-The vertex route calls COM once per topology cell (to read its NLS path and to get
-a reference), so its price is set by the *cell* count, not the vertex count — a
-16-vertex plate can still have hundreds of cells. **And the per-cell cost depends on
-the session, not only on the part.** The same 70-instance assembly measured three
-times in one session:
+The vertex route reads one topology cell at a time, so its price is set by the
+*cell* count, not the vertex count — a 16-vertex plate can still have hundreds of
+cells. Since 0.3.31 that read happens **inside CATIA**: one `SystemService.Evaluate`
+call enumerates the selection, drops the construction cells by their NLS name and
+returns the coordinates, instead of a Python→COM round trip per cell (measured:
+**827 ms one-call vs 1134 ms per-cell, −27 %**, identical boxes — `sweep_route`
+says which one ran, and a build that refuses CATScript still falls back to the
+per-cell reader). **And the per-cell cost depends on the session, not only on the
+part.** The same 70-instance assembly measured three times in one session:
 
 | call, same session, same `method` | time | per cell |
 |---|---|---|
@@ -326,7 +379,8 @@ Three things dominate, and none of them is "one fixed cost per part":
 Tools run on a single worker thread, so a long box blocks every other MCP call
 until it finishes. The reply states `elapsed_ms` (total and per part, `parts[]`),
 `first_measure` (was this part touched for the first time in this session),
-`cold_parts`, `cells_scanned`, and `points_route` (`batched` / `batched_retried` /
+`cold_parts`, `cells_scanned`, `sweep_route` (`one_call` / `per_cell`) and
+`points_route` (`batched` / `batched_retried` /
 `per_point` for a vertex sweep, `mesh` for an STL extent), so the cost is
 attributable instead of surprising. To bound one instance, pass `component=` — with
 or without an assembly active: if the active document is a Part, the component is
