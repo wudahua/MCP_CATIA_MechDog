@@ -29,6 +29,29 @@ from catia_mcp.topo_search import topology_cells
 MAX_RESULT_CHARS = 600
 
 
+def _failure_code(message: str) -> str:
+    """A code a script can branch on, from the message the tool already wrote.
+
+    Every failed step used to answer ``STEP_EXCEPTION``, so "the sketch went with
+    the rollback" and "the licence is missing" looked identical to a caller
+    (reported 2026-10-27). These are the failures this server raises on purpose;
+    anything else keeps the generic code, and the exception class travels in
+    ``error_type`` instead of in front of the sentence.
+    """
+    text = message.casefold()
+    if "no sketch named" in text or "no sketch" in text and "available" in text:
+        return "SKETCH_NOT_FOUND"
+    if "built no material" in text or "removed no material" in text:
+        return "NO_MATERIAL"
+    if message.startswith("UNSUPPORTED_CAPABILITY"):
+        return "UNSUPPORTED_CAPABILITY"
+    if "no component matches" in text:
+        return "COMPONENT_NOT_FOUND"
+    if "part not loaded" in text:
+        return "PART_NOT_LOADED"
+    return "STEP_EXCEPTION"
+
+
 class PlannerTools:
     """Batch executor for build plans."""
 
@@ -341,10 +364,17 @@ class PlannerTools:
             try:
                 raw = self._router[tool].execute(tool, args)
             except Exception as error:  # noqa: BLE001 - COM raises opaque errors
+                message = str(error)
+                # `RuntimeError: …` in front of a sentence that already explains
+                # itself is noise, and every failed step used to carry the same
+                # code, so a script could not branch at all (reported 2026-10-27).
+                # The class name is kept as its own field, and the handful of
+                # failures this server produces on purpose get their own code.
                 entry.update(
                     ok=False,
-                    code="STEP_EXCEPTION",
-                    error=f"{type(error).__name__}: {error}",
+                    code=_failure_code(message),
+                    error=message,
+                    error_type=type(error).__name__,
                 )
             else:
                 if isinstance(raw, dict):
@@ -376,12 +406,32 @@ class PlannerTools:
         measurements: dict[str, Any] = {}
         assertions: list[dict[str, Any]] = []
         assertions_skipped_because = None
+        measurements_note = None
+        ran_to_the_end = (len(report) == len(steps))
         if measure and failed_at is None:
             measurements = self._measure_part()
             assertions = self._check_all(arguments.get("expect"), measurements)
-        elif arguments.get("expect") and failed_at is not None:
-            # Say it out loud. Returning an empty `assertions` after a failed step
-            # is correct - the plan is already broken - but a caller doing
+        elif measure and failed_at is not None and not stop_on_error and ran_to_the_end:
+            # The plan went on after a failure and reached its last step, so the
+            # document HAS a final state - and an empty `measurements` made
+            # "everything after the failure is unknown" out of "one step failed
+            # and the rest ran and saved" (reported 2026-10-27). Measure it, but
+            # do not evaluate `expect`: a broken plan cannot pass its assertions.
+            try:
+                measurements = self._measure_part()
+                measurements_note = (
+                    f"final state of the document after all {len(steps)} step(s) "
+                    f"ran ({sum(1 for entry in report if not entry['ok'])} failed). "
+                    "'expect' was NOT evaluated against it - a plan with a failed "
+                    "step cannot pass its assertions")
+            except Exception as error:  # noqa: BLE001 - reported, not fatal
+                measurements_note = (
+                    "the final state could not be measured: "
+                    f"{type(error).__name__}: {error}")
+        if arguments.get("expect") and failed_at is not None:
+            # Say it out loud, whether or not a final measurement was taken.
+            # Returning an empty `assertions` after a failed step is correct - the
+            # plan is already broken - but a caller doing
             # `assert r["assertions"][0]["pass"]` then gets an IndexError, and one
             # reading `if r["assertions"]` reads it as "no assertions were asked
             # for" (reported 2026-10-27).
@@ -419,6 +469,8 @@ class PlannerTools:
         if assertions_skipped_because:
             data["assertions_status"] = "skipped"
             data["assertions_skipped_because"] = assertions_skipped_because
+        if measurements_note:
+            data["measurements_note"] = measurements_note
         return {
             "ok": ok,
             "code": code,

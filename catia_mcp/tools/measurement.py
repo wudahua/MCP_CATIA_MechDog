@@ -123,6 +123,16 @@ _MESH_CACHE_LIMIT = 48
 # is, so an extent-only caller keeps hitting the cache.
 _MESH_CACHE_CLOUD_LIMIT = 50_000
 
+# Parts this PROCESS has already walked the vertices of. CATIA builds a part's
+# internal representation on the first topology read, and that is what makes the
+# first measurement of an assembly 4-5x the later ones: measured on a 28-part,
+# 70-instance model, 194.7 s for the first call and 41.4 / 41.5 s for the next
+# two, with `cells_scanned`, `vertices_used` and `nls_chars` IDENTICAL all three
+# times - the work is the same, the first pass pays CATIA's setup. A number that
+# looks like "this part costs 80 s" turned out to mean "this part had not been
+# touched yet" (reported 2026-10-27), so the reply says which one it was.
+_MEASURED_PARTS: set[Any] = set()
+
 
 def _file_identity(path: str) -> tuple[str, int, int] | None:
     """``(path, size, mtime_ns)`` - what makes a saved file's box reproducible."""
@@ -273,12 +283,13 @@ def _route_name(route: Any) -> str:
 def _nls_fields(stats: dict[str, Any]) -> dict[str, Any]:
     """``nls_chars`` (and how many cells it covers) when the filter counted them.
 
-    Characters of NLS path read by the construction filter: the only per-part
-    number that measures the FILTER rather than the geometry. Two parts with 239
-    and 246 cells cost 66.4 and 30.5 ms per cell, so cell count does not explain
-    the spread; path length is what is left. Free to collect - the string is
-    already in hand - so it rides along instead of needing a second run
-    (reported 2026-10-27).
+    Characters of NLS path read by the construction filter: a SIZE indicator for
+    how much construction geometry a part carries - not a cost predictor. It was
+    published in 0.3.29 with the claim that it was "the filter's whole per-cell
+    cost"; an acceptance run on 26 parts falsified that (nls/cell varies 1.31x
+    while ms/cell varies 5.49x, r = 0.34, and the part with the longest paths was
+    the fastest). Free to collect - the string is already in hand - so it rides
+    along; it just does not explain the time (reported 2026-10-27).
     """
     if stats.get("nls_chars") is None:
         return {}
@@ -469,7 +480,11 @@ class MeasurementTools:
                     "With an assembly active it returns the WORLD box: each "
                     "component's local box is transformed by its placement and the "
                     "results are aggregated, per component as well as overall. Pass "
-                    "'component' for one instance only. Those per-component boxes "
+                    "'component' for one instance only - it matches TOP-LEVEL "
+                    "components, and when the same part number is ALSO installed "
+                    "inside a sub-assembly the reply reports complete: false, lists "
+                    "those instances in 'also_nested' and 'skipped', and says the box "
+                    "covers the top-level one only. Those per-component boxes "
                     "are still vertex sweeps, so ANY part whose extremum lies on a "
                     "curved face is under-reported there - revolved or not. The true "
                     "per-part box comes from get_bounding_box(document='<part>"
@@ -485,13 +500,19 @@ class MeasurementTools:
                     "if they had been placed directly here (the two placements "
                     "composed) and every entry says which level it came from with "
                     "'path' and 'depth'. "
-                    "Exactness has a price: the vertex route walks every topology "
-                    "cell of each part, and the per-cell cost grows with the part "
-                    "(measured 17-93 ms per cell across two acceptance models - a "
-                    "24-cell plate is ~0.5 s, a 500-cell body can be 45 s, and one "
-                    "1200-cell part dominated an assembly at 84 s). A 70-instance "
-                    "assembly costs MINUTES, not seconds - and the server runs tools "
-                    "one at a time, so nothing else runs meanwhile. 'cells_scanned' "
+                    "Exactness has a price, and there are TWO regimes. Warm, a part "
+                    "costs about 200 ms + 9.5 ms per topology cell (26 parts of one "
+                    "acceptance model: 8.6-11 ms per cell, a 1200-cell part 11.4 s). "
+                    "COLD - the first time a part is touched in a session - the same "
+                    "work costs 16-90 ms per cell, because CATIA builds that part's "
+                    "internal representation on the first topology read: one "
+                    "70-instance model measured 194.7 s for the first call and 41.4 s "
+                    "for the next one, with cells_scanned, vertices_used and "
+                    "nls_chars IDENTICAL all three times. 'first_measure' per part "
+                    "in 'parts', 'cold_parts' and 'elapsed_note' say which regime a "
+                    "number came from; compare elapsed_ms across sessions only with "
+                    "that in view. A 70-instance assembly is MINUTES cold, ~40 s "
+                    "warm, and the server runs tools one at a time. 'cells_scanned' "
                     "and 'elapsed_ms' (total, and per part in 'parts') report what it "
                     "actually cost, which is how you find the one part that eats 40% "
                     "of the call. Measure the instances you need with 'component' "
@@ -1029,6 +1050,11 @@ class MeasurementTools:
     def _get_inertia(self, density: float | None = None,
                      document: str | None = None) -> str:
         self.conn.ensure_connected()
+        # The assembly route has published elapsed_ms since 0.3.26; the two PART
+        # routes did not, so the field's presence depended on which document
+        # happened to be active - an asymmetry a caller budgeting a timeout runs
+        # straight into (reported 2026-10-27).
+        started = time.perf_counter()
         if document:
             self.opened_for_measurement = None
             doc = self._resolve_open_document(document)
@@ -1046,7 +1072,8 @@ class MeasurementTools:
                 raise RuntimeError(
                     f"'{doc.Name}' is neither a Part nor a Product document ({exc})."
                 ) from exc
-            reply = self._part_inertia(part, density, str(doc.Name))
+            reply = self._stamp_elapsed(
+                self._part_inertia(part, density, str(doc.Name)), started)
             if self.opened_for_measurement:
                 payload = json.loads(reply)
                 payload["opened"] = (
@@ -1096,7 +1123,7 @@ class MeasurementTools:
         except Exception as e:
             result["inertia_matrix_kg_m2"] = f"unavailable: {e}"
 
-        return json.dumps(result, indent=2)
+        return self._stamp_elapsed(json.dumps(result, indent=2), started)
 
     @staticmethod
     def _matrix_fields(vals: list[float]) -> dict[str, Any]:
@@ -1474,6 +1501,28 @@ class MeasurementTools:
         # minutes with the whole server behind it; the number makes that visible
         # instead of surprising (reported 2026-10-26).
         payload["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        # Which regime this call ran in. Two calls of the same assembly in one
+        # session differ by 4.7x with every work counter identical, so the number
+        # alone cannot be compared across calls - let alone across sessions
+        # (reported 2026-10-27: 194.7 s, then 41.4 s, then 41.5 s).
+        cold_parts = sum(1 for cached in local_boxes.values()
+                         if cached.get("first_measure"))
+        payload["cold_parts"] = cold_parts
+        payload["part_boxes_total"] = len(local_boxes)
+        if cold_parts:
+            payload["elapsed_note"] = (
+                f"{cold_parts} of {len(local_boxes)} part(s) were measured for the "
+                "FIRST time in this session. CATIA builds a part's internal "
+                "representation on the first topology read, and on a 70-instance "
+                "acceptance model that made the first call 194.7 s against 41.4 s "
+                "and 41.5 s for the next two - with cells_scanned, vertices_used "
+                "and nls_chars IDENTICAL all three times, so it is not 'less work'. "
+                "Do not compare a single elapsed_ms across sessions without "
+                "saying which regime it came from.")
+        else:
+            payload["elapsed_note"] = (
+                "every part here had already been measured once in this session, "
+                "so this is the warm number")
         try:
             payload["document"] = str(doc.Name)
         except Exception:  # noqa: BLE001 - the numbers are the point
@@ -1495,13 +1544,51 @@ class MeasurementTools:
         # distinct values (reported 2026-10-26). The instance entries keep the
         # geometry; this list keeps the cost model and the caveats.
         payload["parts"] = list(parts_detail.values())
-        payload["note_scope"] = (
-            f"{len(entries)} instance(s) of {len(local_boxes)} part(s): each part's "
-            "local box is computed once and only the placement is repeated, so the "
-            "cost is per part, not per instance. Per-part counts are in 'parts', "
-            "not on every instance entry. A sub-assembly is EXPANDED, so its parts "
-            "appear with their 'path' ('ASM/PART.1') and 'depth', and both counts "
-            "include them.")
+        # `component=` narrows to TOP-LEVEL components. When the same part is ALSO
+        # installed inside a sub-assembly, the reply used to say complete: true
+        # with instances {total: 1} while its own note_scope claimed sub-assemblies
+        # are expanded - a narrowed answer wearing the whole assembly's
+        # completeness, and three statements contradicting each other in one reply
+        # (reported 2026-10-27). Find what the narrowing left out and say it.
+        also_nested: list[dict[str, Any]] = []
+        if only:
+            for row in self._components_doc(doc):
+                nested = row.get("nested_doc")
+                if row.get("kind") == "sub_assembly" and nested is not None:
+                    also_nested.extend(self._nested_matches(
+                        nested, only, 2, str(row["name"] or "")))
+            for match in also_nested:
+                skipped.append({
+                    "component": only.strip(),
+                    "name": match["path"].split("/")[-1],
+                    "path": match["path"],
+                    "depth": match["depth"],
+                    "kind": "part",
+                    "error": (f"nested instance of '{only}', NOT included because "
+                              "component= narrows to TOP-LEVEL components - the "
+                              "box is that of the top-level instance only"),
+                })
+        if only:
+            payload["scope"] = "top_level_only"
+            payload["note_scope"] = (
+                f"narrowed to the TOP-LEVEL instance(s) of '{only}': "
+                f"{len(entries)} measured. Instances of the same part inside "
+                "sub-assemblies are NOT part of this box"
+                + (f" - {len(also_nested)} of them exist and are listed in "
+                   "'also_nested' / 'skipped', so this answer is NOT the whole "
+                   "part's envelope" if also_nested else
+                   " (none exist at the time of this call)")
+                + ".")
+            if also_nested:
+                payload["also_nested"] = also_nested
+        else:
+            payload["note_scope"] = (
+                f"{len(entries)} instance(s) of {len(local_boxes)} part(s): each "
+                "part's local box is computed once and only the placement is "
+                "repeated, so the cost is per part, not per instance. Per-part "
+                "counts are in 'parts', not on every instance entry. A "
+                "sub-assembly is EXPANDED, so its parts appear with their 'path' "
+                "('ASM/PART.1') and 'depth', and both counts include them.")
         # Say whether the box covers the whole assembly. 'skipped' sat beside
         # min/max as a sibling key, so a caller reading only the numbers never
         # learned that 6 of 70 instances were left out and the box is a lower
@@ -1522,16 +1609,26 @@ class MeasurementTools:
                                 "skipped": len(skipped)}
         if skipped:
             payload["skipped"] = skipped
-            payload["incomplete_because"] = (
-                f"{len(skipped)} of {len(entries) + len(skipped)} instance(s) could "
-                "not be bounded at all - neither their vertices nor (with "
-                "include_curved=true) their mesh gave a box, so this box is a LOWER "
-                "BOUND in any direction they extend. What to try: read each "
-                "instance's placement with catia_list_components or "
-                "catia_get_component_transform, measure the part on its own with "
-                "get_bounding_box(document='<part>.CATPart', method='mesh'), and "
-                "apply the rotation/translation yourself."
-            )
+            if only and also_nested:
+                payload["incomplete_because"] = (
+                    f"component= narrows to TOP-LEVEL components, and {len(also_nested)} "
+                    f"further instance(s) of '{only}' live inside sub-assemblies "
+                    "(listed in 'also_nested'). Those are NOT in this box, so it is "
+                    "the envelope of the top-level instance(s) only - not of the "
+                    "part everywhere in this assembly. To get them: measure each "
+                    "sub-assembly by name (get_bounding_box(document='<sub>.CATProduct')) "
+                    "or measure the whole assembly without 'component'.")
+            else:
+                payload["incomplete_because"] = (
+                    f"{len(skipped)} of {len(entries) + len(skipped)} instance(s) could "
+                    "not be bounded at all - neither their vertices nor (with "
+                    "include_curved=true) their mesh gave a box, so this box is a LOWER "
+                    "BOUND in any direction they extend. What to try: read each "
+                    "instance's placement with catia_list_components or "
+                    "catia_get_component_transform, measure the part on its own with "
+                    "get_bounding_box(document='<part>.CATPart', method='mesh'), and "
+                    "apply the rotation/translation yourself."
+                )
         depths = [entry["depth"] for entry in entries] + [entry["depth"] for entry in skipped]
         payload["assembly_depth_max"] = max(depths, default=1)
         # A sub-assembly is ONE entry in 'instances' until it is expanded, and two
@@ -1544,6 +1641,35 @@ class MeasurementTools:
         return json.dumps(payload, indent=2)
 
     _BOX_MAX_DEPTH = 8
+
+    def _nested_matches(self, doc: Any, only: str, depth: int = 2,
+                        prefix: str = "") -> list[dict[str, Any]]:
+        """Instances of ``only`` that live BELOW the top level, with their paths.
+
+        ``component=`` narrows to TOP-LEVEL components, and when the same part
+        number is ALSO installed inside a sub-assembly the narrowed reply used to
+        say `complete: true` with `instances: {total: 1}` - a partial answer
+        wearing the whole assembly's completeness, which is the same sin as the
+        0.3.28 partial sum (reported 2026-10-27). This finds the ones the
+        narrowing left out so the reply can name them.
+        """
+        wanted = only.strip().casefold()
+        found: list[dict[str, Any]] = []
+        try:
+            rows = self._components_doc(doc)
+        except Exception:  # noqa: BLE001 - a reply is still worth sending
+            return found
+        for row in rows:
+            name = str(row["name"] or "")
+            label = str(row["part_number"] or name)
+            path = f"{prefix}/{name}" if prefix else name
+            if name.casefold() == wanted or label.casefold() == wanted:
+                found.append({"path": path, "depth": depth})
+            nested = row.get("nested_doc")
+            if (row.get("kind") == "sub_assembly" and nested is not None
+                    and depth < self._BOX_MAX_DEPTH):
+                found.extend(self._nested_matches(nested, only, depth + 1, path))
+        return found
 
     def _box_walk(self, rows: list[dict[str, Any]], matrix: list[list[float]],
                   translation: list[float], depth: int, prefix: str,
@@ -1621,8 +1747,11 @@ class MeasurementTools:
             key = self._part_identity(row["part"])
             if key not in local_boxes:
                 part_started = time.perf_counter()
+                first_measure = key not in _MEASURED_PARTS
                 local_boxes[key] = self._part_box_entry(row["part"], body,
                                                         include_curved)
+                local_boxes[key]["first_measure"] = first_measure
+                _MEASURED_PARTS.add(key)
                 # What this part actually cost, once. `cells_scanned` is the work
                 # estimate; this is the measured price of it, which is the number
                 # a caller budgets with - 1 207 cells and 24 cells differ by 40x
@@ -1682,6 +1811,11 @@ class MeasurementTools:
                 }
                 if cached.get("elapsed_ms") is not None:
                     detail["elapsed_ms"] = cached["elapsed_ms"]
+                # Which of the two regimes this number came from. Without it a
+                # caller compares 80 s with 11 s for the same part and the same
+                # work, and concludes the tool got 7x faster (reported 2026-10-27).
+                if cached.get("first_measure") is not None:
+                    detail["first_measure"] = cached["first_measure"]
                 if cached["source"] == "mesh_fallback":
                     detail["mesh_vertices"] = cached["mesh_vertices"]
                     detail["points_route"] = "mesh"
@@ -1702,18 +1836,21 @@ class MeasurementTools:
                             "out (sketch-wire vertices, datum-plane corners) - a "
                             "count of CATIA cells, not of mesh elements")
                     if cached.get("nls_chars") is not None:
-                        # The one number that measures the FILTER instead of the
-                        # geometry. Two parts with 239 and 246 cells cost 66.4 and
-                        # 30.5 ms per cell, so cell count is not the driver; NLS
-                        # path length is the candidate that fits, and this makes
-                        # the comparison free (reported 2026-10-27, §3.4).
+                        # A SIZE indicator, not a cost predictor. 0.3.29 claimed
+                        # it was "the filter's whole per-cell cost"; 26 parts of
+                        # one acceptance model falsified that - nls/cell varied
+                        # 1.31x while ms/cell varied 5.49x (r = 0.34), and the
+                        # part with the longest paths (P10, 267 chars/cell) was
+                        # the fastest (16.4 ms/cell) (reported 2026-10-27).
                         detail["nls_chars"] = cached["nls_chars"]
                         detail["nls_chars_note"] = (
                             "characters of NLS path the construction filter read "
-                            "for this part (one path per cell). Divide by "
-                            "'cells_scanned' to compare two parts whose ms/cell "
-                            "differ - a longer path is a longer string to build and "
-                            "match, and that is the filter's whole per-cell cost")
+                            "for this part (one path per cell): how much "
+                            "construction geometry there was to filter, NOT how "
+                            "long the sweep took. Measured on 26 parts: nls/cell "
+                            "varies 1.31x while ms/cell varies 5.49x (r = 0.34), "
+                            "and the part with the longest paths was the fastest. "
+                            "Treat this as a size indicator, not a cost predictor")
                     detail["points_route"] = _route_name(cached.get("points_route"))
                 parts_detail[key] = detail
             parts_detail[key]["instances"] += 1
@@ -2020,6 +2157,17 @@ class MeasurementTools:
         body = part.MainBody
         if body.Shapes.Count == 0:
             raise RuntimeError("That part has no solid shape yet.")
+        # Which regime this is: a part's first topology read also pays CATIA's
+        # setup for that part, 4-7x the later ones for the same work (measured
+        # 2026-10-27). Publishing it here keeps the single-part route comparable
+        # with the assembly route's per-part `first_measure`.
+        regime: dict[str, Any] = {}
+        try:
+            identity = self._part_identity(part)
+            regime["first_measure"] = identity not in _MEASURED_PARTS
+            _MEASURED_PARTS.add(identity)
+        except Exception:  # noqa: BLE001 - the box matters, the label is a courtesy
+            pass
         method, auto_note = self._auto_method(method, body)
         if method in ("auto", "vertices"):
             stats: dict[str, Any] = {}
@@ -2044,6 +2192,7 @@ class MeasurementTools:
                         "vertices_used": len(points),
                         "cells_scanned": stats.get("cells"),
                         **_nls_fields(stats),
+                        **regime,
                     },
                 )
             if method == "vertices":
@@ -2062,7 +2211,7 @@ class MeasurementTools:
             bounds=("lower bound: mesh chording, measured 0.47-0.73 % small on "
                     "curved faces. Exact for a solid whose diameter runs through "
                     "a planar edge or a vertex"),
-            extra={"points_route": "mesh", "mesh_vertices": triangles},
+            extra={"points_route": "mesh", "mesh_vertices": triangles, **regime},
         )
         if copy_note:
             # The caveat used to live only inside the prose of `method`, where a

@@ -778,7 +778,13 @@ class PartDesignTools:
             },
             {
                 "name": "catia_list_features",
-                "description": "List all features in the active Part Body with their names and types.",
+                "description": (
+                    "List all features in the active Part Body with their names and "
+                    "types, plus the sketches in that body ('sketches', not counted "
+                    "in 'count') and any geometrical sets the tools left behind. "
+                    "This is how to check whether a sketch still exists after a "
+                    "failed pad/pocket/hole: those rollbacks take the sketch with "
+                    "them."),
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -1460,8 +1466,12 @@ class PartDesignTools:
             # Nothing grew either way: drop the dead node so the document stays
             # usable. This is the case that used to poison the whole part - a pad
             # on an open profile left '凸台.N' behind and every later update
-            # failed. Only the pad is removed: the sketch was in the tree before
-            # this call and is none of this rollback's business.
+            # failed. Only the pad is removed ... and CATIA takes the sketch with
+            # it, because the sketch is consumed by the feature: measured on B30,
+            # 5 of 5 such rollbacks left an empty body, and the message claimed
+            # the opposite (reported 2026-10-27). The sketch is read back after
+            # the delete and the sentence follows what is actually there.
+            sketch_name = getattr(sketch, "Name", None)
             gone = self._remove_feature(part, pad)
             # Put the body back in work. Deleting the pad leaves InWorkObject on
             # whatever CATIA picks - on B32 it was the sketch's datum plane
@@ -1471,23 +1481,19 @@ class PartDesignTools:
                 part.InWorkObject = body
             except Exception:  # noqa: BLE001 - the message is the payload
                 pass
-            survived = self._sketch_present(body, sketch)
+            survived = self._sketch_present(part, sketch)
             stayed = (f"Volume stayed {before:.1f} mm3." if before is not None
                       else f"The volume could not be measured ({volume_note}).")
-            sketch_name = getattr(sketch, "Name", "the sketch")
             raise RuntimeError(
                 "CATIA built no material for this pad in EITHER direction, so it "
                 "was rolled back"
                 + ("" if gone else " (the dead feature could NOT be deleted - "
                                    "close the document without saving)")
+                + "."
                 + f" {stayed} Both directions were MEASURED, not assumed: the same "
                 "pad node was flipped and re-updated, and neither orientation grew "
                 "the body."
-                + (f" Your sketch '{sketch_name}' is still in the tree - only the "
-                   "pad node was removed." if survived else
-                   f" WARNING: the sketch '{sketch_name}' did not survive the "
-                   "rollback, so it has to be re-created before this pad can be "
-                   "retried.")
+                + self._sketch_after_rollback(sketch_name, survived)
                 + " Four things do this:\n"
                 "  · the sketch plane sits ON the material boundary and the sweep "
                 "runs INTO the body, so the whole sweep is absorbed - move the "
@@ -1654,6 +1660,8 @@ class PartDesignTools:
             # is already in the geometry. Deciding on the volume keeps the
             # message and the model in agreement whichever way CATIA behaved.
             gone = self._remove_feature(part, pocket)
+            sketch_name = getattr(sketch, "Name", None)
+            survived = self._sketch_present(part, sketch)
             side = ("the requested direction" if explicit_direction
                     else "either direction")
             raise RuntimeError(
@@ -1661,7 +1669,9 @@ class PartDesignTools:
                 + ("rolled back" if gone else
                    "left in the tree (the dead feature could NOT be deleted - "
                    "close the document without saving)")
-                + f" (volume stayed {before:.1f} mm3). Two usual causes: the "
+                + f" (volume stayed {before:.1f} mm3)."
+                + self._sketch_after_rollback(sketch_name, survived)
+                + " Two usual causes: the "
                 "profile does not intersect the solid (a face sketch whose "
                 "local coordinates do not land on the material - put the sketch "
                 "on a datum plane with an offset instead), or the profile is "
@@ -1862,37 +1872,122 @@ class PartDesignTools:
             except Exception:
                 pass
 
-    def _sketch_present(self, body: Any, sketch: Any) -> bool:
-        """Whether a sketch is still in the tree, by name, across every body.
+    def _sketch_present(self, part: Any, sketch: Any) -> bool | None:
+        """Whether a sketch is still in the tree - ``None`` when it cannot be told.
 
         A rollback that says "the feature was removed" has to be able to say what
         else went with it. Reported 2026-10-26: a failed pad removed the caller's
         input sketch, and the only evidence was the NEXT call answering "No sketch
         named '草图.5'. Available: 草图.1, 草图.4." - which reads like a typo in the
-        caller's own naming. True when it cannot be determined; the sentence is a
-        courtesy, not a gate.
+        caller's own naming.
+
+        The check itself was broken until 0.3.30: it went through
+        ``body.Parent.Bodies``, a Body has no ``Parent`` in the V5 automation
+        model, the fallback then called ``.Count`` on a Python list, and the outer
+        ``except`` returned True - "cannot tell, do not accuse". So it answered
+        "still in the tree" for sketches CATIA had already deleted (measured on
+        B30: 3 of 5 failed pads said exactly that while ``Body.Sketches`` read
+        right after the message no longer held the sketch, and an explicit
+        ``Part.Update()`` did not change it). Read ``Part.Bodies`` and answer
+        honestly - including "I could not check".
         """
         try:
             name = str(sketch.Name)
         except Exception:  # noqa: BLE001 - a dead handle proves nothing
-            return False
+            name = None
         try:
-            bodies = body.Parent.Bodies
+            bodies = part.Bodies
         except Exception:  # noqa: BLE001
-            bodies = [body]
+            return None
         try:
-            for b in range(1, bodies.Count + 1):
-                container = bodies.Item(b)
+            for index in range(1, bodies.Count + 1):
+                container = bodies.Item(index)
                 try:
                     sketches = container.Sketches
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001 - a body without sketches
                     continue
-                for s in range(1, sketches.Count + 1):
-                    if str(sketches.Item(s).Name) == name:
+                for position in range(1, sketches.Count + 1):
+                    if name is not None and str(sketches.Item(position).Name) == name:
                         return True
         except Exception:  # noqa: BLE001 - cannot tell, so do not accuse
-            return True
+            return None
         return False
+
+    def _sketch_after_rollback(self, sketch_name: str | None,
+                               survived: bool | None) -> str:
+        """One sentence about the input sketch, read AFTER the rollback.
+
+        Three states, because there are three: still in the tree, taken by CATIA
+        together with the feature that consumed it, or unreadable. The third used
+        to be reported as "still in the tree" - see ``_sketch_present`` - and that
+        sentence sent the caller to "change the offset", on a sketch that no
+        longer existed (reported 2026-10-27).
+        """
+        label = sketch_name or "the sketch"
+        if survived is True:
+            return (f" Your sketch '{label}' is still in the tree - only the "
+                    "feature node was removed.")
+        if survived is None:
+            return (f" Whether '{label}' survived the rollback could not be read back "
+                    "- check the tree before retrying."
+                    + self._sketch_rebuild_hint(sketch_name))
+        return (f" CATIA removed the sketch '{label}' with the rollback: a sketch is "
+                "consumed by the feature built on it, so it went with the node."
+                + self._sketch_rebuild_hint(sketch_name))
+
+    def _sketch_rebuild_hint(self, sketch_name: str | None) -> str:
+        """What the lost sketch held, from this session's own drawing record.
+
+        A rollback that takes the sketch has to leave the caller something to act
+        on: "recreate it" with no coordinates is the same dead end as the false
+        "still in the tree". The sketcher already records every element it draws
+        (GSD uses it to place outlines in 3D), keyed by document and name, so the
+        profile can be echoed verbatim - and that record outlives the sketch
+        precisely because it is not read back from CATIA.
+        """
+        if not sketch_name:
+            return ""
+        outlines = getattr(self.conn, "sketch_outlines", None) or {}
+        try:
+            document = str(self.conn.active_document.Name)
+        except Exception:  # noqa: BLE001
+            document = "?"
+        record = outlines.get(f"{document}::{sketch_name}") or {}
+        elements = record.get("elements") or []
+        placement = record.get("placement") or {}
+        parts: list[str] = []
+        for element in elements[:4]:
+            kind = str(element.get("kind"))
+            if kind == "rectangle":
+                parts.append("rectangle (%g, %g) .. (%g, %g)"
+                             % (element.get("x1", 0.0), element.get("y1", 0.0),
+                                element.get("x2", 0.0), element.get("y2", 0.0)))
+            elif kind == "circle":
+                parts.append("circle centre (%g, %g) r %g"
+                             % (element.get("cx", 0.0), element.get("cy", 0.0),
+                                element.get("radius", 0.0)))
+            elif kind == "line":
+                parts.append("line (%g, %g) -> (%g, %g)"
+                             % (element.get("x1", 0.0), element.get("y1", 0.0),
+                                element.get("x2", 0.0), element.get("y2", 0.0)))
+            elif kind == "arc":
+                parts.append("arc centre (%g, %g) r %g"
+                             % (element.get("cx", 0.0), element.get("cy", 0.0),
+                                element.get("radius", 0.0)))
+            else:
+                parts.append(kind)
+        if len(elements) > 4:
+            parts.append(f"… {len(elements) - 4} more element(s)")
+        where = ""
+        if placement.get("base"):
+            where = " on plane '%s'" % placement["base"]
+            if placement.get("distance") is not None:
+                where += " at offset %g" % placement["distance"]
+        if not parts and not where:
+            return ""
+        drawn = "; ".join(parts) if parts else "no element recorded"
+        return (f" It held: {drawn}{where} - catia_create_sketch + the same drawing "
+                "calls + catia_close_sketch rebuilds it.")
 
     @staticmethod
     def _try_update(part: Any, feature: Any) -> Exception | None:
@@ -2672,12 +2767,16 @@ class PartDesignTools:
         extent = "through all" if through_all else f"depth {depth} mm"
         if took is False:
             gone = self._remove_feature(part, hole)
+            survived = self._sketch_present(part, sketch)
             raise RuntimeError(
                 "The hole removed no material, so it was "
                 + ("rolled back" if gone else
                    "left in the tree (the dead feature could NOT be deleted - "
                    "close the document without saving)")
-                + f" (volume stayed {before:.1f} mm3). The sketch has to hold a "
+                + f" (volume stayed {before:.1f} mm3)."
+                + self._sketch_after_rollback(getattr(sketch, "Name", None),
+                                              survived)
+                + " The sketch has to hold a "
                 "closed CIRCLE - the Hole feature takes the bore from the "
                 "profile, so a bare point produces a feature that cannot "
                 "update." + ("" if through_all else
@@ -3460,6 +3559,21 @@ class PartDesignTools:
                 "set and that geometry must stay: the pattern holds a reference "
                 "to it, so deleting it deletes the pattern."
             )
+        # Sketches were not listed at all, so "what is in the tree" could only be
+        # read side-on, from the `Available:` list a failed pad prints - and that
+        # channel was itself lying about survival until 0.3.30 (reported
+        # 2026-10-27). They are not features and stay out of 'count'.
+        try:
+            sketches = [{"index": i, "name": str(body.Sketches.Item(i).Name)}
+                        for i in range(1, body.Sketches.Count + 1)]
+        except Exception:  # noqa: BLE001 - a listing must not fail over this
+            sketches = []
+        if sketches:
+            payload["sketches"] = sketches
+            payload["sketch_count"] = len(sketches)
+            payload["sketches_note"] = (
+                "sketches live in the body alongside the features (a sketch "
+                "consumed by a pad is still here), and are not counted in 'count'")
         return json.dumps(payload, indent=2)
 
     def _pattern_geoset_inventory(self, part: Any) -> list[dict[str, Any]]:

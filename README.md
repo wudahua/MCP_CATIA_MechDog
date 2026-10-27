@@ -231,10 +231,11 @@ assembly to be active. Each PART is bounded once and only the placement repeated
 in `parts`, not on every instance entry; `cells_scanned` counts CATIA topology
 cells before construction geometry was filtered, and the per-part time is dominated
 by that filter, not by the vertices. `nls_chars` is the total length of the NLS
-paths that filter read (one per cell): two parts with 239 and 246 cells were
-measured at 66.4 and 30.5 ms per cell, so cell count is not the driver — path
-length is the candidate that fits, and publishing it makes the comparison free.
-`component='P24.1'` reads one placement, not seventy.
+paths that filter read (one per cell): a **size** indicator for how much
+construction geometry a part carries, not a cost predictor — on 26 parts of one
+model `nls/cell` varied 1.31× while `ms/cell` varied 5.49× (r = 0.34), and the part
+with the longest paths was the fastest. `component='P24.1'` reads one placement,
+not seventy.
 
 A part with no vertex at any extremum (a fully curved part) cannot be bounded by a
 vertex sweep. It is bounded from its STL mesh instead — `include_curved: false`
@@ -256,32 +257,47 @@ otherwise puts up a modal "另存为" that, unanswered, holds the call for 89 s.
 
 The vertex route calls COM once per topology cell (to read its NLS path and to get
 a reference), so its price is set by the *cell* count, not the vertex count — a
-16-vertex plate can still have hundreds of cells. The per-cell cost is not a
-constant either: it rises with the part (17 ms/cell on a 24-cell plate, 93 ms/cell
-on a 504-cell body, measured on two acceptance models), because the parts with the
-most cells also have the most faces behind each `Selection.Item` call.
+16-vertex plate can still have hundreds of cells. **And the per-cell cost depends on
+the session, not only on the part.** The same 70-instance assembly measured three
+times in one session:
+
+| call, same session, same `method` | time | per cell |
+|---|---|---|
+| 1st | **194.7 s** | 53.7 ms (26 vertex parts) |
+| 2nd | **41.4 s** | 10.6 ms |
+| 3rd | **41.5 s** | 10.6 ms |
+
+`cells_scanned`, `vertices_used` and `nls_chars` were **identical** all three
+times, so the work is the same — the first pass pays CATIA's own setup for each
+part. Warm the fit is `≈ 200 ms + 9.5 ms × cells` (8.6–11 ms/cell); cold it is
+16–90 ms/cell and grows with the part. Every number in this section that was
+measured as "one part by name" is a COLD number, and reading it as a property of
+the part is what made an earlier release claim `17–93 ms per cell` as the model.
+`parts[].first_measure`, `cold_parts` and `elapsed_note` say which regime a call
+ran in; compare `elapsed_ms` across sessions only with that in view.
 
 | call | time |
 |---|---|
-| one part, 24 cells / 16 vertices | ~0.5–1.5 s |
-| one part, 535 cells / 335 vertices (B30) | ~5.2 s |
-| one part, 1 207 cells (acceptance model, B32) | 84 s |
-| one part, 504 cells (same model, B32) | 47 s |
+| one part, 24 cells / 16 vertices | ~0.3–0.5 s warm, ~0.5–1.5 s cold |
+| one part, 535 cells / 335 vertices (B30) | 5.9 s warm / 36.1 s cold |
+| one part, 1 207 cells (acceptance model, B32) | 11.4 s warm / 84 s cold |
+| one part, 504 cells (same model, B32) | 5.0 s warm / 47 s cold |
 | 24 instances / 11 parts (drone), warm | 94.4 s |
 | the same call right after opening the assembly | 130.0 s (1.38×) |
 | the same call again, same session (mesh boxes reused) | **16.0 s (8.1×)** |
-| 70 instances / 28 parts (acceptance model) | 203.9–216.8 s |
+| 70 instances / 28 parts (acceptance model) | **194.7 s cold / 41.4 s warm** |
 
 Three things dominate, and none of them is "one fixed cost per part":
 
-* **Cost concentrates in a few parts.** On the 70-instance model: `P05` 84.2 s
-  (38.8 %), `P01` 46.8 s (21.6 %), `P07` 15.9 s, `P02` 13.1 s — four parts are
-  73.8 % of the call; the 17 lightest parts (≤ 34 cells) together are 4.5 %, at
-  ~574 ms each. `elapsed_ms` in `parts` is what makes that visible.
-* **The first sweep of a part pays for its update.** `drone body` (535 cells) took
-  36.1 s cold and 5.9 s warm (6.2×); the small parts differ by 1.2–2.1×, and the
-  whole call by 1.38×. Numbers from two calls in one session are not comparable
-  across a session boundary unless you say which one it was.
+* **Cold vs warm is the biggest single factor.** 194.7 → 41.4 s (−78.7 %) with
+  every work counter unchanged. The gap is per PART and it disappears once that
+  part has been touched: `P05` 80.0 s cold / 11.4 s warm (7.0×), `P01` 45.5 /
+  5.0 s (9.2×), a 12-cell plate 0.33 s warm. It is not "less work" and not the
+  assembly layer — the call overhead is 5 350 ms either way.
+* **Cost concentrates in a few parts — in both regimes.** Cold: `P05` 80.0 s
+  (41 %), `P01` 45.5 s, `P07` 15.0 s, `P02` 12.2 s. Warm: `P05` 11.4 s (27 %),
+  `P01` 5.0 s, `P02` 2.9 s, `P07` 2.2 s. `elapsed_ms` in `parts` is what makes
+  that visible, and `first_measure` is what makes it honest.
 * **The mesh fallback costs more than the vertex work when the assembly has curved
   parts.** Parts bounded from STL are in context, so each one is copied to a temp
   file, opened, updated, exported and closed: 12–17 s per part, unchanged by
@@ -297,23 +313,25 @@ Three things dominate, and none of them is "one fixed cost per part":
   already-loaded component into that state (it activates it instead). If you only
   need `complete: true`, `include_curved: false` is cheaper still and lists those
   instances in `skipped` instead.
-* **The two tiers are not explained yet.** On the 70-instance model every part sat
-  at either 17–31 ms/cell or 66–92 ms/cell — and the three in the slow tier are
-  exactly the three biggest contributors. Cell count cannot be the reason: `P27`
-  (246 cells) and `P07` (239 cells) differ by 2.18×, and `P31`/`P30` (both 12
-  cells, same call, adjacent) by 1.89×. `nls_chars` in `parts` is the number that
-  tests the remaining explanation (path length), so the comparison takes one run.
+* **The "two tiers" were the cold/warm split in disguise.** Every part sat at
+  either 17–31 ms/cell or 66–92 ms/cell in one cold pass, and cell count could not
+  separate them (`P27` 246 cells at 30.5 vs `P07` 239 at 66.4; `P31`/`P30` both 12
+  cells at 34.2 vs 64.7). Warm, the same pairs read 9.1 vs 9.4 and 28.1 vs 30.5 —
+  the factor was the first-touch cost, not the geometry. A per-cell figure is
+  therefore only meaningful with the regime it came from.
 * **Do not use a small part's ~400 ms as a regression baseline.** In that model
   twelve-cell parts sat at 398–424 ms, but `P30` was 776 ms, `P20` 732 ms and `P24`
   635 ms — per-part jitter of +20 % to +90 % on a field that reads like a constant.
 
 Tools run on a single worker thread, so a long box blocks every other MCP call
 until it finishes. The reply states `elapsed_ms` (total and per part, `parts[]`),
-`cells_scanned`, and `points_route` (`batched` / `batched_retried` / `per_point`
-for a vertex sweep, `mesh` for an STL extent), so the cost is attributable instead
-of surprising. To bound one instance, pass `component=` — with or without an
-assembly active: if the active document is a Part, the component is looked up in
-the open assembly that contains it, and the reply says so (`measured_in`).
+`first_measure` (was this part touched for the first time in this session),
+`cold_parts`, `cells_scanned`, and `points_route` (`batched` / `batched_retried` /
+`per_point` for a vertex sweep, `mesh` for an STL extent), so the cost is
+attributable instead of surprising. To bound one instance, pass `component=` — with
+or without an assembly active: if the active document is a Part, the component is
+looked up in the open assembly that contains it, and the reply says so
+(`measured_in`).
 
 `catia_list_components` filters before reading any placement, and
 `names_only: true` skips them entirely (measured: 370 ms → 32 ms on a 5-instance
@@ -521,7 +539,11 @@ is a modal dialog, and reads as a bare `[WinError 2]`). Place the result with
   `path` (`ASM/PART.1`) and a `depth`, so one part is still bounded and measured
   once however many levels it appears at. `component=` still matches TOP-LEVEL
   components only — a nested instance has to be asked for through its
-  sub-assembly, and the refusal says so.
+  sub-assembly, and the refusal says so. When the same part number exists BOTH at
+  the top level and inside a sub-assembly, the narrowed reply reports
+  `complete: false`, `scope: "top_level_only"` and the instances it left out in
+  `also_nested` / `skipped`, so a partial box cannot pass for the part's whole
+  envelope.
 * A part that CATIA is editing **in context** (loaded inside an assembly, no window
   of its own) cannot be exported to STL. The mesh box falls back to a copy of the
   saved file, so it measures the file, not unsaved edits; the reply says when that

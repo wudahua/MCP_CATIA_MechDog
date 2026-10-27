@@ -44,12 +44,18 @@ def test_pad_failure_says_whether_the_sketch_survived():
     from catia_mcp.tools.part_design import PartDesignTools
 
     source = inspect.getsource(PartDesignTools._pad)
+    # 0.3.30: the sentence moved into one helper, because `pocket` and `hole`
+    # needed the same three states instead of only `pad` saying anything.
     assert "_sketch_present" in source
-    assert "is still in the tree" in source
-    assert "did not survive" in source
+    assert "_sketch_after_rollback" in source
     # Both directions are measured now, so the claim is a fact, not an assumption.
     assert "Both directions were MEASURED" in source
     assert "not the problem" not in source
+
+    said = inspect.getsource(PartDesignTools._sketch_after_rollback)
+    assert "is still in the tree" in said
+    assert "removed the sketch" in said
+    assert "could not be read back" in said
 
 
 def test_sketch_present_finds_a_sketch_in_any_body():
@@ -76,12 +82,15 @@ def test_sketch_present_finds_a_sketch_in_any_body():
     class _Part:
         Bodies = _Bodies()
 
-    body = _Body()
-    body.Parent = _Part()
+    # 0.3.30: the check reads Part.Bodies. It used to walk `body.Parent.Bodies`,
+    # a Body has no Parent, and the fallback ("cannot tell, do not accuse")
+    # answered True for a sketch CATIA had already deleted.
     tools = PartDesignTools(connection=None)
-    assert tools._sketch_present(body, _Sketch()) is True
+    assert tools._sketch_present(_Part(), _Sketch()) is True
     missing = type("S", (), {"Name": "草图.9"})()
-    assert tools._sketch_present(body, missing) is False
+    assert tools._sketch_present(_Part(), missing) is False
+    # ...and it says so when it cannot tell, instead of claiming survival.
+    assert tools._sketch_present(object(), _Sketch()) is None
 
 
 # --------------------------------------------------------------------------

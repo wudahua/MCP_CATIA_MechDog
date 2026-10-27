@@ -2,6 +2,104 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Fixed — a failed pad/pocket/hole took the sketch, and one of them said it hadn't
+
+- `catia_pad` answered "Your sketch '草图.7' is still in the tree - only the pad
+  node was removed" while CATIA had removed the sketch together with the feature
+  it was consumed by. The caller then read "changing the offset or the profile
+  does" and had nothing left to change: the next call answered `No sketch named`,
+  which reads like a typo in their own naming (reported 2026-10-27).
+- The check behind that sentence had been answering True for every input since it
+  was written: it walked `body.Parent.Bodies`, a Body has no `Parent` in the V5
+  automation model, the fallback called `.Count` on a Python list, and the outer
+  `except` returned "cannot tell, do not accuse" - as True. It reads `Part.Bodies`
+  now and has three answers: present, gone, and *could not be read back*. Measured
+  on B30: 5 of 5 rollbacks left no sketch, and 3 of 5 claimed otherwise; with the
+  fix, 0 of 5 claim otherwise.
+- When the sketch is gone the message says so, and echoes what it held from this
+  session's own drawing record - `It held: rectangle (30, 15) .. (35, 25) on plane
+  'xy' at offset 20 - catia_create_sketch + the same drawing calls +
+  catia_close_sketch rebuilds it.` A rollback that cannot be prevented has to
+  leave the caller something to act on.
+- `catia_pocket` and `catia_hole` consume the sketch the same way and said nothing
+  about it at all; all three now share one sentence (`_sketch_after_rollback`).
+
+### Fixed — `component=` narrowing called a partial box complete
+
+- `get_bounding_box(component='P26A.1')` matches TOP-LEVEL components only, and
+  when the same part is ALSO installed inside a sub-assembly the reply carried
+  `complete: true`, `instances: {total: 1}` and a `note_scope` saying "a
+  sub-assembly is EXPANDED" - three statements, two of them false, in one reply
+  (reported 2026-10-27). Same class as the 0.3.28 partial sum, one size smaller.
+- The reply now finds the instances the narrowing left out: `complete: false`,
+  `scope: "top_level_only"`, `also_nested: [{path, depth}]`, one `skipped` entry
+  per nested instance, and `note_scope` that says the box covers the top-level
+  instance only. The un-narrowed reply keeps the "expanded" wording, which is
+  true there.
+
+### Changed — the cost model has two regimes, and the reply says which one it ran in
+
+- One acceptance run measured the same 70-instance assembly three times in one
+  session: **194.7 s, then 41.4 s, then 41.5 s**, with `cells_scanned`,
+  `vertices_used` and `nls_chars` IDENTICAL all three times. The work is the same;
+  the first pass pays CATIA's own setup per part. Every per-part number published
+  so far - including the "17-93 ms per cell" calibration of 0.3.27 - was a COLD
+  number being read as a property of the part (reported 2026-10-27).
+- `parts[].first_measure`, `part_boxes_total`, `cold_parts` and `elapsed_note` say
+  which regime a call ran in. The single-part route publishes `first_measure` too.
+  Warm the fit is `~200 ms + 9.5 ms per cell` (26 parts: 8.6-11 ms per cell); cold
+  it is 16-90 ms per cell, and the description says both.
+
+### Changed — `nls_chars` is a size, not a cost predictor
+
+- 0.3.29 published it with "divide by cells_scanned … that is the filter's whole
+  per-cell cost". The same report falsified that on 26 parts: `nls/cell` varies
+  1.31x while `ms/cell` varies 5.49x (r = 0.34), and the part with the longest
+  paths was the fastest. The claim is withdrawn; the field stays as a size
+  indicator with the counter-evidence in its note.
+
+### Added — a step error a script can branch on
+
+- Every failed step in `run_plan` answered `code: "STEP_EXCEPTION"` with
+  `error: "RuntimeError: …"` in front of a sentence that already explained itself,
+  so "the sketch went with the rollback" and "the licence is missing" looked the
+  same (reported 2026-10-27). The class name moved to `error_type`, and the
+  failures this server raises on purpose get their own code:
+  `SKETCH_NOT_FOUND`, `NO_MATERIAL`, `UNSUPPORTED_CAPABILITY`,
+  `COMPONENT_NOT_FOUND`, `PART_NOT_LOADED`.
+
+### Added — a failed plan reports the document's final state
+
+- With `stop_on_error: false` and every step run, `measurements` was `{}` even
+  when the later steps built and saved their part. It now measures the final state
+  and says in `measurements_note` that `expect` was NOT evaluated against it.
+  A plan that stopped at the failure still reports nothing - there is no final
+  state to report.
+
+### Added — `catia_list_features` lists the sketches
+
+- 14 sketches in a body and `count: 3`, so "what is in the tree" could only be read
+  side-on from the `Available:` list a failed pad prints - and that channel was the
+  one lying about survival. Sketches now come back as `sketches` /
+  `sketch_count`, not folded into `count` (they are not features).
+
+### Changed — `get_inertia` publishes `elapsed_ms` on the part routes too
+
+- The assembly route had it, the two part routes did not, so the field existed or
+  not depending on which document was active (reported 2026-10-27). Same field,
+  every exit.
+
+### Fixed — the "Not covered" note in 0.3.29 named the wrong machine
+
+- It said the 70-instance acceptance model "could not be re-measured here" because
+  "this machine runs B30". True of the B30 dev box; the acceptance machine is B32
+  and measured it completely. The B32 numbers are now recorded as the regression
+  baseline they are: `get_inertia` 76 362 861.6798 mm3 / area 10 547 327.351 mm2 /
+  COG (-419.2233, 41.6144, 275.4612) / `complete: true` / 70 of 70 instances, and
+  the box `(-978.182, -210.526, -566.9) .. (141.608, 316.793, 1049.910)`.
+
 ## [0.3.29] — 2026-10-27 · a sub-assembly is not a hole in the box either
 
 ### Changed — the bounding box expands sub-assemblies too

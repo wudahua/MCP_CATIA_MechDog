@@ -248,11 +248,24 @@ def test_a_skipped_expect_is_not_silent():
                                               "volume_mm3": 1.0}])
     assert result["ok"] is False
     data = result["data"]
-    assert data["measurements"] == {}
+    # 0.3.30: the plan ran on and reached its last step, so the document HAS a
+    # final state - it is measured, while `expect` stays unevaluated. Before
+    # this, `measurements` was empty even when every later step ran and saved.
+    assert data["measurements"] == {"volume_mm3": 1.0}
+    assert "NOT evaluated" in data["measurements_note"]
     assert data["assertions"] == []
     assert data["assertions_status"] == "skipped"
     assert "1 step(s) failed" in data["assertions_skipped_because"]
     assert "assertions not evaluated" in result["message"]
+
+
+def test_a_stopped_plan_does_not_claim_a_final_measurement():
+    result, _ = _plan({3: "nope"}, 5, stop_on_error=True,
+                      expect=[{"document": "X.CATPart", "volume_mm3": 1.0}])
+    data = result["data"]
+    assert data["measurements"] == {}
+    assert "measurements_note" not in data
+    assert data["assertions_status"] == "skipped"
 
 
 def test_a_plan_without_expect_does_not_claim_assertions_were_skipped():

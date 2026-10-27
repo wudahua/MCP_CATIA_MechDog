@@ -300,7 +300,10 @@ def test_the_tool_description_warns_about_the_price():
 
     description = [d for d in MeasurementTools(connection=None).get_tool_definitions()
                    if d["name"] == "catia_get_bounding_box"][0]["description"]
-    assert "MINUTES, not seconds" in description
+    # 0.3.30 replaced the single figure with the two regimes an acceptance run
+    # measured (194.7 s cold, 41.4 s warm on one 70-instance model).
+    assert "MINUTES cold" in description
+    assert "warm" in description
     assert "elapsed_ms" in description
     assert "cells_scanned" in description
     assert "one at a time" in description
