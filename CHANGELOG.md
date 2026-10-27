@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [0.3.28] — 2026-10-27 · a sub-assembly is not a part, and a partial sum is not a total
 
 ### Fixed — a sub-assembly was a partial sum wearing the assembly's name
 
