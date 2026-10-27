@@ -2,7 +2,17 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [0.3.26] — 2026-10-27 · a saved file's box does not change
+
+### Added — the reply says what the box cost, and the docs say it before you wait
+
+- `elapsed_ms` on the reply and on every entry of `parts[]`. The total says "this
+  call was slow"; the per-part value says WHICH part - 1 207 cells and 24 cells
+  differ by 40x, and the estimate alone does not say where the time went.
+- The `catia_get_bounding_box` description and a README section ("What an exact box
+  costs") now state the price: ~15 ms per topology cell on B30, so a 500-cell part
+  is ~5 s, a 70-instance assembly is minutes (not seconds), and the server runs
+  tools one at a time - nothing else runs meanwhile.
 
 ### Changed — a mesh box measured from a saved file is reused
 
