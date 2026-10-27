@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [0.3.30] — 2026-10-27 · the rollback took the sketch, so say it took the sketch
 
 ### Fixed — a failed pad/pocket/hole took the sketch, and one of them said it hadn't
 
