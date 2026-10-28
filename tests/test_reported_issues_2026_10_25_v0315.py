@@ -408,7 +408,12 @@ def test_save_as_description_is_honest_about_both_builds():
     assert "right after catia_new_part" in text
 
 
-@pytest.mark.parametrize("field", ["rolled_back", "rollback_supported",
+# `rollback_supported` was here until 0.3.35: it was a constant false in every
+# reply (no tool takes a rollback argument) sitting next to `rolled_back: true`,
+# so it read as "this failure could not be rolled back" - the opposite of what
+# had just happened. Both 2026-10-28 reviewers flagged it; the key is now
+# `can_request_rollback`, which says what the constant actually meant.
+@pytest.mark.parametrize("field", ["rolled_back", "can_request_rollback",
                                    "automatic_retry_allowed", "next_actions"])
 def test_recovery_block_shape_is_stable(field):
     from catia_mcp.results import operation_result
@@ -417,3 +422,17 @@ def test_recovery_block_shape_is_stable(field):
                               data={}, modified=False)
     assert field in result["recovery"]
     assert json.dumps(result["recovery"])  # serialisable for MCP
+
+
+def test_a_constant_that_read_as_the_opposite_is_gone():
+    from catia_mcp.results import operation_result
+
+    result = operation_result(tool="catia_pad", ok=False, code="NO_MATERIAL",
+                             message="rolled back", data={}, modified=None,
+                             rolled_back=True)
+    block = result["recovery"]
+    assert "rollback_supported" not in block
+    assert block["can_request_rollback"] is False
+    assert block["rolled_back"] is True
+    # The sentence the constant was standing in for.
+    assert "no tool in this server takes a rollback argument" in block["rollback_note"]

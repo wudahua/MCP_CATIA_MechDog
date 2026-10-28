@@ -14,8 +14,8 @@ class FeatureRejected(RuntimeError):
     later Update fails), while one that was removed leaves the model exactly as
     it was. Carrying it as an attribute lets the error envelope agree with the
     message instead of contradicting it - reported twice on 2026-10-25, because
-    ``recovery.rollback_supported`` was hard-coded false and ``next_actions``
-    said "recovery is manual" even when the tool had just undone the change.
+    ``next_actions`` said "recovery is manual" even when the tool had just undone
+    the change.
 
     ``next_actions`` is what the caller should do NEXT, and only the raise site
     knows it: "fix the argument and retry" is wrong for a pad that built no
@@ -44,14 +44,27 @@ class CodedError(RuntimeError):
     name, because only the first phrase was in the table. The raise site knows
     what it is refusing; the code travels with the exception from now on, and the
     phrase table stays only for failures CATIA itself produces.
+
+    ``modified`` and ``next_actions`` travel the same way. A refusal that happens
+    before anything is written knows it wrote nothing - "No sketch named 'X'.
+    Available: ..." is a lookup in a list - and leaving that as the envelope's
+    "unknown" put "model changes were not verified, inspect the CATIA model" on
+    a call that never touched the model (reported 2026-10-28, §5.2).
     """
 
     code = "STEP_EXCEPTION"
+    modified: bool | None = None
 
-    def __init__(self, message: str, code: str | None = None) -> None:
+    def __init__(self, message: str, code: str | None = None,
+                 modified: bool | None = None,
+                 next_actions: list[str] | None = None) -> None:
         super().__init__(message)
         if code:
             self.code = str(code)
+        if modified is not None:
+            self.modified = bool(modified)
+        if next_actions:
+            self.next_actions = list(next_actions)
 
 
 class ComponentNotFound(CodedError, ValueError):
@@ -93,6 +106,11 @@ def failure_code(message: str, error: BaseException | None = None,
         return "UNSUPPORTED_CAPABILITY"
     if "no component matches" in text or "no component '" in text:
         return "COMPONENT_NOT_FOUND"
+    if "no open document matches" in text or "is not open" in text and "open:" in text:
+        # "I typed the name wrong / it is not open" and "CATIA is broken" need
+        # different next steps, and COM_ERROR said neither (reported 2026-10-28,
+        # §5.3).
+        return "DOCUMENT_NOT_FOUND"
     if "part not loaded" in text:
         return "PART_NOT_LOADED"
     return default
@@ -193,15 +211,25 @@ def operation_result(
     }
     if recovery is not NO_RECOVERY:
         block: dict[str, Any] = {
-            # No separate rollback request exists: a client cannot ask for one,
-            # so this stays false. Whether *this* failure already undid itself is
-            # a different question, and ``rolled_back`` is the field that
-            # answers it.
-            "rollback_supported": False,
+            # What happened, in the order a caller reads it: did this failure
+            # undo itself, and what is left to do.
             "rolled_back": rolled_back,
             "automatic_retry_allowed": False,
+            "can_request_rollback": False,
             "next_actions": actions,
         }
+        if rolled_back is not None:
+            # The field that used to sit here was `rollback_supported`, always
+            # false - a constant that carried no information and read as a
+            # contradiction next to `rolled_back: true` ("不支持回滚" beside "回滚了").
+            # Reported 2026-10-28 by both reviewers. A constant describing an
+            # input that does not exist is not worth a key; the sentence is worth
+            # more than the key was.
+            block["rollback_note"] = (
+                "no tool in this server takes a rollback argument, so no caller "
+                "can ask for one ('can_request_rollback' is always false); "
+                "'rolled_back' answers the different question of whether THIS "
+                "failure already removed the feature it created")
         if isinstance(recovery, dict):
             block.update(recovery)
         payload["recovery"] = block

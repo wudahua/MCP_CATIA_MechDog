@@ -65,6 +65,27 @@ Use one result envelope across tools. Field names may evolve, but success/failur
 - `warnings`: non-fatal limitations.
 - `recovery`: recovery availability and next safe action where appropriate.
 
+### What this server actually emits in `recovery`
+
+The examples above come from the upstream full bridge and describe fields this
+lite fork does not implement (`operation_group_id`, `recoverable`). The real block
+is built in `catia_mcp/results.py::operation_result`, from FACTS collected by the
+tool that failed:
+
+| field | meaning |
+|---|---|
+| `rolled_back` | `true` the feature this call created was removed again, `false` it could not be removed, `null` no feature was ever created |
+| `automatic_retry_allowed` | always `false`: retrying automatically is the caller's decision |
+| `can_request_rollback` | always `false`: no tool takes a rollback argument (the name says what the constant means - `rollback_supported` was removed in 0.3.35 because a false there read as "this failure could not be rolled back" beside `rolled_back: true`) |
+| `rollback_note` | present only when `rolled_back` is not null: the sentence the constants above stand in for |
+| `next_actions` | what is left to do, written by the raise site when it knows better than the default |
+
+Read-only tools (`catia_get_*`, `catia_list_*`, `catia_measure_*`,
+`catia_diagnose`, `catia_export`, plus named exceptions - see `is_read_only`)
+emit **no** `recovery` block at all: a lookup that wrote nothing has nothing to
+recover, and "inspect the model before retrying" on such a failure is advice to
+check a model nothing touched.
+
 ## Error codes
 
 Use stable codes as applicable:

@@ -226,9 +226,12 @@ class CATIAMCPServer:
             # A tool that cannot write has no model to repair, so the recovery block
             # (and its "inspect the model" advice) is left out instead of filled
             # with a sentence that is wrong. Modified is a known no, not unknown.
+            # A tool that DOES write can still know it wrote nothing - a refusal
+            # that happened at the name lookup carries `modified=False` with it.
             read_only = is_read_only(name)
-            return failure(code, message, stage,
-                           False if (read_only or stage == "connect") else None, name,
+            modified = False if (read_only or stage == "connect") else \
+                getattr(error, "modified", None)
+            return failure(code, message, stage, modified, name,
                            rolled_back=getattr(error, "rolled_back", None),
                            recovery=NO_RECOVERY if read_only else None,
                            next_actions=getattr(error, "next_actions", None))

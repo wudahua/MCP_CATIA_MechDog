@@ -1290,6 +1290,16 @@ class PartDesignTools:
                     f"No sketch named '{sketch_name}' in the active body. "
                     f"Available: {names or 'none'}.{hint}",
                     code="SKETCH_NOT_FOUND",
+                    # The lookup is a walk over Body.Sketches; nothing was built,
+                    # so the envelope must not say "model changes were not
+                    # verified" (reported 2026-10-28, §5.2).
+                    modified=False,
+                    next_actions=[
+                        "Pick a name from 'Available' (each one lists the older "
+                        "names that still resolve to it) or call "
+                        "catia_list_features to see the body's sketches; this "
+                        "call created nothing, so nothing has to be undone"
+                    ],
                 )
 
         remembered = getattr(self.conn, "last_sketch", None)
@@ -4061,6 +4071,10 @@ class PartDesignTools:
         ("倒角", "chamfer"), ("Chamfer", "chamfer"),
         ("拔模", "draft"), ("Draft", "draft"),
         ("抽壳", "shell"), ("Shell", "shell"),
+        # CATIA's Chinese name for Shell is 盒体, which was missing from this
+        # table: a shell built by catia_shell listed as type "unknown" while the
+        # pad above it said "pad" (reported 2026-10-28, section 5.4).
+        ("盒体", "shell"),
         ("加厚", "thickness"), ("Thickness", "thickness"),
         ("矩形阵列", "rect_pattern"), ("RectPattern", "rect_pattern"),
         ("圆周阵列", "circ_pattern"), ("CircPattern", "circ_pattern"),

@@ -2,6 +2,97 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.35] — 2026-10-28 · the third honest value, and a constant that read as the opposite
+
+### Fixed — `poses_route` disappeared on the narrowed path (reported P1)
+
+- `catia_get_bounding_box{component: 'H34P.6'}` shipped no `poses_route` at all:
+  not `null`, not a value - the key was absent, so `reply["poses_route"]` raised
+  KeyError on the one path that deliberately reads a single pose. And a caller
+  that got `one_call` everywhere else would have read the narrowed call as
+  "all seventy were batched", which is the opposite of what it did.
+- It reads `"single"` now, with a note of its own ("this call was narrowed to one
+  component, so exactly one placement was read … reading the rest is the
+  per-instance entry fee 0.3.26 removed"). Three routes, three sentences:
+  `one_call` / `per_component` / `single`. This is the rule 0.3.32 set for
+  `sweep_route: mesh` - the third honest value, never a missing key.
+- The route is captured right after the first component read, because a narrowed
+  reply re-reads the component list (to find a nested twin) and that second read
+  would have answered `one_call`.
+
+### Fixed — `recovery.rollback_supported` was false next to `rolled_back: true` (reported P2)
+
+- Both reviewers hit this. The field was a constant: no tool takes a rollback
+  argument, so it was false in every reply, and next to `rolled_back: true` it
+  read as "this failure could not be rolled back" - the opposite of what had just
+  happened. A constant that carries no information and reads as a contradiction is
+  worse than no field.
+- It is `can_request_rollback` now (the name says what the constant means), and
+  when there is a rollback story to tell (`rolled_back` is not null) the block
+  carries `rollback_note`: "no tool in this server takes a rollback argument …
+  'rolled_back' answers the different question of whether THIS failure already
+  removed the feature it created".
+
+### Fixed — `SKETCH_NOT_FOUND` still got the default "inspect the model" advice (reported P3)
+
+- `catia_pad{sketch_name: '草图.99'}` answered `effects.modified: null` and
+  "Inspect the CATIA model before retrying; model changes were not verified" for a
+  call that only walked `Body.Sketches`. `NO_MATERIAL` had been given bespoke
+  advice in 0.3.34; this one was missed.
+- `CodedError` now carries `modified` and `next_actions` like `FeatureRejected`
+  does, and both sketch lookups (`part_design`, `sketcher`) fill them:
+  `modified: false` plus "pick a name from `Available` … this call created
+  nothing, so nothing has to be undone".
+
+### Fixed — a document that is not open is no longer `COM_ERROR` (reported P3, optional ask)
+
+- `catia_get_bounding_box{document: 'NOPE.CATProduct'}` answers
+  `DOCUMENT_NOT_FOUND`: "I typed the name wrong / it is not open" and "CATIA
+  failed" lead to different next steps, and `COM_ERROR` said neither. Both raise
+  sites carry it, and the phrase table knows it for anything that does not.
+
+### Fixed — small items from the same report
+
+- `catia_list_features` said `type: "unknown"` for `盒体.1` - CATIA's Chinese name
+  for Shell was missing from the type table, so a shell built by `catia_shell`
+  listed as nothing while the pad above it said `"pad"`.
+- The `overhead_note` still said "90.5 % … five seconds" although
+  `components_doc_ms` was 911.8 ms by then - the only sentence explaining where
+  the overhead went described a number that no longer existed. It is version-tagged
+  now ("in 0.3.33 and earlier …") and points at `poses_route` for this call.
+- `elapsed_note` said warm calls "vary by a few percent" while the call right
+  after a cold pass measured 23.6 % above the third one, on both 0.3.33 and
+  0.3.34. The reply now carries `after_cold: true` on that call and says so:
+  "read a single post-cold number as an upper bound, not as the warm cost".
+
+### Changed — `error_type` in a plan step
+
+- A failed step that this server refuses on purpose now reports
+  `error_type: "CodedError"` (or `"FeatureRejected"`), not `"RuntimeError"`. Both
+  are `RuntimeError` subclasses, so `except RuntimeError` keeps working, but a
+  caller matching the string `error_type == "RuntimeError"` would stop. Called out
+  here because the reporter asked for it.
+
+### Measured, not fixed — the fixed/marginal split moved, and nothing in that path changed
+
+- The report measured warm `parts[]` fixed cost `f` rising ~182 → ~243 ms while
+  the marginal cost fell 3.2-4.2 → 2.7-3.7 ms/cell: small parts slower, big parts
+  faster, net −5.6 %. Worth recording that **no code on the per-part reader
+  changed between 0.3.33 and 0.3.35** (the sweep is byte-identical), so this is a
+  session-shaped shift rather than a trade this release made. It is the same
+  reason the docstrings no longer quote `f` and `k` as constants.
+
+### Verified
+
+- 651 tests pass (12 new in `tests/test_reported_issues_2026_10_28_v0335.py`).
+- On B30 through the tool layer (`catia_probe/probe_v0335a`): narrowed call →
+  `poses_route: single`; cold → no `after_cold`, first warm → `after_cold: true`,
+  second warm → `false`; `SKETCH_NOT_FOUND` with `modified: false` and bespoke
+  `next_actions`; `DOCUMENT_NOT_FOUND` on a missing document; `盒体.1` → `shell`;
+  `overhead_note` free of "five seconds".
+- Still not verifiable here: the reporter's B32 model (this machine runs B30 and
+  cannot open those `CATPart`s), so the 20.0 s warm call remains their number.
+
 ## [0.3.34] — 2026-10-28 · one failure one code, and a listing that keeps its shape
 
 ### Fixed — a bare call flattened `NO_MATERIAL` into `COM_ERROR` (reported P0)

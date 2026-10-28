@@ -15,6 +15,7 @@ import uuid
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
+from catia_mcp.results import CodedError
 from catia_mcp.topo_search import is_construction, nls_of, search_topology
 
 
@@ -380,6 +381,29 @@ def _route_name(route: Any) -> str:
     return "batched"
 
 
+def _pose_note(route: str) -> str:
+    """What the pose reader did, in the words of the route that actually ran.
+
+    Three routes, three sentences - including the one that read a single pose
+    because that is all a narrowed call needs. A caller that branches on
+    ``poses_route`` should never have to infer "the key is missing, so maybe it
+    was the cheap path".
+    """
+    if route == "single":
+        return ("this call was narrowed to one component, so exactly one "
+                "placement was read - 'components_doc_ms' is that one read, and "
+                "reading the rest is the per-instance entry fee 0.3.26 removed. "
+                "Drop 'component' to measure the whole assembly")
+    if route == "per_component":
+        return ("one COM round trip per instance: this build refused the script "
+                "that reads them all in one call (~86 ms per instance on B30, so "
+                "~6 s on 70 instances - the cost 0.3.34 removed). The numbers are "
+                "the same; only the price differs")
+    return ("every instance's placement (12 numbers) was read inside ONE CATIA "
+            "script call. Before 0.3.34 each instance cost a round trip of its "
+            "own: 5 036 ms of a 5 563 ms overhead block on 70 instances")
+
+
 def _cost_first(payload: dict[str, Any]) -> dict[str, Any]:
     """Answer first, cost model next, per-component detail last.
 
@@ -392,7 +416,7 @@ def _cost_first(payload: dict[str, Any]) -> dict[str, Any]:
     order = ("dimensions", "min", "max", "complete", "elapsed_ms", "cold_parts",
              "part_boxes_total", "part_boxes", "parts_ms", "overhead_ms",
              "overhead_note", "overhead_breakdown", "poses_route",
-             "poses_route_note", "elapsed_note", "document",
+             "poses_route_note", "after_cold", "elapsed_note", "document",
              "assembly_depth_max", "instances", "mesh_fallback_instances",
              "scope", "note_scope")
     head = {key: payload[key] for key in order if key in payload}
@@ -517,6 +541,10 @@ class MeasurementTools:
         # runs tools on ONE worker thread, so the attribute cannot race with
         # itself inside one call.
         self._poses_route: str | None = None
+        # Whether the last measurement of an assembly was the cold one, so the
+        # reply can say "this is the first call after a cold pass" instead of
+        # "warm numbers vary by a few percent" (reported 2026-10-28, §6).
+        self._last_call_was_cold = False
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         return [
@@ -1007,11 +1035,20 @@ class MeasurementTools:
         if opened is not None:
             return opened
         names = ", ".join(str(docs.Item(i).Name) for i in range(1, docs.Count + 1))
-        raise RuntimeError(
+        raise CodedError(
             f"No open document matches '{name}', and no component of an open "
             f"assembly references a part by that name either. Open: "
             f"{names or 'none'}. Pass the full name from catia_list_documents, or "
-            "open the part first with catia_open_document."
+            "open the part first with catia_open_document.",
+            # A lookup in the Documents collection. COM_ERROR made "I typed the
+            # name wrong" indistinguishable from "CATIA failed" (reported
+            # 2026-10-28, §5.3).
+            code="DOCUMENT_NOT_FOUND",
+            modified=False,
+            next_actions=[
+                "Pass a name from catia_list_documents, or open the file first - "
+                "no document was opened or changed by this call"
+            ],
         )
 
     def _open_component_part(self, name: str) -> Any:
@@ -1404,6 +1441,16 @@ class MeasurementTools:
             except Exception:  # noqa: BLE001 - no app handle, no script route
                 poses = None
             self._poses_route = "one_call" if poses is not None else "per_component"
+        else:
+            # The third honest value, for the third thing that happens. A
+            # narrowed call reads exactly ONE pose on purpose (0.3.26 removed the
+            # 5.8 s entry fee by not reading the rest), so neither "one_call" nor
+            # "per_component" describes it - and leaving the key out entirely is
+            # what made a caller reading reply["poses_route"] get a KeyError on
+            # the narrowed path while "one_call" elsewhere meant "all of them
+            # were batched" (reported 2026-10-28, P1). Same rule 0.3.32 set for
+            # `sweep_route: mesh`.
+            self._poses_route = "single"
         for i in range(1, count + 1):
             child = products.Item(i)
             row: dict[str, Any] = {"index": i, "name": None, "part_number": None,
@@ -1634,6 +1681,10 @@ class MeasurementTools:
         started = time.perf_counter()
         self._poses_route = None
         rows = self._components_doc(doc, only)
+        # Captured now, not read at the end: the narrowed branch re-reads the
+        # component list below (to find a nested twin) and that second read would
+        # overwrite the answer with "one_call".
+        poses_route = self._poses_route
         if only and not rows:
             names = ", ".join(str(r["name"]) for r in self._components_doc(doc))
             raise RuntimeError(
@@ -1760,6 +1811,16 @@ class MeasurementTools:
                              for entry in parts_detail.values()), 1)
         payload["parts_ms"] = parts_ms
         payload["overhead_ms"] = round(max(payload["elapsed_ms"] - parts_ms, 0.0), 1)
+        # Was the PREVIOUS measurement of this assembly the cold one? Both 0.3.33
+        # and 0.3.34 measured the call right after a cold pass 23-24 % above the
+        # third one, with parts_ms driving it (23 555.7 -> 19 090.3 -> 18 580.2 on
+        # the acceptance assembly), while the note said "vary by a few percent".
+        # A caller comparing a single 25.5 s against someone else's 20.0 s would
+        # read that as a regression (reported 2026-10-28, §6).
+        after_cold = cold_parts == 0 and self._last_call_was_cold
+        self._last_call_was_cold = cold_parts > 0
+        if cold_parts == 0:
+            payload["after_cold"] = after_cold
         if cold_parts:
             # Quote THIS call, not a constant baked in from one afternoon. The
             # sentence used to say "173.4 s against 22.9 s (7.6x)" - true when it
@@ -1788,7 +1849,14 @@ class MeasurementTools:
                 "so this is the warm number. Repeat calls of one assembly vary by a "
                 "few percent, but a single small part can swing much more (12 cells "
                 "measured at 324 ms and then 549 ms in one session), so do not read "
-                "one part's time to three digits")
+                "one part's time to three digits"
+                + (" - and this call is the FIRST one after a cold pass, which "
+                   "still carries part of that setup: on the 28-part acceptance "
+                   "assembly the call right after its 181.8 s cold run measured "
+                   "25.5 s, then 20.6 s and 20.0 s. Read a single post-cold number "
+                   "as an upper bound, not as the warm cost ('after_cold: true' "
+                   "says this is that call)"
+                   if after_cold else ""))
         try:
             payload["document"] = str(doc.Name)
         except Exception:  # noqa: BLE001 - the numbers are the point
@@ -1833,16 +1901,14 @@ class MeasurementTools:
             "walk_other_ms": walk_other,
             "report_ms": report_ms,
         }
-        if self._poses_route:
+        if poses_route:
             # Which way the 12 numbers per instance were read: one script call
-            # for the whole assembly, or one COM round trip each. The second is
-            # what made components_doc_ms 5 036 ms on 70 instances.
-            payload["poses_route"] = self._poses_route
-            payload["poses_route_note"] = (
-                "components_doc_ms is dominated by reading each instance's "
-                "placement (12 numbers). 'one_call' reads them all inside a single "
-                "CATIA script call; 'per_component' is one round trip per "
-                "instance, which on 70 instances cost ~86 ms each")
+            # for the whole assembly, one COM round trip each, or exactly one
+            # because the call was narrowed. Reading `self._poses_route` here
+            # would be wrong - a narrowed reply reads it again (unfiltered) to
+            # find the nested twin below.
+            payload["poses_route"] = poses_route
+            payload["poses_route_note"] = _pose_note(poses_route)
         payload["overhead_note"] = (
             "elapsed_ms minus the sum of parts[].elapsed_ms: reading the component "
             "tree, transforming every instance's points into world coordinates, "
@@ -1851,9 +1917,14 @@ class MeasurementTools:
             "from 'parts' alone is short by this much. 'overhead_breakdown' splits "
             "it into the three phases it was measured in; 'report_ms' is what is "
             "left after the other two, so the three add up to overhead_ms exactly. "
-            "On the 28-part acceptance assembly 'components_doc_ms' was 90.5 % of "
-            "this block - five seconds spent reading the tree once, not "
-            "transforming or serialising (walk_other + report accounted for 9.5 %)")
+            "Which phase dominates is a property of the CALL, not of the model: "
+            "'components_doc_ms' is reading each instance's placement, so the "
+            "instance count drives it, and 'poses_route' says whether those reads "
+            "were one script call, one round trip per instance, or a single read "
+            "because 'component' narrowed the call. In 0.3.33 and earlier the "
+            "per-instance round trips made it 90.5 % of this block (5 036 ms on a "
+            "70-instance assembly); read the two phases THIS call reports rather "
+            "than the number in that sentence")
         # `component=` narrows to TOP-LEVEL components. When the same part is ALSO
         # installed inside a sub-assembly, the reply used to say complete: true
         # with instances {total: 1} while its own note_scope claimed sub-assemblies

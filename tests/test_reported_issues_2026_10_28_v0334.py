@@ -346,7 +346,11 @@ def test_the_assembly_reports_how_the_poses_were_read():
     tools = M.MeasurementTools(connection=None)
     tools._poses_route = "one_call"
     source = inspect.getsource(M.MeasurementTools._assembly_box)
-    assert 'payload["poses_route"] = self._poses_route' in source
+    # 0.3.35: the route is captured right after the first component read, because
+    # a narrowed reply reads the list again and that second read would answer
+    # "one_call" for a call that read a single pose.
+    assert "poses_route = self._poses_route" in source
+    assert 'payload["poses_route"] = poses_route' in source
     order = inspect.getsource(M._cost_first)
     assert '"poses_route"' in order and '"poses_route_note"' in order
     assert tools is not None

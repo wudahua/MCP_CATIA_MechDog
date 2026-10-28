@@ -22,6 +22,7 @@ import time
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
+from catia_mcp.results import CodedError
 from catia_mcp.results import failure_code as shared_failure_code
 from catia_mcp.topo_search import topology_cells
 
@@ -546,11 +547,15 @@ class PlannerTools:
                 names.append(str(docs.Item(i).Name))
             except Exception:  # noqa: BLE001
                 continue
-        raise RuntimeError(
+        raise CodedError(
             f"No open document matches '{document}'. Open documents: "
             f"{', '.join(names) or 'none'}. A part that exists only as a component "
             "of an open assembly is not in this list - open it with "
-            "catia_open_document first."
+            "catia_open_document first.",
+            # Same reasoning as the measurement route: a name that is not open is
+            # not a CATIA failure (reported 2026-10-28, §5.3).
+            code="DOCUMENT_NOT_FOUND",
+            modified=False,
         )
 
     # Published in every topology answer: the counting rule changed twice, and a

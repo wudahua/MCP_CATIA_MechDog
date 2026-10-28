@@ -1545,6 +1545,12 @@ class SketcherTools:
                     f"No sketch named '{sketch_name}' in the active body. "
                     f"Sketches: {names or 'none'}.{hint}",
                     code="SKETCH_NOT_FOUND",
+                    modified=False,
+                    next_actions=[
+                        "Use one of the names in 'Sketches', or call "
+                        "catia_list_features to see them with their aliases; "
+                        "nothing was created or edited by this call"
+                    ],
                 ) from None
         if self._active_sketch is not None:
             return self._active_sketch, "open in the editor"

@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.34** · [what changed](CHANGELOG.md) ·
+**0.3.35** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -442,9 +442,13 @@ Three things dominate, and none of them is "one fixed cost per part":
   refused pose falls back to the per-component reader instead of reporting zeros).
   Measured on B30 with 10 instances: `components_doc_ms` 866 / 851 / 868 ms →
   **267 / 253 / 205 ms**; one instance is unchanged (95 → 101 ms) because there is
-  nothing to batch. `poses_route` (`one_call` / `per_component`) says which ran.
-  A narrowed call (`component=...`) still reads exactly one pose — batching all of
-  them would bring back the 5.8 s entry fee 0.3.26 removed.
+  nothing to batch. A narrowed call (`component=...`) still reads exactly one pose
+  — batching all of them would bring back the 5.8 s entry fee 0.3.26 removed.
+  `poses_route` has three values, one per thing that can happen: `one_call` (the
+  whole assembly in one script call), `per_component` (this build refused the
+  script, so it fell back to a round trip each) and `single` (the call was
+  narrowed). The third one exists because "the key is missing" is not an answer a
+  caller can branch on — the same rule `sweep_route: mesh` follows.
 
 ### A listing keeps its shape when it is empty
 
@@ -497,11 +501,24 @@ at all: `catia_get_bounding_box{document: '<a document that is not open>'}` used
 answer "model changes were not verified — inspect the CATIA model" for a lookup
 that wrote nothing.
 
+| field | meaning |
+|---|---|
+| `rolled_back` | `true` the feature this call created was removed again, `false` it could not be removed, `null` no feature was ever created |
+| `can_request_rollback` | always `false` — no tool takes a rollback argument (it was called `rollback_supported` until 0.3.35, where a false read as "this failure could not be rolled back" right beside `rolled_back: true`) |
+| `rollback_note` | present only when `rolled_back` is not null: the sentence the constants stand in for |
+| `next_actions` | what is left to do, written by the raise site when it knows better than the default |
+
+A refusal that happens before anything is written says so: `CodedError` carries
+`modified: false` and its own `next_actions`, so `catia_pad{sketch_name: '草图.99'}`
+answers `SKETCH_NOT_FOUND` / `modified: false` / "pick a name from `Available` …
+this call created nothing" instead of "inspect the CATIA model".
+
 Tools run on a single worker thread, so a long box blocks every other MCP call
 until it finishes. The reply states `elapsed_ms` (total and per part, `parts[]`),
 `first_measure` (was this part touched for the first time in this session),
-`cold_parts`, `cells_scanned`, `sweep_route` (`one_call` / `per_cell`, or `mesh`
-when no vertex sweep ran), `poses_route` (`one_call` / `per_component`),
+`cold_parts`, `after_cold` (was the previous call a cold pass), `cells_scanned`,
+`sweep_route` (`one_call` / `per_cell`, or `mesh` when no vertex sweep ran),
+`poses_route` (`one_call` / `per_component` / `single`),
 `parts_ms`, `overhead_ms` and
 `points_route` (`batched` / `batched_retried` /
 `per_point` for a vertex sweep, `mesh` for an STL extent), so the cost is
