@@ -106,6 +106,20 @@ _MASS_NOTE = (
     "3.33e-7 = 0.008/12*(0.02^2+0.01^2))."
 )
 
+# The two buckets a PART measurement publishes, in the same words on both part
+# routes (the active document and `document=`). The assembly route has had them
+# since 0.3.34; on a part they answer the one question `elapsed_ms` cannot: two
+# parts of the same tool differed by 12x (174.3 ms against 2 117.3 ms) and the
+# reply said nothing about where it went (reported 2026-10-28, §6.2).
+_PART_COST_NOTE = (
+    "the same two buckets the assembly route publishes, for one part: 'parts_ms' "
+    "is this part's own measurement - 'measure_ms' reading volume / area / "
+    "centroid, 'tensor_ms' borrowing the activation for the inertia tensor - and "
+    "'overhead_ms' is everything else, which on this route is finding the document "
+    "you named and building the reply. parts_ms + overhead_ms = elapsed_ms. "
+    "'tensor_ms' is the field that explains a slow part: a tensor that cannot be "
+    "read still pays for the activation attempt")
+
 # How many STL vertices a part's cloud may hold while an assembly is being
 # measured. The cloud is kept per PART and transformed once per INSTANCE, so the
 # memory is bounded by this and the time by the instance count. Typical parts in
@@ -396,9 +410,10 @@ def _pose_note(route: str) -> str:
                 "in the assembly (two COM string reads each), which is why a "
                 "narrowed call on 70 instances still paid 303.3 ms for one pose in "
                 "the 2026-10-28 acceptance run - three times what a single "
-                "unfiltered read costs. 'component_lookup_ms' is the matching part; "
-                "the rest is the pose. Drop 'component' to measure the whole "
-                "assembly")
+                "unfiltered read costs. 'component_lookup_ms' - published beside "
+                "'overhead_breakdown', not inside it, because it is a part of that "
+                "block's first term - is the matching half; the rest is the pose. "
+                "Drop 'component' to measure the whole assembly")
     if route == "per_component":
         return ("one COM round trip per instance: this build refused the script "
                 "that reads them all in one call (~86 ms per instance on B30, so "
@@ -421,10 +436,10 @@ def _cost_first(payload: dict[str, Any]) -> dict[str, Any]:
     order = ("dimensions", "min", "max", "complete", "empty_assembly",
              "elapsed_ms", "cold_parts",
              "part_boxes_total", "part_boxes", "parts_ms", "overhead_ms",
-             "overhead_note", "overhead_breakdown", "poses_route",
-             "poses_route_note", "after_cold", "elapsed_note", "document",
-             "assembly_depth_max", "instances", "mesh_fallback_instances",
-             "scope", "note_scope")
+             "overhead_note", "overhead_breakdown", "component_lookup_ms",
+             "poses_route", "poses_route_note", "after_cold", "elapsed_note",
+             "document", "assembly_depth_max", "instances",
+             "mesh_fallback_instances", "scope", "note_scope")
     head = {key: payload[key] for key in order if key in payload}
     for key in head:
         payload.pop(key)
@@ -435,16 +450,20 @@ def _cost_first(payload: dict[str, Any]) -> dict[str, Any]:
 #:
 #: The assembly-level ratio is a WEIGHTED SUM, and that is why it looked like it
 #: was drifting: 4.65x (0.3.30), 7.6x (0.3.31), 7.24x (0.3.33), 9.11x (0.3.35) on
-#: one unchanged 28-part model. Per part the spread is 1.30x (12 cells) to 15.10x
-#: (1207 cells) - the acceptance run of 2026-10-28 measured both in one session -
-#: so the aggregate moves when the composition moves, and a single ratio quoted as
+#: one unchanged 28-part model. Per part the spread is a RANGE, and it is quoted
+#: as one: the 0.3.36 acceptance run (2026-10-28) measured 1.15x-1.81x on
+#: 12-34-cell parts and 12.29x-17.25x on 504-1207-cell parts IN ONE SESSION, while
+#: the two reference points a release earlier (0.3.35) read 1.30x and 15.10x. So
+#: the aggregate moves when the composition moves, and a single ratio quoted as
 #: "the machine's cold/warm factor" is not reproducible across assemblies.
 _COLD_RATIO_NOTE = (
     "this part's FIRST measurement in the session against its latest warm one. "
-    "The ratio is per PART and varies with size - 1.30x on a 12-cell part, 15.10x "
-    "on a 1207-cell part, measured in one session - so the assembly-level 'cold "
-    "costs N times warm' figure is a weighted sum over these, not a property of "
-    "CATIA or of this code")
+    "The ratio is per PART and varies with size, so read it as a range, not a "
+    "constant: one session (0.3.36, 2026-10-28) measured 1.15x-1.81x on 12-34-cell "
+    "parts and 12.29x-17.25x on 500-1200-cell parts, and the same model read 1.30x "
+    "/ 15.10x one release earlier (0.3.35). The assembly-level 'cold costs N times "
+    "warm' figure is a weighted sum over these, not a property of CATIA or of this "
+    "code")
 
 #: What `nls_chars` means, in the same words on both routes.
 #:
@@ -1163,14 +1182,23 @@ class MeasurementTools:
     def _part_inertia(self, part: Any, density: float | None,
                       label: str) -> str:
         """Volume / area / centroid of a specific Part, by name or object."""
+        started = time.perf_counter()
         doc = part.Parent
         body = part.MainBody
         if body.Shapes.Count == 0:
             raise RuntimeError(self._no_solid_reason(part, body, label))
+        # Where the milliseconds of this route go, measured rather than inferred.
+        # A 24000 mm3 box measured in 2 117.3 ms next to a 12-times smaller
+        # 174.3 ms for another part is not explainable from `elapsed_ms` alone,
+        # and the answer (a failed activation attempt) was only reachable from a
+        # KNOWN bug described in another section of the same report (reported
+        # 2026-10-28, §6.2).
+        t_read = time.perf_counter()
         spa = doc.GetWorkbench("SPAWorkbench")
         measurable = spa.GetMeasurable(part.CreateReferenceFromObject(body))
         payload: dict[str, Any] = {"document": label}
         payload.update(self._measured_quantities(measurable))
+        measure_ms = round((time.perf_counter() - t_read) * 1000, 1)
         volume_mm3 = payload.get("volume_mm3")
         if density and volume_mm3 is not None:
             payload["mass_kg"] = round(density * volume_mm3 / 1e9, 6)
@@ -1180,7 +1208,9 @@ class MeasurementTools:
         # to return volume/area/centroid without one - and getting nine parts'
         # tensors took 18 calls (open + activate each). CATIA's activation is
         # temporary here: activate, read, restore (reported 2026-10-24).
+        t_tensor = time.perf_counter()
         tensor = self._tensor_for(part)
+        tensor_ms = round((time.perf_counter() - t_tensor) * 1000, 1)
         if tensor:
             payload.update(tensor)
             if "mass_kg" in payload:
@@ -1198,13 +1228,9 @@ class MeasurementTools:
             # nine identical sentences and the only thing a reader needs is which
             # case it is (reported 2026-10-26).
             payload["tensor"] = None
-            payload["tensor_reason_code"] = "no_own_window"
-            payload["tensor_reason"] = (
-                "no own window: CATIA computes the tensor only for the active "
-                "document, and this part is a component of an open assembly, so it "
-                "cannot be activated where it is. Fix: catia_open_document + "
-                "catia_activate_document, then get_inertia without 'document'."
-            )
+            code, reason = self._tensor_refusal(doc, label)
+            payload["tensor_reason_code"] = code
+            payload["tensor_reason"] = reason
             # The partial route is a FACT, not prose: it says which fields a plan
             # can still assert on and which it cannot. Nine identical sentences in
             # a nine-part sweep were the second-longest block in the reply
@@ -1223,7 +1249,65 @@ class MeasurementTools:
                 "measured on this document's own Part, independent of which document "
                 "CATIA reports as active. The inertia tensor is missing - see "
                 "tensor_reason.")
+        # What this route cost, in the vocabulary the assembly route already uses,
+        # so "174.3 ms here, 2 117.3 ms there, same tool" has an answer inside the
+        # reply instead of in a bug report (reported 2026-10-28, §6.2).
+        payload["parts_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        payload["measure_ms"] = measure_ms
+        payload["tensor_ms"] = tensor_ms
+        payload["overhead_note"] = _PART_COST_NOTE
         return json.dumps(payload, indent=2)
+
+    def _tensor_refusal(self, doc: Any, label: str) -> tuple[str, str]:
+        """Why the tensor is missing, as a code AND a sentence that agree.
+
+        One code could not say two different things. ``no_own_window`` asserted
+        "this part is a component of an open assembly" about every part that
+        could not be activated - including a part reached through
+        ``document=`` that no assembly references at all, where the same reply's
+        ``catia_list_documents`` output showed no ``component_of`` entry. The
+        advice was wrong in the same way: it sent the caller to look for an
+        assembly that does not hold the part (reported 2026-10-28, §6.3).
+
+        So: ask the connection which assemblies reference this part (the reading
+        the listing prints), and answer ``nested_in_assembly`` only when one does.
+        Anything else is ``not_activated`` - CATIA kept another document in front,
+        which ``catia_activate_document`` fixes.
+        """
+        why = getattr(self, "_tensor_why", None)
+        try:
+            doc_name = str(doc.Name)
+        except Exception:  # noqa: BLE001 - the label is what the caller passed
+            doc_name = str(label)
+        users: list[str] = []
+        try:
+            users = list(self.conn.component_usage().get(doc_name) or [])
+        except Exception:  # noqa: BLE001 - a refusal is not worth an exception
+            users = []
+        if users:
+            holders = ", ".join(f"'{name}'" for name in users)
+            return ("nested_in_assembly",
+                    f"nested in an open assembly: CATIA computes the tensor only "
+                    f"for the ACTIVE document, and {holders} uses this part as a "
+                    "component, so Activate() leaves the assembly in front. Fix: "
+                    f"catia_get_inertia(document='{label}') already reads its own "
+                    "Part without needing the window - for the tensor itself, open "
+                    "it as its own document (catia_open_document), activate it, then "
+                    "call get_inertia without 'document'")
+        if why == "unreadable":
+            return ("unreadable",
+                    "CATIA raised on the inertia query for this part's main body "
+                    "(the message is in the plan's diagnostics): the part is in no "
+                    "open assembly and CATIA did put it in front, so this is the "
+                    "measurement itself. Check that the body holds a solid "
+                    "(catia_measure_topology).")
+        return ("not_activated",
+                f"not activated: CATIA computes the tensor only for the ACTIVE "
+                f"document, and activating '{doc_name}' did not leave it in front - "
+                "it is in no open assembly, so this is a focus refusal, not a "
+                "nested component. Fix: catia_activate_document('"
+                f"{doc_name}') and retry, or double the route with "
+                "catia_open_document if it was never opened as its own document.")
 
     def _measured_quantities(self, measurable: Any) -> dict[str, Any]:
         """`volume` / `area` / `center_of_gravity`, in one key table.
@@ -1270,7 +1354,10 @@ class MeasurementTools:
 
         Returns None when the part cannot be made active (a component with no
         window of its own), which is the one case where the caller still has to
-        open the document first.
+        open the document first. ``self._tensor_why`` records WHICH case it was -
+        ``activation_refused`` or ``unreadable`` - because the caller has to say
+        something more useful than "no tensor" and the two need different advice
+        (see ``_tensor_refusal``).
 
         The restore keeps the previous document as an OBJECT, not as a name. It
         used to search ``Documents`` for the old name and activate the first hit,
@@ -1283,6 +1370,7 @@ class MeasurementTools:
         call measures - which is how a wrong number appears two calls later.
         """
         doc = part.Parent
+        self._tensor_why = None
         previous = None
         try:
             previous = self.conn.active_document
@@ -1301,13 +1389,16 @@ class MeasurementTools:
             if same is None:
                 same = str(active.Name) == str(doc.Name)
             if not same:
+                self._tensor_why = "activation_refused"
                 return None
             body = part.MainBody
             if body.Shapes.Count == 0:
+                self._tensor_why = "unreadable"
                 return None
             vals = self._evaluate_floats(self._VBS_INERTIA, "catia_mcp_inertia", [body])
             return self._matrix_fields(vals)
         except Exception:  # noqa: BLE001 - the caller reports what is missing
+            self._tensor_why = "unreadable"
             return None
         finally:
             if previous is not None:
@@ -1405,7 +1496,9 @@ class MeasurementTools:
         result: dict[str, Any] = {}
         # Same reader as the `document=` route: one key table for the same
         # reading (reported 2026-10-27 - `area_cm2` existed on this route only).
+        t_read = time.perf_counter()
         result.update(self._measured_quantities(measurable))
+        measure_ms = round((time.perf_counter() - t_read) * 1000, 1)
         volume_mm3 = result.get("volume_mm3")
 
         if density and volume_mm3 is not None:
@@ -1416,13 +1509,23 @@ class MeasurementTools:
         try:
             # Inertia data lives on the SPAWorkbench Inertia object, not on
             # Measurable (Measurable.GetInertia does not exist in V5).
+            t_tensor = time.perf_counter()
             vals = self._evaluate_floats(self._VBS_INERTIA, "catia_mcp_inertia", [body])
             result.update(self._matrix_fields(vals))
+            result["tensor_ms"] = round((time.perf_counter() - t_tensor) * 1000, 1)
             if "mass_kg" in result:
                 result["mass_note"] = _MASS_NOTE
         except Exception as e:
             result["inertia_matrix_kg_m2"] = f"unavailable: {e}"
+            result["tensor_ms"] = round((time.perf_counter() - t_tensor) * 1000, 1)
 
+        # The same two buckets the `document=` route publishes, measured from this
+        # call's own start so `parts_ms + overhead_ms = elapsed_ms` holds here too
+        # (reported 2026-10-28, §6.2: the ACTIVE part route was the one with
+        # elapsed_ms and nothing else).
+        result["parts_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        result["measure_ms"] = measure_ms
+        result["overhead_note"] = _PART_COST_NOTE
         return self._stamp_elapsed(json.dumps(result, indent=2), started)
 
     @staticmethod
@@ -1993,7 +2096,7 @@ class MeasurementTools:
                 "so this is the warm number. Repeat calls of one assembly vary by a "
                 "few percent, but a single small part can swing much more (12 cells "
                 "measured at 324 ms and then 549 ms in one session), so do not read "
-                "one part's time to three digits"
+                "one part's time to three digits."
                 + (f" This call took {payload['elapsed_ms']} ms against "
                    f"{previous_warm} ms for the previous warm call on this document "
                    f"in this session ({payload['elapsed_ms'] - previous_warm:+.1f} ms, "
@@ -2005,8 +2108,22 @@ class MeasurementTools:
                    "18.8 / 19.2 / 19.0 s on the run that produced this field - so "
                    "the direction is not a property of this code, it is session "
                    "state. Read a single post-cold number as 'not yet the steady "
-                   "state', NOT as an upper bound, and compare it with the previous "
-                   "warm call quoted above rather than with another session."
+                   "state', NOT as an upper bound"
+                   # "Compare it with the previous warm call quoted above" only
+                   # means something when that sentence WAS quoted: on the first
+                   # warm call after a cold pass there is no previous warm call in
+                   # this session at all, and the old tail pointed the reader at
+                   # the other session's numbers that the same sentence had just
+                   # told them not to use (reported 2026-10-28, §6.4). Three cases,
+                   # because "warm, then a cold pass, then this" is not the same
+                   # as "this is the first warm call of the session".
+                   + ((" - an earlier warm call on this document exists in this "
+                       f"session ({previous_warm} ms) but is not quoted here; read "
+                       "this one as one reading, not as a trend.")
+                      if previous_warm
+                      else " - and there is no previous warm call on this document "
+                           "in this session to compare it with, so read it as one "
+                           "reading, not as a trend.")
                    if after_cold else ""))
         try:
             payload["document"] = str(doc.Name)
@@ -2053,11 +2170,15 @@ class MeasurementTools:
             "report_ms": report_ms,
         }
         if poses_route == "single" and self._lookup_ms is not None:
-            # A SUB-bucket, not a fourth term: the name scan happens inside
-            # components_doc_ms, so adding it to the three would double-count and
-            # break the "the three add up to overhead_ms exactly" property the
-            # 2026-10-28 acceptance run verified on five samples.
-            payload["overhead_breakdown"]["component_lookup_ms"] = self._lookup_ms
+            # Published BESIDE the breakdown, not inside it. 0.3.36 put it in the
+            # dict and said in the same release that "the three terms still add up
+            # to overhead_ms exactly" - true of those three, false of the dict,
+            # which now had four keys: a caller doing the documented
+            # `sum(overhead_breakdown.values())` silently over-counted by the
+            # lookup time (reported 2026-10-28, P3). A sub-bucket inside a block
+            # whose whole contract is "these add up" cannot be made safe by
+            # renaming it, because sum() does not read names.
+            payload["component_lookup_ms"] = self._lookup_ms
         if poses_route:
             # Which way the 12 numbers per instance were read: one script call
             # for the whole assembly, one COM round trip each, or exactly one
@@ -2073,7 +2194,12 @@ class MeasurementTools:
             "attributable to any entry in 'parts', so a share-of-total table built "
             "from 'parts' alone is short by this much. 'overhead_breakdown' splits "
             "it into the three phases it was measured in; 'report_ms' is what is "
-            "left after the other two, so the three add up to overhead_ms exactly. "
+            "left after the other two, so the three add up to overhead_ms exactly - "
+            "summing this dict is safe, and it has exactly three keys. "
+            "'component_lookup_ms' (when 'poses_route' is 'single') is a SIBLING of "
+            "this block, not a fourth term: it is the part of 'components_doc_ms' "
+            "spent matching the name you passed, so subtract it from that bucket - "
+            "adding it to the three double-counts. "
             "Which phase dominates is a property of the CALL, not of the model: "
             "'components_doc_ms' is reading each instance's placement, so the "
             "instance count drives it, and 'poses_route' says whether those reads "
@@ -2507,7 +2633,13 @@ class MeasurementTools:
                 "included), walk_other_ms is transforming each leaf and aggregating, "
                 "report_ms is what is left. parts_ms is the parts' own mass "
                 "properties, cached per part, so multiple instances of one part "
-                "count once"),
+                "count once. walk_other_ms is small HERE by nature, not by "
+                "optimisation: this route moves one centroid per instance, while "
+                "the same assembly's bounding box moves every part's whole vertex "
+                "cloud into world coordinates - 9.4 ms against 463-486 ms for one "
+                "70-instance assembly in the 2026-10-28 acceptance run. Read the "
+                "two blocks' walk_other_ms as different jobs, not as one job done "
+                "faster"),
         }
         if poses_route:
             cost_fields["poses_route"] = poses_route
@@ -2872,8 +3004,19 @@ class MeasurementTools:
             payload = json.loads(reply)
         except Exception:  # noqa: BLE001 - a non-JSON reply is not ours to touch
             return reply
-        payload.setdefault("elapsed_ms",
-                           round((time.perf_counter() - started) * 1000, 1))
+        elapsed = payload.setdefault("elapsed_ms",
+                                     round((time.perf_counter() - started) * 1000, 1))
+        if "parts_ms" in payload and "overhead_ms" not in payload:
+            # The remainder, computed the same way the assembly route computes it:
+            # elapsed minus the part's own measurement, so the two add up to
+            # elapsed_ms instead of merely being adjacent (reported 2026-10-28,
+            # §6.2 asked for an account; an account that does not close is the
+            # defect this project keeps fixing).
+            try:
+                payload["overhead_ms"] = round(
+                    max(float(elapsed) - float(payload["parts_ms"]), 0.0), 1)
+            except Exception:  # noqa: BLE001 - a broken number is not a crash
+                pass
         return json.dumps(payload, indent=2)
 
     def _assembly_box_checked(self, doc: Any, method: str, component: str | None,

@@ -247,6 +247,43 @@ class CATIAConnection:
     # ── Document names: one definition, used by every tool ──
 
     @staticmethod
+    def same_document(left: Any, right: Any) -> bool:
+        """Is this the same open document, given two handles to it?
+
+        Measured on B30 and reported from B32, both 2026-10-28::
+
+            Item(1) is Item(1)  ->  False     # a NEW Python wrapper every access
+            Item(1) == Item(1)  ->  True      # COM identity inside pywin32
+
+        ``Documents.Item(i)`` builds a fresh wrapper on every call, so ``is`` is
+        never true even for two handles to one document - and any test written
+        with it answers "no" for the document itself. That is not a subtle wrong
+        answer: it turned every "is another open document called this?" into a
+        yes, which is how 0.3.36 greeted every newly created part with a warning
+        about its own name (reported 2026-10-28, new P1).
+
+        ``==`` compares through COM and is the reliable test. When even that
+        refuses (an older pywin32, a stub in a test), fall back to the plain data
+        both rows carry - name plus the path the document reports. That fallback
+        cannot tell two never-saved documents with one name apart (both report
+        their name as their path), and it answers "same" for both; losing a
+        warning is better than inventing one.
+        """
+        if left is None or right is None:
+            return False
+        if left is right:
+            return True
+        try:
+            return bool(left == right)
+        except Exception:  # noqa: BLE001 - not comparable on this build
+            pass
+        try:
+            return (str(left.Name) == str(right.Name)
+                    and str(left.FullName) == str(right.FullName))
+        except Exception:  # noqa: BLE001 - no name, no claim
+            return False
+
+    @staticmethod
     def _same_path(left: str, right: str) -> bool:
         """Do two spellings name the same file? Separators and case do not matter."""
         if not left or not right:
@@ -259,7 +296,7 @@ class CATIAConnection:
         except Exception:  # noqa: BLE001 - an unparseable path is just a string
             return left.replace("/", "\\").casefold() == right.replace("/", "\\").casefold()
 
-    def _document_rows(self) -> list[dict[str, Any]]:
+    def _document_rows(self, with_paths: bool = True) -> list[dict[str, Any]]:
         """Every open document, as plain data: name, stem, path, active flag.
 
         Plain dicts, not COM objects, because the interesting answer is "which
@@ -276,22 +313,40 @@ class CATIAConnection:
         not "no document matches", and folding the two together here would answer
         DOCUMENT_NOT_FOUND for an unreadable session. The advisory callers wrap
         this in their own try/except; the resolvers do not.
+
+        ``with_paths=False`` reads only ``Name`` - and that is a cost decision, not
+        a simplification. Each property read through pywin32's late binding costs
+        ~1.3-1.9 ms on B30 (measured 2026-10-28: 8 open documents, ``Item(i)``
+        0.82 ms, +1.27 ms for ``Name``, +1.94 ms more for ``FullName``; the full
+        row set 28.5 ms against 16.7 ms for names alone). 0.3.36 made EVERY
+        ``document=`` call pay the full set to detect a duplicate name, which is
+        +28 ms on the same call that used to take 56 ms - a 40 % regression on
+        the single-part route, found by A/B (2026-10-28). Names decide "is this
+        name shared", which is the question the resolver asks first; paths are
+        needed only for a key that looks like a path, or to describe a pair once
+        it is known to be a pair. So the cheap pass comes first.
         """
         rows: list[dict[str, Any]] = []
         docs = self.documents
         count = docs.Count
         active = None
         active_doc = None
-        try:
-            active_doc = self.active_document
-            active = str(active_doc.Name)
-        except Exception:  # noqa: BLE001 - no active document is normal
-            active = None
+        if with_paths:
+            try:
+                active_doc = self.active_document
+                active = str(active_doc.Name)
+            except Exception:  # noqa: BLE001 - no active document is normal
+                active = None
         for i in range(1, count + 1):
             doc = docs.Item(i)
             try:
                 name = str(doc.Name)
             except Exception:  # noqa: BLE001 - a broken item is not a match
+                continue
+            if not with_paths:
+                rows.append({"doc": doc, "name": name,
+                             "stem": name.rsplit(".", 1)[0] if "." in name else name,
+                             "path": "", "saved": False, "active": None})
                 continue
             try:
                 path = str(doc.FullName)
@@ -303,7 +358,7 @@ class CATIAConnection:
             is_active = None
             if active_doc is not None:
                 try:
-                    is_active = bool(doc == active_doc)
+                    is_active = self.same_document(doc, active_doc)
                 except Exception:  # noqa: BLE001 - not comparable on this build
                     is_active = None
             if is_active is None:
@@ -340,6 +395,23 @@ class CATIAConnection:
         key = (name or "").strip().casefold()
         if not key:
             return []
+        looks_like_path = any(mark in key for mark in ("\\", "/", ":"))
+        # Cheap pass first: names only. One hit and a name-ish key answers the
+        # question, and the caller gets a document without paying for eight (or
+        # nineteen) FullName reads it will never look at. A key that IS a path
+        # skips it: names cannot match a path, so the cheap pass would only be a
+        # second enumeration before the same answer.
+        if not looks_like_path:
+            cheap = [row for row in self._document_rows(with_paths=False)
+                     if row["name"].casefold() == key or row["stem"].casefold() == key]
+            if len(cheap) == 1:
+                return cheap
+            if not cheap:
+                return []
+        # Either the name is shared (then the caller must see paths to choose,
+        # and `saved` to know which copy can be named by one) or the key itself
+        # may be a path (which only a FullName can match). Both need the full
+        # rows, and both are the RARE answer - the common one is above.
         found = []
         for row in self._document_rows():
             if row["name"].casefold() == key or row["stem"].casefold() == key:
@@ -385,6 +457,43 @@ class CATIAConnection:
                  "active": row["active"],
                  "saved": row["saved"]}
                 for row in matches]
+
+    def component_usage(self) -> dict[str, list[str]]:
+        """Part document name -> the open assemblies whose components use it.
+
+        The ONE reader of this fact, because two tools now publish it and a
+        disagreement between them is worse than neither having it:
+        ``catia_list_documents`` marks such a part with ``component_of``, and
+        ``catia_get_inertia`` has to know whether a part it could not activate is
+        nested in an assembly or merely not in front - the reply used to assert
+        the first about a part that was in no assembly at all, against this very
+        reading (reported 2026-10-28, §6.3).
+
+        Top-level children only, like the listing: walking into sub-assemblies
+        means opening documents, which is not something a "which assemblies hold
+        this" lookup may do.
+        """
+        uses: dict[str, list[str]] = {}
+        docs = self.documents
+        for i in range(1, docs.Count + 1):
+            product_doc = docs.Item(i)
+            try:
+                product = self.product_of(product_doc)
+                children = product.Products
+            except Exception:  # noqa: BLE001 - not a product
+                continue
+            for j in range(1, children.Count + 1):
+                try:
+                    child = children.Item(j)
+                    part_doc = child.ReferenceProduct.Parent
+                    name = str(part_doc.Name)
+                except Exception:  # noqa: BLE001 - a dead link
+                    continue
+                uses.setdefault(name, [])
+                owner = str(product_doc.Name)
+                if owner not in uses[name]:
+                    uses[name].append(owner)
+        return uses
 
     # ── Document type detection ──
 

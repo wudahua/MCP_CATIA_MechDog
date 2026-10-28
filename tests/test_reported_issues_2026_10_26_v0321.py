@@ -348,8 +348,15 @@ def test_the_shell_reply_names_the_side_the_wall_grew_on():
 def test_tensor_reason_has_a_code():
     from catia_mcp.tools import measurement
 
+    # 0.3.37: still a code beside the sentence, but the code now comes from a
+    # decision ("is this part actually held by an assembly?") instead of being
+    # the constant `no_own_window` - which asserted "component of an open
+    # assembly" about parts no assembly referenced (reported 2026-10-28, §6.3).
     source = inspect.getsource(measurement.MeasurementTools._part_inertia)
-    assert 'payload["tensor_reason_code"] = "no_own_window"' in source
+    assert 'payload["tensor_reason_code"] = code' in source
+    refusal = inspect.getsource(measurement.MeasurementTools._tensor_refusal)
+    assert '"nested_in_assembly"' in refusal
+    assert '"not_activated"' in refusal
 
 
 # --------------------------------------------------------------------------

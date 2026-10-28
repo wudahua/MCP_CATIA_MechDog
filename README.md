@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.36** · [what changed](CHANGELOG.md) ·
+**0.3.37** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -499,6 +499,16 @@ it with `DOCUMENT_NAME_AMBIGUOUS` instead of picking one", `catia_activate_docum
 says it activated the first of N, and `catia_list_documents` marks each duplicated
 entry with `name_shared_by`.
 
+That warning only means something if it appears when there IS another copy. 0.3.36
+compared the handles with `is`, which pywin32 never satisfies (`Documents.Item(i)`
+mints a new Python wrapper per access: `Item(1) is Item(1)` is False,
+`Item(1) == Item(1)` is True) — so every document was its own twin, every new part
+was greeted with "Another open document is already called 'SOLO36.CATPart' (1 of
+them)", and a unique name was reported as "2 open documents carry that name" while
+the same reply's `catia_list_documents` said 1. One comparison now
+(`CATIAConnection.same_document`, COM equality), used by the listing, the warning
+and the activation count.
+
 The same name-based restore was hiding in two more places: `_tensor_for` and
 `_mesh_export` borrow the active document (the inertia tensor only exists for the
 active one) and gave it back **by name** — with a duplicate pair that restored the
@@ -565,7 +575,11 @@ and "change the sketch's offset or profile, then retry", because retrying the sa
 call *is* the call that failed. A tool that cannot write reports no `recovery` block
 at all: `catia_get_bounding_box{document: '<a document that is not open>'}` used to
 answer "model changes were not verified — inspect the CATIA model" for a lookup
-that wrote nothing.
+that wrote nothing. What such a tool still publishes are the next actions it can
+know — they are about the argument, not the model — in `data.next_actions` beside
+the `candidates` they describe. Suppressing the block had been dropping
+`DOCUMENT_NAME_AMBIGUOUS`'s two sentences on the one code only read-only tools
+raise.
 
 | field | meaning |
 |---|---|
@@ -613,17 +627,26 @@ looked up in the open assembly that contains it, and the reply says so
 cold one, `true` on the first call after a cold pass, `false` in the steady state.
 `parts[].cold_ms` and `parts[].cold_warm_ratio` give the two regimes per part once
 both have been seen, because the assembly-level ratio is a weighted sum over parts
-that ranged **1.30× (12 cells) to 15.10× (1207 cells)** in one session — which is
-why the aggregate read 4.65× / 7.6× / 7.24× / 9.11× on one unchanged model. A warm
+whose per-part ratio ranged **1.15×–1.81× on 12–34-cell parts and 12.29×–17.25× on
+500–1200-cell parts, in one session** — which is why the aggregate read 4.65× /
+7.6× / 7.24× / 9.11× on one unchanged model. The note quotes both ranges with
+their versions (0.3.36 and 0.3.35 read different ones), because a multiplier
+measured once is a reading, not a property. A warm
 call also quotes this session's own difference against the previous warm call on
 the same document, instead of a constant from another session.
 
-`component_lookup_ms` (in `overhead_breakdown`, narrowed calls only) is the share
-of `components_doc_ms` spent matching the name you passed against every component
-— 303 ms of a 70-instance narrowed call for one pose read, which is three times a
-single unfiltered read. `catia_get_inertia` publishes the same `parts_ms` /
-`overhead_ms` / `overhead_breakdown` / `poses_route` vocabulary on the assembly
-route, so the two aggregators can be compared on one model.
+`component_lookup_ms` (narrowed calls only, published **beside**
+`overhead_breakdown` rather than inside it) is the share of `components_doc_ms`
+spent matching the name you passed against every component — 303 ms of a
+70-instance narrowed call for one pose read, which is three times a single
+unfiltered read. It sits outside the block on purpose: that block promises "these
+three add up to `overhead_ms`", and a fourth key made
+`sum(overhead_breakdown.values())` over-count silently (reported 2026-10-28, P3).
+`catia_get_inertia` publishes the same `parts_ms` / `overhead_ms` /
+`overhead_breakdown` / `poses_route` vocabulary on the assembly route **and on
+both part routes** (`measure_ms`, `tensor_ms`), so the two aggregators can be
+compared on one model, and "174 ms here, 2 117 ms there, same tool" is answered
+inside the reply.
 
 `catia_list_components` filters before reading any placement, and
 `names_only: true` skips them entirely (measured: 370 ms → 32 ms on a 5-instance

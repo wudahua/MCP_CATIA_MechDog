@@ -157,8 +157,11 @@ def test_activating_one_of_two_says_it_picked_the_first():
     tools = DocumentTools(connection=None)
     tools.conn = _conn(DUP, "DUP35.CATPart")
     saved, unsaved = tools.conn.test_documents
-    assert tools._twin_documents(saved) == [
-        row for row in tools.conn._document_rows() if row["doc"] is unsaved]
+    twins = tools._twin_documents(saved)
+    # The OTHER document only: 0.3.36 counted the document itself here (the
+    # handles were compared with `is`, which pywin32 never satisfies), so this
+    # asserted a list that contained the asked-about document too.
+    assert len(twins) == 1 and twins[0]["doc"] is unsaved
     assert tools._twin_documents(_Doc("ONLY_ONE.CATPart")) == []
 
 
@@ -418,10 +421,15 @@ def test_a_narrowed_reply_publishes_the_lookup_inside_components_doc():
                                            only="P31A.1"))
     assert reply["poses_route"] == "single"
     breakdown = reply["overhead_breakdown"]
-    assert breakdown["component_lookup_ms"] == 250.0
-    # A SUB-bucket: the three terms still add up to overhead_ms exactly.
+    # 0.3.37: BESIDE the breakdown, not inside it. Inside, `sum(breakdown.values())`
+    # - which this reply's own note tells callers to do - over-counted by exactly
+    # this number (reported 2026-10-28, P3).
+    assert reply["component_lookup_ms"] == 250.0
+    assert "component_lookup_ms" not in breakdown
+    # The three terms still add up, and summing the dict is now safe.
     assert round(breakdown["components_doc_ms"] + breakdown["walk_other_ms"]
                  + breakdown["report_ms"], 1) == reply["overhead_ms"]
+    assert round(sum(breakdown.values()), 1) == reply["overhead_ms"]
 
 
 # ─────────────── 5. a customised failure stops appending the COM_ERROR sermon

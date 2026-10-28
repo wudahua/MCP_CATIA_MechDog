@@ -2,6 +2,151 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.37] — 2026-10-28 · every document was its own twin, and the cost that was not per cell
+
+### Fixed — the duplicate-name WARNING counted every document as its own twin (reported P1)
+
+- 0.3.36 taught the resolver to refuse a name that means two documents, and then
+  built a warning on top of it with a comparison that cannot work:
+
+  ```python
+  return [row for row in rows() if row["name"] == name and row["doc"] is not doc]
+  ```
+
+  `Documents.Item(i)` builds a **new Python wrapper** on every access, so `is` is
+  false even for two handles to one document - measured on B30 and quoted by the
+  reporter from B32: `Item(1) is Item(1) → False`, `Item(1) == Item(1) → True`.
+  Every document therefore had one twin - itself - and one sentence was wrong
+  twice: a part created under a name the session had never used was told
+  *"Another open document is already called `SOLO36.CATPart` (1 of them)"*, and
+  activating a unique name said *"2 open documents carry that name"* while
+  `catia_list_documents` said 1 in the same reply.
+- Identity now comes from one place, `CATIAConnection.same_document`, which
+  compares through COM (`==`) and falls back to name+path only when the build
+  refuses to compare. `_document_rows` marks the active row with it too - that
+  line was already right, and having two definitions was the defect.
+- Consequences: a warning appears only when there IS another document
+  (`(1 of them)` for a pair), `catia_activate_document` counts the pair as 2, and
+  a fresh name says nothing at all. Measured on B30 with a real pair
+  (`v36_dup.CATPart`, one saved one unsaved): unique name → plain
+  `Activated document: 'v36_part.CATPart'`; the pair → `2 open documents carry
+  that name`; `catia_new_part('SOLO37B')` → no warning.
+
+### Fixed — a read-only failure lost its `next_actions` (reported P2)
+
+- `DOCUMENT_NAME_AMBIGUOUS` carries two next actions, and it is raised almost
+  only by `catia_get_*` / `catia_measure_*` - which are read-only, and read-only
+  failures publish no `recovery` block (0.3.34: a tool that cannot write has no
+  model to repair). The block was doing double duty: it carried both the repair
+  advice and the ARGUMENT advice, so suppressing it dropped the two sentences
+  the CHANGELOG promised.
+- When the block is suppressed and the raise site knows what to do, the actions
+  now travel in `data.next_actions`, beside the `candidates` they describe, with
+  `data.next_actions_note` saying why they are there. A tool that DOES write
+  still gets them inside `recovery`; nothing is invented when the raise site said
+  nothing.
+
+### Fixed — `sum(overhead_breakdown.values())` over-counted (reported P3)
+
+- 0.3.36 added `component_lookup_ms` INSIDE `overhead_breakdown` and said in the
+  same release that *"the three terms still add up to `overhead_ms` exactly"* -
+  true of the three, false of the dict, which now had four keys. A caller who
+  followed 0.3.34's note and summed the block silently added 5.8 ms it should
+  not have. Renaming the key would not have helped: `sum()` does not read names.
+- It is published **beside** the block now (`reply["component_lookup_ms"]`, in the
+  cost-first order), the block has exactly three keys again, and `overhead_note`
+  says so in words: summing the dict is safe; the lookup is a part of
+  `components_doc_ms`, so subtract it, do not add it.
+
+### Fixed — one session's cold/warm multipliers were written as the fact (reported §6.1, third time)
+
+- `cold_warm_note` quoted `1.30x on a 12-cell part, 15.10x on a 1207-cell part,
+  measured in one session` - 0.3.35's run. The same model in the 0.3.36 run read
+  1.15x-1.32x and 12.29x. Both versions and both ranges are in the note now, and
+  it says out loud that any single multiplier is a reading, not a constant.
+- This is the same failure as 0.3.34's `overhead_note` and 0.3.35's
+  `elapsed_note`, in the release that fixed the second one. The rule that keeps
+  being relearned: a number measured once is published with its version and its
+  range, or not at all.
+
+### Fixed — `catia_get_inertia`'s PART route had no cost account (reported §6.2)
+
+- The assembly route has published `parts_ms` / `overhead_ms` /
+  `overhead_breakdown` since 0.3.36; the part route published `elapsed_ms` and
+  nothing else, which made "174.3 ms here, 2 117.3 ms there, same tool" a
+  question the reply could not answer. Both part routes now publish
+  `parts_ms`, `overhead_ms`, `measure_ms`, `tensor_ms` and an `overhead_note`,
+  with `parts_ms + overhead_ms = elapsed_ms` closing exactly (measured on B30:
+  173.4 = 173.4 for the active part).
+- `tensor_ms` is the field that answers the report's question: on B30 a part
+  reached by `document=` spent **10 210 ms of its 14 855 ms borrowing an
+  activation that failed** - the cost was in the attempt, not the measurement.
+
+### Fixed — `tensor_reason` accused an independent part of being a component (reported §6.3)
+
+- One code, `no_own_window`, asserted *"this part is a component of an open
+  assembly"* about every part whose tensor could not be read - including parts
+  reached through `document=` that no assembly references, where
+  `catia_list_documents` printed no `component_of` in the same breath. The
+  advice was wrong in the same way: it sent the caller to look for an assembly
+  that does not hold the part.
+- Two codes now, decided by the reading the listing already prints
+  (`CATIAConnection.component_usage`, one definition shared by both tools):
+  - `nested_in_assembly`, naming the assemblies that DO hold the part;
+  - `not_activated`, when none does - a focus refusal, fixed by
+    `catia_activate_document`, not by looking for an assembly;
+  - and `unreadable` when CATIA raised on the query itself.
+
+### Fixed — the post-cold note cited a field that is not in the reply (reported §6.4)
+
+- On the FIRST warm call after a cold pass the note ended *"compare it with the
+  previous warm call quoted above"* - but that call is the session's first warm
+  one, so the only numbers "above" were the other session's, which the same
+  sentence had just told the reader not to use. Three cases now: no previous
+  warm call at all (say so), a previous one that is not quoted here (say the
+  number and that it is not a trend), or the steady state, where the delta IS
+  quoted.
+
+### Added — `walk_other_ms` is 50x smaller on the inertia route, and now says why (reported §6.5)
+
+- Same field name, different job: `get_inertia` moves one centroid per instance,
+  `get_bounding_box` moves each part's whole vertex cloud (9.4 ms against
+  463-486 ms for one 70-instance assembly in the acceptance run). The inertia
+  route's `overhead_note` says so, so the next reader does not conclude that one
+  of them has been optimised.
+
+### Performance — the regression was the name resolver, not the per-cell sweep (report 2, §3)
+
+The report asked for a decision rather than a guess ("`k` went up is a fact, why
+is unknown"), and gave three experiments. Two of them are done here.
+
+- **The sweep is unchanged.** `git diff v0.3.35..v0.3.36` touches no line of the
+  vertex-sweep path (the only measurement.py changes are notes, the narrowed
+  lookup timer, and `_mesh_export`'s restore-by-object). A same-session A/B on
+  B30 (`v36_part.CATPart`, alternating checkouts, 8 calls each, twice) measures
+  the sweep itself at **38-40 ms on both** - identical within noise.
+- **But `document=` calls DID get slower in 0.3.36, and by a fixed amount.** The
+  duplicate-name check enumerates every open document and reads `Name` AND
+  `FullName` for each. On B30 each late-bound property read costs 1.3-1.9 ms
+  (`Item(i)` 0.82 ms, `+Name` 1.27 ms, `+FullName` 1.94 ms; 8 documents: full
+  rows 28.5 ms, names alone 16.7 ms), so every `document=` call paid +28 ms on a
+  call that used to take 56 ms. Measured A/B: 0.3.35 **56 ms**, 0.3.36 **80 ms**
+  (+43 %), same part, same session.
+- Fixed by reading the cheap thing first: `_document_rows(with_paths=False)`
+  reads names only, and `document_matches` uses it unless the key looks like a
+  path or the name is shared (both cases still get the full rows, and both are
+  the rare answer). A/B after the change: **56 ms vs 66 ms** (+18 %), and the
+  remaining 10 ms is one name-only enumeration - the price of never answering
+  with the other model. The part routes pay it once per call, not per cell.
+- Still unverified: the report's own +16.4 % warm figure. Its machine had 19 open
+  documents (~40 ms of resolver per call), which cannot account for 3 259 ms.
+  Their `f`/`k` separation stays unexplained, and this release does not claim to
+  explain it.
+
+- 705 tests pass (22 new in `tests/test_reported_issues_2026_10_28_v0337.py`),
+  including one that pins the pywin32 behaviour the P1 came from: a collection
+  that mints a fresh wrapper per access.
+
 ## [0.3.36] — 2026-10-28 · two documents can have one name, and a number you cannot tell apart is worse than an error
 
 ### Fixed — `document=` returned the OTHER model when two documents shared a name (reported P1)
@@ -133,7 +278,8 @@ All notable changes to this project are documented here.
 
 ### Verified
 
-- 680 tests pass (`pytest tests -q`), 30 of them new.
+- 683 tests pass (`pytest tests -q`), 30 of them new. (This line said 680
+  when 0.3.36 shipped; the suite was already 3 tests further on.)
 - On B30 2026-10-28, through the tool layer (`catia_probe/probe_v0336a`): the
   duplicate-name refusal and its path escape hatch, the creation warning, the
   empty product on both routes, `after_cold` null/true/false, the per-part ratio,

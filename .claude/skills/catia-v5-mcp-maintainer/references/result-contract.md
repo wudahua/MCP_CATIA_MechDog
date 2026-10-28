@@ -86,6 +86,19 @@ emit **no** `recovery` block at all: a lookup that wrote nothing has nothing to
 recover, and "inspect the model before retrying" on such a failure is advice to
 check a model nothing touched.
 
+When such a tool DOES know what the caller should do next, the actions are still
+published - in `data.next_actions`, with `data.next_actions_note` explaining why
+they are not in `recovery`. They are about the ARGUMENT this call used ("pass the
+full path of the copy you mean"), not about a model state to repair, and
+`DOCUMENT_NAME_AMBIGUOUS` is raised almost only by read-only tools, so suppressing
+the block was silently dropping its advice (reported 2026-10-28, P2).
+
+`tensor_reason_code` is one of `nested_in_assembly` (an open assembly holds the
+part, named in the sentence), `not_activated` (nothing holds it: a focus refusal,
+fixed with `catia_activate_document`) or `unreadable` (CATIA raised on the query).
+It used to be the single constant `no_own_window`, which asserted "component of an
+open assembly" about parts no assembly referenced.
+
 ## Error codes
 
 Use stable codes as applicable:

@@ -311,7 +311,20 @@ class DocumentTools:
                 raise ValueError(f"Unknown document tool: {tool_name}")
 
     def _twin_documents(self, doc: Any) -> list[dict[str, Any]]:
-        """Other open documents with the SAME ``Name`` as ``doc``.
+        """Other open documents with the SAME ``Name`` as ``doc`` - not ``doc``.
+
+        "Not doc" is the whole difficulty, and 0.3.36 got it wrong: it compared
+        the handles with ``is``, which pywin32 never satisfies (``Documents.Item``
+        returns a NEW Python wrapper each access, so even ``Item(1) is Item(1)``
+        is False). Every document therefore had at least one "twin" - itself - and
+        the warning fired on every new part and every activation, while the count
+        was one higher than the truth (reported 2026-10-28, new P1: "Another open
+        document is already called 'SOLO36.CATPart' (1 of them)" on the first
+        document ever created under that name).
+
+        Identity comes from ``CATIAConnection.same_document``, which compares
+        through COM and knows the fallback. The result is "the OTHER documents",
+        so a caller saying ``len(others) + 1`` counts documents correctly.
 
         Guarded, unlike every other connection call in this file: this is an
         advisory warning ("another document answers to this name"), and a
@@ -324,9 +337,20 @@ class DocumentTools:
             return []
         try:
             name = str(doc.Name)
-            return [row for row in rows() if row["name"] == name and row["doc"] is not doc]
+            # Names only: this answer is a COUNT, and each document's FullName
+            # read costs ~1.9 ms on B30 (measured 2026-10-28) for a field the
+            # warning never prints.
+            enumerated = rows(with_paths=False)
         except Exception:  # noqa: BLE001 - never turn a warning into a failure
             return []
+        others: list[dict[str, Any]] = []
+        for row in enumerated:
+            if row["name"] != name:
+                continue
+            if self.conn.same_document(row["doc"], doc):
+                continue
+            others.append(row)
+        return others
 
     def _name_collision_note(self, doc: Any) -> str:
         """A sentence when another open document already carries this name.
@@ -799,28 +823,13 @@ class DocumentTools:
         return json.dumps(result, indent=2, ensure_ascii=False)
 
     def _component_usage(self) -> dict[str, list[str]]:
-        """Part document name -> the open assemblies whose components use it."""
-        uses: dict[str, list[str]] = {}
-        docs = self.conn.documents
-        for i in range(1, docs.Count + 1):
-            product_doc = docs.Item(i)
-            try:
-                product = self.conn.product_of(product_doc)
-                children = product.Products
-            except Exception:  # noqa: BLE001 - not a product
-                continue
-            for j in range(1, children.Count + 1):
-                try:
-                    child = children.Item(j)
-                    part_doc = child.ReferenceProduct.Parent
-                    name = str(part_doc.Name)
-                except Exception:  # noqa: BLE001 - a dead link
-                    continue
-                uses.setdefault(name, [])
-                owner = str(product_doc.Name)
-                if owner not in uses[name]:
-                    uses[name].append(owner)
-        return uses
+        """Part document name -> the open assemblies whose components use it.
+
+        Delegated: ``catia_get_inertia`` publishes the same reading (it has to
+        tell "nested in an assembly" from "not in front"), and two walkers of one
+        fact drift apart (reported 2026-10-28, §6.3).
+        """
+        return self.conn.component_usage()
 
     def _activate_document(self, name: str) -> str:
         """Activate an open document by name so later calls act on it.

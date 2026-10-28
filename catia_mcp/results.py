@@ -240,4 +240,24 @@ def operation_result(
         if isinstance(recovery, dict):
             block.update(recovery)
         payload["recovery"] = block
+    elif actions:
+        # A read-only tool has no model to repair, so it publishes no `recovery`
+        # block - but some of its failures DO know what to do next, and they are
+        # not model repairs: "pass the full path of the copy you mean" is about
+        # the ARGUMENT, and DOCUMENT_NAME_AMBIGUOUS is raised almost only by
+        # catia_get_* / catia_measure_*. Suppressing the block therefore dropped
+        # the two next actions the CHANGELOG promised, on the one code a script
+        # branching on fields can never reach (reported 2026-10-28, P2).
+        #
+        # They travel in `data.next_actions` instead - beside the `candidates`
+        # they refer to - so the block keeps its meaning ("what to repair is
+        # unknown because nothing was written") while the advice survives.
+        payload["data"] = {
+            **payload["data"],
+            "next_actions": actions,
+            "next_actions_note": (
+                "this tool does not modify the model, so there is no 'recovery' "
+                "block to carry these: they are about the ARGUMENT this call used, "
+                "not about a model state to repair"),
+        }
     return payload
