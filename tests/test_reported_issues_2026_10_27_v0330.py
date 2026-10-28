@@ -209,9 +209,13 @@ def test_the_description_quotes_both_regimes_not_only_the_cold_one():
     description = [d for d in MeasurementTools(connection=None)
                    .get_tool_definitions()
                    if d["name"] == "catia_get_bounding_box"][0]["description"]
-    assert "3.2 ms per topology cell" in description
+    # 0.3.34: a RANGE instead of the number one afternoon produced. The report
+    # that closed this one measured 3.8-4.8 ms/cell on its own machine, so a
+    # single figure here had already stopped describing the product.
+    assert "3-5 ms per topology cell" in description
     assert "9.5 ms" in description  # the 0.3.31 figure, kept as the comparison
     assert "16-90 ms per cell" in description
+    assert "RANGES, not constants" in description
     assert "first_measure" in description and "cold_parts" in description
 
 

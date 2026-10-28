@@ -268,7 +268,11 @@ def test_a_stopped_plan_does_not_claim_a_final_measurement():
                       expect=[{"document": "X.CATPart", "volume_mm3": 1.0}])
     data = result["data"]
     assert data["measurements"] == {}
-    assert "measurements_note" not in data
+    # 0.3.34: the note is back, saying the opposite of a claim - "empty because it
+    # was skipped". Silence about an empty field is what a caller reads as
+    # "the measurement failed" (reported 2026-10-28, §7.1).
+    assert data["measurements_status"] == "not_taken"
+    assert "NOT measured" in data["measurements_note"]
     assert data["assertions_status"] == "skipped"
 
 

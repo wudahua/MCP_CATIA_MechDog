@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.33** · [what changed](CHANGELOG.md) ·
+**0.3.34** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -352,16 +352,23 @@ part.** The same 70-instance assembly measured three times in one session:
 
 `cells_scanned`, `vertices_used` and `nls_chars` were **identical** all three
 times, so the work is the same — the first pass pays CATIA's own setup for each
-part. Warm the fit is `≈ 200 ms + 3.2 ms × cells` after 0.3.31's one-call sweep
-(it was 9.5 ms/cell); cold it is 16–90 ms/cell and grows with the part. Every
+part. Warm the fit is `≈ 200 ms + 3–5 ms × cells` after 0.3.31's one-call sweep
+(3.2 ms/cell on 0.3.32's session, 3.8–4.9 on 0.3.34's, 9.5 before the sweep); cold
+it is 16–90 ms/cell and grows with the part. **Read these as ranges, not
+constants** — the same model moved 4.65× → 7.6× → 7.24× in three versions with the
+same geometry, and a single number quoted in a docstring reads as a promise the
+next measurement can only break. Every
 number in this section that was measured as "one part by name" is a COLD number,
 and reading it as a property of the part is what made an earlier release claim
 `17–93 ms per cell` as the model. `parts[].first_measure`, `cold_parts` and
 `elapsed_note` say which regime a call ran in; compare `elapsed_ms` across
 sessions only with that in view.
 
-The 0.3.32 acceptance run on the same model measured **cold 173.4 s, warm 22.9 s**
-— the warm side had been cut in half, so the ratio *grew* to 7.6×. That is why the
+The 0.3.32 acceptance run on the same model measured **cold 173 s, warm 22.9 s**
+— the warm side had been cut in half, so the ratio *grew* to 7.6×; 0.3.33 measured
+**183 s cold / 25.2–26.0 s warm (7.24×)** on the same model, and 0.3.34's cold note
+quotes the range plus that call's own `parts_ms`/`overhead_ms` instead of any
+constant. That is why the
 cold pass is now something you can **schedule** rather than something that happens
 to you: `catia_get_bounding_box {warm_up: true}` runs the same measurement, throws
 the geometry away and returns what it cost, so the next call that needs the box is
@@ -379,11 +386,11 @@ part, which may hold edits that were never saved.
 | 24 instances / 11 parts (drone), warm | 94.4 s |
 | the same call right after opening the assembly | 130.0 s (1.38×) |
 | the same call again, same session (mesh boxes reused) | **16.0 s (8.1×)** |
-| 70 instances / 28 parts (acceptance model) | **173.4 s cold / 22.9 s warm** |
+| 70 instances / 28 parts (acceptance model) | **173–183 s cold / 23–26 s warm** |
 
 Three things dominate, and none of them is "one fixed cost per part":
 
-* **Cold vs warm is the biggest single factor.** 173.4 → 22.9 s (−86.8 %) with
+* **Cold vs warm is the biggest single factor.** 173 → 23 s (−87 %) with
   every work counter unchanged. The gap is per PART and it disappears once that
   part has been touched: `P05` 80.0 s cold / 11.4 s warm (7.0×), `P01` 45.5 /
   5.0 s (9.2×), a 12-cell plate 0.33 s warm. It is not "less work" and not the
@@ -427,12 +434,75 @@ Three things dominate, and none of them is "one fixed cost per part":
   `overhead_ms` 451.3, of which `components_doc_ms` **413.3** — so the residual is
   dominated by one read of the component tree, not by per-part bookkeeping, which
   is also why it is identical cold and warm.
+* **That read was one COM call per instance, and it is not any more.** On the
+  70-instance model `components_doc_ms` was 5 036 of 5 563 ms (90.5 % of the whole
+  overhead block) — seventy `Evaluate` calls for twelve numbers each, 86 ms apiece
+  when timed directly. Since 0.3.34 the unfiltered path reads every child's pose in
+  **one** script call (`batch_positions`, with a status byte per instance so a
+  refused pose falls back to the per-component reader instead of reporting zeros).
+  Measured on B30 with 10 instances: `components_doc_ms` 866 / 851 / 868 ms →
+  **267 / 253 / 205 ms**; one instance is unchanged (95 → 101 ms) because there is
+  nothing to batch. `poses_route` (`one_call` / `per_component`) says which ran.
+  A narrowed call (`component=...`) still reads exactly one pose — batching all of
+  them would bring back the 5.8 s entry fee 0.3.26 removed.
+
+### A listing keeps its shape when it is empty
+
+`catia_list_features` used to answer the bare string `"No features in the active
+body"` when a body held sketches and no feature — the one moment its own
+description says to call it ("this is how to check whether a sketch still exists
+after a failed pad/pocket/hole"), and the moment a caller doing
+`resp["sketches"]` gets a `TypeError` instead of its sketch. Reported 2026-10-28,
+along with `catia_list_components` doing the same on an empty product and
+`catia_list_constraints` answering a bare LIST when full and a STRING when empty.
+
+All three always return an object now:
+
+```json
+{"body": "零件几何体", "count": 0, "bodies": 1, "features": [],
+ "sketches": [{"index": 1, "name": "草图.1"}], "sketch_count": 1,
+ "note": "the active body holds no Part Design feature yet, so 'features' is empty
+          and 'count' is 0 - this is not an error, and the sketches in it are
+          listed below"}
+```
+
+The rule is the one already applied to plan results: **a caller must never have to
+branch on the SHAPE of a reply before it can read it.** An empty answer is a value,
+not a failure, and it says which of the two it is.
+
+### One failure, one code — on both paths
+
+0.3.30 gave failures machine-readable codes so a caller could branch on them:
+`NO_MATERIAL` means change the offset or profile, `SKETCH_NOT_FOUND` means read
+`Available`. 0.3.33 kept those codes inside `catia_run_plan` and lost them on the
+bare path, because the server derived the code from the Python exception type
+(`COM_ERROR`) while the planner read the message. The same failed pad answered
+`NO_MATERIAL` in a plan and `COM_ERROR` on its own — two semantics for one failure,
+in one server.
+
+There is one table now, and it prefers what the raise site declares:
+
+| source | example | code |
+|---|---|---|
+| the exception's own `code` | `FeatureRejected` after a rolled-back pad | `NO_MATERIAL` |
+| the exception type | `AttributeError` on a missing API | `UNSUPPORTED_CAPABILITY` |
+| the message | CATIA's own refusals | `PART_NOT_LOADED`, … |
+| the caller's default | nothing matched | `COM_ERROR` (bare) / `STEP_EXCEPTION` (plan) |
+
+`recovery` follows the same rule — it is filled from facts, not from a template.
+A pad that measured both directions and rolled back reports `rolled_back: true`
+and "change the sketch's offset or profile, then retry", because retrying the same
+call *is* the call that failed. A tool that cannot write reports no `recovery` block
+at all: `catia_get_bounding_box{document: '<a document that is not open>'}` used to
+answer "model changes were not verified — inspect the CATIA model" for a lookup
+that wrote nothing.
 
 Tools run on a single worker thread, so a long box blocks every other MCP call
 until it finishes. The reply states `elapsed_ms` (total and per part, `parts[]`),
 `first_measure` (was this part touched for the first time in this session),
 `cold_parts`, `cells_scanned`, `sweep_route` (`one_call` / `per_cell`, or `mesh`
-when no vertex sweep ran), `parts_ms`, `overhead_ms` and
+when no vertex sweep ran), `poses_route` (`one_call` / `per_component`),
+`parts_ms`, `overhead_ms` and
 `points_route` (`batched` / `batched_retried` /
 `per_point` for a vertex sweep, `mesh` for an STL extent), so the cost is
 attributable instead of surprising. `catia_get_bounding_box {warm_up: true}` pays

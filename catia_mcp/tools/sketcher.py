@@ -10,6 +10,7 @@ import json
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
+from catia_mcp.results import CodedError
 from catia_mcp.topo_search import topology_reference
 
 # Plane name mapping
@@ -1540,9 +1541,10 @@ class SketcherTools:
                 if alias:
                     hint = (f" '{sketch_name}' was re-created as '{alias}', which "
                             "is no longer in the tree either.")
-                raise RuntimeError(
+                raise CodedError(
                     f"No sketch named '{sketch_name}' in the active body. "
-                    f"Sketches: {names or 'none'}.{hint}"
+                    f"Sketches: {names or 'none'}.{hint}",
+                    code="SKETCH_NOT_FOUND",
                 ) from None
         if self._active_sketch is not None:
             return self._active_sketch, "open in the editor"

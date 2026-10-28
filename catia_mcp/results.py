@@ -16,11 +16,21 @@ class FeatureRejected(RuntimeError):
     message instead of contradicting it - reported twice on 2026-10-25, because
     ``recovery.rollback_supported`` was hard-coded false and ``next_actions``
     said "recovery is manual" even when the tool had just undone the change.
+
+    ``next_actions`` is what the caller should do NEXT, and only the raise site
+    knows it: "fix the argument and retry" is wrong for a pad that built no
+    material in either direction, because the retry is the call that just
+    failed. Reported 2026-10-28: the message said "rolled back, volume stayed
+    96 750.0, both directions were measured" while the envelope said
+    ``rolled_back: null`` and "model changes were not verified".
     """
 
-    def __init__(self, message: str, rolled_back: bool) -> None:
+    def __init__(self, message: str, rolled_back: bool,
+                 next_actions: list[str] | None = None) -> None:
         super().__init__(message)
         self.rolled_back = bool(rolled_back)
+        if next_actions:
+            self.next_actions = list(next_actions)
 
 
 class CodedError(RuntimeError):
@@ -53,6 +63,83 @@ class ComponentNotFound(CodedError, ValueError):
     code = "COMPONENT_NOT_FOUND"
 
 
+def failure_code(message: str, error: BaseException | None = None,
+                default: str = "STEP_EXCEPTION") -> str:
+    """A code a script can branch on: the exception's own, else read the message.
+
+    ONE table, used by both paths. Before 0.3.34 ``catia_run_plan`` classified a
+    failed step by reading the message while a bare call classified it by the
+    exception TYPE, so the same failed pad answered ``NO_MATERIAL`` inside a plan
+    and ``COM_ERROR`` on its own - two semantics for one failure, in one server
+    (reported 2026-10-28, as a P0 regression against 0.3.30).
+
+    The order is deliberate: what the raise site declares wins, because a phrase
+    table is only as good as the last person to edit the wording
+    (``ComponentNotFound`` was added for exactly that reason on 2026-10-27).
+    ``AttributeError`` means the automation API did not resolve, which no table
+    entry can know better than the exception type.
+    """
+    carried = getattr(error, "code", None)
+    if isinstance(carried, str) and carried and carried != "STEP_EXCEPTION":
+        return carried
+    if isinstance(error, AttributeError):
+        return "UNSUPPORTED_CAPABILITY"
+    text = (message or "").casefold()
+    if "no sketch named" in text or "no sketch" in text and "available" in text:
+        return "SKETCH_NOT_FOUND"
+    if "built no material" in text or "removed no material" in text:
+        return "NO_MATERIAL"
+    if (message or "").startswith("UNSUPPORTED_CAPABILITY"):
+        return "UNSUPPORTED_CAPABILITY"
+    if "no component matches" in text or "no component '" in text:
+        return "COMPONENT_NOT_FOUND"
+    if "part not loaded" in text:
+        return "PART_NOT_LOADED"
+    return default
+
+
+# A failure of a tool that cannot change the document must not carry recovery
+# advice about repairing one: reported 2026-10-28, where
+# catia_get_bounding_box{document: '<a document that is not open>'} answered "no
+# document matches" (a lookup in the Documents collection, nothing written) and
+# then told the caller to "inspect the CATIA model before retrying; model changes
+# were not verified". Read by a caller that trusts the field over the prose, that
+# sends a human to check a model nothing touched.
+#
+# The list is a rule plus named exceptions, not a table of 101 entries: a tool
+# called catia_get_*/list_*/measure_* reads, and the extras below are the ones
+# whose names do not say so (a sketch reader, a listing under another prefix, and
+# the three that only move the camera or the active window). test_v0334 keeps the
+# rule honest by checking that no tool in the package ships a writer under one of
+# these prefixes without being listed here.
+READ_ONLY_PREFIXES = ("catia_get_", "catia_list_", "catia_measure_",
+                      "catia_diagnose", "catia_export")
+
+READ_ONLY_EXTRAS = frozenset({
+    "catia_sketch_get_geometry",   # reads a sketch's elements
+    "catia_gsd_list_elements",     # lists a geometrical set
+    "catia_screenshot",            # writes an image file, not the model
+    "catia_fit_all",               # camera
+    "catia_set_view",              # camera
+    "catia_activate_document",     # changes which window is active
+})
+
+
+def is_read_only(tool: str) -> bool:
+    """Whether a failure of ``tool`` can leave a half-built model behind."""
+    return tool in READ_ONLY_EXTRAS or tool.startswith(READ_ONLY_PREFIXES)
+
+
+class _Omit:
+    """Sentinel: the reply must not carry that key at all."""
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "NO_RECOVERY"
+
+
+NO_RECOVERY = _Omit()
+
+
 def operation_result(
     *,
     tool: str,
@@ -65,28 +152,35 @@ def operation_result(
     diagnostics: list[dict[str, Any]] | None = None,
     warnings: list[str] | None = None,
     rolled_back: bool | None = None,
+    recovery: dict[str, Any] | None | _Omit = None,
+    next_actions: list[str] | None = None,
 ) -> dict[str, Any]:
     if rolled_back is True:
         # The tool removed the feature CATIA rejected, so there is nothing left
         # to repair and ``modified`` is not "unknown" - it is a known no.
         modified = False
-        next_actions = [
+        actions = [
             "Nothing to repair: the rejected feature was removed again, so the "
             "model is back to its previous state. Fix the argument and retry."
         ]
     elif rolled_back is False:
-        next_actions = [
+        actions = [
             "The rejected feature could NOT be removed. Inspect the tree "
             "(catia_list_features) and delete it by hand before anything else "
             "works - a failed feature stops the whole part from updating."
         ]
     elif modified is None:
-        next_actions = ["Inspect the CATIA model before retrying; model changes were not verified"]
+        actions = ["Inspect the CATIA model before retrying; model changes were not verified"]
     elif not ok and modified:
-        next_actions = ["Inspect partial model changes; recovery is manual"]
+        actions = ["Inspect partial model changes; recovery is manual"]
     else:
-        next_actions = []
-    return {
+        actions = []
+    if next_actions:
+        # The raise site knows what to do next; a generic sentence does not. A pad
+        # that built no material in either direction is not repaired by "retry
+        # with a fixed argument" - retrying IS the failing call (2026-10-28).
+        actions = list(next_actions)
+    payload: dict[str, Any] = {
         "ok": ok,
         "code": code,
         "operation_id": operation_id or uuid4().hex,
@@ -96,7 +190,9 @@ def operation_result(
         "effects": {"modified": modified},
         "diagnostics": diagnostics or [],
         "warnings": warnings or [],
-        "recovery": {
+    }
+    if recovery is not NO_RECOVERY:
+        block: dict[str, Any] = {
             # No separate rollback request exists: a client cannot ask for one,
             # so this stays false. Whether *this* failure already undid itself is
             # a different question, and ``rolled_back`` is the field that
@@ -104,6 +200,9 @@ def operation_result(
             "rollback_supported": False,
             "rolled_back": rolled_back,
             "automatic_retry_allowed": False,
-            "next_actions": next_actions,
-        },
-    }
+            "next_actions": actions,
+        }
+        if isinstance(recovery, dict):
+            block.update(recovery)
+        payload["recovery"] = block
+    return payload

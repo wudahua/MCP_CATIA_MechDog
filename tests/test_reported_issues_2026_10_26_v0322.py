@@ -293,12 +293,13 @@ def test_set_active_body_reads_the_work_object_back():
 def test_a_rolled_back_pad_puts_the_body_back_in_work():
     from catia_mcp.tools.part_design import PartDesignTools
 
-    source = inspect.getsource(PartDesignTools._pad)
+    # 0.3.34: the reset moved into _remove_feature, so every rollback gets it
+    # (pocket left Datum_xy_45 behind). The pad must still ask for it by passing
+    # the body in - that is what keeps this from silently regressing.
+    pad = inspect.getsource(PartDesignTools._pad)
+    assert "self._remove_feature(part, pad, body)" in pad
+    source = inspect.getsource(PartDesignTools._remove_feature)
     assert "part.InWorkObject = body" in source
-    # The reset has to happen on the failure path, right after the rollback.
-    rollback = source.index("gone = self._remove_feature(part, pad)")
-    reset = source.index("part.InWorkObject = body", rollback)
-    assert reset - rollback < 400, "reset must sit next to the rollback"
 
 
 def test_closing_a_referenced_part_pluralises_correctly():

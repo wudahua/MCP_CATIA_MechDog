@@ -386,8 +386,12 @@ def test_the_cold_note_quotes_the_measurement_that_prompted_it():
     tools = _assembly_tools()
     reply = json.loads(tools._assembly_box(_Doc("ASM.CATProduct"), "vertices"))
     note = reply["elapsed_note"]
-    assert "173.4 s" in note and "22.9 s" in note
-    assert "7.6x" in note
+    # 0.3.34: the note now quotes a RANGE across versions plus THIS call's own
+    # parts_ms / overhead_ms / elapsed_ms, instead of the one afternoon that
+    # produced 173.4 s / 22.9 s (reported 2026-10-28, section 6).
+    assert "7.6x" in note and "4.65x" in note
+    assert "parts_ms" in note and "overhead_ms" in note
+    assert f"{reply['parts_ms']}" in note
     assert "warm_up=true" in note
     from catia_mcp.tools import measurement as M
     M._MEASURED_PARTS.clear()

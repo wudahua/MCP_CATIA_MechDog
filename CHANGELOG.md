@@ -2,6 +2,125 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.34] — 2026-10-28 · one failure one code, and a listing that keeps its shape
+
+### Fixed — a bare call flattened `NO_MATERIAL` into `COM_ERROR` (reported P0)
+
+- 0.3.30 gave failures machine-readable codes so a caller could branch:
+  `NO_MATERIAL` means change the offset or profile, `SKETCH_NOT_FOUND` means read
+  `Available`. 0.3.33 kept them **inside `catia_run_plan`** and lost them
+  everywhere else: the server derived the code from the Python exception type
+  (`"UNSUPPORTED_CAPABILITY" if isinstance(error, AttributeError) else
+  "COM_ERROR"`), while the planner read the message. One failed pad, two answers.
+- There is one table now (`results.failure_code`), and the planner calls it. Order:
+  the code the raise site declares, then the exception type, then the phrase table,
+  then the caller's default (`COM_ERROR` on the bare path, `STEP_EXCEPTION` in a
+  plan). The raise sites that know what they are refusing carry it:
+  `FeatureRejected` for pad/pocket/hole no-material, `CodedError(...,
+  code="SKETCH_NOT_FOUND")` for both sketch lookups.
+- `tests/...v0334` asserts the two paths agree on the same exception object, which
+  is the check the report asked for.
+
+### Fixed — the `recovery` block contradicted the message (reported P1)
+
+- `catia_pad` answering "so it was rolled back … Volume stayed 96750.0 mm3" shipped
+  `recovery.rolled_back: null`, `rollback_supported: false` and "Inspect the CATIA
+  model before retrying; model changes were not verified" in the same reply.
+- `FeatureRejected` now carries `next_actions`, so the envelope says what the text
+  says: `modified: false`, `rolled_back: true`, "change the sketch's offset or
+  profile, then retry - retrying the same call IS the call that failed".
+- A tool that cannot write no longer gets a recovery block at all: `is_read_only`
+  covers `catia_get_*` / `catia_list_*` / `catia_measure_*` / `catia_diagnose` /
+  `catia_export` plus six named exceptions, and their failures report
+  `effects.modified: false` instead of asking a human to inspect a model nothing
+  touched. `catia_get_bounding_box{document: '<not open>'}` was the example in the
+  report - a lookup in the `Documents` collection that told the caller the model
+  might be half-built.
+
+### Fixed — a listing changed its TYPE when it was empty (reported P1)
+
+- `catia_list_features` answered the bare string `"No features in the active body"`
+  when a body held sketches and no feature - the exact moment its own description
+  says to call it ("this is how to check whether a sketch still exists after a
+  failed pad/pocket/hole"). `resp["sketches"]` raised instead of returning the
+  caller's sketch.
+- It always returns an object now (`count: 0`, `features: []`, the sketches listed,
+  and a `note` explaining that an empty feature list is not a failure). Same for
+  `catia_list_components` (the report called the pattern out) and for
+  `catia_list_constraints`, which was worse: a bare LIST when full, a STRING when
+  empty.
+
+### Fixed — an empty product was described as "every component failed" (reported P2)
+
+- `skipped: []` next to "each one's reason is in 'skipped'". An empty product now
+  says "the active product holds no component, so there is nothing to measure -
+  `complete: false` here means 'nothing was asked for'", and `skipped` carries one
+  entry, the way `catia_get_inertia` already did for the same document.
+
+### Fixed — the cost block did not add up (reported P3)
+
+- `components_doc_ms + walk_other_ms + report_ms` was consistently 0.1-0.2 ms MORE
+  than `overhead_ms` on every sample, in the one reply that promises to reconcile
+  to the millisecond. `report_ms` is the remainder now, and if rounding pushed the
+  sum past the total the excess comes off the largest bucket. Measured after the
+  change: sum == `overhead_ms` exactly (0.0, three samples).
+
+### Changed — `components_doc_ms`: 866 → 205-267 ms on 10 instances
+
+- The report's P2 asked where the 5 seconds of a 70-instance call go, and the answer
+  its own `overhead_breakdown` gave was "reading the component tree": 5 036 ms of
+  5 563 ms. That is one `Evaluate` per instance for twelve numbers (measured here:
+  86 ms each).
+- `batch_positions` reads every child's 12 placement numbers in ONE script call,
+  with a status byte per instance so a refused pose falls back to the
+  per-component reader instead of reporting zeros. Measured on B30, 10 instances:
+  `components_doc_ms` 866 / 851 / 868 → **267 / 253 / 205**. One instance is
+  unchanged (95 → 101 ms): there is nothing to batch.
+- The reply publishes `poses_route` (`one_call` / `per_component`) next to the cost,
+  and `component=` narrowing still reads ONE pose - batching all of them would bring
+  back the 5.8 s entry fee 0.3.26 removed.
+
+### Changed — the docstring stopped quoting one afternoon
+
+- `200 ms + 3.2 ms/cell` and `173.4 s against 22.9 s` were true when measured and
+  wrong one release later (the same model measured 3.8-4.9 ms/cell and 183 / 25.9 s
+  on 0.3.33), so a reader whose environment matched neither read the release as a
+  regression. Both are ranges with version labels now, and the cold note quotes
+  **this call's** `parts_ms` / `overhead_ms` / `elapsed_ms` instead of a constant.
+- Warm `parts[]` was reported 12.6-17.3 % slower than 0.3.31. Not reproduced here:
+  `git diff v0.3.31..v0.3.34` touches nothing in the per-part reader except
+  publishing two fields, and on a 204-cell part the sweep route measures 1 348 ms
+  against 2 398 ms for the per-cell route (one_call 1.78× faster, identical box) -
+  so the ranking of the two routes did not flip at scale. Recorded as a measured
+  "not reproduced" rather than fixed.
+
+### Fixed — small items from the same reports
+
+- `catia_run_plan` publishes `measurements_status` (`taken` / `not_taken` /
+  `not_requested`); a stopping plan says why `measurements` is empty instead of
+  leaving it silently `{}` (reported P3, the same hole `assertions_status` closed
+  on 2026-10-27).
+- `_remove_feature` restores `part.InWorkObject = body`. A pocket rollback left
+  `in_work_object=Datum_xy_45`, which is the state this server's own error text
+  warns makes the next Part Design call fail (reported P3). Fixing it in one place
+  covers pad, pocket, hole, chamfer, draft and pattern.
+- `catia_shell` reports the volume it added (`Volume 96000.0 -> 157500.0 mm3
+  (delta +61500.0)`), like every other feature tool (reported P3).
+- A rebuild in the caller's vocabulary now opens with the caller's name:
+  "('草图.2' resolves to '草图.3', which CATIA just removed.)" - the third retry
+  used to reply only about 草图.3 → 草图.4 (reported P4).
+
+### Verified
+
+- 638 tests pass (25 new in `tests/test_reported_issues_2026_10_28_v0334.py`).
+- On B30 through the tool layer (`catia_probe/probe_v0334a/b/c`): 204-cell part,
+  one_call vs per_cell with identical boxes; 10-instance product, the pose batching
+  and the exact reconciliation of the cost block.
+- Not verifiable here: the reporter's own model. Its `CATPart`s are B32 files and
+  this machine runs B30, so `Documents.Open` raises CATIA's file dialog and the
+  70-instance assembly cannot be loaded at all - the 5 s / 25 s figures remain
+  theirs, and the batching gain above is measured on a 10-instance stand-in.
+
 ## [0.3.33] — 2026-10-28 · the remedies in the errors point at tools that exist
 
 ### Fixed — three error messages offered `catia_list_sketches`, which is not a tool

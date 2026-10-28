@@ -18,7 +18,7 @@ from mcp.types import CallToolResult, TextContent, Tool
 
 from catia_mcp import __version__
 from catia_mcp.connection import CATIAConnection
-from catia_mcp.results import operation_result
+from catia_mcp.results import NO_RECOVERY, failure_code, is_read_only, operation_result
 from catia_mcp.tools.assembly import AssemblyTools
 from catia_mcp.tools.diagnostics import DiagnosticsTools
 from catia_mcp.tools.document import DocumentTools
@@ -62,6 +62,8 @@ def failure(
     modified: bool | None,
     tool: str,
     rolled_back: bool | None = None,
+    recovery: Any = None,
+    next_actions: list[str] | None = None,
 ) -> CallToolResult:
     return structured_result(
         operation_result(
@@ -72,6 +74,8 @@ def failure(
             data={"failure_stage": stage},
             modified=modified,
             rolled_back=rolled_back,
+            recovery=recovery,
+            next_actions=next_actions,
         )
     )
 
@@ -191,7 +195,12 @@ class CATIAMCPServer:
             return CallToolResult(content=[TextContent(type="text", text=result)])
         except Exception as error:
             logger.exception("Tool failed: %s: %s", name, error)  # noqa: TRY401 -- log preview includes the error message
-            code = "UNSUPPORTED_CAPABILITY" if isinstance(error, AttributeError) else "COM_ERROR"
+            # The code comes from the failure, not from its Python type. This line
+            # used to be `"UNSUPPORTED_CAPABILITY" if isinstance(AttributeError)
+            # else "COM_ERROR"`, which flattened NO_MATERIAL and SKETCH_NOT_FOUND
+            # into COM_ERROR on the bare-call path while catia_run_plan kept them
+            # - one failure, two semantics, reported 2026-10-28 as a P0.
+            code = failure_code(str(error), error, default="COM_ERROR")
             message = str(error)
             if code == "UNSUPPORTED_CAPABILITY":
                 message = (
@@ -214,8 +223,15 @@ class CATIAMCPServer:
                     "'session' block, with the reasons next to the readings that could not be "
                     "taken."
                 )
-            return failure(code, message, stage, False if stage == "connect" else None, name,
-                           rolled_back=getattr(error, "rolled_back", None))
+            # A tool that cannot write has no model to repair, so the recovery block
+            # (and its "inspect the model" advice) is left out instead of filled
+            # with a sentence that is wrong. Modified is a known no, not unknown.
+            read_only = is_read_only(name)
+            return failure(code, message, stage,
+                           False if (read_only or stage == "connect") else None, name,
+                           rolled_back=getattr(error, "rolled_back", None),
+                           recovery=NO_RECOVERY if read_only else None,
+                           next_actions=getattr(error, "next_actions", None))
 
     async def close(self) -> None:
         try:

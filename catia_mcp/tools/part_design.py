@@ -12,7 +12,7 @@ import re
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
-from catia_mcp.results import FeatureRejected
+from catia_mcp.results import CodedError, FeatureRejected
 from catia_mcp.topo_search import (
     edge_fingerprint,
     face_keys,
@@ -895,7 +895,11 @@ class PartDesignTools:
                     "in 'count') and any geometrical sets the tools left behind. "
                     "This is how to check whether a sketch still exists after a "
                     "failed pad/pocket/hole: those rollbacks take the sketch with "
-                    "them."),
+                    "them. ALWAYS an object, even when the body holds no feature: "
+                    "'count' is 0 and 'features' is empty then, and the sketches "
+                    "are still listed (a body holding only sketches used to answer "
+                    "with a bare string, which broke every caller reading "
+                    "['sketches'] in exactly the situation this tool exists for)."),
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -1282,9 +1286,10 @@ class PartDesignTools:
                     hint = (f" '{sketch_name}' was re-created as '{replacement}', "
                             "which is no longer in the tree either - read "
                             "catia_list_features.sketches.")
-                raise RuntimeError(
+                raise CodedError(
                     f"No sketch named '{sketch_name}' in the active body. "
-                    f"Available: {names or 'none'}.{hint}"
+                    f"Available: {names or 'none'}.{hint}",
+                    code="SKETCH_NOT_FOUND",
                 )
 
         remembered = getattr(self.conn, "last_sketch", None)
@@ -1522,6 +1527,10 @@ class PartDesignTools:
         sf = part.ShapeFactory
 
         sketch = self._get_last_sketch(args.get("sketch_name"))
+        # The name the CALLER used, which after a rebuild is not the sketch's
+        # name in the tree (草图.2 resolving to 草图.3). The failure below has to
+        # answer in the caller's vocabulary.
+        requested_name = args.get("sketch_name")
         height = args["height"]
         direction = args.get("direction", "normal")
         symmetric = args.get("symmetric", False) or direction == "both"
@@ -1593,19 +1602,16 @@ class PartDesignTools:
             # the opposite (reported 2026-10-27). The sketch is read back after
             # the delete and the sentence follows what is actually there.
             sketch_name = getattr(sketch, "Name", None)
-            gone = self._remove_feature(part, pad)
-            # Put the body back in work. Deleting the pad leaves InWorkObject on
-            # whatever CATIA picks - on B32 it was the sketch's datum plane
-            # (reported 2026-10-26), and the very next Part Design call then fails
-            # with a bare "method failed" that reads like a bad sketch.
-            try:
-                part.InWorkObject = body
-            except Exception:  # noqa: BLE001 - the message is the payload
-                pass
+            # _remove_feature also puts the body back in work: deleting a feature
+            # leaves InWorkObject on whatever CATIA picks - on B32 it was the
+            # sketch's datum plane (reported 2026-10-26), and the very next Part
+            # Design call then fails with a bare "method failed" that reads like a
+            # bad sketch.
+            gone = self._remove_feature(part, pad, body)
             survived = self._sketch_present(part, sketch)
             stayed = (f"Volume stayed {before:.1f} mm3." if before is not None
                       else f"The volume could not be measured ({volume_note}).")
-            raise RuntimeError(
+            raise FeatureRejected(
                 "CATIA built no material for this pad in EITHER direction, so it "
                 "was rolled back"
                 + ("" if gone else " (the dead feature could NOT be deleted - "
@@ -1614,7 +1620,8 @@ class PartDesignTools:
                 + f" {stayed} Both directions were MEASURED, not assumed: the same "
                 "pad node was flipped and re-updated, and neither orientation grew "
                 "the body."
-                + self._recover_lost_sketch(part, body, sketch_name, survived)
+                + self._recover_lost_sketch(part, body, sketch_name, survived,
+                                            requested=requested_name)
                 + " Four things do this:\n"
                 "  · the sketch plane sits ON the material boundary and the sweep "
                 "runs INTO the body, so the whole sweep is absorbed - move the "
@@ -1629,7 +1636,19 @@ class PartDesignTools:
                 "so calling it twice draws two).\n"
                 "Retrying the SAME call changes none of these; changing the offset "
                 "or the profile does."
-                + (f" Original error: {update_error}" if update_error else "")
+                + (f" Original error: {update_error}" if update_error else ""),
+                rolled_back=gone,
+                # The generic "fix the argument and retry" is wrong here: the
+                # retry IS the call that failed. Say what the four causes above
+                # imply (reported 2026-10-28, where the envelope contradicted the
+                # message this very reply already contained).
+                next_actions=[
+                    "Change the sketch's offset or profile, then retry: both "
+                    "directions were measured and neither grew the body, so the "
+                    "same call builds nothing again"
+                    + ("; the sketch was rebuilt, so the name still resolves"
+                       if sketch_name and not survived else "")
+                ],
             )
         self.conn.refresh_display()
         span = "total %.3f mm, %0.3f each side" % (height, height / 2.0) if symmetric \
@@ -1706,6 +1725,7 @@ class PartDesignTools:
         sf = part.ShapeFactory
 
         sketch = self._get_last_sketch(args.get("sketch_name"))
+        requested_name = args.get("sketch_name")
         through_all = bool(args.get("through_all")) and "depth" not in args
         depth = args.get("depth", 0)
         reverse = args.get("direction") == "reverse"
@@ -1780,24 +1800,30 @@ class PartDesignTools:
             # and one of them was a lie: UpdateObject can raise *after* the cut
             # is already in the geometry. Deciding on the volume keeps the
             # message and the model in agreement whichever way CATIA behaved.
-            gone = self._remove_feature(part, pocket)
+            gone = self._remove_feature(part, pocket, body)
             sketch_name = getattr(sketch, "Name", None)
             survived = self._sketch_present(part, sketch)
             side = ("the requested direction" if explicit_direction
                     else "either direction")
-            raise RuntimeError(
+            raise FeatureRejected(
                 f"The pocket removed no material in {side}, so it was "
                 + ("rolled back" if gone else
                    "left in the tree (the dead feature could NOT be deleted - "
                    "close the document without saving)")
                 + f" (volume stayed {before:.1f} mm3)."
-                + self._recover_lost_sketch(part, body, sketch_name, survived)
+                + self._recover_lost_sketch(part, body, sketch_name, survived,
+                                            requested=requested_name)
                 + " Two usual causes: the "
                 "profile does not intersect the solid (a face sketch whose "
                 "local coordinates do not land on the material - put the sketch "
                 "on a datum plane with an offset instead), or the profile is "
                 "not closed"
-                + (f". Original error: {update_error}" if update_error else ".")
+                + (f". Original error: {update_error}" if update_error else "."),
+                rolled_back=gone,
+                next_actions=[
+                    "Change the profile or the sketch's offset so the cut meets "
+                    "material, then retry: the same call removes nothing again"
+                ],
             ) from (update_error or None)
 
         self.conn.refresh_display()
@@ -1823,7 +1849,7 @@ class PartDesignTools:
             ):
                 # A mid-plane cut from a face into open space removes material on
                 # one side only. Keep the tree honest: drop the empty feature.
-                self._remove_feature(part, mirror)
+                self._remove_feature(part, mirror, body)
                 mirror = None
             else:
                 after = new_after
@@ -1971,13 +1997,23 @@ class PartDesignTools:
             f"{detail} Feature: '{groove.Name}'"
         )
 
-    def _remove_feature(self, part: Any, feature: Any) -> bool:
+    def _remove_feature(self, part: Any, feature: Any,
+                        body: Any = None) -> bool:
         """Remove a feature from the tree; True if the call went through.
 
         A silent failure here is how a document ends up "dirty": the caller is
         told the feature was rolled back while the dead node stays in the tree
         and poisons every later update. Return the outcome so the message can
         stay honest.
+
+        ``body`` is the body the feature was built in. Deleting a feature leaves
+        ``InWorkObject`` on whatever CATIA happens to pick - on B32 the sketch's
+        datum plane - and the tool then hands the caller a part whose in-work
+        object is a geometrical set, which is the state its own error text warns
+        about ("a Part Design factory called while in_work_object is a
+        geometrical set fails exactly this way"). The pad path learned this on
+        2026-10-26; the pocket path still left ``Datum_xy_45`` behind (reported
+        2026-10-28, §7.2). Restoring here covers every rollback instead of one.
         """
         try:
             selection = self.conn.hso
@@ -1992,6 +2028,11 @@ class PartDesignTools:
                 self.conn.hso.Clear()
             except Exception:
                 pass
+            if body is not None:
+                try:
+                    part.InWorkObject = body
+                except Exception:  # noqa: BLE001 - the message is the payload
+                    pass
 
     def _sketch_present(self, part: Any, sketch: Any) -> bool | None:
         """Whether a sketch is still in the tree - ``None`` when it cannot be told.
@@ -2066,7 +2107,8 @@ class PartDesignTools:
 
     def _recover_lost_sketch(self, part: Any, body: Any,
                              sketch_name: str | None,
-                             survived: bool | None) -> str:
+                             survived: bool | None,
+                             requested: str | None = None) -> str:
         """The sentence about the input sketch after a rollback - and the repair.
 
         0.3.30 learned to READ whether the sketch survived, which ended the false
@@ -2084,8 +2126,19 @@ class PartDesignTools:
 
         new_name, problem = SketcherTools(self.conn).rebuild_lost_sketch(
             part, body, sketch_name)
+        # The caller never used the tree's name for this sketch: it asked for
+        # 草图.2, an alias, and the sketch it has been working on is 草图.3. A
+        # reply that only says 草图.3 -> 草图.4 leaves that caller unable to match
+        # its own name to anything (reported 2026-10-28, §P4). Reserve the first
+        # sentence for the name the caller used.
+        asked = (str(requested).strip() if requested else "")
+        if asked and asked != sketch_name:
+            lead = (f" ('{asked}' resolves to '{sketch_name}', which CATIA just "
+                    "removed.)")
+        else:
+            lead = ""
         if new_name:
-            return (
+            return lead + (
                 f" CATIA removed the sketch '{sketch_name}' with the rollback - a "
                 "sketch is consumed by the feature built on it, and whether it goes "
                 "with the node depends on the document's history, not on anything "
@@ -2100,7 +2153,7 @@ class PartDesignTools:
                 # way to see the profile (reported 2026-10-27).
                 + self._sketch_rebuild_hint(
                     sketch_name, tail="the rebuilt sketch holds the same elements."))
-        return (self._sketch_after_rollback(sketch_name, survived)
+        return (lead + self._sketch_after_rollback(sketch_name, survived)
                 + f" It could NOT be re-created: {problem}.")
 
     def _sketch_after_rollback(self, sketch_name: str | None,
@@ -2229,7 +2282,7 @@ class PartDesignTools:
             return
         except Exception as error:  # noqa: BLE001 - reported with the rollback state
             name = str(getattr(feature, "Name", "the new feature"))
-            gone = self._remove_feature(part, feature)
+            gone = self._remove_feature(part, feature, body)
             if gone:
                 raise FeatureRejected(
                     f"CATIA rejected the feature and it was removed from the tree "
@@ -2894,7 +2947,7 @@ class PartDesignTools:
         self.conn.refresh_display()
         self._clear_selection()
         if update_error is not None:
-            gone = self._remove_feature(part, chamfer)
+            gone = self._remove_feature(part, chamfer, body)
             raise RuntimeError(
                 "CATIA rejected the chamfer"
                 + (" and it was removed from the tree" if gone else
@@ -2974,23 +3027,32 @@ class PartDesignTools:
             took = (after - before) < -1e-6
         extent = "through all" if through_all else f"depth {depth} mm"
         if took is False:
-            gone = self._remove_feature(part, hole)
+            gone = self._remove_feature(part, hole, body)
             survived = self._sketch_present(part, sketch)
-            raise RuntimeError(
+            raise FeatureRejected(
                 "The hole removed no material, so it was "
                 + ("rolled back" if gone else
                    "left in the tree (the dead feature could NOT be deleted - "
                    "close the document without saving)")
                 + f" (volume stayed {before:.1f} mm3)."
-                + self._recover_lost_sketch(part, body, sketch_name, survived)
+                + self._recover_lost_sketch(part, body, sketch_name, survived,
+                                            requested=args.get("sketch_name"))
                 + self._bore_axis_sentence(target, placement)
                 + " The sketch has to hold a "
-                "closed CIRCLE - the Hole feature takes the bore from the "
-                "profile, so a bare point produces a feature that cannot "
-                "update." + ("" if through_all else
-                             " A depth deeper than the local wall also fails; "
-                             "pass through_all for that case.")
-                + (f" Original error: {update_error}" if update_error else "")
+                "closed CIRCLE: the bore's axis comes from a POINT in the "
+                "sketch (this tool adds one at the circle's centre when the "
+                "sketch has none), so a sketch without a circle produces a "
+                "feature that cannot update."
+                + ("" if through_all else
+                   " A depth deeper than the local wall also fails; "
+                   "pass through_all for that case.")
+                + (f" Original error: {update_error}" if update_error else ""),
+                rolled_back=gone,
+                next_actions=[
+                    "Put a closed circle in the sketch at the bore's centre, or "
+                    "pass through_all if the bore has to cross the whole wall; "
+                    "these were already checked before the feature was built"
+                ],
             ) from (update_error or None)
         if before is not None and after is not None:
             removed = before - after
@@ -3000,7 +3062,7 @@ class PartDesignTools:
                 # A bore in the wrong place is worse than no bore: the volume
                 # delta is right, so nothing downstream can tell. Take it back
                 # out and say where it went.
-                went = self._remove_feature(part, hole)
+                went = self._remove_feature(part, hole, body)
                 survived = self._sketch_present(part, sketch)
                 raise RuntimeError(
                     f"The bore is not where the profile is, so it was "
@@ -3566,7 +3628,7 @@ class PartDesignTools:
             # take the dead node out - but the seed feature is NOT touched, and
             # that is worth saying because the old failure mode looked like the
             # seed had vanished (it had not; a dead 圆形阵列.1 was in the tree).
-            gone = self._remove_feature(part, pattern)
+            gone = self._remove_feature(part, pattern, body)
             raise RuntimeError(
                 "CATIA rejected the circular pattern"
                 + (" and it was removed from the tree" if gone else
@@ -3698,6 +3760,12 @@ class PartDesignTools:
                 "indexed face name ('Face.N' from catia_list_faces): "
                 "AddNewShell's first parameter is the face to remove."
             )
+        # The volume on both sides of the cut, like every other feature here.
+        # shell was the one Part Design tool that answered without it, so a caller
+        # verifying "a 5 mm outward wall on a 60x40x40 box" (the case that is
+        # easiest to get wrong, since the outer surface is what grows) had to make
+        # a second call to catia_get_inertia (reported 2026-10-28, §7.3).
+        before, volume_note = self._volume_probe(part, body)
         refs = [
             r.reference
             for r in topology_references(
@@ -3721,9 +3789,17 @@ class PartDesignTools:
         except Exception:
             pass
         note = f" (could not add: {', '.join(skipped)})" if skipped else ""
+        after, _after_note = self._volume_probe(part, body)
+        if before is not None and after is not None:
+            gain = after - before
+            note += (f" Volume {before:.1f} -> {after:.1f} mm3 "
+                     f"(delta {gain:+.1f}).")
+        elif volume_note:
+            note += (f" The volume could not be measured ({volume_note}), so the "
+                     "wall is reported on CATIA's return alone.")
         return (
             f"Shell created: {self._shell_wall_text(thickness, external)}, removed "
-            f"{len(faces) - len(skipped)} face(s){note}. Feature: '{shell.Name}'"
+            f"{len(faces) - len(skipped)} face(s){note} Feature: '{shell.Name}'"
         )
 
     @staticmethod
@@ -3814,7 +3890,7 @@ class PartDesignTools:
                 self.conn.refresh_display()
                 return (f"Draft created: {angle} deg on {face_name}, {neutral_note}. "
                         f"Feature: '{draft.Name}'")
-            gone = self._remove_feature(part, draft)
+            gone = self._remove_feature(part, draft, body)
             errors.append(f"{neutral_name}: {update_error}"
                           + ("" if gone else " (and the dead feature could NOT be "
                                               "deleted - close the document without "
@@ -4017,14 +4093,25 @@ class PartDesignTools:
                 "catia_type": shape.Type if hasattr(shape, "Type") else None,
             })
 
-        if not features:
-            return "No features in the active body"
+        # ALWAYS an object, even with count 0. This used to return the bare
+        # string "No features in the active body", so the reply's SHAPE depended
+        # on whether the part had been built yet - and the moment that happens is
+        # exactly when a caller asks this tool, because the description says
+        # "this is how to check whether a sketch still exists after a failed
+        # pad/pocket/hole". A caller parsing resp["sketches"] got a string and an
+        # IndexError instead of its own sketch (reported 2026-10-28, P1).
+        notes: list[str] = []
         payload: dict[str, Any] = {
             "body": str(body.Name),
             "count": len(features),
             "bodies": part.Bodies.Count,
             "features": features,
         }
+        if not features:
+            notes.append(
+                "the active body holds no Part Design feature yet, so 'features' "
+                "is empty and 'count' is 0 - this is not an error, and the "
+                "sketches in it are listed below")
         # count == body.Shapes.Count, and it is published so a caller can tell
         # "my feature was created" from "a dead feature is still hanging around".
         # A failed fillet used to show up here as a normal-looking row and as a
@@ -4038,7 +4125,7 @@ class PartDesignTools:
         geosets = self._pattern_geoset_inventory(part)
         if geosets:
             payload["geometrical_sets"] = geosets
-            payload["note"] = (
+            notes.append(
                 "geometrical_sets are wireframe containers, not Part Design "
                 "features, and they are not counted in 'count'. Each circular "
                 "pattern adds a line (plus its two points) to the 'PatternAxis' "
@@ -4065,14 +4152,20 @@ class PartDesignTools:
                 sketches.append(entry)
         except Exception:  # noqa: BLE001 - a listing must not fail over this
             sketches = []
+        payload["sketches"] = sketches
+        payload["sketch_count"] = len(sketches)
         if sketches:
-            payload["sketches"] = sketches
-            payload["sketch_count"] = len(sketches)
             payload["sketches_note"] = (
                 "sketches live in the body alongside the features (a sketch "
                 "consumed by a pad is still here), and are not counted in 'count'. "
                 "'aliases' lists older names that still resolve to that sketch, "
                 "left by a rollback that deleted it and this server rebuilding it")
+        else:
+            payload["sketches_note"] = (
+                "the body holds no sketch either, so there is nothing drawn to "
+                "build on yet")
+        if notes:
+            payload["note"] = " ".join(notes)
         return json.dumps(payload, indent=2)
 
     def _pattern_geoset_inventory(self, part: Any) -> list[dict[str, Any]]:
@@ -4165,7 +4258,7 @@ class PartDesignTools:
         try:
             part.Update()
         except Exception as error:
-            gone = self._remove_feature(part, feature)
+            gone = self._remove_feature(part, feature, body)
             raise FeatureRejected(
                 f"CATIA rejected the solid loft"
                 + (" and it was removed from the tree again (rolled_back: true)"

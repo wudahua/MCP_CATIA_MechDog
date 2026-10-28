@@ -33,6 +33,67 @@ def position_components(app: Any, position: Any) -> list[float]:
     return [float(value) for value in raw]
 
 
+# Every pose read is one Evaluate call, and one Evaluate call costs ~86 ms on
+# B30 (measured 2026-10-28: 10 instances = 866 ms of components_doc_ms). For a
+# 70-instance assembly that is the 5 036 ms an acceptance report measured as
+# 90.5 % of the reply's whole overhead block - five seconds spent asking CATIA
+# seventy times for twelve numbers. The same statements inside ONE script cost a
+# fraction of that, exactly like the vertex sweep in 0.3.31.
+#
+# Layout: out[0 .. 12n-1] poses (12 per component), out[12n .. 13n-1] status
+# (1 = read, 0 = CATIA refused for that component). A failed slot is left Empty
+# and comes back as None, which the parser maps to 0.0 - the status byte is what
+# decides, never the numbers.
+POSES_SCRIPT = (
+    "Public Function catia_mcp_poses(prods, count)\n"
+    "    Dim i, j, out(), a(11)\n"
+    "    ReDim out(13 * count - 1)\n"
+    "    On Error Resume Next\n"
+    "    For i = 1 To count\n"
+    "        Err.Clear\n"
+    "        prods.Item(i).Position.GetComponents a\n"
+    "        out(12 * count + i - 1) = 0\n"
+    "        If Err.Number = 0 Then\n"
+    "            For j = 0 To 11\n"
+    "                out(12 * (i - 1) + j) = a(j)\n"
+    "            Next\n"
+    "            out(12 * count + i - 1) = 1\n"
+    "        End If\n"
+    "    Next\n"
+    "    catia_mcp_poses = out\n"
+    "End Function\n"
+)
+
+
+def batch_positions(app: Any, products: Any,
+                    count: int) -> list[list[float] | None] | None:
+    """Every child's 12 placement numbers in ONE call; ``None`` per failure.
+
+    Returns ``None`` when the script route is refused, so the caller keeps its
+    per-component reader: a number a caller acts on must not depend on whether
+    this build accepts CATScript.
+    """
+    if count <= 0:
+        return []
+    for attempt in (1, 2):
+        try:
+            raw = app.SystemService.Evaluate(POSES_SCRIPT, 0, "catia_mcp_poses",
+                                             [products, int(count)])
+            flat = [float(value) if value is not None else 0.0 for value in raw]
+            break
+        except Exception:  # noqa: BLE001 - the per-component route still works
+            if attempt == 2:
+                return None
+            continue
+    if len(flat) < 13 * count:
+        return None
+    poses: list[list[float] | None] = []
+    for i in range(count):
+        ok = flat[12 * count + i] >= 0.5
+        poses.append(flat[12 * i:12 * i + 12] if ok else None)
+    return poses
+
+
 class AssemblyTools:
     """Tools for assembly (Product) operations in CATIA V5."""
 
@@ -247,7 +308,9 @@ class AssemblyTools:
                     "TRANSPOSE of what catia_set_component_transform reads when you "
                     "pass rotation_convention='basis'. Each entry says so in its own "
                     "'convention' field, so a first comparison does not look like a "
-                    "wrong placement (reported 2026-10-25). Pass 'part_number' to "
+                    "wrong placement (reported 2026-10-25). ALWAYS an object, even "
+                    "for a product with no component: 'components' is [] and 'count' "
+                    "is 0 then, with a 'note' saying so. Pass 'part_number' to "
                     "see just the instances of one part - it filters before reading "
                     "any placement, so 'which instances exist' no longer costs one "
                     "pose read per component. 'names_only' skips the placements "
@@ -1437,8 +1500,26 @@ class AssemblyTools:
             entry["occurrence"] = per_part[group]
             components.append(entry)
 
+        # An empty assembly answers with the SAME shape as a full one. Returning
+        # the bare string "No components in the active assembly" made the reply's
+        # type depend on the data, so `resp["components"]` worked until the day
+        # the product was empty and then raised (reported 2026-10-28, called out
+        # as the second instance of one pattern, the first being
+        # catia_list_features).
         if not components:
-            return "No components in the active assembly"
+            payload: dict[str, Any] = {
+                "components": [],
+                "count": 0,
+                "occurrence_scope": "per_part",
+                "note": ("the active assembly holds no component, so this is an "
+                         "empty list and not a failure - add one with "
+                         "catia_add_component"),
+            }
+            if names_only:
+                payload["read"] = ("index, name, part_number and occurrence only")
+            else:
+                payload["convention"] = "matrix"
+            return json.dumps(payload, indent=2, ensure_ascii=False)
         # Same shape in both branches, and the same rule for the convention key:
         # it is present exactly when a rotation is present. A caller that knows
         # names_only was asked for can rely on that instead of guessing whether
@@ -1482,6 +1563,10 @@ class AssemblyTools:
                 pass
             cst_list.append(info)
 
+        # Same rule, and this one was worse: a full assembly answered with a
+        # bare LIST and an empty one with a STRING, so the shape changed twice.
+        payload: dict[str, Any] = {"constraints": cst_list, "count": len(cst_list)}
         if not cst_list:
-            return "No constraints in the active assembly"
-        return json.dumps(cst_list, indent=2, ensure_ascii=False)
+            payload["note"] = ("the active assembly holds no constraint - an empty "
+                               "list, not a failure")
+        return json.dumps(payload, indent=2, ensure_ascii=False)

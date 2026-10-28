@@ -22,6 +22,7 @@ import time
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
+from catia_mcp.results import failure_code as shared_failure_code
 from catia_mcp.topo_search import topology_cells
 
 #: Result text longer than this is truncated in the per-step report, so a plan
@@ -30,32 +31,14 @@ MAX_RESULT_CHARS = 600
 
 
 def _failure_code(message: str, error: BaseException | None = None) -> str:
-    """A code a script can branch on: the exception's own, else read the message.
+    """Kept as the planner's name for the shared classifier.
 
-    Every failed step used to answer ``STEP_EXCEPTION``, so "the sketch went with
-    the rollback" and "the licence is missing" looked identical to a caller
-    (reported 2026-10-27). The exceptions this server raises on purpose now carry
-    their code (``ComponentNotFound.code``), and that is always preferred: a
-    phrase table is only as good as the last person to edit the wording, and
-    0.3.30 shipped one that missed ``No component 'X'. Available: [...]`` because
-    it only knew ``no component matches`` - reported the same day, with the same
-    name answered COMPONENT_NOT_FOUND by one tool and STEP_EXCEPTION by the next.
+    The table lives in ``catia_mcp.results.failure_code`` because it used to live
+    HERE only: a failed step read the message while a bare call read the
+    exception type, so one failed pad answered ``NO_MATERIAL`` in a plan and
+    ``COM_ERROR`` on its own (reported 2026-10-28). Two paths, one table.
     """
-    carried = getattr(error, "code", None)
-    if isinstance(carried, str) and carried and carried != "STEP_EXCEPTION":
-        return carried
-    text = message.casefold()
-    if "no sketch named" in text or "no sketch" in text and "available" in text:
-        return "SKETCH_NOT_FOUND"
-    if "built no material" in text or "removed no material" in text:
-        return "NO_MATERIAL"
-    if message.startswith("UNSUPPORTED_CAPABILITY"):
-        return "UNSUPPORTED_CAPABILITY"
-    if "no component matches" in text or "no component '" in text:
-        return "COMPONENT_NOT_FOUND"
-    if "part not loaded" in text:
-        return "PART_NOT_LOADED"
-    return "STEP_EXCEPTION"
+    return shared_failure_code(message, error)
 
 
 class PlannerTools:
@@ -465,9 +448,27 @@ class PlannerTools:
                 + (f", {len(assertions)} assertions passed" if assertions else "")
             )
 
+        # Say WHY `measurements` is empty when it is. `assertions_status` got this
+        # treatment on 2026-10-27 for the same reason, and the identical hole was
+        # left one field over: a stopping plan (stop_on_error, failed at step 2)
+        # answered `measurements: {}` with nothing to distinguish "skipped on
+        # purpose" from "the measurement failed silently" (reported 2026-10-28,
+        # §7.1).
+        if measurements:
+            measurements_status = "taken"
+        elif measure and failed_at is not None:
+            measurements_status = "not_taken"
+            measurements_note = (
+                f"stop_on_error aborted the plan at step {len(report)} of "
+                f"{len(steps)}, so the document's final state was NOT measured - "
+                "'measurements' is empty because it was skipped, not because "
+                "nothing was asked for")
+        else:
+            measurements_status = "not_requested"
         data: dict[str, Any] = {
             "steps": report,
             "measurements": measurements,
+            "measurements_status": measurements_status,
             "assertions": assertions,
             "executed": len(report),
             "planned": len(steps),
