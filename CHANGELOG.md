@@ -2,6 +2,157 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.36] — 2026-10-28 · two documents can have one name, and a number you cannot tell apart is worse than an error
+
+### Fixed — `document=` returned the OTHER model when two documents shared a name (reported P1)
+
+- `_resolve_open_document` documented its own premise: *"A name is unambiguous"*.
+  That premise was false, and this server is what breaks it - `catia_new_part` /
+  `catia_new_product` set the part number, CATIA uses it as the document name, so
+  calling either twice with one name leaves **two documents called
+  `DUP35.CATPart`**. The resolver returned on the first hit, so
+  `catia_get_inertia{document='DUP35.CATPart'}` answered **16000 mm³ for the
+  24000 mm³ model that was in front** - no error, no hint, the name echoed back.
+  The reporter nearly filed it as a regression of 0.3.28's sub-assembly work.
+- Name resolution now lives on the connection, one definition for every tool
+  (`_document_rows`, `document_matches`, `resolve_document`,
+  `describe_matches`), and it **collects every match instead of stopping at the
+  first**. Rules: a full-PATH match beats a name match (a saved document's
+  `FullName` is the only thing that tells two same-named copies apart); one match
+  is that match; anything else raises `DOCUMENT_NAME_AMBIGUOUS` with
+  `data.candidates` (`document`, `path`, `active`, `saved`) and two next actions.
+  Measured on B30: bare name → refused, listing both copies with paths;
+  `document='F:\cat_bench\v36_dup.CATPart'` → 16000 (the saved one);
+  `catia_get_inertia{}` right after → 24000 (still the document that was in front).
+- `catia_measure_topology` had a second copy of the same loop; it calls the same
+  resolver now and refuses with the same code.
+- The tool that CREATES the duplicate says so: `catia_new_part` /
+  `catia_new_product` compare the new document's name against every open document
+  and warn at creation time, when renaming is still cheap. `catia_activate_document`
+  says it activated the first of N same-named documents, and
+  `catia_list_documents` flags each entry with `name_shared_by` plus a note
+  pointing at the path.
+- **Found while verifying the above, not reported:** `_tensor_for` and
+  `_mesh_export` borrow the activation (the tensor only exists for the active
+  document) and restored it **by name**. With a duplicate pair that restore
+  activated the wrong twin - measured: the active document went from the unsaved
+  `v36_dup.CATPart` to the saved copy after a named `catia_get_inertia`, so the
+  NEXT no-argument call measured the other model. Both now keep the previous
+  document as an OBJECT and re-activate that. `_tensor_for` also checks identity,
+  not name, before believing that `Activate()` worked.
+
+### Fixed — `after_cold` was a missing key, and its sentence pointed the wrong way (reported P2 ×2)
+
+- The cold reply omitted `after_cold` entirely, so `reply["after_cold"]` raised
+  KeyError on the one call where "which regime is this?" is the whole question -
+  two fields away from the `poses_route` hole 0.3.35 had just closed, in the same
+  object. It is three values now and always present: `null` (this call was
+  cold), `true` (first call after a cold pass), `false` (steady state).
+- The post-cold sentence asserted "read it as an upper bound" from one
+  afternoon's numbers (0.3.34: +27.4 %; **0.3.35 measured -0.8 %, the opposite
+  direction**). It now names both measurements, says the direction is session
+  state rather than a property of this code, and stops calling it an upper bound.
+  The quoted seconds carry their version, like `overhead_note` already did.
+- The reply also publishes **this session's own difference**: the previous warm
+  `elapsed_ms` for the same document, and the current call's delta against it.
+  A number from another session is now a fallback, not the default.
+
+### Fixed — per-part cold/warm ratio, because the aggregate is a weighted sum (reported observation)
+
+- `parts[]` entries now carry `cold_ms` and `cold_warm_ratio` once both regimes
+  have been seen, plus a note. On one unchanged model the aggregate read 4.65×
+  (0.3.30), 7.6× (0.3.31), 7.24× (0.3.33), 9.11× (0.3.35) - not drift, a weighted
+  sum: the acceptance run measured **1.30× on a 12-cell part and 15.10× on a
+  1207-cell one in the same session**. The cold note says so and points at the
+  terms instead of quoting the total as a property of CATIA.
+
+### Fixed — the narrowed call's cost was labelled as "that one read" (reported P2)
+
+- `components_doc_ms` for `component=…` was 303.3 ms on 70 instances - 33.5 % of
+  the full sweep's placement cost for ONE pose, and 3× the 95-101 ms a single
+  unfiltered read costs. The difference is matching the requested name against
+  every component. `overhead_breakdown.component_lookup_ms` now times that
+  separately (sub-bucket, so the three terms still add up to `overhead_ms`
+  exactly), and the note says what it covers.
+
+### Fixed — a customised failure no longer ends with the COM_ERROR sermon (reported P3)
+
+- `SKETCH_NOT_FOUND` / `DOCUMENT_NOT_FOUND` / `NO_MATERIAL` got their own
+  `next_actions`, but `message` still appended *"CATIA reports most automation
+  failures as a bare 'method failed' … before reading that as a bad sketch, check
+  the state above"* - directly below a line saying the sketch name does not
+  exist, and for a document that is not open it pointed at a body the caller does
+  not have. That paragraph is now only added when the failure came from COM, i.e.
+  when the exception carries no code of its own. `Session state:` stays either
+  way - it is a reading, not a diagnosis.
+
+### Fixed — `recovery` on a read-only tool when it failed validation (reported P3)
+
+- `is_read_only` was queried only in the `except` branch, so
+  `catia_list_components{names_only: 'yes please'}` answered with a full recovery
+  block ("inspect the CATIA model before retrying") while the same tool failing at
+  execution answered with none. It is computed once, before the first failure
+  path, and `UNKNOWN_TOOL` / `INVALID_ARGUMENT` publish no recovery block at all -
+  nothing was opened, read or written.
+
+### Fixed — an empty assembly named the wrong document, and the two routes disagreed (reported P2)
+
+- `skipped[0].component` was `self._active_name()` - the ACTIVE WINDOW, so
+  `EMPTY35.CATProduct` measured while `F35S.CATPart` was in front reported
+  `skipped: [{component: 'F35S.CATPart'}]`, a document the call never mentioned.
+  The placeholder is gone: an entry in `skipped` means "here is a component and
+  here is why its box is missing", and an empty product has none. The reason
+  lives in `empty_assembly` + `incomplete_because` (which names the MEASURED
+  document) and `instances` is 0/0/0 on **both** routes - the box route used to
+  say `total: 1` while `catia_get_inertia` said 0 for the same document in the
+  same second. `instances.skipped == len(skipped)` now holds everywhere.
+- `catia_list_documents` returns `[]` for an empty session instead of the string
+  `"No documents open in CATIA"` - the same type-depends-on-data defect as the
+  three listings fixed in 0.3.34.
+
+### Fixed — three small fields (reported P3)
+
+- `catia_list_features[].catia_type` was `shape.Type`, which answers `None` (no
+  attribute) or a raw id (a hole came back as `0`) on this API - null on every
+  feature of every part, forever. It now carries the host's own word for the
+  feature (`凸台`, `盒体`, `Pocket`), i.e. the prefix the `type` mapping read, so
+  the mapping can be audited instead of trusted.
+- `sketches_note` described an `aliases` key that is absent from a reply with no
+  rebuilt sketch; it now says the array appears only when a sketch has one.
+- `catia_get_inertia` publishes `parts_ms`, `overhead_ms`, `overhead_breakdown`
+  (`components_doc_ms` / `walk_other_ms` / `report_ms`) and `poses_route`, the same
+  vocabulary as `catia_get_bounding_box`, so the two aggregators on one assembly
+  can be compared. Measured on B30, 4 instances: `parts_ms 111.7 + overhead_ms
+  136.9 = 248.6`, and `elapsed_ms 248.6`; the three buckets close to the digit.
+
+### Changed
+
+- `CodedError` carries `data`, and `failure()` merges it into the envelope's
+  `data`, so a refusal can publish structure (`candidates`) instead of prose.
+- `catia_list_documents` gains `name_shared_by` on a duplicated entry.
+
+### Verified
+
+- 680 tests pass (`pytest tests -q`), 30 of them new.
+- On B30 2026-10-28, through the tool layer (`catia_probe/probe_v0336a`): the
+  duplicate-name refusal and its path escape hatch, the creation warning, the
+  empty product on both routes, `after_cold` null/true/false, the per-part ratio,
+  the narrowed lookup, the inertia cost account, and the shortened message.
+
+### Not fixed / not verified
+
+- **The 70-instance `M113_asm_v21` model was not measured again.** Its `CATPart`
+  files are B32 and this machine runs B30: `Documents.Open` raises CATIA's own
+  file dialog and the assembly never loads. The report's 18.8-19.2 s warm timings
+  are theirs, not reproduced here; the per-part ratios quoted above come from
+  their run plus this machine's small assemblies.
+- **`component_lookup_ms` is only measured on the narrowed path.** The unfiltered
+  route does no name matching, so the field is absent there rather than 0 - and
+  the three cost terms stay comparable across both.
+- **`catia_type` is the localised prefix.** On a build whose UI language differs
+  the string differs with it; `type` is the stable field, `catia_type` is the
+  evidence behind it.
+
 ## [0.3.35] — 2026-10-28 · the third honest value, and a constant that read as the opposite
 
 ### Fixed — `poses_route` disappeared on the narrowed path (reported P1)

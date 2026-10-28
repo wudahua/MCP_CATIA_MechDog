@@ -50,6 +50,10 @@ class CodedError(RuntimeError):
     Available: ..." is a lookup in a list - and leaving that as the envelope's
     "unknown" put "model changes were not verified, inspect the CATIA model" on
     a call that never touched the model (reported 2026-10-28, §5.2).
+
+    ``data`` carries the structured detail a message cannot: an ambiguous
+    document name publishes the candidates themselves, so the caller can pick one
+    instead of parsing prose out of an error string (reported 2026-10-28, P1).
     """
 
     code = "STEP_EXCEPTION"
@@ -57,7 +61,8 @@ class CodedError(RuntimeError):
 
     def __init__(self, message: str, code: str | None = None,
                  modified: bool | None = None,
-                 next_actions: list[str] | None = None) -> None:
+                 next_actions: list[str] | None = None,
+                 data: dict[str, Any] | None = None) -> None:
         super().__init__(message)
         if code:
             self.code = str(code)
@@ -65,6 +70,8 @@ class CodedError(RuntimeError):
             self.modified = bool(modified)
         if next_actions:
             self.next_actions = list(next_actions)
+        if data:
+            self.data = dict(data)
 
 
 class ComponentNotFound(CodedError, ValueError):

@@ -187,14 +187,16 @@ def test_the_warm_note_admits_the_first_call_after_a_cold_one():
     tools = _assembly_tools()
     cold = json.loads(tools._assembly_box(_Doc("ASM.CATProduct"), "vertices"))
     # Two instances, one PART: cold_parts counts parts, not instances.
-    assert cold["cold_parts"] == 1 and "after_cold" not in cold
+    # 0.3.36: the cold reply carries after_cold: null instead of omitting the key,
+    # so reply["after_cold"] answers on all three regimes (reported §5.2).
+    assert cold["cold_parts"] == 1 and cold["after_cold"] is None
     first_warm = json.loads(tools._assembly_box(_Doc("ASM.CATProduct"), "vertices"))
     assert first_warm["cold_parts"] == 0
     assert first_warm["after_cold"] is True
-    assert "FIRST one after a cold pass" in first_warm["elapsed_note"]
+    assert "FIRST call after a cold pass" in first_warm["elapsed_note"]
     second_warm = json.loads(tools._assembly_box(_Doc("ASM.CATProduct"), "vertices"))
     assert second_warm["after_cold"] is False
-    assert "FIRST one after a cold pass" not in second_warm["elapsed_note"]
+    assert "FIRST call after a cold pass" not in second_warm["elapsed_note"]
     M._MEASURED_PARTS.clear()
 
 

@@ -195,6 +195,12 @@ def test_an_unknown_document_lists_the_open_ones():
     class _Conn:
         documents = _Docs()
 
+        def resolve_document(self, name):
+            # The single resolver, as the real connection provides it: no match,
+            # no ambiguity. (0.3.36 moved this rule out of the planner, which used
+            # to own a second copy of the "first hit wins" loop.)
+            return None, []
+
     planner = PlannerTools(connection=_Conn())
     with pytest.raises(RuntimeError) as error:
         planner._topology_target("NOPE")

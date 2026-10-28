@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.35** · [what changed](CHANGELOG.md) ·
+**0.3.36** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -450,6 +450,62 @@ Three things dominate, and none of them is "one fixed cost per part":
   narrowed). The third one exists because "the key is missing" is not an answer a
   caller can branch on — the same rule `sweep_route: mesh` follows.
 
+### Two documents, one name
+
+`document=` used to return on the first name match, and its own docstring said
+why: *"A name is unambiguous."* It is not, and this server is what makes it
+ambiguous — `catia_new_part(name=…)` sets the part number, CATIA names the
+document after it, so creating a part under a name that is already open leaves
+**two documents called `DUP35.CATPart`**:
+
+```
+catia_new_part({name: "DUP35", file_path: "…/DUP35.CATPart"}) → pad 40 → 16000 mm³, saved
+catia_new_part({name: "DUP35"})                              → pad 60 → 24000 mm³, unsaved
+
+catia_get_inertia({})                              → 24000   ✔ the document in front
+catia_get_inertia({document: "DUP35.CATPart"})     → 16000   ✘ the other model
+                                                     and the reply says document: "DUP35.CATPart"
+```
+
+No error, no hint, a plausible number — the reporter nearly filed it as a
+regression of the 0.3.28 sub-assembly work. A name that means two models is worse
+than a name that matches none.
+
+Resolution is one function on the connection (`resolve_document`) and it collects
+**every** match:
+
+| step | result |
+|---|---|
+| the argument matches one document's full path | that document — the path is the only thing that tells two same-named copies apart (`catia_list_documents` prints it) |
+| exactly one document matches by name or stem | that document |
+| more than one | `DOCUMENT_NAME_AMBIGUOUS`, `modified: false`, and `data.candidates` with each copy's `document`, `path`, `active`, `saved` |
+| none | `DOCUMENT_NOT_FOUND`, listing what is open |
+
+```json
+{"ok": false, "code": "DOCUMENT_NAME_AMBIGUOUS",
+ "message": "'v36_dup.CATPart' matches 2 open documents: 'v36_dup.CATPart' at
+             'F:\\cat_bench\\v36_dup.CATPart'; 'v36_dup.CATPart' (never saved - no
+             path to name it by) (active). This call did NOT pick one …",
+ "data": {"candidates": [
+   {"document": "v36_dup.CATPart", "path": "F:\\cat_bench\\v36_dup.CATPart",
+    "active": false, "saved": true},
+   {"document": "v36_dup.CATPart", "path": null, "active": true, "saved": false}]}}
+```
+
+The tools that can create the situation say so when it happens:
+`catia_new_part` / `catia_new_product` append "⚠ Another open document is already
+called 'DUP35.CATPart' … `document='<name>'` is ambiguous and this server refuses
+it with `DOCUMENT_NAME_AMBIGUOUS` instead of picking one", `catia_activate_document`
+says it activated the first of N, and `catia_list_documents` marks each duplicated
+entry with `name_shared_by`.
+
+The same name-based restore was hiding in two more places: `_tensor_for` and
+`_mesh_export` borrow the active document (the inertia tensor only exists for the
+active one) and gave it back **by name** — with a duplicate pair that restored the
+wrong twin, so a named `catia_get_inertia` left the other document in front and the
+*next* no-argument call measured the other model. Both keep the document object and
+re-activate that.
+
 ### A listing keeps its shape when it is empty
 
 `catia_list_features` used to answer the bare string `"No features in the active
@@ -472,7 +528,17 @@ All three always return an object now:
 
 The rule is the one already applied to plan results: **a caller must never have to
 branch on the SHAPE of a reply before it can read it.** An empty answer is a value,
-not a failure, and it says which of the two it is.
+not a failure, and it says which of the two it is. `catia_list_documents` follows
+it too — `[]` instead of the string `"No documents open in CATIA"`.
+
+An EMPTY PRODUCT is not "every component failed", and the two routes now agree on
+that: `empty_assembly: true`, `instances` 0/0/0, `skipped: []`, and the reason in
+`incomplete_because` naming the document that was measured. The old placeholder in
+`skipped` was named after the *active window*, so an empty `EMPTY35.CATProduct`
+measured while `F35S.CATPart` was in front answered with a skipped component called
+`F35S.CATPart` — a document the call never mentioned — and counted it as one
+instance while `catia_get_inertia` counted zero for the same document.
+`instances.skipped == len(skipped)` holds on both.
 
 ### One failure, one code — on both paths
 
@@ -513,10 +579,24 @@ A refusal that happens before anything is written says so: `CodedError` carries
 answers `SKETCH_NOT_FOUND` / `modified: false` / "pick a name from `Available` …
 this call created nothing" instead of "inspect the CATIA model".
 
+Two follow-ons from the same report. First, that block is absent on **every**
+failure of a read-only tool, including argument validation — `is_read_only` used to
+be asked only in the `except` branch, so `catia_list_components{names_only: "yes
+please"}` answered `INVALID_ARGUMENT` with "inspect the CATIA model before
+retrying" about a call that never opened one. `UNKNOWN_TOOL` and
+`INVALID_ARGUMENT` carry no `recovery` block at all now.
+
+Second, the message no longer ends with the COM_ERROR sermon when the tool knows
+what it refused. `Session state: …` stays (it is a reading); the paragraph telling
+you to check whether `in_work_object` is a geometrical set is only added when the
+failure actually came from COM — otherwise it sat directly below a line saying the
+sketch name does not exist, or, for `DOCUMENT_NOT_FOUND`, sent you to inspect a
+body in a document you do not have open.
+
 Tools run on a single worker thread, so a long box blocks every other MCP call
 until it finishes. The reply states `elapsed_ms` (total and per part, `parts[]`),
 `first_measure` (was this part touched for the first time in this session),
-`cold_parts`, `after_cold` (was the previous call a cold pass), `cells_scanned`,
+`cold_parts`, `after_cold`, `cells_scanned`,
 `sweep_route` (`one_call` / `per_cell`, or `mesh` when no vertex sweep ran),
 `poses_route` (`one_call` / `per_component` / `single`),
 `parts_ms`, `overhead_ms` and
@@ -528,6 +608,22 @@ pass `component=` — with
 or without an assembly active: if the active document is a Part, the component is
 looked up in the open assembly that contains it, and the reply says so
 (`measured_in`).
+
+`after_cold` is three values, never a missing key: `null` when THIS call was the
+cold one, `true` on the first call after a cold pass, `false` in the steady state.
+`parts[].cold_ms` and `parts[].cold_warm_ratio` give the two regimes per part once
+both have been seen, because the assembly-level ratio is a weighted sum over parts
+that ranged **1.30× (12 cells) to 15.10× (1207 cells)** in one session — which is
+why the aggregate read 4.65× / 7.6× / 7.24× / 9.11× on one unchanged model. A warm
+call also quotes this session's own difference against the previous warm call on
+the same document, instead of a constant from another session.
+
+`component_lookup_ms` (in `overhead_breakdown`, narrowed calls only) is the share
+of `components_doc_ms` spent matching the name you passed against every component
+— 303 ms of a 70-instance narrowed call for one pose read, which is three times a
+single unfiltered read. `catia_get_inertia` publishes the same `parts_ms` /
+`overhead_ms` / `overhead_breakdown` / `poses_route` vocabulary on the assembly
+route, so the two aggregators can be compared on one model.
 
 `catia_list_components` filters before reading any placement, and
 `names_only: true` skips them entirely (measured: 370 ms → 32 ms on a 5-instance

@@ -222,13 +222,19 @@ def test_an_empty_product_says_it_holds_no_component():
     tools.conn = SimpleNamespace(ensure_connected=lambda: None,
                                  active_document=None)
     tools._components_doc = lambda doc, only=None: []
-    tools._active_name = lambda: "EMPTY.CATProduct"
+    tools._active_name = lambda: "SOMETHING_ELSE.CATPart"
     reply = json.loads(tools._assembly_box(
         SimpleNamespace(Name="EMPTY.CATProduct"), "vertices"))
     assert reply["complete"] is False
-    assert reply["skipped"] == [{"component": "EMPTY.CATProduct",
-                                 "kind": "unknown",
-                                 "error": "the assembly has no components"}]
+    # 0.3.36: no invented placeholder. `skipped` is for components that exist and
+    # could not be bounded; an empty product has none, and 0.3.34's placeholder was
+    # named after the ACTIVE WINDOW (reported §P2). The reason lives in
+    # empty_assembly + incomplete_because, and both routes agree on 0 instances.
+    assert reply["skipped"] == []
+    assert reply["empty_assembly"] is True
+    assert reply["instances"] == {"total": 0, "measured": 0, "skipped": 0}
+    assert "'EMPTY.CATProduct' holds no component" in reply["incomplete_because"]
+    assert "SOMETHING_ELSE" not in json.dumps(reply)
     assert "holds no component" in reply["method"]
     assert "each one's reason is in 'skipped'" not in reply["method"]
 

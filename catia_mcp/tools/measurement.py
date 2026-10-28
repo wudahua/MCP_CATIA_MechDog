@@ -391,9 +391,14 @@ def _pose_note(route: str) -> str:
     """
     if route == "single":
         return ("this call was narrowed to one component, so exactly one "
-                "placement was read - 'components_doc_ms' is that one read, and "
-                "reading the rest is the per-instance entry fee 0.3.26 removed. "
-                "Drop 'component' to measure the whole assembly")
+                "placement was read. 'components_doc_ms' is NOT that one read: it "
+                "also covers matching the name you passed against every component "
+                "in the assembly (two COM string reads each), which is why a "
+                "narrowed call on 70 instances still paid 303.3 ms for one pose in "
+                "the 2026-10-28 acceptance run - three times what a single "
+                "unfiltered read costs. 'component_lookup_ms' is the matching part; "
+                "the rest is the pose. Drop 'component' to measure the whole "
+                "assembly")
     if route == "per_component":
         return ("one COM round trip per instance: this build refused the script "
                 "that reads them all in one call (~86 ms per instance on B30, so "
@@ -413,7 +418,8 @@ def _cost_first(payload: dict[str, Any]) -> dict[str, Any]:
     per-part objects. So the most useful fields were exactly the ones a truncated
     reply loses. Nothing is dropped; the order is.
     """
-    order = ("dimensions", "min", "max", "complete", "elapsed_ms", "cold_parts",
+    order = ("dimensions", "min", "max", "complete", "empty_assembly",
+             "elapsed_ms", "cold_parts",
              "part_boxes_total", "part_boxes", "parts_ms", "overhead_ms",
              "overhead_note", "overhead_breakdown", "poses_route",
              "poses_route_note", "after_cold", "elapsed_note", "document",
@@ -424,6 +430,21 @@ def _cost_first(payload: dict[str, Any]) -> dict[str, Any]:
         payload.pop(key)
     return {**head, **payload}
 
+
+#: What a per-part cold/warm ratio means, in the same words on every entry.
+#:
+#: The assembly-level ratio is a WEIGHTED SUM, and that is why it looked like it
+#: was drifting: 4.65x (0.3.30), 7.6x (0.3.31), 7.24x (0.3.33), 9.11x (0.3.35) on
+#: one unchanged 28-part model. Per part the spread is 1.30x (12 cells) to 15.10x
+#: (1207 cells) - the acceptance run of 2026-10-28 measured both in one session -
+#: so the aggregate moves when the composition moves, and a single ratio quoted as
+#: "the machine's cold/warm factor" is not reproducible across assemblies.
+_COLD_RATIO_NOTE = (
+    "this part's FIRST measurement in the session against its latest warm one. "
+    "The ratio is per PART and varies with size - 1.30x on a 12-cell part, 15.10x "
+    "on a 1207-cell part, measured in one session - so the assembly-level 'cold "
+    "costs N times warm' figure is a weighted sum over these, not a property of "
+    "CATIA or of this code")
 
 #: What `nls_chars` means, in the same words on both routes.
 #:
@@ -541,10 +562,25 @@ class MeasurementTools:
         # runs tools on ONE worker thread, so the attribute cannot race with
         # itself inside one call.
         self._poses_route: str | None = None
+        # Milliseconds a narrowed call spent matching the requested name against
+        # every component, inside components_doc_ms. Published as a sub-bucket so
+        # "components_doc_ms is that one read" stops being a false label
+        # (reported 2026-10-28, §5.3).
+        self._lookup_ms: float | None = None
         # Whether the last measurement of an assembly was the cold one, so the
         # reply can say "this is the first call after a cold pass" instead of
         # "warm numbers vary by a few percent" (reported 2026-10-28, §6).
         self._last_call_was_cold = False
+        # Last WARM elapsed_ms per document, so a repeated call quotes THIS
+        # session's difference instead of another session's constant. Keyed by
+        # document name; the cold pass never writes it (a cold number is not a
+        # baseline for a warm one).
+        self._warm_elapsed: dict[str, float] = {}
+        # Per PART: {"cold_ms": first measurement, "warm_ms": latest one}. The
+        # assembly-level cold/warm ratio is a weighted sum of these, and quoting
+        # the sum as a property of CATIA is what made 4.65x -> 7.6x -> 7.24x look
+        # like drift on an unchanged model (reported 2026-10-28, §2.4).
+        self._part_times: dict[str, dict[str, float]] = {}
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         return [
@@ -1009,9 +1045,14 @@ class MeasurementTools:
         Activating a component's part inside an open product does not reliably
         change what ``ActiveDocument`` returns on every build, so a measurement
         aimed at "the part I just activated" silently measured the assembly
-        (reported 2026-10-24). A name is unambiguous; matching is
-        case-insensitive on the full name and on the stem, like
-        catia_activate_document.
+        (reported 2026-10-24). Matching is case-insensitive on the full name and
+        on the stem, like catia_activate_document - but NO LONGER "first hit
+        wins". This docstring used to open with "A name is unambiguous", and this
+        server is what falsified it: creating a part under a name that is already
+        open leaves two documents with the same ``Name`` (see
+        ``CATIAConnection.resolve_document``), so the first hit answered with the
+        other model's mass properties and echoed the name back - no error, no
+        hint, a plausible wrong number (reported 2026-10-28, P1).
 
         A part that exists only as a component of an open product is NOT in
         ``Documents`` at all (measured on B30 2026-10-24: opening a product that
@@ -1021,19 +1062,42 @@ class MeasurementTools:
         own file is located by path and opened, so the call works without the
         caller knowing this rule.
         """
-        docs = self.conn.documents
-        key = name.strip().casefold()
-        for i in range(1, docs.Count + 1):
-            doc = docs.Item(i)
-            try:
-                full = str(doc.Name)
-            except Exception:  # noqa: BLE001
-                continue
-            if full.casefold() == key or full.split(".")[0].casefold() == key:
-                return doc
+        doc, matches = self.conn.resolve_document(name)
+        if doc is not None:
+            return doc
+        if matches:
+            # Two documents answer to this name. Choosing one is the defect, so
+            # name both and let the caller pass a path - the saved copy carries
+            # its full path as its Name, which resolves unambiguously.
+            rows = self.conn.describe_matches(matches)
+            listing = "; ".join(
+                f"'{row['document']}'" + (f" at '{row['path']}'" if row["saved"] else
+                                          " (never saved - no path to name it by)")
+                + (" (active)" if row["active"] else "")
+                for row in rows)
+            raise CodedError(
+                f"'{name}' matches {len(rows)} open documents: {listing}. This call "
+                "did NOT pick one: the two models differ, and the name you passed "
+                "reads the same either way. Pass the full path of the one you mean "
+                "(that is what catia_list_documents prints), or close/rename the "
+                "other copy first.",
+                code="DOCUMENT_NAME_AMBIGUOUS",
+                modified=False,
+                next_actions=[
+                    "Pass the full path from catia_list_documents instead of the "
+                    "bare name - a saved document's Name IS its path, so the path "
+                    "matches exactly one document and nothing was measured or "
+                    "changed by this call",
+                    "If both copies are unsaved (neither shows a path), give them "
+                    "different part numbers with catia_new_part or close one: no "
+                    "argument can tell them apart",
+                ],
+                data={"candidates": rows},
+            )
         opened = self._open_component_part(name)
         if opened is not None:
             return opened
+        docs = self.conn.documents
         names = ", ".join(str(docs.Item(i).Name) for i in range(1, docs.Count + 1))
         raise CodedError(
             f"No open document matches '{name}', and no component of an open "
@@ -1207,15 +1271,36 @@ class MeasurementTools:
         Returns None when the part cannot be made active (a component with no
         window of its own), which is the one case where the caller still has to
         open the document first.
+
+        The restore keeps the previous document as an OBJECT, not as a name. It
+        used to search ``Documents`` for the old name and activate the first hit,
+        so with two documents sharing a name - which this server itself creates,
+        see ``CATIAConnection.resolve_document`` - measuring the SAVED copy left
+        the UNSAVED copy in front, or the other way round (measured on B30
+        2026-10-28: active went from the unsaved ``v36_dup.CATPart`` to the saved
+        one after a named ``catia_get_inertia``). A measurement that silently
+        changes which document is in front also changes what the NEXT no-argument
+        call measures - which is how a wrong number appears two calls later.
         """
         doc = part.Parent
+        previous = None
         try:
-            previous = str(self.conn.active_document.Name)
-        except Exception:  # noqa: BLE001
+            previous = self.conn.active_document
+        except Exception:  # noqa: BLE001 - nothing was in front
             previous = None
         try:
             doc.Activate()
-            if str(self.conn.app.ActiveDocument.Name) != str(doc.Name):
+            # Identity, not name: two documents can share a name, and then a name
+            # comparison says "activated" about whichever one CATIA left in front.
+            active = self.conn.app.ActiveDocument
+            same = None
+            try:
+                same = bool(active == doc)
+            except Exception:  # noqa: BLE001 - not comparable on this build
+                same = None
+            if same is None:
+                same = str(active.Name) == str(doc.Name)
+            if not same:
                 return None
             body = part.MainBody
             if body.Shapes.Count == 0:
@@ -1225,14 +1310,10 @@ class MeasurementTools:
         except Exception:  # noqa: BLE001 - the caller reports what is missing
             return None
         finally:
-            if previous and previous != str(getattr(doc, "Name", "")):
+            if previous is not None:
                 try:
-                    for i in range(1, self.conn.documents.Count + 1):
-                        candidate = self.conn.documents.Item(i)
-                        if str(candidate.Name) == previous:
-                            candidate.Activate()
-                            break
-                except Exception:  # noqa: BLE001 - best effort
+                    previous.Activate()
+                except Exception:  # noqa: BLE001 - best effort, as before
                     pass
 
     @staticmethod
@@ -1433,6 +1514,7 @@ class MeasurementTools:
         products = product.Products
         count = products.Count
         poses = None
+        lookup_seconds = 0.0
         if wanted is None:
             try:
                 from catia_mcp.tools.assembly import batch_positions
@@ -1441,6 +1523,7 @@ class MeasurementTools:
             except Exception:  # noqa: BLE001 - no app handle, no script route
                 poses = None
             self._poses_route = "one_call" if poses is not None else "per_component"
+            self._lookup_ms = None
         else:
             # The third honest value, for the third thing that happens. A
             # narrowed call reads exactly ONE pose on purpose (0.3.26 removed the
@@ -1457,6 +1540,7 @@ class MeasurementTools:
                                    "matrix": None, "translation": None,
                                    "part": None, "nested_doc": None,
                                    "kind": "unknown", "problems": []}
+            scan_started = time.perf_counter() if wanted is not None else 0.0
             for key, getter in (("name", lambda c: str(c.Name)),
                                 ("part_number", lambda c: str(c.PartNumber))):
                 try:
@@ -1464,6 +1548,14 @@ class MeasurementTools:
                 except Exception as exc:  # noqa: BLE001
                     row["problems"].append(f"{key}: {str(exc).splitlines()[0][:70]}")
             if wanted is not None:
+                # Timed separately, because it is NOT free: comparing the requested
+                # name against 70 components costs two COM string reads each, and
+                # on a 70-instance assembly that was 303.3 ms for ONE pose read -
+                # 33.5 % of the full sweep's placement cost, and 3x the 95-101 ms
+                # a single unfiltered read costs. Labelling that "the one read"
+                # sent the cost-hunt to the wrong place (reported 2026-10-28,
+                # §5.3).
+                lookup_seconds += time.perf_counter() - scan_started
                 # Two cheap string reads decide; the expensive reads below only
                 # happen for a component that will actually be reported.
                 if (row["name"] or "").casefold() != wanted and \
@@ -1512,6 +1604,10 @@ class MeasurementTools:
                     row["problems"].append(
                         f"part not loaded: {str(exc).splitlines()[0][:70]}")
             rows.append(row)
+        if wanted is not None:
+            # How much of components_doc_ms was spent RESOLVING the name rather
+            # than reading the one pose the narrowed call needs.
+            self._lookup_ms = round(lookup_seconds * 1000, 1)
         return rows
 
     def _local_box(self, part: Any, body: Any,
@@ -1680,6 +1776,7 @@ class MeasurementTools:
                       include_curved: bool = True) -> str:
         started = time.perf_counter()
         self._poses_route = None
+        self._lookup_ms = None
         rows = self._components_doc(doc, only)
         # Captured now, not read at the end: the narrowed branch re-reads the
         # component list below (to find a nested twin) and that second read would
@@ -1732,26 +1829,49 @@ class MeasurementTools:
             # component - but this branch said "each one's reason is in 'skipped'"
             # and handed back `skipped: []`, sending the caller to read an empty
             # array for a reason that was never recorded (reported 2026-10-28,
-            # §P2). Say which of the two it is, and keep 'skipped' populated the
-            # way catia_get_inertia already does for the same document.
+            # §P2). 0.3.34 answered by inventing one placeholder entry - named
+            # after the ACTIVE WINDOW, so an empty assembly measured while a part
+            # was in front reported `skipped[0].component = 'F35S.CATPart'`, a
+            # document the call never mentioned (reported 2026-10-28, §P2), and
+            # `instances.total: 1` for a product holding nothing, while
+            # catia_get_inertia answered 0 for the same document.
+            #
+            # Both routes now say the same thing: zero instances, zero skipped,
+            # and the reason in a field that is ABOUT the reason. An entry in
+            # `skipped` has to mean "here is a component, and here is why its box
+            # is missing" - there is no such component here.
             empty_product = not entries and not skipped
-            if empty_product:
-                skipped = [{"component": self._active_name(),
-                            "kind": "unknown",
-                            "error": "the assembly has no components"}]
+            try:
+                measured_name = str(doc.Name)
+            except Exception:  # noqa: BLE001 - the numbers are the point
+                measured_name = "<assembly>"
             return json.dumps({
                 "dimensions": None,
                 "min": None,
                 "max": None,
                 "components": [],
                 "complete": False,
+                "empty_assembly": empty_product,
                 "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
-                "instances": {"total": len(skipped), "measured": 0,
-                              "skipped": len(skipped)},
+                # instances.skipped == len(skipped), on every route: this counted
+                # the placeholder entry as an "instance" of an empty product,
+                # while catia_get_inertia answered 0 for the same document
+                # (reported 2026-10-28, §3.3).
+                "instances": {"total": 0 if empty_product else len(skipped),
+                              "measured": 0,
+                              "skipped": 0 if empty_product else len(skipped)},
                 "assembly_depth_max": max((entry.get("depth", 1)
                                            for entry in skipped), default=1),
-                "skipped": skipped,
-                "method": ("the active product holds no component, so there is "
+                "skipped": [] if empty_product else skipped,
+                "incomplete_because": (
+                    f"'{measured_name}' holds no component, so there is nothing to "
+                    "bound - 'complete: false' here means 'nothing was asked for', "
+                    "not 'the measurement failed', and 'skipped' is empty because "
+                    "no component was skipped"
+                    if empty_product else
+                    "no component could be measured from its vertices; each one's "
+                    "reason is in 'skipped'"),
+                "method": ("the measured product holds no component, so there is "
                            "nothing to measure - 'complete: false' here means "
                            "'nothing was asked for', not 'the measurement failed'"
                            if empty_product else
@@ -1817,10 +1937,31 @@ class MeasurementTools:
         # the acceptance assembly), while the note said "vary by a few percent".
         # A caller comparing a single 25.5 s against someone else's 20.0 s would
         # read that as a regression (reported 2026-10-28, §6).
-        after_cold = cold_parts == 0 and self._last_call_was_cold
-        self._last_call_was_cold = cold_parts > 0
+        #
+        # 0.3.36 makes it THREE values, and the third one matters: the cold reply
+        # used to omit the key entirely, so `reply["after_cold"]` raised KeyError
+        # on the one call where the question "which regime is this?" is the whole
+        # point - the exact shape 0.3.35 had just fixed for poses_route two fields
+        # up, in the same object (reported 2026-10-28, §5.2). null = this call was
+        # itself cold; true = first call after one; false = the steady state.
+        after_cold: bool | None = None
         if cold_parts == 0:
-            payload["after_cold"] = after_cold
+            after_cold = self._last_call_was_cold
+        self._last_call_was_cold = cold_parts > 0
+        payload["after_cold"] = after_cold
+        # The previous WARM elapsed_ms for this document, so the post-cold sentence
+        # can quote this session's own difference instead of another session's
+        # constant. The 0.3.35 note asserted "+23.6 % and therefore an upper bound"
+        # from 0.3.34's numbers, and 0.3.35 measured -0.8 % - the opposite
+        # direction (reported 2026-10-28, §5.1).
+        document_key = ""
+        try:
+            document_key = str(doc.Name)
+        except Exception:  # noqa: BLE001 - no name, no comparison
+            document_key = ""
+        previous_warm = self._warm_elapsed.get(document_key) if document_key else None
+        if cold_parts == 0 and document_key:
+            self._warm_elapsed[document_key] = payload["elapsed_ms"]
         if cold_parts:
             # Quote THIS call, not a constant baked in from one afternoon. The
             # sentence used to say "173.4 s against 22.9 s (7.6x)" - true when it
@@ -1833,9 +1974,12 @@ class MeasurementTools:
                 "FIRST time in this session. CATIA builds a part's internal "
                 "representation on the first topology read, so a cold call costs "
                 "several times a warm one: on the 28-part acceptance assembly the "
-                "ratio measured 4.65x (0.3.30), 7.6x (0.3.31) and 7.24x (0.3.33) "
-                "with cells_scanned, vertices_used and nls_chars IDENTICAL, so it is "
-                "not 'less work' - it moved because the warm side got faster. Quote "
+                "ratio measured 4.65x (0.3.30), 7.6x (0.3.31), 7.24x (0.3.33) and "
+                "9.11x (0.3.35) with cells_scanned, vertices_used and nls_chars "
+                "IDENTICAL, so it is not 'less work'. Do not read those four numbers "
+                "as drift: the aggregate is a WEIGHTED SUM over parts that cost "
+                "1.30x (12 cells) to 15.10x (1207 cells), so it moves when the model "
+                "moves - 'parts[].cold_warm_ratio' carries the terms. Quote "
                 "THIS call's own numbers (parts_ms "
                 f"{payload.get('parts_ms')} + overhead_ms "
                 f"{payload.get('overhead_ms')} = elapsed_ms "
@@ -1850,12 +1994,19 @@ class MeasurementTools:
                 "few percent, but a single small part can swing much more (12 cells "
                 "measured at 324 ms and then 549 ms in one session), so do not read "
                 "one part's time to three digits"
-                + (" - and this call is the FIRST one after a cold pass, which "
-                   "still carries part of that setup: on the 28-part acceptance "
-                   "assembly the call right after its 181.8 s cold run measured "
-                   "25.5 s, then 20.6 s and 20.0 s. Read a single post-cold number "
-                   "as an upper bound, not as the warm cost ('after_cold: true' "
-                   "says this is that call)"
+                + (f" This call took {payload['elapsed_ms']} ms against "
+                   f"{previous_warm} ms for the previous warm call on this document "
+                   f"in this session ({payload['elapsed_ms'] - previous_warm:+.1f} ms, "
+                   f"{(payload['elapsed_ms'] / previous_warm - 1) * 100:+.1f} %)."
+                   if previous_warm and not after_cold else "")
+                + (" It is also the FIRST call after a cold pass. Across versions "
+                   "that has measured BOTH ways against the third call - +27.4 % on "
+                   "0.3.34, -0.8 % on 0.3.35, 25.5 s then 20.6 / 20.0 s there, and "
+                   "18.8 / 19.2 / 19.0 s on the run that produced this field - so "
+                   "the direction is not a property of this code, it is session "
+                   "state. Read a single post-cold number as 'not yet the steady "
+                   "state', NOT as an upper bound, and compare it with the previous "
+                   "warm call quoted above rather than with another session."
                    if after_cold else ""))
         try:
             payload["document"] = str(doc.Name)
@@ -1901,6 +2052,12 @@ class MeasurementTools:
             "walk_other_ms": walk_other,
             "report_ms": report_ms,
         }
+        if poses_route == "single" and self._lookup_ms is not None:
+            # A SUB-bucket, not a fourth term: the name scan happens inside
+            # components_doc_ms, so adding it to the three would double-count and
+            # break the "the three add up to overhead_ms exactly" property the
+            # 2026-10-28 acceptance run verified on five samples.
+            payload["overhead_breakdown"]["component_lookup_ms"] = self._lookup_ms
         if poses_route:
             # Which way the 12 numbers per instance were read: one script call
             # for the whole assembly, one COM round trip each, or exactly one
@@ -2138,8 +2295,17 @@ class MeasurementTools:
                 # a caller budgets with - 1 207 cells and 24 cells differ by 40x
                 # and the estimate alone does not say which part to fix
                 # (reported 2026-10-26).
-                local_boxes[key]["elapsed_ms"] = round(
-                    (time.perf_counter() - part_started) * 1000, 1)
+                elapsed_ms = round((time.perf_counter() - part_started) * 1000, 1)
+                local_boxes[key]["elapsed_ms"] = elapsed_ms
+                # Keep the two regimes apart per PART, not just per call: the
+                # assembly-level cold/warm ratio is a weighted sum, so quoting it
+                # as "CATIA's cold factor" hid that a 1207-cell part pays 15x and a
+                # 12-cell one 1.3x (reported 2026-10-28, §2.4).
+                history = self._part_times.setdefault(key, {})
+                if first_measure:
+                    history["cold_ms"] = elapsed_ms
+                else:
+                    history["warm_ms"] = elapsed_ms
             cached = local_boxes[key]
             if "error" in cached:
                 skipped.append({"component": label, "name": name, "path": path,
@@ -2192,6 +2358,15 @@ class MeasurementTools:
                 }
                 if cached.get("elapsed_ms") is not None:
                     detail["elapsed_ms"] = cached["elapsed_ms"]
+                # This part's own two regimes, when both have been seen. The
+                # aggregate ratio is a weighted sum; these are the terms
+                # (reported 2026-10-28, §2.4: 1.30x to 15.10x inside one session).
+                history = self._part_times.get(key) or {}
+                if history.get("cold_ms") is not None and history.get("warm_ms"):
+                    detail["cold_ms"] = history["cold_ms"]
+                    detail["cold_warm_ratio"] = round(
+                        history["cold_ms"] / history["warm_ms"], 2)
+                    detail["cold_warm_note"] = _COLD_RATIO_NOTE
                 # Which of the two regimes this number came from. Without it a
                 # caller compares 80 s with 11 s for the same part and the same
                 # work, and concludes the tool got 7x faster (reported 2026-10-27).
@@ -2290,9 +2465,19 @@ class MeasurementTools:
         leaves: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
         part_cache: dict[Any, Any] = {}
+        # Same three buckets the bounding box publishes, accumulated during the
+        # walk: reading the component tree (poses included), reading each part's
+        # mass properties, and everything else. The box route has had a full cost
+        # account since 0.3.34, so the two aggregators on ONE assembly could not be
+        # compared - "4.2 s" with no breakdown, next to a box call that says where
+        # every millisecond went (reported 2026-10-28, §5.6).
+        cost = {"components_doc": 0.0, "part_props": 0.0}
+        self._poses_route = None
         self._inertia_collect(doc, [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0],
                                     [0.0, 0.0, 1.0]], [0.0, 0.0, 0.0],
-                              1, "", leaves, skipped, part_cache)
+                              1, "", leaves, skipped, part_cache, cost)
+        poses_route = self._poses_route
+        t_walk = time.perf_counter()
         total = sum(entry["volume_mm3"] for entry in leaves)
         total_area = sum(entry["area_mm2"] for entry in leaves)
         acc = [0.0, 0.0, 0.0]
@@ -2301,6 +2486,32 @@ class MeasurementTools:
             for i, axis in enumerate("xyz"):
                 acc[i] += entry["volume_mm3"] * cog[axis]
         elapsed = round((time.perf_counter() - started) * 1000, 1)
+        parts_ms = round(cost["part_props"] * 1000, 1)
+        components_doc = round(cost["components_doc"] * 1000, 1)
+        computed = round((t_walk - started) * 1000, 1)
+        walk_other = round(max(computed - components_doc - parts_ms, 0.0), 1)
+        overhead_ms = round(max(elapsed - parts_ms, 0.0), 1)
+        report_ms = round(max(overhead_ms - components_doc - walk_other, 0.0), 1)
+        cost_fields: dict[str, Any] = {
+            "parts_ms": parts_ms,
+            "overhead_ms": overhead_ms,
+            "overhead_breakdown": {
+                "components_doc_ms": components_doc,
+                "walk_other_ms": walk_other,
+                "report_ms": report_ms,
+            },
+            "overhead_note": (
+                "the same three buckets catia_get_bounding_box publishes, so the "
+                "two aggregators can be compared on one assembly: "
+                "components_doc_ms is reading the component tree (placements "
+                "included), walk_other_ms is transforming each leaf and aggregating, "
+                "report_ms is what is left. parts_ms is the parts' own mass "
+                "properties, cached per part, so multiple instances of one part "
+                "count once"),
+        }
+        if poses_route:
+            cost_fields["poses_route"] = poses_route
+            cost_fields["poses_route_note"] = _pose_note(poses_route)
         try:
             doc_name = str(doc.Name)
         except Exception:  # noqa: BLE001 - the numbers are the point
@@ -2314,6 +2525,14 @@ class MeasurementTools:
             # volume first used to be stopped dead here while the box call happily
             # returned "which component, and why" (reported 2026-10-24: the tool
             # that needed the diagnosis most was the one that threw it away).
+            #
+            # "No component at all" is not "every component failed", and the two
+            # must not be told apart by counting entries: the box route said
+            # `instances.total: 1` with a placeholder in `skipped`, this one said
+            # 0, for the same document in the same second (reported 2026-10-28,
+            # §3.3). Both now say 0 instances, 0 skipped, and the reason in
+            # `empty_assembly` + `incomplete_because`.
+            empty_product = not leaves and not skipped
             return json.dumps({
                 "volume_mm3": None,
                 "volume_cm3": None,
@@ -2322,14 +2541,20 @@ class MeasurementTools:
                 "center_of_gravity_mm": None,
                 "components": [],
                 "complete": False,
-                "instances": instances,
+                "empty_assembly": empty_product,
+                "instances": ({"total": 0, "measured": 0, "skipped": 0}
+                              if empty_product else instances),
                 "assembly_depth_max": depth_max,
                 "elapsed_ms": elapsed,
+                **cost_fields,
                 **({"document": doc_name} if doc_name else {}),
-                "skipped": skipped or [{"component": "<assembly>",
-                                        "kind": "unknown",
-                                        "error": "the assembly has no components"}],
+                "skipped": [] if empty_product else skipped,
                 "incomplete_because": (
+                    f"'{doc_name or 'the active document'}' holds no component, so "
+                    "there is no total - 'complete: false' here means 'nothing was "
+                    "asked for', not 'the measurement failed', and 'skipped' is "
+                    "empty because no component was skipped"
+                    if empty_product else
                     "no component could be measured, so there is no total - not "
                     "even a partial one. A component without a solid "
                     "(surface-only, or an empty part) has no volume to add; each "
@@ -2351,6 +2576,7 @@ class MeasurementTools:
             "instances": instances,
             "assembly_depth_max": depth_max,
             "elapsed_ms": elapsed,
+            **cost_fields,
             "note": ("volume-weighted aggregation of the components' own volumes "
                      "and centres of gravity, moved into world space by each "
                      "component's placement. Surface area is summed (it is "
@@ -2384,15 +2610,22 @@ class MeasurementTools:
                          translation: list[float], depth: int, prefix: str,
                          leaves: list[dict[str, Any]],
                          skipped: list[dict[str, Any]],
-                         part_cache: dict[Any, Any]) -> None:
+                         part_cache: dict[Any, Any],
+                         cost: dict[str, float] | None = None) -> None:
         """Flatten an assembly into world-space leaves, recursing into sub-assemblies.
 
         ``matrix``/``translation`` are the accumulated placement of the assembly
         being walked, so a leaf two levels down is placed by the composition of
         both, which is what makes a nested assembly's COG land where its parent
         put it.
+
+        ``cost`` accumulates where the time went, so this route can publish the
+        same three buckets as the box route.
         """
+        read_started = time.perf_counter()
         rows = self._components_doc(doc)
+        if cost is not None:
+            cost["components_doc"] += time.perf_counter() - read_started
         if not rows and depth > 1:
             skipped.append({"component": f"<sub-assembly {prefix}>", "kind":
                             "sub_assembly", "path": prefix, "depth": depth,
@@ -2429,14 +2662,17 @@ class MeasurementTools:
                                              "this branch was not expanded"})
                     continue
                 self._inertia_collect(nested, world_matrix, world_t, depth + 1,
-                                      path, leaves, skipped, part_cache)
+                                      path, leaves, skipped, part_cache, cost)
                 continue
             if row["part"] is None:
                 skipped.append({"component": label, "path": path, "depth": depth,
                                 "kind": row.get("kind", "unknown"),
                                 "error": "; ".join(row["problems"])})
                 continue
+            props_started = time.perf_counter()
             props = self._part_mass_properties(row["part"], part_cache)
+            if cost is not None:
+                cost["part_props"] += time.perf_counter() - props_started
             if "error" in props:
                 skipped.append({"component": label, "path": path, "depth": depth,
                                 "kind": "part", "error": props["error"]})
@@ -2985,7 +3221,10 @@ class MeasurementTools:
         doc = part.Parent
         previous = None
         try:
-            previous = str(self.conn.active_document.Name)
+            # The OBJECT, not its name: two open documents can share a name (this
+            # server creates them), and restoring by name then activates the wrong
+            # twin - the same defect _tensor_for had (2026-10-28).
+            previous = self.conn.active_document
         except Exception:  # noqa: BLE001 - nothing to restore
             previous = None
         # ExportData raises an overwrite prompt when the target exists, and that
@@ -3045,13 +3284,9 @@ class MeasurementTools:
         finally:
             shutil = __import__("shutil")
             shutil.rmtree(folder, ignore_errors=True)
-            if previous and previous != str(getattr(doc, "Name", "")):
+            if previous is not None:
                 try:
-                    for i in range(1, self.conn.documents.Count + 1):
-                        candidate = self.conn.documents.Item(i)
-                        if str(candidate.Name) == previous:
-                            candidate.Activate()
-                            break
+                    previous.Activate()
                 except Exception:  # noqa: BLE001 - best effort
                     pass
 

@@ -522,25 +522,34 @@ class PlannerTools:
         """The part and body to count: the named open document, or the active one."""
         if not document:
             return self.conn.get_active_part(), self.conn.get_active_part_body()
-        docs = self.conn.documents
-        key = document.strip().casefold()
-        for i in range(1, docs.Count + 1):
-            doc = docs.Item(i)
-            try:
-                name = str(doc.Name)
-            except Exception:  # noqa: BLE001
-                continue
-            if key not in (name.casefold(), name.rsplit(".", 1)[0].casefold()):
-                continue
+        doc, matches = self.conn.resolve_document(document)
+        if doc is not None:
             try:
                 part = self.conn.part_of(doc)
                 return part, part.MainBody
             except Exception as exc:  # noqa: BLE001 - a product, most likely
                 raise RuntimeError(
-                    f"'{name}' is open but is not a Part document, so there is no "
-                    f"solid to count ({str(exc).splitlines()[0][:80]}). Use "
+                    f"'{doc.Name}' is open but is not a Part document, so there is "
+                    f"no solid to count ({str(exc).splitlines()[0][:80]}). Use "
                     "catia_measure_topology without 'document' for an assembly."
                 ) from exc
+        if matches:
+            # Same refusal as the measurement route, from the same resolver: this
+            # used to be a second copy of the "first hit wins" loop (reported
+            # 2026-10-28, P1).
+            rows = self.conn.describe_matches(matches)
+            raise CodedError(
+                f"'{document}' matches {len(rows)} open documents: "
+                + "; ".join(f"'{row['document']}'"
+                            + (f" at '{row['path']}'" if row["saved"] else "")
+                            + (" (active)" if row["active"] else "")
+                            for row in rows)
+                + ". Nothing was counted - pass the full path of the one you mean.",
+                code="DOCUMENT_NAME_AMBIGUOUS",
+                modified=False,
+                data={"candidates": rows},
+            )
+        docs = self.conn.documents
         names = []
         for i in range(1, docs.Count + 1):
             try:

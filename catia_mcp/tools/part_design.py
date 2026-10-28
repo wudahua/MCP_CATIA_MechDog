@@ -4059,8 +4059,7 @@ class PartDesignTools:
 
     # `Shape.Type` is not usable on this API: the late-bound object either has no
     # Type attribute at all ("unknown") or exposes a raw CATIA id (a hole came
-    # back as 0). The NLS name prefix is reliable, so canonicalise from there and
-    # keep the raw value as `catia_type` for anyone who wants it.
+    # back as 0). The NLS name prefix is reliable, so canonicalise from there.
     _FEATURE_PREFIXES = (
         ("凸台", "pad"), ("Pad", "pad"),
         ("凹槽", "pocket"), ("Pocket", "pocket"),
@@ -4091,6 +4090,24 @@ class PartDesignTools:
                 return kind
         return "unknown"
 
+    @classmethod
+    def _feature_type_name(cls, name: str) -> str | None:
+        """The prefix this build actually used ('凸台', 'Pocket'), or None.
+
+        Published as ``catia_type``. That field used to read ``shape.Type``,
+        which answers None on this API (no attribute) or a raw id (a hole came
+        back as 0) - so it was null on every feature of every part, forever. A
+        field that can never hold a value is the same defect as a constant that
+        always holds the same one ("a constant that carries no information is
+        worse than no field", 0.3.35, and reported again 2026-10-28, §5.5). The
+        prefix IS the host's own word for the feature, and it is what the `type`
+        mapping read, so a caller can audit that mapping instead of trusting it.
+        """
+        for prefix, _kind in cls._FEATURE_PREFIXES:
+            if name.startswith(prefix):
+                return prefix
+        return None
+
     def _list_features(self) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
@@ -4104,7 +4121,9 @@ class PartDesignTools:
                 "index": i,
                 "name": shape.Name,
                 "type": self._feature_kind(shape.Name),
-                "catia_type": shape.Type if hasattr(shape, "Type") else None,
+                # The host's own name for it - not shape.Type, which is None or 0
+                # on this API and made this field a permanent null (§5.5).
+                "catia_type": self._feature_type_name(shape.Name),
             })
 
         # ALWAYS an object, even with count 0. This used to return the bare
@@ -4172,8 +4191,11 @@ class PartDesignTools:
             payload["sketches_note"] = (
                 "sketches live in the body alongside the features (a sketch "
                 "consumed by a pad is still here), and are not counted in 'count'. "
-                "'aliases' lists older names that still resolve to that sketch, "
-                "left by a rollback that deleted it and this server rebuilding it")
+                "An entry gains an 'aliases' array only when it has one: after a "
+                "rollback deleted a sketch, this server rebuilds it under a new "
+                "name and the old name keeps resolving, so 'aliases' lists those "
+                "older names. Absent means the sketch never had another name - not "
+                "that the field could not be read")
         else:
             payload["sketches_note"] = (
                 "the body holds no sketch either, so there is nothing drawn to "

@@ -64,14 +64,21 @@ def failure(
     rolled_back: bool | None = None,
     recovery: Any = None,
     next_actions: list[str] | None = None,
+    data_extra: dict[str, Any] | None = None,
 ) -> CallToolResult:
+    data: dict[str, Any] = {"failure_stage": stage}
+    if data_extra:
+        # Structured detail the message can only spell out in prose: an ambiguous
+        # document name publishes the candidates, so a caller can choose one
+        # instead of parsing an error string (reported 2026-10-28, P1).
+        data.update(data_extra)
     return structured_result(
         operation_result(
             tool=tool,
             ok=False,
             code=code,
             message=message,
-            data={"failure_stage": stage},
+            data=data,
             modified=modified,
             rolled_back=rolled_back,
             recovery=recovery,
@@ -175,12 +182,23 @@ class CATIAMCPServer:
 
     def _execute_tool(self, name: str, arguments: dict[str, Any]) -> CallToolResult:
         module = self._tool_router.get(name)
+        # Computed ONCE, before the first failure path, because it is a fact about
+        # the TOOL and not about where it failed. Only the `except` branch used to
+        # ask, so a read-only tool that failed argument validation got the full
+        # recovery block ("inspect the CATIA model before retrying") while the
+        # same tool failing at execution got none - a contract with an exception,
+        # and the exception was the wrong half (reported 2026-10-28, §P3).
+        read_only = is_read_only(name)
         if module is None:
-            return failure("UNKNOWN_TOOL", f"Unknown tool: {name}", "validate", False, name)
+            return failure("UNKNOWN_TOOL", f"Unknown tool: {name}", "validate", False, name,
+                           recovery=NO_RECOVERY)
         try:
             validate(arguments, self._schemas[name])
         except ValidationError as error:
-            return failure("INVALID_ARGUMENT", error.message, "validate", False, name)
+            # Nothing was opened, read or written: there is no session state to
+            # report and nothing to recover.
+            return failure("INVALID_ARGUMENT", error.message, "validate", False, name,
+                           recovery=NO_RECOVERY if read_only else None)
         logger.info("Tool call: %s(%s)", name, arguments)
         stage = "connect"
         try:
@@ -202,6 +220,17 @@ class CATIAMCPServer:
             # - one failure, two semantics, reported 2026-10-28 as a P0.
             code = failure_code(str(error), error, default="COM_ERROR")
             message = str(error)
+            # Does the raise site know what it is refusing? A CodedError /
+            # FeatureRejected / ComponentNotFound is a decision this server made
+            # ("that sketch name is not in the body", "both directions removed
+            # nothing"), and its message already says what to do. Appending the
+            # COM_ERROR paragraph to those told the caller "before reading that as
+            # a bad sketch, check in_work_object" directly below a line that had
+            # just said the sketch name does not exist - and for
+            # DOCUMENT_NOT_FOUND it sent them to inspect a body in a document they
+            # do not have open (reported 2026-10-28, §5.4). The session line stays:
+            # it is a reading, not a diagnosis.
+            declared = getattr(error, "code", None)
             if code == "UNSUPPORTED_CAPABILITY":
                 message = (
                     f"UNSUPPORTED_CAPABILITY in {name}: the required CATIA automation API "
@@ -211,6 +240,8 @@ class CATIAMCPServer:
                     "delete the %TEMP%\\gen_py folder, restart and retry once. A missing "
                     "workbench licence can also lock methods. Run catia_diagnose for details."
                 )
+            elif stage == "execute" and declared:
+                message = f"{error}\n\nSession state: {self._session_state()}"
             elif stage == "execute":
                 message = (
                     f"{error}\n\n"
@@ -228,13 +259,13 @@ class CATIAMCPServer:
             # with a sentence that is wrong. Modified is a known no, not unknown.
             # A tool that DOES write can still know it wrote nothing - a refusal
             # that happened at the name lookup carries `modified=False` with it.
-            read_only = is_read_only(name)
             modified = False if (read_only or stage == "connect") else \
                 getattr(error, "modified", None)
             return failure(code, message, stage, modified, name,
                            rolled_back=getattr(error, "rolled_back", None),
                            recovery=NO_RECOVERY if read_only else None,
-                           next_actions=getattr(error, "next_actions", None))
+                           next_actions=getattr(error, "next_actions", None),
+                           data_extra=getattr(error, "data", None))
 
     async def close(self) -> None:
         try:

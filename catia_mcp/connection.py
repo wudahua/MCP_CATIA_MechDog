@@ -244,6 +244,148 @@ class CATIAConnection:
                                                           document=scope) == name)]
         return sorted(set(found))
 
+    # ── Document names: one definition, used by every tool ──
+
+    @staticmethod
+    def _same_path(left: str, right: str) -> bool:
+        """Do two spellings name the same file? Separators and case do not matter."""
+        if not left or not right:
+            return False
+        try:
+            import os
+
+            return os.path.normcase(os.path.abspath(left)) == \
+                os.path.normcase(os.path.abspath(right))
+        except Exception:  # noqa: BLE001 - an unparseable path is just a string
+            return left.replace("/", "\\").casefold() == right.replace("/", "\\").casefold()
+
+    def _document_rows(self) -> list[dict[str, Any]]:
+        """Every open document, as plain data: name, stem, path, active flag.
+
+        Plain dicts, not COM objects, because the interesting answer is "which
+        ones matched" and it has to be publishable in an error reply.
+
+        ``name`` and ``path`` are two different readings and both are needed:
+        ``Document.Name`` is the FILE NAME (``DUP35.CATPart``) even for a saved
+        document, while ``Document.FullName`` is the path - and an unsaved
+        document reports its name as its FullName too. That is what makes a
+        duplicate pair tellable apart (B32 acceptance, 2026-10-28: two entries
+        printed the same name and only ``path=`` differed).
+
+        Failures reach the caller: "I could not read the Documents collection" is
+        not "no document matches", and folding the two together here would answer
+        DOCUMENT_NOT_FOUND for an unreadable session. The advisory callers wrap
+        this in their own try/except; the resolvers do not.
+        """
+        rows: list[dict[str, Any]] = []
+        docs = self.documents
+        count = docs.Count
+        active = None
+        active_doc = None
+        try:
+            active_doc = self.active_document
+            active = str(active_doc.Name)
+        except Exception:  # noqa: BLE001 - no active document is normal
+            active = None
+        for i in range(1, count + 1):
+            doc = docs.Item(i)
+            try:
+                name = str(doc.Name)
+            except Exception:  # noqa: BLE001 - a broken item is not a match
+                continue
+            try:
+                path = str(doc.FullName)
+            except Exception:  # noqa: BLE001 - never saved
+                path = ""
+            # Identity first: two documents can share a name, and then a
+            # name comparison marks BOTH as active - which is how the duplicate
+            # listing ends up telling the caller nothing.
+            is_active = None
+            if active_doc is not None:
+                try:
+                    is_active = bool(doc == active_doc)
+                except Exception:  # noqa: BLE001 - not comparable on this build
+                    is_active = None
+            if is_active is None:
+                is_active = active is not None and (
+                    name == active or bool(path) and self._same_path(path, active))
+            rows.append({
+                "doc": doc,
+                "name": name,
+                "stem": name.rsplit(".", 1)[0] if "." in name else name,
+                "path": path or "",
+                # An UNSAVED document reports its name as its FullName, so "this
+                # row has a path" and "this row was ever written to disk" are
+                # different facts - and only the second one can disambiguate a
+                # duplicate pair. Without this, a bare name matched the unsaved
+                # copy "by path" and the ambiguity disappeared into a coin toss.
+                "saved": bool(path) and path != name,
+                "active": is_active,
+            })
+        return rows
+
+    def document_matches(self, name: str) -> list[dict[str, Any]]:
+        """Open documents that ``name`` could mean - ALL of them, not the first.
+
+        The first version of every caller returned on the first hit and documented
+        the reason: "a name is unambiguous". That premise was false, and this
+        server is what breaks it - ``catia_new_part(name=...)`` sets the part
+        number, CATIA uses it as the document name, so creating a part under a
+        name that is already open leaves two documents with the SAME ``Name``.
+        Then ``document='DUP35.CATPart'`` answered with the other model's mass
+        properties and echoed the name back (reported 2026-10-28, P1): no error,
+        no hint, a plausible wrong number. Collecting every match is the only way
+        a caller can be told.
+        """
+        key = (name or "").strip().casefold()
+        if not key:
+            return []
+        found = []
+        for row in self._document_rows():
+            if row["name"].casefold() == key or row["stem"].casefold() == key:
+                found.append(row)
+            elif row["saved"] and self._same_path(row["path"], key):
+                found.append(row)
+        return found
+
+    def resolve_document(self, name: str) -> tuple[Any | None, list[dict[str, Any]]]:
+        """``(document, matches)`` - the document is None when the name is ambiguous.
+
+        Resolution order, and why each step exists:
+
+        1. a PATH match beats a name match. ``document='DUP35'`` matches both
+           copies of ``DUP35.CATPart``, but ``document='E:\\...\\DUP35.CATPart'``
+           matches only the saved one, so the path is a real answer even when the
+           names collide - and it is the answer ``catia_list_documents`` prints;
+        2. one match is that match - no notes, no cost;
+        3. anything else is ambiguous, and guessing is the behaviour being fixed.
+
+        The caller decides what to say; this only refuses to choose.
+        """
+        matches = self.document_matches(name)
+        key = (name or "").strip()
+        by_path = [row for row in matches
+                   if row["saved"] and self._same_path(row["path"], key)]
+        if len(by_path) == 1:
+            return by_path[0]["doc"], matches
+        if len(matches) == 1:
+            return matches[0]["doc"], matches
+        return None, matches
+
+    @staticmethod
+    def describe_matches(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The publishable part of ``document_matches``: no COM handles.
+
+        ``path`` is what makes a duplicate pair actionable, and ``saved`` says
+        whether the copy has been written to disk - an unsaved document reports
+        its name as its path, so it has no path of its own to name it by.
+        """
+        return [{"document": row["name"],
+                 "path": row["path"] if row["saved"] else None,
+                 "active": row["active"],
+                 "saved": row["saved"]}
+                for row in matches]
+
     # ── Document type detection ──
 
     @staticmethod

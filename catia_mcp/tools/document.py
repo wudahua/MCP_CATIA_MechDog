@@ -310,6 +310,50 @@ class DocumentTools:
             case _:
                 raise ValueError(f"Unknown document tool: {tool_name}")
 
+    def _twin_documents(self, doc: Any) -> list[dict[str, Any]]:
+        """Other open documents with the SAME ``Name`` as ``doc``.
+
+        Guarded, unlike every other connection call in this file: this is an
+        advisory warning ("another document answers to this name"), and a
+        connection stub that cannot enumerate documents should lose the warning,
+        not the tool call. The refusal itself lives in the resolver, which has no
+        such fallback.
+        """
+        rows = getattr(self.conn, "_document_rows", None)
+        if not callable(rows):
+            return []
+        try:
+            name = str(doc.Name)
+            return [row for row in rows() if row["name"] == name and row["doc"] is not doc]
+        except Exception:  # noqa: BLE001 - never turn a warning into a failure
+            return []
+
+    def _name_collision_note(self, doc: Any) -> str:
+        """A sentence when another open document already carries this name.
+
+        ``name=`` sets the part number, and CATIA names an unsaved document after
+        it - so calling this tool twice with one name leaves two documents called
+        ``DUP35.CATPart``, and ``document='DUP35.CATPart'`` then means whichever
+        one the resolver reaches first. That was a silent wrong answer for a
+        whole release (reported 2026-10-28, P1), and this tool is what creates the
+        situation, so it is where the caller has to hear about it: at the moment
+        the second copy appears, when renaming is still cheap.
+        """
+        try:
+            name = str(doc.Name)
+        except Exception:  # noqa: BLE001 - no name, no claim
+            return ""
+        others = self._twin_documents(doc)
+        if not others:
+            return ""
+        return (f" ⚠ Another open document is already called '{name}' "
+                f"({len(others)} of them). CATIA names a document after its part "
+                "number, so two documents can share one name - and then "
+                "document='<name>' is ambiguous and this server refuses it with "
+                "DOCUMENT_NAME_AMBIGUOUS instead of picking one. Save this one to a "
+                "different path, or give it a different part number, before using "
+                "document= by name.")
+
     def _new_part(self, name: str | None = None,
                   file_path: str | None = None) -> str:
         self.conn.ensure_connected()
@@ -367,7 +411,7 @@ class DocumentTools:
                     + ".")
         return (f"Created new Part document: '{part_name}'"
                 + (f" [{part_number}]" if part_number else "")
-                + f".{note}{saved}{hint}")
+                + f".{note}{saved}{hint}" + self._name_collision_note(doc))
 
     def _new_product(self, name: str | None = None) -> str:
         self.conn.ensure_connected()
@@ -415,6 +459,7 @@ class DocumentTools:
             f"'{product_name}'{rename_note}. In this session the document is called "
             f"'{doc_name}'; a path you save it to decides the FILE name "
             "(catia_save_document(file_path=...))."
+            + self._name_collision_note(doc)
         )
 
     def _open_document(self, file_path: str) -> str:
@@ -700,6 +745,17 @@ class DocumentTools:
         docs = self.conn.documents
         uses = self._component_usage()
         result = []
+        # How many open documents answer to each name. A count over 1 is the
+        # precondition for every "document= returned the other model" report, and
+        # this listing is where a caller can still see it BEFORE relying on the
+        # name (reported 2026-10-28, P1).
+        shared: dict[str, int] = {}
+        for i in range(1, docs.Count + 1):
+            try:
+                key = str(docs.Item(i).Name)
+            except Exception:  # noqa: BLE001
+                continue
+            shared[key] = shared.get(key, 0) + 1
         for i in range(1, docs.Count + 1):
             doc = docs.Item(i)
             doc_info = {
@@ -723,10 +779,23 @@ class DocumentTools:
                     "used by an open assembly, so it may have no window of its own; "
                     "if catia_activate_document refuses it, open it with "
                     "catia_open_document (or measure it by name with document=)")
+            if shared.get(str(doc.Name), 0) > 1:
+                doc_info["name_shared_by"] = shared[str(doc.Name)]
+                doc_info["note"] = (
+                    (doc_info.get("note", "") + " ").lstrip()
+                    + f"{shared[str(doc.Name)]} open documents carry this exact name "
+                    "(CATIA names an unsaved document after its part number), so "
+                    "document='<name>' is ambiguous and is refused with "
+                    "DOCUMENT_NAME_AMBIGUOUS - pass this entry's path instead")
             result.append(doc_info)
 
         if not result:
-            return "No documents open in CATIA"
+            # An empty session answers [] like a full one answers [ ... ]. It used
+            # to return the bare string "No documents open in CATIA", which made
+            # the reply's TYPE depend on the session - the same defect the three
+            # listings were fixed for on 2026-10-28 (list_features / _components /
+            # _constraints).
+            return "[]"
         return json.dumps(result, indent=2, ensure_ascii=False)
 
     def _component_usage(self) -> dict[str, list[str]]:
@@ -784,6 +853,10 @@ class DocumentTools:
             raise ValueError(
                 f"No open document named '{name}'. Open: {', '.join(names) or 'none'}."
             )
+        # Activating one of two same-named documents is a coin toss the caller
+        # cannot see either: the reply would name the document, and both answer to
+        # that name. Say so - and say how many (reported 2026-10-28, P1).
+        twins = self._twin_documents(target)
         target.Activate()
         # Read the state back. Activate() returning without an exception means
         # "the call was accepted", not "the document is now active": a part that
@@ -838,7 +911,12 @@ class DocumentTools:
                 "CATIA refused it the foreground while the assembly still "
                 "references it." + routes
             )
-        return f"Activated document: '{target.Name}'"
+        return (f"Activated document: '{target.Name}'"
+                + (f" - but {len(twins) + 1} open documents carry that name, and "
+                   "this activated the first match, which may not be the one you "
+                   f"mean. Tell them apart with catia_list_documents (a saved copy "
+                   "shows its path) and measure by full path, or close one."
+                   if twins else ""))
 
     def _window_state(self, name: str) -> bool | None:
         """True/False when this build can tell whether ``name`` has a window.
