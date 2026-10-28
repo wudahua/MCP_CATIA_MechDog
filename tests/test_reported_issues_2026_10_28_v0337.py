@@ -94,7 +94,6 @@ def _live_conn(docs, active=1):
     conn = CATIAConnection()
     conn.app = _App()
     conn.refresh_display = lambda: None
-    conn.refresh_display = conn.refresh_display  # noqa: PLW0127 - keep the stub
     return conn, session
 
 
