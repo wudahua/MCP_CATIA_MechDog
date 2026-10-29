@@ -264,7 +264,7 @@ def _assembly_tools(entries=None, skip=("part",)):
     tools._part_box_entry = lambda part, body, include_curved: dict(
         entries[part.Name])
     tools._part_identity = lambda part: part.Name
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
     return tools
 
 
@@ -274,7 +274,7 @@ def test_the_assembly_parts_publish_the_sweep_route():
     assert reply["parts"][0]["sweep_route"] == "one_call"
     assert reply["parts"][0]["points_route"] == "batched"
     from catia_mcp.tools import measurement as M
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
 
 
 def test_a_mesh_part_says_mesh_rather_than_nothing():
@@ -285,7 +285,7 @@ def test_a_mesh_part_says_mesh_rather_than_nothing():
     reply = json.loads(tools._assembly_box(_Doc("ASM.CATProduct"), "vertices"))
     assert reply["parts"][0]["sweep_route"] == "mesh"
     from catia_mcp.tools import measurement as M
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
 
 
 # ─────────────── 5. the cost no part owns is published
@@ -302,7 +302,7 @@ def test_the_cost_no_part_owns_is_reported():
     assert "not attributable to any entry" in reply["overhead_note"]
     assert "short by this much" in reply["overhead_note"]
     from catia_mcp.tools import measurement as M
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
 
 
 def test_the_cost_fields_come_before_the_instance_list():
@@ -347,16 +347,17 @@ def test_a_warm_up_returns_the_cost_and_not_the_geometry():
     for gone in ("min", "max", "dimensions", "components"):
         assert gone not in report
     assert report["parts_measured"] == 1
-    assert report["cold_parts"] == 1
+    assert report["session_first_parts"] == 1
+    assert report["regime"] == "cold"
     assert report["parts"][0]["part"] == "P31A"
     assert report["parts"][0]["first_measure"] is True
     assert "cells_scanned" in report["parts"][0]
     assert report["parts"][0]["sweep_route"] == "one_call"
-    assert "cold_parts: 0" in report["warm_up_note"]
+    assert "session_first_parts: 0" in report["warm_up_note"]
     assert "cannot be cached" in report["warm_up_note"]
     assert "mesh box" in report["warm_up_note"]
     from catia_mcp.tools import measurement as M
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
 
 
 def test_a_warm_up_on_one_part_reports_that_parts_regime():
@@ -394,7 +395,11 @@ def test_the_cold_note_quotes_the_measurement_that_prompted_it():
     assert not re.search(r"\d+\.\d+x", note), note
     assert "cold_warm_ratio" in note
     assert "parts_ms" in note and "overhead_ms" in note
-    assert f"{reply['parts_ms']}" in note
+    # 0.3.39: the note stopped QUOTING the two numbers and points at the fields
+    # instead. Quoting them cost a correction every release (the sentence printed
+    # "None" for one version, then a number that disagreed with the field beside
+    # it); naming the fields cannot go stale, and they are in the same object.
+    assert "read 'parts_ms'" in note
     assert "warm_up=true" in note
     from catia_mcp.tools import measurement as M
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()

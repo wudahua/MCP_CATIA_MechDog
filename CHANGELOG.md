@@ -2,6 +2,100 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.39] — 2026-10-29 · the acceptance table, done by a machine
+
+This release adds no field. It deletes three implementations of one function,
+renames a field that asserted a cause it never measured, and turns the
+"which route is missing which key" table into a test. The previous eleven rounds
+each closed one or two cells of that table — three fields across seven routes is
+twenty-one cells, and every one was filled in by hand, which is why two people
+were still finding one or two empty cells per round after eleven rounds.
+
+### Added — one `regime` function, seven routes, and a matrix test that keeps it
+
+- `catia_mcp/regime.py`: `SessionBooks.describe` returns the same six keys on
+  every measuring route — `regime`, `after_cold`, `session_first_parts`,
+  `parts_total`, `cold_reasons`, `elapsed_note` — including the two EMPTY
+  branches, which published none of them.
+- `tests/test_route_matrix.py` walks all seven routes (box: assembly / empty /
+  single part; mass properties: assembly / empty / named part / active part) and
+  asserts the key set, the arithmetic (`sum(cold_reasons) == session_first_parts`,
+  `session_first_parts <= parts_total`), the cost closure
+  (`parts_ms + overhead_ms == elapsed_ms`) and the three-key `overhead_breakdown`.
+- It also reads the `route=` literals out of `measurement.py` and compares them
+  with its own table, so a new branch cannot be added without a row. That is the
+  seam the acceptance table rotted through: the code grew a route, the table did
+  not.
+- Measured on B30 through the server, one call each: box cold/warm/warm =
+  `cold`/`warm`/`warm` with `after_cold` `null`/`true`/`false`; empty product =
+  `not_measured` and it does not move the flag for the next real call; mass
+  properties on the named part and on the active part answer the same six keys;
+  closure exact on all seven (833.1 = 487.7 + 345.4; 394.0 = 141.6 + 252.4;
+  9.8 = 0.0 + 9.8).
+
+### Changed — `cold_parts` is `session_first_parts`, and each part says why
+
+- The old name asserted a cause the count never measured: "these parts were
+  cold". The 2026-10-29 run falsified it — 26 of 28 parts were **no slower at
+  all** on their second reading (0.97×–1.13×), and the two that read 21×–26× were
+  paying for an **STL export**, not for a build.
+- `parts[].cold_reason` now says which JOB a part's first reading was:
+  `topology`, `mesh_export` or `mass_properties`. Recorded at the moment of the
+  reading, because a part's route is only known once its box exists.
+- The cold note no longer claims "CATIA builds a part's internal representation on
+  the first topology read". It says what the book counts, names the jobs in that
+  count, and points at this call's own fields. Nothing in it is a multiplier, a
+  range, or a cause.
+
+### Fixed — a warm reply quoted a delta between two different scopes
+
+- `elapsed_note` compared this call against the previous warm call on the same
+  document, whatever either call had measured. A `component='P05.1'` narrowing
+  (one instance) against the whole 70-instance assembly printed **−67 %**, which
+  is the scope, not the machine.
+- Each book now stores the scope with the warm time (component filter and instance
+  count) and quotes a delta only between two calls of the same scope. Two
+  different scopes get a sentence naming both. Measured on B30: the narrowed call
+  after two full ones says "the previous warm call on this document measured a
+  different scope (the whole assembly, 1 instance(s), against component 'REL38.1',
+  1 instance(s) here), so no delta is quoted" — and contains no `%`.
+
+### Fixed — every pre-execution rejection has one envelope (report B §5.1, §5.5)
+
+- `catia_run_plan(steps=[])` raised `ValueError`, which the server turned into
+  `COM_ERROR` plus "inspect the CATIA model before retrying" and a `recovery`
+  block — for a plan that never opened a document.
+- A **writer** whose arguments failed the outer schema got the same recovery block
+  (`recovery=NO_RECOVERY if read_only else None`), so `catia_pad {}` was told the
+  model changes were not verified. A validate-stage rejection happens before the
+  first COM call, whoever the tool is.
+- `catia_mcp.results.reject_validation` writes all of them: `ok: false`,
+  `data.failure_stage: "validate"`, `effects.modified: false`, no `recovery`,
+  `data.next_actions`. Measured on B30: unknown tool, `catia_pad {}`, empty plan,
+  bad step args and bad `expect` all answer that shape, and a valid plan still
+  runs (`PLAN_OK`) and still dry-runs (`PLAN_VALID`).
+- `expect` is validated like `steps`. A value that is not a number is
+  `INVALID_EXPECT` **before** the model changes, not `ASSERTION_FAILED` after it;
+  an entry that is not an object used to be skipped silently, so a plan whose
+  assertions were malformed answered `PLAN_OK` with an empty `assertions` list.
+
+### Note — the tests that asserted wording were rewritten to assert facts
+
+- Sixteen assertions across v0325–v0338 checked a sentence fragment in a source
+  file ("324 ms and then 549 ms", "FIRST time in this ", `cold_parts`). Those are
+  the same failure as the code: a contract bound to a phrase. They now assert the
+  fields, the notes' properties (no multiplier, no unlabelled constant) and, where
+  the sentence matters, that the one implementation contains it.
+- `_MEASURED_PARTS`, `_part_times`, `_inertia_times`, `_last_call_was_cold`,
+  `_last_inertia_cold`, `_warm_elapsed` and `_inertia_warm_elapsed` are gone.
+  Session state is one `SessionBooks` at module level (`M.reset_session_books()`
+  for tests), because two tool objects talking to one CATIA share a session and a
+  second book answers "first time" about a part this server already read.
+
+- 754 tests pass (37 new in `tests/test_route_matrix.py`), plus sixteen assertions
+  in eleven older files updated — they required the field names and phrases this
+  release removed.
+
 ## [0.3.38] — 2026-10-29 · one wrong name is one code, and the cost a narrowed call never reported
 
 ### Fixed — a wrong document name was a CATIA fault on the one tool about document names (report 1, P1)

@@ -123,12 +123,32 @@ Two independent promises, and a release that keeps one is not keeping the other:
   existed all along and, unnamed, made the other two 18-19 % short of the field
   beside them (reported 2026-10-29, §6.1).
 
-### Cold and warm: mechanism plus the field, never a multiplier
+### Cold and warm: ONE function, every route, mechanism plus the field
 
-`after_cold` is `null` (this call was cold), `true` (first call after a cold pass)
-or `false` (steady state) - always present, on both `catia_get_bounding_box` and
-an assembly `catia_get_inertia`. `cold_parts` counts the parts whose first
-measurement in this session happened in THIS call.
+There is exactly one implementation of the regime fields:
+`catia_mcp.regime.SessionBooks.describe`. It returns the same six keys on all
+seven measuring routes - `regime`, `after_cold`, `session_first_parts`,
+`parts_total`, `cold_reasons`, `elapsed_note` - and the EMPTY routes call it too,
+with `measured=False`.
+
+**Do not write these fields by hand in a route.** They were written out three
+times and missing from four branches; every acceptance round then found one or two
+of the empty cells, in the release that had just filled another pair. Adding a
+route means adding a row to `tests/test_route_matrix.py`, which reads the `route=`
+literals out of `measurement.py` and fails if the table and the code disagree.
+
+`regime` is `cold` / `warm` / `not_measured`; `after_cold` is `null` (this call was
+the cold one), `true` (first call after a cold pass) or `false` (steady state).
+`session_first_parts` counts the parts whose first reading by THIS SERVER happened
+in this call, out of `parts_total`. The name used to be `cold_parts`, which
+asserted a cause the count never measured - 26 of 28 parts in the 2026-10-29 run
+were no slower on their second reading.
+
+`cold_reasons` breaks that count down by JOB: `topology`, `mesh_export`,
+`mass_properties`. Each part also carries `parts[].cold_reason`, recorded at the
+moment of the reading (the route is only known once the box exists). A part
+bounded from an STL reads 20x on its first box and a vertex-swept one 1.0x; the
+ratio alone cannot say that, the reason can.
 
 The notes publish **no** cold/warm multiplier: not one reading, not a range, not a
 version-tagged pair. Every range this project published was falsified by the next
@@ -137,10 +157,26 @@ per-part terms are `parts[].cold_ms` and `parts[].cold_warm_ratio`, which are th
 call's reading. The rule: publish a range only if it holds in three independent
 sessions; otherwise mechanism plus the field.
 
-The two aggregators keep SEPARATE books. A part whose vertex sweep is warm can be
-cold for its mass properties, so `catia_get_bounding_box` and the assembly
-`catia_get_inertia` do not share `_part_times` - sharing them would divide one
-job's cold cost by another job's warm cost and print a ratio that means nothing.
+A delta is quoted only between two calls of the SAME scope. The book stores
+`(book, document, (component filter, instance count))` with the warm time, so a
+`component=` narrowing is never subtracted from a full scan - that comparison
+printed -67 % in the 2026-10-29 run and meant nothing.
+
+The two aggregators keep SEPARATE books (`BOOK_TOPOLOGY`, `BOOK_MASS`). A part
+whose vertex sweep is warm can be cold for its mass properties; sharing one book
+would divide one job's cold cost by another job's warm cost.
+
+### A rejection before execution has one envelope
+
+Everything refused before the first COM call goes through
+`catia_mcp.results.reject_validation`: `ok: false`,
+`data.failure_stage: "validate"`, `effects.modified: false`, **no** `recovery`
+block, `data.next_actions`. That covers an unknown tool, arguments that fail the
+outer schema (writers included - `recovery=NO_RECOVERY if read_only else None` was
+the bug), a plan with no steps, bad step args, and an `expect` that cannot be
+parsed (`INVALID_EXPECT`).
+
+A hand-built refusal dict is how the three shapes happened. Do not add a fourth.
 
 ## Error codes
 

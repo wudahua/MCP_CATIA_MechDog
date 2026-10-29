@@ -246,7 +246,7 @@ def _measurement_tools():
 def test_the_lookup_time_is_published_beside_the_breakdown_not_inside_it():
     from catia_mcp.tools import measurement as M
 
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
     tools = _measurement_tools()
     inner = tools._components_doc
 
@@ -266,7 +266,7 @@ def test_the_lookup_time_is_published_beside_the_breakdown_not_inside_it():
     assert round(sum(breakdown.values()), 1) == reply["overhead_ms"]
     assert "summing this dict is safe" in reply["overhead_note"]
     assert "SIBLING" in reply["overhead_note"]
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
 
 
 # ─────────────── 4. the cold/warm note quotes no multiplier (report 2, §6.1)
@@ -392,7 +392,7 @@ def test_a_part_that_could_not_be_measured_says_so_instead():
 def test_the_post_cold_note_does_not_cite_a_missing_sibling_field():
     from catia_mcp.tools import measurement as M
 
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
     tools = _measurement_tools()
     json.loads(tools._assembly_box(SimpleNamespace(Name="ASM.CATProduct"), "vertices"))
     note = json.loads(
@@ -403,8 +403,12 @@ def test_the_post_cold_note_does_not_cite_a_missing_sibling_field():
     # reply, so pointing at "quoted above" pointed at another session (report 2,
     # §6.4).
     assert "quoted above" not in note
-    assert "no previous warm call on this document in this session" in note
-    M._MEASURED_PARTS.clear()
+    assert "no earlier warm call on this document in this session yet" in note
+    # ...and it must not claim a delta it cannot have: with no previous warm
+    # reading of this scope there is nothing to subtract, and inventing "0.0 %"
+    # is how a first reading turns into a "trend".
+    assert "against" not in note
+    M.reset_session_books()
 
 
 # ─────────────── 8. the two aggregators' walk_other_ms are different jobs

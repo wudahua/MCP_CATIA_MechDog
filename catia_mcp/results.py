@@ -166,6 +166,43 @@ class _Omit:
 NO_RECOVERY = _Omit()
 
 
+def reject_validation(*, tool: str, message: str, code: str,
+                      details: list[dict[str, Any]] | None = None,
+                      next_actions: list[str] | None = None,
+                      data: dict[str, Any] | None = None) -> dict[str, Any]:
+    """A rejection that happened BEFORE anything was opened, read or written.
+
+    One shape, because two shapes were the defect: ``catia_run_plan`` answered a
+    plan it rejected with a hand-built dict (``ok``, ``code``, ``tool``,
+    ``message``, ``data``) that had no ``effects.modified`` and no
+    ``failure_stage``, while a plan with NO steps raised a bare ``ValueError``
+    that the server turned into ``COM_ERROR`` - complete with "inspect the CATIA
+    model before retrying" for a plan that never touched a model (reported
+    2026-10-29, report B §5.1).
+
+    A validation failure has three facts and they are always the same three:
+    nothing was modified, it failed at the ``validate`` stage, and what to fix is
+    an ARGUMENT. Publishing them from one function is what stops the next
+    rejection from being written with two of the three.
+    """
+    payload = operation_result(
+        tool=tool,
+        ok=False,
+        code=code,
+        message=message,
+        data={"failure_stage": "validate", **(data or {})},
+        # Not "unknown": this branch runs before the first COM call, so the
+        # model is provably untouched. `None` here is what put "model changes
+        # were not verified, inspect the CATIA model" on a rejected plan.
+        modified=False,
+        recovery=NO_RECOVERY,
+        next_actions=next_actions,
+    )
+    if details:
+        payload["data"] = {**payload["data"], "details": details}
+    return payload
+
+
 def operation_result(
     *,
     tool: str,

@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.38** · [what changed](CHANGELOG.md) ·
+**0.3.39** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -360,8 +360,8 @@ same geometry, and a single number quoted in a docstring reads as a promise the
 next measurement can only break. Every
 number in this section that was measured as "one part by name" is a COLD number,
 and reading it as a property of the part is what made an earlier release claim
-`17–93 ms per cell` as the model. `parts[].first_measure`, `cold_parts` and
-`elapsed_note` say which regime a call ran in; compare `elapsed_ms` across
+`17–93 ms per cell` as the model. `parts[].first_measure`, `parts[].cold_reason`,
+`regime` and `session_first_parts` say which regime a call ran in; compare `elapsed_ms` across
 sessions only with that in view.
 
 The 0.3.32 acceptance run on the same model measured **cold 173 s, warm 22.9 s**
@@ -372,7 +372,7 @@ constant. That is why the
 cold pass is now something you can **schedule** rather than something that happens
 to you: `catia_get_bounding_box {warm_up: true}` runs the same measurement, throws
 the geometry away and returns what it cost, so the next call that needs the box is
-warm (`cold_parts: 0`). There is no cheaper warm-up: CATIA's first-read setup *is*
+warm (`session_first_parts: 0`). There is no cheaper warm-up: CATIA's first-read setup *is*
 the work, and a per-part vertex box cannot be cached from a `(size, mtime)` the way
 a mesh box is — the mesh box describes a file, the vertex box describes the live
 part, which may hold edits that were never saved.
@@ -592,6 +592,29 @@ There is one table now, and it prefers what the raise site declares:
 | the message | CATIA's own refusals | `PART_NOT_LOADED`, … |
 | the caller's default | nothing matched | `COM_ERROR` (bare) / `STEP_EXCEPTION` (plan) |
 
+### A rejection before execution has one shape, from any tool
+
+Everything this server refuses **before its first COM call** — an unknown tool,
+arguments that fail the tool's own schema, a plan with no steps, a step whose
+arguments are wrong, an `expect` that cannot be parsed — answers the same
+envelope: `ok: false`, `data.failure_stage: "validate"`,
+`effects.modified: false`, **no `recovery` block**, and `data.next_actions`
+describing the argument to fix.
+
+It used to be three shapes. `catia_run_plan` built its refusal dict by hand (no
+`effects`, no `failure_stage`), a plan with no steps raised `ValueError` and came
+back as `COM_ERROR` with "inspect the CATIA model before retrying", and a *writer*
+whose arguments failed the outer schema got a full `recovery` block — advice to
+repair a model that had not been opened — while the same failure on a reader got
+none. `catia_mcp.results.reject_validation` writes all of them now, so the next
+refusal cannot ship with two of the three facts.
+
+`expect` is validated like `steps`: a value that is not a number is
+`INVALID_EXPECT` **before** the model changes, not `ASSERTION_FAILED` (a verdict
+on the model) after it. An `expect` entry that is not an object used to be skipped
+silently, so a plan whose assertions were malformed answered `PLAN_OK` with an
+empty `assertions` list — a pass that tested nothing.
+
 `recovery` follows the same rule — it is filled from facts, not from a template.
 A pad that measured both directions and rolled back reports `rolled_back: true`
 and "change the sketch's offset or profile, then retry", because retrying the same
@@ -633,7 +656,8 @@ body in a document you do not have open.
 Tools run on a single worker thread, so a long box blocks every other MCP call
 until it finishes. The reply states `elapsed_ms` (total and per part, `parts[]`),
 `first_measure` (was this part touched for the first time in this session),
-`cold_parts`, `after_cold`, `cells_scanned`,
+`regime` / `session_first_parts` / `parts_total` / `cold_reasons` / `after_cold`,
+`cells_scanned`,
 `sweep_route` (`one_call` / `per_cell`, or `mesh` when no vertex sweep ran),
 `poses_route` (`one_call` / `per_component` / `single`),
 `parts_ms`, `overhead_ms` and
@@ -646,17 +670,44 @@ or without an assembly active: if the active document is a Part, the component i
 looked up in the open assembly that contains it, and the reply says so
 (`measured_in`).
 
-`after_cold` is three values, never a missing key: `null` when THIS call was the
-cold one, `true` on the first call after a cold pass, `false` in the steady state.
+### Regime fields: one function, seven routes, one matrix test
+
+`regime` is `cold` / `warm` / `not_measured`, `after_cold` is three values and
+never a missing key: `null` when THIS call was the cold one, `true` on the first
+call after a cold pass, `false` in the steady state. `session_first_parts` counts
+the parts whose first reading by **this server** happened in this call, out of
+`parts_total`, and `cold_reasons` breaks that count down by job
+(`topology` / `mesh_export` / `mass_properties`).
+
+All six fields are produced by one function (`catia_mcp.regime.SessionBooks.describe`)
+and published by all seven measuring routes: bounding box on an assembly, on an
+empty product, and on one part; mass properties on an assembly, on an empty
+product, on a named part and on the active part. Before 0.3.39 they were written
+out three times and missing from four branches — each acceptance round found one
+or two of the empty cells, in the release that had just filled another pair by
+hand. `tests/test_route_matrix.py` now asserts the set, the arithmetic and the
+cost closure on every route, and reads the `route=` literals out of the source so
+a new branch cannot be added without a row in the matrix.
+
+`cold_parts` was renamed `session_first_parts`, and each part carries `cold_reason`.
+The old name asserted a cause ("these parts were cold") that the count never
+measured: in the 2026-10-29 run 26 of 28 parts were **no slower at all** on their
+second reading, and the two that read 21×–26× were paying for an **STL export**,
+not for a build. The note beside the count no longer claims a cause either — it
+says what the book counts and points at this call's own fields.
 `parts[].cold_ms` and `parts[].cold_warm_ratio` give the two regimes per part once
-both have been seen. They are the only numbers to quote: **the notes publish no
+both have been seen (and `parts[].cold_reason` says which job the first reading
+paid for). They are the only numbers to quote: **the notes publish no
 multiplier at all** (not even a range), because every range this project wrote
 down was falsified by the next session — 1.15×–1.81× for 12-cell parts became
 1.93×–3.70×, above its own ceiling, one day later. The rule, adopted 2026-10-29:
 a range is published only if it holds in three independent sessions; otherwise
 mechanism plus the field. A warm call does still quote this session's own
-difference against the previous warm call on the same document, which is a
-reading rather than a claim about CATIA.
+difference against the previous warm call on the same document — **only when both
+call measured the same scope**. Until 0.3.39 it quoted one anyway, and a
+`component=` narrowing (1 instance) compared against the whole 70-instance
+assembly read as −67 %, which is the scope, not the machine. Two different scopes
+get a sentence saying so instead of a number.
 
 `component_lookup_ms` (narrowed calls only, published **beside**
 `overhead_breakdown` rather than inside it) is the share of `components_doc_ms`
@@ -674,12 +725,11 @@ tool" is answered inside the reply. On the part routes the three terms add up:
 remainder (main body, shape count, density arithmetic, building the reply) that
 used to be 18–19 % of `parts_ms` with no field to attribute it to.
 
-The assembly inertia route answers the regime question too: `cold_parts`,
-`parts_total`, `parts[]` (per part, with `first_measure` and, once both regimes
-have been seen, `cold_ms` / `cold_warm_ratio`), `after_cold` and `elapsed_note`.
-Its book is deliberately separate from the bounding box's — mass properties and
-the vertex sweep do not warm up together — so a part can be warm for one and cold
-for the other.
+The assembly inertia route answers the regime question with the same six fields,
+plus `parts[]` (per part, with `first_measure`, `cold_reason` and, once both
+regimes have been seen, `cold_ms` / `cold_warm_ratio`). Its book is deliberately
+separate from the bounding box's — mass properties and the vertex sweep do not
+warm up together — so a part can be warm for one and cold for the other.
 
 A narrowed call (`component=`) reads the component list **once**. Until 0.3.38 it
 re-read the whole list — placements included — to answer "is this part also

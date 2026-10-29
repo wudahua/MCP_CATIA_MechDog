@@ -188,19 +188,26 @@ def test_the_unnarrowed_reply_keeps_saying_sub_assemblies_are_expanded():
 def test_the_box_says_which_regime_it_ran_in():
     from catia_mcp.tools import measurement as M
 
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
     tools = _narrowed_tools()
     first = json.loads(tools._assembly_box(_Doc("ASM27D.CATProduct"), "vertices"))
-    assert first["cold_parts"] == 1
+    # 0.3.39 renamed `cold_parts` to `session_first_parts`: the old name asserted
+    # a cause ("these parts were cold") that the count never measured - 26 of 28
+    # parts in the 2026-10-29 run were no slower on their second reading.
+    assert first["regime"] == "cold"
+    assert first["session_first_parts"] == 1
+    assert first["parts_total"] == 1
     assert first["part_boxes_total"] == 1
-    assert "FIRST time in this session" in first["elapsed_note"]
+    assert "session_first_parts" in first["elapsed_note"]
     assert first["parts"][0]["first_measure"] is True
+    assert first["parts"][0]["cold_reason"] == "topology"
 
     second = json.loads(tools._assembly_box(_Doc("ASM27D.CATProduct"), "vertices"))
-    assert second["cold_parts"] == 0
+    assert second["regime"] == "warm"
+    assert second["session_first_parts"] == 0
     assert "warm number" in second["elapsed_note"]
     assert second["parts"][0]["first_measure"] is False
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
 
 
 def test_the_description_quotes_both_regimes_not_only_the_cold_one():

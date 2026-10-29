@@ -23,6 +23,7 @@ from typing import Any
 
 from catia_mcp.connection import CATIAConnection
 from catia_mcp.results import CodedError
+from catia_mcp.results import reject_validation
 from catia_mcp.results import failure_code as shared_failure_code
 from catia_mcp.topo_search import topology_cells
 
@@ -306,28 +307,118 @@ class PlannerTools:
             })
         return problems
 
+    #: `expect` keys whose value has to be a NUMBER. A string here used to
+    #: reach `float()` inside `_check`, i.e. AFTER the model had been built, and
+    #: surfaced as an assertion failure about a measurement that was fine.
+    _EXPECT_NUMBERS = ("volume_mm3", "area_mm2", "volume_tolerance_pct",
+                       "area_tolerance_pct", "cog_tolerance_mm", "mass_kg",
+                       "density_kg_m3")
+
+    def _validate_expect(self, expect: Any) -> list[str]:
+        """Everything wrong with `expect`, before a single step runs.
+
+        `expect` is checked with the same seriousness as `steps`, because it is
+        the half of a plan that says whether the plan WORKED. Its failures used
+        to be discovered after the model had changed, and reported as
+        `ASSERTION_FAILED` (a verdict on the model) or `COM_ERROR` (a verdict on
+        CATIA) for what is a typo in the request (reported 2026-10-29, §5.5).
+        """
+        if expect is None:
+            return []
+        if isinstance(expect, dict):
+            entries: list[Any] = [expect]
+        elif isinstance(expect, list):
+            entries = expect
+        else:
+            return [
+                f"expect: must be an object (or a list of objects), not "
+                f"{type(expect).__name__} - nothing was executed"]
+        problems: list[str] = []
+        for index, entry in enumerate(entries, start=1):
+            where = f"expect[{index}]" if len(entries) > 1 else "expect"
+            if not isinstance(entry, dict):
+                problems.append(
+                    f"{where}: must be an object, not {type(entry).__name__} - it "
+                    "used to be skipped silently, so the plan answered PLAN_OK "
+                    "with no assertions at all")
+                continue
+            for key in self._EXPECT_NUMBERS:
+                if key not in entry:
+                    continue
+                value = entry[key]
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    problems.append(
+                        f"{where}.{key}: must be a number, got {value!r} - a "
+                        "string here fails inside the comparison, after the model "
+                        "has been built")
+            if "cog" in entry:
+                cog = entry["cog"]
+                if (not isinstance(cog, (list, tuple)) or len(cog) != 3
+                        or any(isinstance(v, bool) or not isinstance(v, (int, float))
+                               for v in cog)):
+                    problems.append(
+                        f"{where}.cog: must be three numbers [x, y, z], got "
+                        f"{cog!r}")
+        return problems
+
     def _run_plan(self, arguments: dict[str, Any]) -> dict[str, Any]:
         if self._router is None:
             raise RuntimeError("Planner is not bound to the tool router")
         steps = arguments.get("steps") or []
         if not steps:
-            raise ValueError("steps must contain at least one entry")
+            # Used to raise ValueError, which the server turned into COM_ERROR
+            # plus "inspect the CATIA model before retrying" and a recovery block
+            # - for a plan that never opened a document (reported 2026-10-29,
+            # report B §5.1). A missing argument is an argument problem.
+            return reject_validation(
+                tool="catia_run_plan",
+                code="INVALID_PLAN",
+                message=(
+                    "Plan rejected before touching the model: 'steps' is empty. A "
+                    "plan needs at least one step; to check a document without "
+                    "changing it, call catia_measure_topology or "
+                    "catia_get_inertia directly."),
+                next_actions=[
+                    "Pass 'steps' as a list of {tool, args} objects - nothing "
+                    "was opened, measured or changed by this call",
+                    "If you only want to read the model, use the reading tools: "
+                    "catia_measure_topology, catia_get_inertia, "
+                    "catia_get_bounding_box",
+                ],
+            )
 
         problems = self._validate_steps(steps)
         arg_problems = self._validate_args(steps)
-        if problems or arg_problems:
-            messages = problems + [p["message"] for p in arg_problems]
-            return {
-                "ok": False,
-                # "BAD_ARGS" is the honest code when the only thing wrong is a
-                # step's arguments: the plan itself is fine, and the caller has
-                # to fix a call, not a sequence.
-                "code": "BAD_ARGS" if arg_problems and not problems else "INVALID_PLAN",
-                "tool": "catia_run_plan",
-                "message": "Plan rejected before touching the model: "
-                           + "; ".join(messages[:3]),
-                "data": {"problems": messages, "details": arg_problems},
-            }
+        expect_problems = self._validate_expect(arguments.get("expect"))
+        if problems or arg_problems or expect_problems:
+            messages = (problems + [p["message"] for p in arg_problems]
+                        + expect_problems)
+            # "BAD_ARGS" is the honest code when the only thing wrong is a step's
+            # arguments: the plan itself is fine, and the caller has to fix a
+            # call, not a sequence. "INVALID_EXPECT" separates the assertion half
+            # from the step half - they are fixed in different places.
+            if problems:
+                code = "INVALID_PLAN"
+            elif arg_problems:
+                code = "BAD_ARGS"
+            else:
+                code = "INVALID_EXPECT"
+            return reject_validation(
+                tool="catia_run_plan",
+                code=code,
+                message="Plan rejected before touching the model: "
+                        + "; ".join(messages[:3]),
+                details=arg_problems or None,
+                data={"problems": messages,
+                      "expect_problems": expect_problems},
+                next_actions=[
+                    "Fix the named argument and re-submit: this plan was rejected "
+                    "before its first step, so nothing was opened, measured or "
+                    "changed",
+                    "catia_run_plan(dry_run=true) checks a plan without running "
+                    "it - the same validation, no execution",
+                ],
+            )
         if arguments.get("dry_run"):
             return {
                 "ok": True,

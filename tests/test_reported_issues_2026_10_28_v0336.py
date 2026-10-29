@@ -14,6 +14,7 @@ read-only tool still got a `recovery` block when it failed validation.
 """
 
 import json
+import re
 import inspect
 from types import SimpleNamespace
 
@@ -256,51 +257,57 @@ def _doc(name):
 def test_after_cold_is_null_true_false_and_always_present():
     from catia_mcp.tools import measurement as M
 
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
     tools = _assembly_tools()
     cold = json.loads(tools._assembly_box(_doc("ASM.CATProduct"), "vertices"))
-    assert cold["cold_parts"] == 1
+    assert cold["session_first_parts"] == 1
+    assert cold["regime"] == "cold"
     assert "after_cold" in cold and cold["after_cold"] is None
     first = json.loads(tools._assembly_box(_doc("ASM.CATProduct"), "vertices"))
     assert first["after_cold"] is True
     second = json.loads(tools._assembly_box(_doc("ASM.CATProduct"), "vertices"))
     assert second["after_cold"] is False
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
 
 
 def test_the_post_cold_note_does_not_claim_a_direction():
     """0.3.34 measured +27 %, 0.3.35 measured -1 %: it is not a rule."""
     from catia_mcp.tools import measurement as M
 
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
     tools = _assembly_tools()
     json.loads(tools._assembly_box(_doc("ASM.CATProduct"), "vertices"))
     note = json.loads(
         tools._assembly_box(_doc("ASM.CATProduct"), "vertices"))["elapsed_note"]
-    assert "upper bound" in note          # the phrase is named...
+    assert "upper bound" in note            # the phrase is named...
     assert "NOT as an upper bound" in note  # ...in order to reject it
-    assert "+27.4 %" in note and "-0.8 %" in note
+    # 0.3.39 dropped "+27.4 %" and "-0.8 %" too: they were two readings from two
+    # sessions, and the sentence's point is that the direction is NOT a rule -
+    # quoting two observations beside that claim was arguing with itself.
+    assert "both ways" in note
+    assert not re.search(r"[+-]\d+\.\d %", note), note
     assert "181.8 s" not in note          # no unlabelled constant survives
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
 
 
 def test_a_repeat_warm_call_quotes_this_sessions_difference():
     from catia_mcp.tools import measurement as M
 
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
     tools = _assembly_tools()
     json.loads(tools._assembly_box(_doc("ASM.CATProduct"), "vertices"))
     json.loads(tools._assembly_box(_doc("ASM.CATProduct"), "vertices"))
     note = json.loads(
         tools._assembly_box(_doc("ASM.CATProduct"), "vertices"))["elapsed_note"]
-    assert "previous warm call on this document in this session" in note
-    M._MEASURED_PARTS.clear()
+    assert "for the previous warm call on this document" in note
+    assert "same scope" in note
+    M.reset_session_books()
 
 
 def test_each_part_carries_its_own_cold_warm_ratio():
     from catia_mcp.tools import measurement as M
 
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
     tools = _assembly_tools(part_ms=3.0)
     json.loads(tools._assembly_box(_doc("ASM.CATProduct"), "vertices"))
     warm = json.loads(tools._assembly_box(_doc("ASM.CATProduct"), "vertices"))
@@ -308,7 +315,7 @@ def test_each_part_carries_its_own_cold_warm_ratio():
     assert entry["cold_ms"] > 0
     assert entry["cold_warm_ratio"] > 0
     assert "weighted sum" in entry["cold_warm_note"]
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
 
 
 # ─────────────── 3. an empty assembly: no phantom instance, no active-window name

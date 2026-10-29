@@ -268,7 +268,7 @@ def _assembly_tools(entries=None, walk_ms=0.0):
     tools._part_box_entry = lambda part, body, include_curved: dict(
         entries[part.Name])
     tools._part_identity = lambda part: part.Name
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
     return tools
 
 
@@ -280,7 +280,7 @@ def test_the_three_cost_buckets_add_up_to_overhead_exactly():
     assert round(sum(breakdown.values()), 1) == reply["overhead_ms"]
     assert reply["parts_ms"] + reply["overhead_ms"] == reply["elapsed_ms"]
     from catia_mcp.tools import measurement as M
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
 
 
 def test_a_negative_remainder_comes_off_the_largest_bucket():
@@ -302,7 +302,7 @@ def test_the_cold_note_quotes_this_call_and_a_range_of_versions():
     # still a single reading (reported 2026-10-29, §6.5).
     assert not re.search(r"\d+\.\d+x", note), note
     from catia_mcp.tools import measurement as M
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
 
 
 # ─────────────── 6. the 12 numbers per instance, read once

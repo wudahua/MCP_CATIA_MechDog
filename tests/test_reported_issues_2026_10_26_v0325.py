@@ -279,7 +279,11 @@ def test_the_single_part_box_publishes_the_route_too():
     # fields, including the cost regime the active path used to drop.
     active = __import__("inspect").getsource(M.MeasurementTools._get_bounding_box)
     assert "_part_bbox(part, method)" in active
-    assert "elapsed_note" in source and "first_measure" in source
+    # 0.3.39: the regime fields are not assembled here any more, they come from
+    # the one implementation every route shares. Asserting the CALL is stronger
+    # than listing field names: a name can be present in a dead branch (it was,
+    # twice), a call cannot.
+    assert "_BOOKS.describe(" in source
 
 
 def test_every_call_says_what_it_cost():

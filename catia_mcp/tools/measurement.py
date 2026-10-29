@@ -15,6 +15,14 @@ import uuid
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
+from catia_mcp.regime import (
+    BOOK_MASS,
+    BOOK_TOPOLOGY,
+    MASS_PROPERTIES,
+    MESH_EXPORT,
+    TOPOLOGY,
+    SessionBooks,
+)
 from catia_mcp.results import CodedError
 from catia_mcp.topo_search import is_construction, nls_of, search_topology
 
@@ -141,15 +149,20 @@ _MESH_CACHE_LIMIT = 48
 # is, so an extent-only caller keeps hitting the cache.
 _MESH_CACHE_CLOUD_LIMIT = 50_000
 
-# Parts this PROCESS has already walked the vertices of. CATIA builds a part's
-# internal representation on the first topology read, and that is what makes the
-# first measurement of an assembly 4-5x the later ones: measured on a 28-part,
-# 70-instance model, 194.7 s for the first call and 41.4 / 41.5 s for the next
-# two, with `cells_scanned`, `vertices_used` and `nls_chars` IDENTICAL all three
-# times - the work is the same, the first pass pays CATIA's setup. A number that
-# looks like "this part costs 80 s" turned out to mean "this part had not been
-# touched yet" (reported 2026-10-27), so the reply says which one it was.
-_MEASURED_PARTS: set[Any] = set()
+# What this PROCESS has read, per JOB. Session state - CATIA's own caches are
+# session state too, so two tool objects talking to one CATIA share it (a second
+# book would report "first time" about a part this server had already read).
+#
+# It used to be `_MEASURED_PARTS` (a bare set) plus five attributes on
+# `MeasurementTools`, and the cold/warm fields built from them were written out
+# THREE times and missing from four branches. There is one book now
+# (`catia_mcp.regime.SessionBooks`) and one function that turns it into fields.
+_BOOKS = SessionBooks()
+
+
+def reset_session_books() -> None:
+    """Forget every first-reading and every warm time. Tests call this."""
+    _BOOKS.reset()
 
 
 def _file_identity(path: str) -> tuple[str, int, int] | None:
@@ -431,6 +444,19 @@ def _pose_note(route: str) -> str:
             "own: 5 036 ms of a 5 563 ms overhead block on 70 instances")
 
 
+def _document_key(doc: Any) -> str:
+    """The document's name, or ``""`` when it cannot be read.
+
+    The regime book keys warm times by document, and a document whose name
+    cannot be read simply gets no delta rather than a KeyError: the numbers are
+    the answer, the label is a courtesy.
+    """
+    try:
+        return str(doc.Name)
+    except Exception:  # noqa: BLE001 - see docstring
+        return ""
+
+
 def _cost_first(payload: dict[str, Any]) -> dict[str, Any]:
     """Answer first, cost model next, per-component detail last.
 
@@ -441,8 +467,9 @@ def _cost_first(payload: dict[str, Any]) -> dict[str, Any]:
     reply loses. Nothing is dropped; the order is.
     """
     order = ("dimensions", "min", "max", "complete", "empty_assembly",
-             "elapsed_ms", "cold_parts",
-             "part_boxes_total", "part_boxes", "parts_ms", "overhead_ms",
+             "elapsed_ms", "regime", "session_first_parts", "parts_total",
+             "cold_reasons", "part_boxes_total", "part_boxes", "parts_ms",
+             "overhead_ms",
              "overhead_note", "overhead_breakdown", "component_lookup_ms",
              "poses_route", "poses_route_note", "after_cold", "elapsed_note",
              "document", "assembly_depth_max", "instances",
@@ -597,29 +624,13 @@ class MeasurementTools:
         # "components_doc_ms is that one read" stops being a false label
         # (reported 2026-10-28, §5.3).
         self._lookup_ms: float | None = None
-        # Whether the last measurement of an assembly was the cold one, so the
-        # reply can say "this is the first call after a cold pass" instead of
-        # "warm numbers vary by a few percent" (reported 2026-10-28, §6).
-        self._last_call_was_cold = False
-        # Last WARM elapsed_ms per document, so a repeated call quotes THIS
-        # session's difference instead of another session's constant. Keyed by
-        # document name; the cold pass never writes it (a cold number is not a
-        # baseline for a warm one).
-        self._warm_elapsed: dict[str, float] = {}
-        # Per PART: {"cold_ms": first measurement, "warm_ms": latest one}. The
-        # assembly-level cold/warm ratio is a weighted sum of these, and quoting
-        # the sum as a property of CATIA is what made 4.65x -> 7.6x -> 7.24x look
-        # like drift on an unchanged model (reported 2026-10-28, §2.4).
-        self._part_times: dict[str, dict[str, float]] = {}
-        # The same book for the ASSEMBLY INERTIA route, kept separate: those
-        # numbers are the vertex sweep, these are volume / area / COG, and a part
-        # whose box is warm can be cold here because the two readers build
-        # different internal structures. Dividing one by the other would produce
-        # a ratio that means nothing (reported 2026-10-29, §5.1: the inertia route
-        # answered none of the regime vocabulary the box route answers).
-        self._inertia_times: dict[str, dict[str, float]] = {}
-        self._last_inertia_cold = False
-        self._inertia_warm_elapsed: dict[str, float] = {}
+        # Cold/warm bookkeeping lives in `_BOOKS` (module level, one book per
+        # JOB), not on this object: what a part's first reading cost is a fact
+        # about the session, and a second MeasurementTools sharing one CATIA must
+        # answer it the same way. The four attributes that used to sit here grew
+        # a second set when the inertia route needed them, and the two sets
+        # disagreed about what "cold" meant - which is what `catia_mcp.regime`
+        # exists to stop.
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         return [
@@ -1290,6 +1301,9 @@ class MeasurementTools:
         payload["tensor_ms"] = tensor_ms
         payload["parts_other_ms"] = parts_other_ms
         payload["overhead_note"] = _PART_COST_NOTE
+        payload.update(self._mass_property_regime(
+            part, route="inertia.part_document", payload=payload,
+            elapsed_ms=parts_ms))
         return json.dumps(payload, indent=2)
 
     def _tensor_refusal(self, doc: Any, label: str) -> tuple[str, str]:
@@ -1565,6 +1579,9 @@ class MeasurementTools:
         result["parts_other_ms"] = round(
             max(parts_ms - measure_ms - tensor_ms, 0.0), 1)
         result["overhead_note"] = _PART_COST_NOTE
+        result.update(self._mass_property_regime(
+            part, route="inertia.part_active", payload=result,
+            elapsed_ms=parts_ms))
         return self._stamp_elapsed(json.dumps(result, indent=2), started)
 
     @staticmethod
@@ -2068,6 +2085,23 @@ class MeasurementTools:
                     "reply has the same keys as a measured one: parts_ms is 0 "
                     "because no part was read, and everything spent is reading the "
                     "(empty) component list and building this reply"),
+                # The regime fields too, and this is the branch that proved the
+                # point: 0.3.38 added them to the EMPTY INERTIA branch and left
+                # this one without, so the two aggregators answered the same
+                # question differently for the same document (reported
+                # 2026-10-29, report A §6). One call, one key set, every route.
+                **_BOOKS.describe(
+                    book=BOOK_TOPOLOGY,
+                    route="box.empty",
+                    measured=False,
+                    parts_total=0,
+                    session_first=0,
+                    doc_key=_document_key(doc),
+                    empty_reason=(
+                        "'parts_total' is 0 for the same reason 'instances.total' "
+                        "is: this product holds no component, so no part's regime "
+                        "is being reported"),
+                ),
                 **({"poses_route": poses_route,
                     "poses_route_note": _pose_note(poses_route)}
                    if poses_route else {}),
@@ -2133,112 +2167,47 @@ class MeasurementTools:
         # minutes with the whole server behind it; the number makes that visible
         # instead of surprising (reported 2026-10-26).
         payload["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
-        # Which regime this call ran in. Two calls of the same assembly in one
-        # session differ by 4.7x with every work counter identical, so the number
-        # alone cannot be compared across calls - let alone across sessions
-        # (reported 2026-10-27: 194.7 s, then 41.4 s, then 41.5 s).
-        cold_parts = sum(1 for cached in local_boxes.values()
-                         if cached.get("first_measure"))
-        payload["cold_parts"] = cold_parts
+        # Which regime this call ran in, from the one implementation every route
+        # shares. Two calls of the same assembly in one session differ by 4.7x
+        # with every work counter identical, so the number alone cannot be
+        # compared across calls - let alone across sessions (reported 2026-10-27:
+        # 194.7 s, then 41.4 s, then 41.5 s). Before 0.3.39 this was 100 lines
+        # written out here, again for the inertia route, again in `_part_bbox`, and
+        # nowhere at all in the two empty branches and the two part routes.
+        session_first = sum(1 for cached in local_boxes.values()
+                            if cached.get("first_measure"))
+        cold_reasons: dict[str, int] = {}
+        for cached in local_boxes.values():
+            if not cached.get("first_measure"):
+                continue
+            reason = (MESH_EXPORT if cached.get("source") == "mesh_fallback"
+                      else TOPOLOGY)
+            cold_reasons[reason] = cold_reasons.get(reason, 0) + 1
         payload["part_boxes_total"] = len(local_boxes)
-        # Summed here, not later, because the cold note quotes it: the note that
-        # says "do not compare elapsed_ms across sessions, use this call's own
-        # numbers" was written before the numbers existed and printed None
-        # (found by its own test, 2026-10-28).
         parts_ms = round(sum(float(entry.get("elapsed_ms") or 0.0)
                              for entry in parts_detail.values()), 1)
         payload["parts_ms"] = parts_ms
         payload["overhead_ms"] = round(max(payload["elapsed_ms"] - parts_ms, 0.0), 1)
-        # Was the PREVIOUS measurement of this assembly the cold one? Both 0.3.33
-        # and 0.3.34 measured the call right after a cold pass 23-24 % above the
-        # third one, with parts_ms driving it (23 555.7 -> 19 090.3 -> 18 580.2 on
-        # the acceptance assembly), while the note said "vary by a few percent".
-        # A caller comparing a single 25.5 s against someone else's 20.0 s would
-        # read that as a regression (reported 2026-10-28, §6).
-        #
-        # 0.3.36 makes it THREE values, and the third one matters: the cold reply
-        # used to omit the key entirely, so `reply["after_cold"]` raised KeyError
-        # on the one call where the question "which regime is this?" is the whole
-        # point - the exact shape 0.3.35 had just fixed for poses_route two fields
-        # up, in the same object (reported 2026-10-28, §5.2). null = this call was
-        # itself cold; true = first call after one; false = the steady state.
-        after_cold: bool | None = None
-        if cold_parts == 0:
-            after_cold = self._last_call_was_cold
-        self._last_call_was_cold = cold_parts > 0
-        payload["after_cold"] = after_cold
-        # The previous WARM elapsed_ms for this document, so the post-cold sentence
-        # can quote this session's own difference instead of another session's
-        # constant. The 0.3.35 note asserted "+23.6 % and therefore an upper bound"
-        # from 0.3.34's numbers, and 0.3.35 measured -0.8 % - the opposite
-        # direction (reported 2026-10-28, §5.1).
-        document_key = ""
-        try:
-            document_key = str(doc.Name)
-        except Exception:  # noqa: BLE001 - no name, no comparison
-            document_key = ""
-        previous_warm = self._warm_elapsed.get(document_key) if document_key else None
-        if cold_parts == 0 and document_key:
-            self._warm_elapsed[document_key] = payload["elapsed_ms"]
-        if cold_parts:
-            # Quote THIS call, not a constant baked in from one afternoon. The
-            # sentence used to say "173.4 s against 22.9 s (7.6x)" - true when it
-            # was written and wrong one version later (182.8 s / 25.9 s), so a
-            # reader whose environment matched neither read the release as a
-            # regression (reported 2026-10-28, §6). A ratio range says what CATIA
-            # does; the current numbers say what this call did.
-            payload["elapsed_note"] = (
-                f"{cold_parts} of {len(local_boxes)} part(s) were measured for the "
-                "FIRST time in this session. CATIA builds a part's internal "
-                "representation on the first topology read, so a cold call costs "
-                "several times a warm one - and that factor is per PART and per "
-                "session, so no multiplier is quoted here. This note carried one "
-                "reading as if it were a property for four versions in a row, and "
-                "each new session moved it again; the per-part terms for THIS call "
-                "are in 'parts[].cold_warm_ratio', and those are the only ones to "
-                "quote. Quote "
-                "THIS call's own numbers (parts_ms "
-                f"{payload.get('parts_ms')} + overhead_ms "
-                f"{payload.get('overhead_ms')} = elapsed_ms "
-                f"{payload.get('elapsed_ms')}) rather than a constant, and do not "
-                "compare elapsed_ms across sessions without saying which regime it "
-                "came from. warm_up=true pays this cost in a call that does not "
-                "need the box.")
-        else:
-            payload["elapsed_note"] = (
-                "every part here had already been measured once in this session, "
-                "so this is the warm number. Repeat calls of one assembly vary by a "
-                "few percent, but a single small part can swing much more (12 cells "
-                "measured at 324 ms and then 549 ms in one session), so do not read "
-                "one part's time to three digits."
-                + (f" This call took {payload['elapsed_ms']} ms against "
-                   f"{previous_warm} ms for the previous warm call on this document "
-                   f"in this session ({payload['elapsed_ms'] - previous_warm:+.1f} ms, "
-                   f"{(payload['elapsed_ms'] / previous_warm - 1) * 100:+.1f} %)."
-                   if previous_warm and not after_cold else "")
-                + (" It is also the FIRST call after a cold pass. Across versions "
-                   "that has measured BOTH ways against the third call - +27.4 % on "
-                   "0.3.34, -0.8 % on 0.3.35, 25.5 s then 20.6 / 20.0 s there, and "
-                   "18.8 / 19.2 / 19.0 s on the run that produced this field - so "
-                   "the direction is not a property of this code, it is session "
-                   "state. Read a single post-cold number as 'not yet the steady "
-                   "state', NOT as an upper bound"
-                   # "Compare it with the previous warm call quoted above" only
-                   # means something when that sentence WAS quoted: on the first
-                   # warm call after a cold pass there is no previous warm call in
-                   # this session at all, and the old tail pointed the reader at
-                   # the other session's numbers that the same sentence had just
-                   # told them not to use (reported 2026-10-28, §6.4). Three cases,
-                   # because "warm, then a cold pass, then this" is not the same
-                   # as "this is the first warm call of the session".
-                   + ((" - an earlier warm call on this document exists in this "
-                       f"session ({previous_warm} ms) but is not quoted here; read "
-                       "this one as one reading, not as a trend.")
-                      if previous_warm
-                      else " - and there is no previous warm call on this document "
-                           "in this session to compare it with, so read it as one "
-                           "reading, not as a trend.")
-                   if after_cold else ""))
+        payload.update(_BOOKS.describe(
+            book=BOOK_TOPOLOGY,
+            route="box.assembly",
+            measured=True,
+            parts_total=len(local_boxes),
+            session_first=session_first,
+            cold_reasons=cold_reasons,
+            doc_key=_document_key(doc),
+            elapsed_ms=payload["elapsed_ms"],
+            # What this call measured, so a delta is only quoted against a call
+            # of the SAME shape: `component='P05.1'` (1 instance) against the
+            # whole 70-instance assembly read as -67 % and meant nothing
+            # (reported 2026-10-29, §5.3).
+            scope=(only or "", len(entries)),
+            # The one sentence only this route can write: `warm_up` is a bounding
+            # box argument, so the advice belongs to this reply and not to the
+            # shared note.
+            tail=("warm_up=true pays this cost in a call that does not need "
+                  "the box."),
+        ))
         try:
             payload["document"] = str(doc.Name)
         except Exception:  # noqa: BLE001 - the numbers are the point
@@ -2524,11 +2493,21 @@ class MeasurementTools:
             key = self._part_identity(row["part"])
             if key not in local_boxes:
                 part_started = time.perf_counter()
-                first_measure = key not in _MEASURED_PARTS
+                first_measure = _BOOKS.is_new(BOOK_TOPOLOGY, key)
                 local_boxes[key] = self._part_box_entry(row["part"], body,
                                                         include_curved)
                 local_boxes[key]["first_measure"] = first_measure
-                _MEASURED_PARTS.add(key)
+                if "error" not in local_boxes[key]:
+                    # The reason is only known once the route is: a part bounded
+                    # from its mesh pays for an STL EXPORT, not for a topology
+                    # build, and that is the whole difference between the parts
+                    # that read 21x on their second call and the ones that read
+                    # 0.97x (reported 2026-10-29, §5.2). Recording it at the
+                    # moment of the reading, not later from a table of sizes.
+                    _BOOKS.note(
+                        BOOK_TOPOLOGY, key,
+                        MESH_EXPORT if local_boxes[key].get("source") == "mesh_fallback"
+                        else TOPOLOGY)
                 # What this part actually cost, once. `cells_scanned` is the work
                 # estimate; this is the measured price of it, which is the number
                 # a caller budgets with - 1 207 cells and 24 cells differ by 40x
@@ -2540,11 +2519,7 @@ class MeasurementTools:
                 # assembly-level cold/warm ratio is a weighted sum, so quoting it
                 # as "CATIA's cold factor" hid that a 1207-cell part pays 15x and a
                 # 12-cell one 1.3x (reported 2026-10-28, §2.4).
-                history = self._part_times.setdefault(key, {})
-                if first_measure:
-                    history["cold_ms"] = elapsed_ms
-                else:
-                    history["warm_ms"] = elapsed_ms
+                _BOOKS.record_time(BOOK_TOPOLOGY, key, elapsed_ms, first_measure)
             cached = local_boxes[key]
             if "error" in cached:
                 skipped.append({"component": label, "name": name, "path": path,
@@ -2600,12 +2575,16 @@ class MeasurementTools:
                 # This part's own two regimes, when both have been seen. The
                 # aggregate ratio is a weighted sum; these are the terms
                 # (reported 2026-10-28, §2.4: 1.30x to 15.10x inside one session).
-                history = self._part_times.get(key) or {}
-                if history.get("cold_ms") is not None and history.get("warm_ms"):
-                    detail["cold_ms"] = history["cold_ms"]
-                    detail["cold_warm_ratio"] = round(
-                        history["cold_ms"] / history["warm_ms"], 2)
+                detail.update(_BOOKS.time_of(BOOK_TOPOLOGY, key))
+                if "cold_warm_ratio" in detail:
                     detail["cold_warm_note"] = _COLD_RATIO_NOTE
+                # WHY this part's first box cost what it did. The ratio alone
+                # cannot say it: 21x is an STL export and 1.0x is a vertex sweep
+                # (reported 2026-10-29, §5.2 - two mesh-bounded parts among 28
+                # made the aggregate count mean something it did not).
+                reason = _BOOKS.reason_of(BOOK_TOPOLOGY, key)
+                if reason:
+                    detail["cold_reason"] = reason
                 # Which of the two regimes this number came from. Without it a
                 # caller compares 80 s with 11 s for the same part and the same
                 # work, and concludes the tool got 7x faster (reported 2026-10-27).
@@ -2769,8 +2748,13 @@ class MeasurementTools:
         # route that reads every part's mass properties - the exact question
         # after_cold exists for (reported 2026-10-29, §5.1).
         inertia_parts = list(parts_detail.values())
-        cold_parts = sum(1 for entry in inertia_parts if entry.get("first_measure"))
-        cost_fields["cold_parts"] = cold_parts
+        session_first = sum(1 for entry in inertia_parts
+                            if entry.get("first_measure"))
+        cold_reasons: dict[str, int] = {}
+        for entry in inertia_parts:
+            if entry.get("first_measure"):
+                reason = entry.get("cold_reason") or MASS_PROPERTIES
+                cold_reasons[reason] = cold_reasons.get(reason, 0) + 1
         cost_fields["parts_total"] = len(inertia_parts)
         cost_fields["parts"] = inertia_parts
         try:
@@ -2808,8 +2792,17 @@ class MeasurementTools:
                 "assembly_depth_max": depth_max,
                 "elapsed_ms": elapsed,
                 **cost_fields,
-                **self._inertia_regime(elapsed, cold_parts, len(inertia_parts),
-                                       doc_name, measured=False),
+                **_BOOKS.describe(
+                    book=BOOK_MASS,
+                    route="inertia.empty",
+                    measured=False,
+                    parts_total=0,
+                    session_first=0,
+                    doc_key=doc_name or "",
+                    empty_reason=(
+                        "'parts_total' is 0 because this product holds no "
+                        "component, so no part's regime is being reported"),
+                ),
                 **({"document": doc_name} if doc_name else {}),
                 "skipped": [] if empty_product else skipped,
                 "incomplete_because": (
@@ -2843,8 +2836,22 @@ class MeasurementTools:
             # fields that say which regime produced the number (reported
             # 2026-10-27). Same order here, since this route now carries them.
             **cost_fields,
-            **self._inertia_regime(elapsed, cold_parts, len(inertia_parts),
-                                   doc_name, measured=True, parts_ms=parts_ms),
+            **_BOOKS.describe(
+                book=BOOK_MASS,
+                route="inertia.assembly",
+                measured=True,
+                parts_total=len(inertia_parts),
+                session_first=session_first,
+                cold_reasons=cold_reasons,
+                doc_key=doc_name or "",
+                elapsed_ms=elapsed,
+                # What this call measured: the whole assembly, always - this route
+                # has no `component=` narrowing - so the scope only has to record
+                # how many instances it walked, which is what makes two calls of
+                # different assemblies (or of the same one before and after an
+                # insert) non-comparable rather than a delta.
+                scope=("", instances["total"]),
+            ),
             "components": leaves,
             "note": ("volume-weighted aggregation of the components' own volumes "
                      "and centres of gravity, moved into world space by each "
@@ -2872,66 +2879,6 @@ class MeasurementTools:
                 "component on its own with catia_get_inertia(document=...), and add "
                 "it in yourself.")
         return json.dumps(payload, indent=2)
-
-    def _inertia_regime(self, elapsed_ms: float, cold_parts: int,
-                        parts_total: int, doc_name: str | None,
-                        measured: bool, parts_ms: float = 0.0) -> dict[str, Any]:
-        """``after_cold`` / ``elapsed_note`` for the assembly inertia route.
-
-        Same three values as the box route, and the same reason: one call of this
-        route right after a cold pass is the slowest one, and without the field a
-        reader compares 22.1 s with 16.2 s and calls it a regression. The
-        direction is not baked in - the note quotes THIS session's own difference
-        and says the post-cold direction has measured both ways.
-
-        ``measured=False`` is the empty product: nothing was read, so the call is
-        neither cold nor warm and the flag must not move (an empty product cannot
-        make the next real call look warm).
-        """
-        if not measured:
-            return {
-                "after_cold": None,
-                "elapsed_note": (
-                    "nothing was read, so this call is neither cold nor warm - "
-                    "'after_cold: null' here means 'not applicable', and it does "
-                    "not change what the next call on this document reports"),
-            }
-        after_cold = None if cold_parts else self._last_inertia_cold
-        self._last_inertia_cold = cold_parts > 0
-        document_key = doc_name or ""
-        previous_warm = (self._inertia_warm_elapsed.get(document_key)
-                         if document_key else None)
-        if cold_parts == 0 and document_key:
-            self._inertia_warm_elapsed[document_key] = elapsed_ms
-        if cold_parts:
-            note = (
-                f"{cold_parts} of {parts_total} part(s) had their MASS PROPERTIES "
-                "read for the first time in this session, so this is a cold call: "
-                "CATIA builds a part's internal representation on the first "
-                "measurement of it, and the factor differs per part and per "
-                "session - which is why no aggregate multiplier is quoted here. "
-                "The per-part terms are in 'parts[].cold_warm_ratio', and each "
-                "part's reading came from its own first measurement in this "
-                "session. This route's book is separate from the bounding box's: "
-                "a part whose box is warm can be cold here, because the two "
-                "readers build different structures. Quote THIS call's own numbers "
-                f"(parts_ms {round(parts_ms, 1)} + overhead_ms "
-                f"{round(max(elapsed_ms - parts_ms, 0.0), 1)} = elapsed_ms "
-                f"{elapsed_ms}).")
-        else:
-            note = (
-                "every part here had its mass properties read earlier in this "
-                "session, so this is the warm number."
-                + (f" This call took {elapsed_ms} ms against {previous_warm} ms for "
-                   f"the previous warm call on this document in this session "
-                   f"({elapsed_ms - previous_warm:+.1f} ms, "
-                   f"{(elapsed_ms / previous_warm - 1) * 100:+.1f} %)."
-                   if previous_warm and not after_cold else "")
-                + (" It is also the FIRST call after a cold pass. That has "
-                   "measured both ways across versions, so read this number as "
-                   "'not yet the steady state', not as an upper bound."
-                   if after_cold else ""))
-        return {"after_cold": after_cold, "elapsed_note": note}
 
     _INERTIA_MAX_DEPTH = 8
 
@@ -3025,17 +2972,55 @@ class MeasurementTools:
                                          for k, v in zip("xyz", world)},
             })
 
+    def _mass_property_regime(self, part: Any, *, route: str,
+                              payload: dict[str, Any],
+                              elapsed_ms: float) -> dict[str, Any]:
+        """The regime fields for a ONE-part mass-properties call.
+
+        The two part routes (`document='X'` and the active part) published
+        `elapsed_ms`, `parts_ms`, `measure_ms` and `tensor_ms` and NOT ONE word
+        about which regime produced them, so a caller holding 174 ms from one
+        session and 2 117 ms from another had nothing to tell them apart - while
+        the same tool's assembly route had answered that question since 0.3.38.
+        Same route through the same book now, so the answer cannot depend on
+        which argument shape reached the part.
+
+        The two routes share `BOOK_MASS` with the assembly route's per-part
+        reader: measuring this part's volume inside an assembly and outside one
+        is the same job, and a second book would report "first time" twice.
+        """
+        identity = self._part_identity(part)
+        first = _BOOKS.is_new(BOOK_MASS, identity)
+        if first:
+            _BOOKS.note(BOOK_MASS, identity, MASS_PROPERTIES)
+        _BOOKS.record_time(BOOK_MASS, identity, elapsed_ms, first)
+        payload["first_measure"] = first
+        payload["cold_reason"] = (
+            _BOOKS.reason_of(BOOK_MASS, identity) or MASS_PROPERTIES)
+        payload.update(_BOOKS.time_of(BOOK_MASS, identity))
+        return _BOOKS.describe(
+            book=BOOK_MASS,
+            route=route,
+            measured=True,
+            parts_total=1,
+            session_first=1 if first else 0,
+            cold_reasons={MASS_PROPERTIES: 1} if first else {},
+            doc_key=_document_key(getattr(part, "Parent", None)),
+            elapsed_ms=elapsed_ms,
+            scope=("", 1),
+        )
+
     def _note_inertia_part(self, part: Any, label: str, props: dict[str, Any],
                            props_ms: float,
                            parts_detail: dict[Any, dict[str, Any]]) -> None:
         """Record one part's mass-properties cost, and its two regimes.
 
-        Separate book from the box route's ``_part_times`` on purpose - see
-        ``_inertia_times``. The first reading in the session is the cold one even
-        if that part's BOX was measured long ago, because CATIA builds a
-        different internal structure for mass properties than for the vertex
-        sweep, and mixing the two would report a cold/warm ratio across two
-        different jobs.
+        A book of its own (``BOOK_MASS``), not the box route's: the first reading
+        in the session is the first mass-properties reading even if that part's
+        BOX was measured long ago, because these are different jobs and they do
+        not warm up together. Mixing them would report a cold/warm ratio across
+        two different jobs, which is how the 21x-26x mesh-export ratios ended up
+        looking like a property of CATIA (reported 2026-10-29, §5.2).
         """
         try:
             key = self._part_identity(part)
@@ -3043,12 +3028,10 @@ class MeasurementTools:
             return
         entry = parts_detail.get(key)
         if entry is None:
-            first = key not in self._inertia_times
-            history = self._inertia_times.setdefault(key, {})
+            first = _BOOKS.is_new(BOOK_MASS, key)
             if first:
-                history["cold_ms"] = props_ms
-            else:
-                history["warm_ms"] = props_ms
+                _BOOKS.note(BOOK_MASS, key, MASS_PROPERTIES)
+            _BOOKS.record_time(BOOK_MASS, key, props_ms, first)
             entry = {
                 "part": label,
                 "instances": 0,
@@ -3056,11 +3039,15 @@ class MeasurementTools:
                 "area_mm2": round(props["area"], 4),
                 "elapsed_ms": props_ms,
                 "first_measure": first,
+                # Which job this part's first reading paid for. Same field name
+                # as the box route's, because the question a caller asks is the
+                # same one ("why was this part slow once?") and the answer has to
+                # be readable without knowing which tool answered.
+                "cold_reason": (_BOOKS.reason_of(BOOK_MASS, key)
+                                or MASS_PROPERTIES),
             }
-            if history.get("cold_ms") is not None and history.get("warm_ms"):
-                entry["cold_ms"] = history["cold_ms"]
-                entry["cold_warm_ratio"] = round(
-                    history["cold_ms"] / history["warm_ms"], 2)
+            entry.update(_BOOKS.time_of(BOOK_MASS, key))
+            if "cold_warm_ratio" in entry:
                 entry["cold_warm_note"] = _COLD_RATIO_NOTE
             parts_detail[key] = entry
         else:
@@ -3149,33 +3136,53 @@ class MeasurementTools:
 
     def _part_bbox(self, part: Any, method: str) -> str:
         """Bounding box of a named Part document (no reliance on ActiveDocument)."""
+        started = time.perf_counter()
         body = part.MainBody
         if body.Shapes.Count == 0:
             raise RuntimeError("That part has no solid shape yet.")
-        # Which regime this is: a part's first topology read also pays CATIA's
-        # setup for that part, 4-7x the later ones for the same work (measured
-        # 2026-10-27). Publishing it here keeps the single-part route comparable
-        # with the assembly route's per-part `first_measure`.
-        regime: dict[str, Any] = {}
+        # Which regime this is. Peek now, RECORD at the return, because the reason
+        # depends on the route this part ends up taking: a vertex sweep paid for a
+        # topology read, an STL export paid for the export, and calling both "the
+        # first topology read" is what made 21x look like a build time
+        # (reported 2026-10-29, §5.2).
         try:
             identity = self._part_identity(part)
-            first = identity not in _MEASURED_PARTS
-            regime["first_measure"] = first
-            # The assembly route has said which regime it ran in since 0.3.30;
-            # the single-part route published `first_measure` alone, so a caller
-            # reading only the prose of one part's reply could not tell a cold
-            # 1 037 ms from a warm one (reported 2026-10-27, §3.2).
-            regime["elapsed_note"] = (
-                "this part's topology is being read for the FIRST time in this "
-                "session, so the cost includes CATIA building that part's internal "
-                "representation - measured at 4-7x the warm per-cell cost on the "
-                "same work, and not a property of this model"
-                if first else
-                "this part had already been measured in this session, so this is "
-                "the warm number")
-            _MEASURED_PARTS.add(identity)
         except Exception:  # noqa: BLE001 - the box matters, the label is a courtesy
-            pass
+            identity = None
+        first = _BOOKS.is_new(BOOK_TOPOLOGY, identity) if identity is not None else False
+
+        def regime_fields(reason: str) -> dict[str, Any]:
+            """The regime fields for a ONE-part call, when the route is known."""
+            if identity is None:
+                return {}
+            if first:
+                _BOOKS.note(BOOK_TOPOLOGY, identity, reason)
+            elapsed = round((time.perf_counter() - started) * 1000, 1)
+            _BOOKS.record_time(BOOK_TOPOLOGY, identity, elapsed, first)
+            fields: dict[str, Any] = {
+                "first_measure": first,
+                "cold_reason": _BOOKS.reason_of(BOOK_TOPOLOGY, identity) or reason,
+                # One part, measured from this call's own start, so `parts_ms` is
+                # the box and `_stamp_elapsed` closes it against `elapsed_ms`
+                # (whose start is the outer tool call, so the difference is
+                # resolving the document and building the reply - which is what
+                # overhead_ms is for).
+                "parts_ms": elapsed,
+            }
+            fields.update(_BOOKS.time_of(BOOK_TOPOLOGY, identity))
+            fields.update(_BOOKS.describe(
+                book=BOOK_TOPOLOGY,
+                route="box.part",
+                measured=True,
+                parts_total=1,
+                session_first=1 if first else 0,
+                cold_reasons={reason: 1} if first else {},
+                doc_key=_document_key(part.Parent),
+                elapsed_ms=elapsed,
+                scope=("", 1),
+            ))
+            return fields
+
         method, auto_note = self._auto_method(method, body)
         if method in ("auto", "vertices"):
             stats: dict[str, Any] = {}
@@ -3203,7 +3210,7 @@ class MeasurementTools:
                         # the whole part, or one COM round trip per topology cell.
                         "sweep_route": stats.get("sweep_route"),
                         **_nls_fields(stats),
-                        **regime,
+                        **regime_fields(TOPOLOGY),
                     },
                 )
             if method == "vertices":
@@ -3222,7 +3229,8 @@ class MeasurementTools:
             bounds=("lower bound: mesh chording, measured 0.47-0.73 % small on "
                     "curved faces. Exact for a solid whose diameter runs through "
                     "a planar edge or a vertex"),
-            extra={"points_route": "mesh", "mesh_vertices": triangles, **regime},
+            extra={"points_route": "mesh", "mesh_vertices": triangles,
+                   **regime_fields(MESH_EXPORT)},
         )
         if copy_note:
             # The caveat used to live only inside the prose of `method`, where a
@@ -3346,7 +3354,12 @@ class MeasurementTools:
             report["parts_measured"] = (payload.get("part_boxes_total")
                                         or payload.get("part_boxes"))
             report["instances"] = payload.get("instances")
-            report["cold_parts"] = payload.get("cold_parts")
+            # The same names as the reply it summarises: a warm-up report that
+            # renamed the regime fields would be the fourth spelling of them.
+            for key in ("regime", "session_first_parts", "parts_total",
+                        "cold_reasons", "after_cold"):
+                if key in payload:
+                    report[key] = payload[key]
             report["elapsed_ms"] = payload.get("elapsed_ms")
             report["parts"] = [
                 {key: entry[key] for key in
@@ -3363,7 +3376,8 @@ class MeasurementTools:
             "this call measured the same geometry and then threw it away: the point "
             "was to make CATIA read every part's topology once, outside a call that "
             "needs the answer. The next catia_get_bounding_box over this document "
-            "should report cold_parts: 0 and run at the warm cost. There is no "
+            "should report 'session_first_parts: 0' and run at the warm cost. "
+            "There is no "
             "cheaper warm-up: CATIA's first-read setup is the work, and a per-part "
             "vertex box cannot be cached from a file identity the way a mesh box "
             "is - the live part may hold edits that were never saved, so a "

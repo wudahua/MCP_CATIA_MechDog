@@ -102,7 +102,7 @@ def _assembly_tools(names=("P1.1", "P1.2")):
         app=_App())
     tools._part_box_entry = lambda part, body, include_curved: dict(_ENTRY)
     tools._part_identity = lambda part: part.Name
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
     return tools
 
 
@@ -116,7 +116,7 @@ def test_a_narrowed_reply_still_says_which_pose_reader_ran():
                                            only="P1.1"))
     assert reply["poses_route"] == "single"
     assert "narrowed" in reply["poses_route_note"]
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
 
 
 def test_an_unfiltered_reply_says_one_call():
@@ -126,7 +126,7 @@ def test_an_unfiltered_reply_says_one_call():
     reply = json.loads(tools._assembly_box(_Doc("ASM.CATProduct"), "vertices"))
     assert reply["poses_route"] == "one_call"
     assert "ONE CATIA script call" in reply["poses_route_note"]
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
 
 
 def test_the_fallback_route_has_its_own_sentence():
@@ -177,7 +177,7 @@ def test_the_overhead_note_no_longer_claims_five_seconds():
     assert "five seconds" not in note
     assert "0.3.33 and earlier" in note          # the number is history now
     assert "poses_route" in note                 # ...and this call says which
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
 
 
 def test_the_warm_note_admits_the_first_call_after_a_cold_one():
@@ -189,15 +189,15 @@ def test_the_warm_note_admits_the_first_call_after_a_cold_one():
     # Two instances, one PART: cold_parts counts parts, not instances.
     # 0.3.36: the cold reply carries after_cold: null instead of omitting the key,
     # so reply["after_cold"] answers on all three regimes (reported §5.2).
-    assert cold["cold_parts"] == 1 and cold["after_cold"] is None
+    assert cold["session_first_parts"] == 1 and cold["after_cold"] is None
     first_warm = json.loads(tools._assembly_box(_Doc("ASM.CATProduct"), "vertices"))
-    assert first_warm["cold_parts"] == 0
+    assert first_warm["session_first_parts"] == 0
     assert first_warm["after_cold"] is True
     assert "FIRST call after a cold pass" in first_warm["elapsed_note"]
     second_warm = json.loads(tools._assembly_box(_Doc("ASM.CATProduct"), "vertices"))
     assert second_warm["after_cold"] is False
     assert "FIRST call after a cold pass" not in second_warm["elapsed_note"]
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
 
 
 # ─────────────── 4. refusals that wrote nothing say so

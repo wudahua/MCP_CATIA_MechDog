@@ -390,9 +390,14 @@ def test_both_single_part_routes_publish_the_same_fields():
     # points_route / vertices_used / cells_scanned - no regime, no nls note.
     assert "_part_bbox(part, method)" in active
     named = inspect.getsource(MeasurementTools._part_bbox)
-    for field in ("first_measure", "elapsed_note", "sweep_route",
-                  "cells_scanned", '"points_route"'):
+    for field in ("sweep_route", "cells_scanned", '"points_route"'):
         assert field in named
+    # 0.3.39: `first_measure` and `elapsed_note` are no longer spelled out here -
+    # they come from the shared `_BOOKS.describe`, the same call the assembly and
+    # inertia routes make, which is why the two single-part routes cannot drift
+    # apart again (they did: 0.3.38 filled the regime on three routes and left
+    # two part routes and two empty branches without it).
+    assert "_BOOKS.describe(" in named
 
 
 # ─────────────────── 4. cost fields survive truncation
@@ -402,11 +407,13 @@ def test_the_cost_fields_are_not_behind_the_per_part_list():
     from catia_mcp.tools.measurement import _cost_first
 
     payload = {"dimensions": {}, "components": [], "parts": [{}] * 28,
-               "elapsed_ms": 197756.9, "cold_parts": 28,
-               "elapsed_note": "cold", "document": "A.CATProduct"}
+               "elapsed_ms": 197756.9, "session_first_parts": 28,
+               "regime": "cold", "elapsed_note": "cold",
+               "document": "A.CATProduct"}
     ordered = list(_cost_first(payload))
     assert ordered.index("elapsed_ms") < ordered.index("components")
-    assert ordered.index("cold_parts") < ordered.index("components")
+    assert ordered.index("session_first_parts") < ordered.index("components")
+    assert ordered.index("regime") < ordered.index("components")
     assert ordered.index("elapsed_note") < ordered.index("components")
 
 
@@ -461,19 +468,26 @@ def test_the_nls_count_and_its_warning_travel_together():
 
 
 def test_the_single_part_regime_has_a_sentence():
-    from catia_mcp.tools.measurement import MeasurementTools
+    from catia_mcp import regime
 
-    # The sentence is a two-part string literal, so match the halves.
-    source = inspect.getsource(MeasurementTools._part_bbox)
-    assert "FIRST time in this " in source
+    # Both sentences a one-part call can print, in the one place they are
+    # written. Before 0.3.39 this test read `_part_bbox`'s source, so the same
+    # sentence existed three times and only this copy was checked.
+    source = inspect.getsource(regime.SessionBooks.describe)
+    assert "'session_first_parts' counts" in source
     assert "the warm number" in source
 
 
 def test_the_assembly_warm_note_warns_about_jitter():
-    from catia_mcp.tools.measurement import MeasurementTools
+    from catia_mcp import regime
 
-    source = inspect.getsource(MeasurementTools._assembly_box)
-    assert "324 ms and then 549 ms" in source
+    # The substance, not the reading: a single small part swings far more than a
+    # big assembly, so one part's time must not be read to three digits. The
+    # old assertion quoted "324 ms and then 549 ms" - two readings from one
+    # session, which the next session would have moved (this project has
+    # retracted four such numbers already).
+    source = inspect.getsource(regime.SessionBooks.describe)
+    assert "do not read one part's time to three digits" in source
 
 
 # ─────────────────── 8. sketch points can be construction

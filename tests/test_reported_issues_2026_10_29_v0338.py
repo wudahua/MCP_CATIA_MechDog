@@ -265,12 +265,12 @@ def _assembly_tools(part_boxes_given=None):
 def test_the_cold_note_quotes_this_call_not_four_old_multipliers():
     from catia_mcp.tools import measurement as M
 
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
     tools = _assembly_tools()
     reply = json.loads(tools._assembly_box(SimpleNamespace(Name="ASM38.CATProduct"),
                                            "vertices"))
     note = reply["elapsed_note"]
-    assert reply["cold_parts"] == 1
+    assert reply["session_first_parts"] == 1
     # The four numbers this note used to carry: 4.65x / 7.6x / 7.24x / 9.11x.
     assert not re.search(r"\d+\.\d+x", note), note
     assert "parts[].cold_warm_ratio" in note
@@ -280,7 +280,7 @@ def test_the_cold_note_quotes_this_call_not_four_old_multipliers():
 def test_the_empty_assembly_answers_with_the_same_cost_block():
     from catia_mcp.tools import measurement as M
 
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
     tools = _assembly_tools(part_boxes_given=[])
     reply = json.loads(tools._assembly_box(SimpleNamespace(Name="EMPTY38.CATProduct"),
                                            "vertices"))
@@ -306,7 +306,7 @@ def test_a_narrowed_call_does_not_reread_the_whole_component_list():
     """The nested-twin search used to pay a second full pose read per call."""
     from catia_mcp.tools import measurement as M
 
-    M._MEASURED_PARTS.clear()
+    M.reset_session_books()
     rows = [{"index": 1, "name": "P38.1", "part_number": "P38",
              "matrix": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
              "translation": [0.0, 0.0, 0.0],
@@ -378,16 +378,20 @@ def test_the_assembly_inertia_route_says_which_regime_it_ran_in():
     cold = json.loads(tools._assembly_inertia(
         None, SimpleNamespace(Name="ASM38.CATProduct")))
     assert cold["after_cold"] is None
-    assert cold["cold_parts"] == 2
+    assert cold["session_first_parts"] == 2
     assert cold["parts_total"] == 2
     assert all(entry["first_measure"] is True for entry in cold["parts"])
-    assert "MASS PROPERTIES" in cold["elapsed_note"]
+    # Which job the first reading was: the note counts it by name, so a caller
+    # can tell "2 parts paid for mass properties" from "2 parts paid for a
+    # topology sweep" - the distinction 0.3.38 collapsed into one count.
+    assert "mass-properties" in cold["elapsed_note"]
+    assert cold["cold_reasons"] == {"mass_properties": 2}
     assert round(cold["parts_ms"] + cold["overhead_ms"], 1) == cold["elapsed_ms"]
 
     warm = json.loads(tools._assembly_inertia(
         None, SimpleNamespace(Name="ASM38.CATProduct")))
     assert warm["after_cold"] is True
-    assert warm["cold_parts"] == 0
+    assert warm["session_first_parts"] == 0
     assert all(entry["first_measure"] is False for entry in warm["parts"])
     assert "cold_warm_ratio" in warm["parts"][0]
     assert "cold_ms" in warm["parts"][0]
