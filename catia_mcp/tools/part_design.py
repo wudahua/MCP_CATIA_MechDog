@@ -90,10 +90,39 @@ class _ProbePoints:
         self.conn = conn
         self.part = part
         self.factory = part.HybridShapeFactory
+        # What was in work BEFORE the scratch set existed. Adding a HybridBody
+        # moves InWorkObject onto it, and deleting the set does not move it
+        # back: in a document that already holds a geometrical set (any GSD
+        # write leaves one), the in-work object ends up on that other set, and
+        # every Part Design factory then answers a bare E_FAIL while the
+        # references are perfectly good. Field-measured 2026-10-30 on B30: the
+        # same edge reference that fails there builds a fillet the moment
+        # InWorkObject is set back to the body.
+        self._in_work = self._read_in_work()
         self.set = part.HybridBodies.Add()
         self.set.Name = self.NAME
         self.shapes: list[Any] = []
         self._updated = False
+
+    def _read_in_work(self) -> Any:
+        try:
+            return self.part.InWorkObject
+        except Exception:  # noqa: BLE001 - nothing to restore is fine
+            return None
+
+    def _restore_in_work(self) -> None:
+        previous = self._in_work
+        if previous is None:
+            return
+        try:
+            if str(self.part.InWorkObject.Name) == str(previous.Name):
+                return
+        except Exception:  # noqa: BLE001 - unreadable means "probably wrong"
+            pass
+        try:
+            self.part.InWorkObject = previous
+        except Exception:  # noqa: BLE001 - better a stale in-work than a raise
+            pass
 
     def add(self, x: float, y: float, z: float) -> Any:
         point = self.factory.AddNewPointCoord(float(x), float(y), float(z))
@@ -122,6 +151,10 @@ class _ProbePoints:
             self.part.Update()
         except Exception:  # noqa: BLE001
             pass
+        # After the rebuild, because deleting a set can itself move the in-work
+        # object. This is the line whose absence made edge_anchors fail with
+        # E_FAIL in every document that had ever seen a GSD write.
+        self._restore_in_work()
 
 
 # Where a sketch's own (x, y) sits in the part's coordinate system. The same
@@ -2041,8 +2074,21 @@ class PartDesignTools:
         finally:
             try:
                 self.conn.hso.Clear()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
+            # The sentence above was true of the intent and not of the code:
+            # the restore was missing, so every rollback left whatever CATIA
+            # picked in work. Done here, where every rollback passes through.
+            if body is not None:
+                try:
+                    current = str(part.InWorkObject.Name)
+                except Exception:  # noqa: BLE001 - unreadable: assign anyway
+                    current = None
+                if current != str(getattr(body, "Name", body)):
+                    try:
+                        part.InWorkObject = body
+                    except Exception:  # noqa: BLE001
+                        pass
             if body is not None:
                 try:
                     part.InWorkObject = body
@@ -2280,7 +2326,8 @@ class PartDesignTools:
             return after, delta > 1e-6
         return after, delta < -1e-6
 
-    def _safe_update(self, part: Any, feature: Any) -> None:
+    def _safe_update(self, part: Any, feature: Any,
+                     body: Any = None) -> None:
         """Update a feature; if CATIA rejects it, take the dead node back out.
 
         A failed Part Design feature left in the tree is not inert: **every**
@@ -2291,12 +2338,23 @@ class PartDesignTools:
         `倒圆角.1` is deleted. The batch paths have rolled back since 0.3.7; the
         single-feature paths (fillet / chamfer / mirror / shell / thickness /
         boolean) called `UpdateObject` raw and did not.
+
+        ``body`` is optional because it used to be *missing*: the rollback line
+        read a free variable of that name, so the first rejected single feature
+        raised ``NameError: name 'body' is not defined`` instead of the two
+        sentences below - no rollback, and no word about the dead node. Reported
+        2026-10-30 as "a rejected fillet reports a Python error".
         """
         try:
             part.UpdateObject(feature)
             return
         except Exception as error:  # noqa: BLE001 - reported with the rollback state
             name = str(getattr(feature, "Name", "the new feature"))
+            if body is None:
+                try:
+                    body = self.conn.get_active_part_body()
+                except Exception:  # noqa: BLE001 - the rollback below still counts
+                    body = None
             gone = self._remove_feature(part, feature, body)
             if gone:
                 raise FeatureRejected(
@@ -2816,7 +2874,7 @@ class PartDesignTools:
         )
 
         try:
-            self._safe_update(part, fillet)
+            self._safe_update(part, fillet, body)
         except FeatureRejected as error:
             hint = self._coplanar_hint([scope])
             if hint:
