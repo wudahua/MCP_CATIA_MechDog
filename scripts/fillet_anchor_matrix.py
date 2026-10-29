@@ -42,6 +42,26 @@ def verdict(reply: str) -> str:
     return "OTHER    " + first[:100]
 
 
+def activate(conn, name: str):
+    """Make `name` the active document, or stop.
+
+    `catia_new_part` does not reliably leave the new part active in this
+    session, and a mutation that runs while another document is active lands in
+    THAT document. One probe run put three fillets into an acceptance user's
+    finished part this way (2026-10-30). Every step that changes geometry now
+    goes through here.
+    """
+    for index in range(1, conn.documents.Count + 1):
+        candidate = conn.documents.Item(index)
+        if candidate.Name == name:
+            candidate.Activate()
+            active = conn.active_document.Name
+            if active != name:
+                raise RuntimeError(f"could not activate {name} (active: {active})")
+            return candidate
+    raise RuntimeError(f"{name} is not open")
+
+
 def safe_delete(tools, name: str) -> None:
     """Delete a feature if it is there; the numbering depends on what succeeded."""
     try:
@@ -69,6 +89,7 @@ def main() -> int:
     workdir = tempfile.mkdtemp(prefix="fillet_anchor_")
     path = os.path.join(workdir, "AnchorMatrix.CATPart")
     documents.execute("catia_new_part", {"name": "AnchorMatrix", "file_path": path})
+    activate(conn, os.path.basename(path))
     sketcher.execute("catia_create_sketch", {"plane": "xy"})
     sketcher.execute("catia_sketch_rectangle",
                      {"x1": -20, "y1": -10, "x2": 20, "y2": 10})

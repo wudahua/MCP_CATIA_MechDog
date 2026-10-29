@@ -50,6 +50,26 @@ def say(line: str) -> None:
     findings.append(line)
 
 
+def activate(conn, name: str):
+    """Make `name` the active document, or stop.
+
+    `catia_new_part` does not reliably leave the new part active in this
+    session, and a mutation that runs while another document is active lands in
+    THAT document. One probe run put three fillets into an acceptance user's
+    finished part this way (2026-10-30). Every step that changes geometry now
+    goes through here.
+    """
+    for index in range(1, conn.documents.Count + 1):
+        candidate = conn.documents.Item(index)
+        if candidate.Name == name:
+            candidate.Activate()
+            active = conn.active_document.Name
+            if active != name:
+                raise RuntimeError(f"could not activate {name} (active: {active})")
+            return candidate
+    raise RuntimeError(f"{name} is not open")
+
+
 def edges_of(reply: str) -> list[str]:
     payload = json.loads(reply)
     items = payload.get("edges") or payload.get("items") or []
@@ -83,6 +103,7 @@ def main() -> int:
         document.execute("catia_new_part", {"name": "REPRO_FILLET",
                                            "file_path": fillet_part})
         made_documents.append("REPRO_FILLET.CATPart")
+        activate(conn, "REPRO_FILLET.CATPart")
         sketcher.execute("catia_create_sketch", {"plane": "xy"})
         sketcher.execute("catia_sketch_rectangle",
                          {"x1": -20, "y1": -10, "x2": 20, "y2": 10})
@@ -110,6 +131,7 @@ def main() -> int:
     try:
         document.execute("catia_new_part", {"name": "REPRO_LOFT"})
         made_documents.append("REPRO_LOFT.CATPart")
+        activate(conn, "REPRO_LOFT.CATPart")
         gsd.execute("catia_gsd_create_geoset", {"name": "RuledSet"})
         gsd.execute("catia_gsd_circle", {"center": [0, 0, 0], "support_plane": "xy",
                                         "radius": 10, "name": "R11"})
@@ -156,6 +178,7 @@ def main() -> int:
     try:
         document.execute("catia_new_product", {"name": "REPRO_ASM"})
         made_documents.append("REPRO_ASM.CATProduct")
+        activate(conn, "REPRO_ASM.CATProduct")
         assembly.execute("catia_add_component", {"file_path": fillet_part,
                                                 "count": 2})
         listing = json.loads(assembly.execute("catia_list_components",

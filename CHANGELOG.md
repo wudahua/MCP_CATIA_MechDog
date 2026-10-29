@@ -2,6 +2,73 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.41] — 2026-10-30 · a scratch set that left the body out of work
+
+0.3.40 said the fillet failures of 2026-10-29 were "not reproduced, probably edge
+references rounded through 4-6 decimals". That was measured on a fresh document,
+which is exactly the case that works. The 2026-10-30 report found the variable:
+**any GSD write**. Both observations were true; the attribution in 0.3.40 is
+withdrawn here.
+
+### Fixed — `catia_fillet(edge_anchors=...)` failed in any document that had seen a GSD write
+
+- Measured on B30 with one box and one `catia_gsd_point`:
+
+  ```
+  pure document          anchors CREATED    name CREATED
+  after one gsd_point    anchors REFUSED    name CREATED
+  after deleting it      anchors REFUSED    name CREATED
+  ```
+
+- The reference was never the problem. Adding a HybridBody leaves CATIA's
+  `Part.InWorkObject` on the geometrical set, and a Part Design factory called in
+  that state answers `AddNewSolidEdgeFilletWithConstantRadius 失败` about a good
+  edge. The same reference builds the fillet the moment `InWorkObject` is set
+  back to the body - measured one line apart.
+- Why only the anchor path: it creates a scratch point set to measure distances
+  (`_ProbePoints`), and creating that set is itself a HybridBody write. Deleting
+  it does not move the in-work object back. In a pure document deleting the only
+  set happens to fall back to the body, which is why the path looked healthy
+  there.
+- `_ProbePoints` now remembers what was in work when it was constructed and
+  hands it back after the delete and the rebuild. A caller who deliberately put
+  a datum plane in work gets that back, not the body.
+
+### Fixed — a rejected single feature raised `NameError: name 'body' is not defined`
+
+- `_safe_update`'s rollback line read a free variable `body` that no caller
+  passed, so the first refused fillet/chamfer/mirror/shell/thickness/boolean
+  raised a Python error instead of the "rolled_back: true/false" sentence - and
+  the dead node stayed in the tree, which is the state that makes every later
+  update of the part fail.
+- `_remove_feature`'s docstring already promised to restore the in-work object
+  after a rollback; the code did not. Both are now true, and the body is passed
+  through from the fillet path.
+
+### Not a defect — `catia_set_active_body` "does nothing the first time"
+
+- The tool sets `Part.InWorkObject` and reads it back, and answers with a warning
+  naming both values when CATIA kept a different one. The report's own note says
+  a document switch happened between the two calls; no change made.
+
+### Measured
+
+```
+770 tests (4 added: the probe set hands the body back, a foreign in-work object
+is left alone, a rejected feature rolls back, the body reaches the rollback).
+
+B30, one matrix run, same edge and same anchor each time:
+  stage 1  pure document        anchors CREATED   name CREATED
+  stage 2  + one gsd_point      anchors CREATED   name CREATED   (was REFUSED)
+  stage 3  point deleted        anchors CREATED   name CREATED
+```
+
+`scripts/fillet_anchor_matrix.py` reproduces that matrix. It - and the other two
+probe scripts - now assert the active document before every mutation, because
+one run placed three fillets in an acceptance user's finished part: `catia_new_
+part` does not reliably leave the new part active, and a mutation lands in
+whatever is active instead.
+
 ## [0.3.40] — 2026-10-29 · a batch that forgot what it was told, a loft that added itself twice
 
 The 2026-10-29 report was written against 0.3.39 by someone rebuilding a 12-part,

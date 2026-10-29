@@ -90,6 +90,10 @@ def main() -> int:
     if document is None:
         document = conn.documents.Open(path)
     document.Activate()
+    if conn.active_document.Name != document.Name:
+        raise RuntimeError(
+            f"could not activate {document.Name} "
+            f"(active: {conn.active_document.Name}); refusing to touch geometry")
     documents = DocumentTools(conn)
     tools = PartDesignTools(conn)
     part = conn.get_active_part()

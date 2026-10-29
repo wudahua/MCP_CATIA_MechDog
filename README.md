@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.40** · [what changed](CHANGELOG.md) ·
+**0.3.41** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -125,6 +125,19 @@ through `AddNewShaftFromRef` + `SetProfileElement` + `RevoluteAxis` with
 | `catia_list_edges` → `coords: true` | Adds `point_on_edge` — a coordinate that lies ON the edge (the midpoint for a straight edge, measured) — which is both the value to feed back as an anchor and the thing to compare with a spec sheet |
 
 Details, measurements and caveats: **[`FORK.md`](FORK.md)** (Chinese).
+
+### A GSD write moves the in-work object, and fillets then fail for no reason
+
+Any HybridShapeFactory write (a circle, a point, a loft) leaves CATIA's
+`Part.InWorkObject` on the geometrical set. A Part Design factory called in that
+state answers a bare `E_FAIL` — `AddNewSolidEdgeFilletWithConstantRadius 失败` —
+about a perfectly good edge, and the message names nothing useful. Until 0.3.41
+this made `catia_fillet(edge_anchors=...)` fail permanently in any document that
+had ever touched a GSD tool, while `edge_name='Edge.1'` on the same edge worked:
+the anchor path creates a scratch point set to measure distances, and creating
+that set is itself a HybridBody write. It now hands the body back when the set is
+deleted, and the rollback path (`_safe_update`) no longer raises `NameError`
+instead of saying the feature was removed again.
 
 ### Fillets on a real part: the edges move
 
