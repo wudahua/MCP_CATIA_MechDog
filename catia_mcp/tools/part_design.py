@@ -854,6 +854,11 @@ class PartDesignTools:
                     "Delete a feature by name (e.g. 'Pocket.2') in any body "
                     "of the active part, then update the part. Features "
                     "depending on it end up in error and are reported. "
+                    "It also deletes a GSD element or a geometrical set - "
+                    "'bridging.1', 'loft.1', 'GSD_Set' - which live in "
+                    "HybridBodies rather than in a solid body's feature list "
+                    "(reported 2026-10-29, §4: five failed loft pieces stayed in "
+                    "the tree and polluted the STL envelope). "
                     "Undoing the feature you have just created is still one call, "
                     "but it now has to be asked for: with neither feature_name nor "
                     "index, pass last=true. A bare no-argument call is refused and "
@@ -4001,11 +4006,18 @@ class PartDesignTools:
             if feature is not None:
                 break
         if feature is None:
+            # GSD elements are not in a body's Shapes: they live in HybridBodies,
+            # which this search never entered, so every failed loft / bridging /
+            # extracted curve answered "No feature or sketch named ..." and stayed
+            # in the tree - visible, and therefore measured by the STL envelope
+            # (reported 2026-10-29, §4). Sets nest, so the walk recurses.
+            feature, kind = self._find_in_geometrical_sets(part, target)
+        if feature is None:
             raise RuntimeError(
-                f"No feature or sketch named '{target}' in any body of the active "
-                "part. Use catia_list_features to see feature names; it lists the "
-                "sketches too, in 'sketches', each with the aliases a rebuild gave "
-                "it."
+                f"No feature, sketch or GSD element named '{target}' in the active "
+                "part - searched every body's feature list, its sketches, and every "
+                "geometrical set (nested ones included). Use catia_list_features to "
+                "see feature names; 'sketches' and 'geometrical_sets' list the rest."
             )
         # Deleting a solid feature takes its support sketch with it (CATIA
         # cascades), and the old reply said nothing about it - the reporter lost
@@ -4043,6 +4055,41 @@ class PartDesignTools:
                         f"to it: {', '.join(lost)}. Re-create the profile before "
                         "cutting with it again.")
         return message
+
+    @staticmethod
+    def _find_in_geometrical_sets(part: Any, target: str) -> tuple[Any, str]:
+        """Find a GSD element, a sketch inside a set, or the set itself.
+
+        Depth-first, because CATIA nests geometrical sets freely and a failed
+        loft often ends up one level below the set that was created for it.
+        Returns ``(None, "")`` when the name is not there.
+        """
+        def walk(sets: Any, depth: int = 0) -> tuple[Any, str]:
+            for index in range(1, sets.Count + 1):
+                hybrid_body = sets.Item(index)
+                if str(hybrid_body.Name) == target:
+                    return hybrid_body, "geometrical set"
+                for collection, label in (("HybridShapes", "GSD element"),
+                                          ("HybridSketches", "sketch in a set")):
+                    try:
+                        items = getattr(hybrid_body, collection)
+                    except Exception:  # noqa: BLE001 - not every set has both
+                        continue
+                    for item_index in range(1, items.Count + 1):
+                        item = items.Item(item_index)
+                        if str(item.Name) == target:
+                            return item, label
+                try:
+                    nested = hybrid_body.HybridBodies
+                except Exception:  # noqa: BLE001 - a plain set has no children
+                    continue
+                if nested is not None and nested.Count and depth < 8:
+                    found, found_kind = walk(nested, depth + 1)
+                    if found is not None:
+                        return found, found_kind
+            return None, ""
+
+        return walk(part.HybridBodies)
 
     def _sketch_names(self) -> list[str]:
         """Every sketch name in the active part, for before/after comparisons."""

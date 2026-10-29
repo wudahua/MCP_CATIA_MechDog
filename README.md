@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.39** · [what changed](CHANGELOG.md) ·
+**0.3.40** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -906,6 +906,15 @@ transposed placement passes every other check (`max_deviation` only proves CATIA
 stored what you sent). One field case: a quadcopter's landing stands came out
 lying flat and its motors tilted 60° while every self-check reported success.
 
+A batch is one convention, not one per row: `placements=[...]` gives every entry
+the top-level `rotation_convention` unless the entry sets its own, and the reply
+says how many inherited it (`rotation_convention.inherited_by`). Before 0.3.40
+the batch branch returned **before** that argument was read, so a basis table
+placed as a batch went in transposed and the per-entry reply still said
+`convention=matrix` — true, and useless. One acceptance build placed 32 of 80
+instances wrong that way; the 48 mirrored ones hid it, because a mirrored
+rotation is symmetric and its transpose is itself.
+
 ## Tool reference
 
 | Group | Tools | Notes |
@@ -913,7 +922,7 @@ lying flat and its motors tilted 60° while every self-check reported success.
 | Document | 12 | new/open/save/close/list + `catia_save_as_copy`; `catia_save_document` retries around dialogs |
 | Sketcher | 13 | lines, rectangles, circles, constraints; reopen a closed sketch and delete one element |
 | Part Design | 25 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, solid loft, bodies (create / list / delete)… |
-| Generative Shape Design | 25 | wireframe and surfaces, extract, revolve + close surface |
+| Generative Shape Design | 25 | wireframe and surfaces, extract, revolve + close surface; a GSD element or set is removed with `catia_delete_feature` |
 | Assembly | **13** | upstream 9 + get/set component transform, rename, list constraints, copy component |
 | Measurement | 6 | inertia, distance, bounding box\*, parameters |
 | Export | 4 | STEP / STL / IGES hand-off |

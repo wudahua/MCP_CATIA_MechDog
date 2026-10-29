@@ -1065,9 +1065,20 @@ class GSDTools:
 
     def _finish(self, shape: Any, name: str | None, message: str) -> str:
         """Append a hybrid shape to the active geoset, rename, update, refresh."""
-        part = self.conn.get_active_part()
         geoset = self._get_geoset()
         geoset.AppendHybridShape(shape)
+        return self._completed(shape, name, message, geoset)
+
+    def _completed(self, shape: Any, name: str | None, message: str,
+                   geoset: Any) -> str:
+        """Rename / update / refresh an element that is ALREADY in the geoset.
+
+        ``_finish`` is ``AppendHybridShape`` + this. The split exists because an
+        element that is already in a body cannot be appended a second time:
+        CATIA answers "方法 AppendHybridShape 失败" (E_FAIL), not "already
+        added".
+        """
+        part = self.conn.get_active_part()
         if name:
             shape.Name = name
         part.InWorkObject = shape
@@ -1585,10 +1596,18 @@ class GSDTools:
             part.UpdateObject(blend)
             blends.append(blend)
         if len(blends) == 1:
-            return self._finish(
+            # TWO sections: the single blend was appended inside the loop, so it
+            # must NOT go through _finish - a second AppendHybridShape on an
+            # element already in the body fails with "方法 AppendHybridShape 失败",
+            # which is what `ruled=true` answered for every two-section loft
+            # (reported 2026-10-29, §3: a fan blade from y=40 to y=540). Three or
+            # more sections never hit it, because the Join is a new element -
+            # that is why the 2026-10-24 smoke test (three circles) passed.
+            return self._completed(
                 blends[0], name,
                 f"Ruled surface created between {len(sections)} sections "
                 "(straight sides, not an interpolated loft).",
+                self._get_geoset(),
             )
         joined = factory.AddNewJoin(part.CreateReferenceFromObject(blends[0]),
                                    part.CreateReferenceFromObject(blends[1]))

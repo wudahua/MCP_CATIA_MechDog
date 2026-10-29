@@ -2,6 +2,101 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.40] — 2026-10-29 · a batch that forgot what it was told, a loft that added itself twice
+
+The 2026-10-29 report was written against 0.3.39 by someone rebuilding a 12-part,
+80-instance Strandbeest from a text specification. Nine findings. Four of them
+were settled by one measurement each — reproduced on B30 in documents this
+release creates and closes — and three of those four were code. The fourth is
+recorded below as NOT reproduced, because "five fillets failed" and "fillets
+always fail" are different claims and only one of them is true.
+
+### Fixed — a `placements` batch dropped the rotation convention (report §1, P1)
+
+- `catia_set_component_transform` read `rotation_convention` **inside** the
+  `rotation_rows` branch, but the batch branch returned first. So
+  `placements=[...]` plus a top-level `'basis'` applied every entry as `matrix`:
+  the nine numbers went in transposed, the reply said `convention=matrix`, and
+  nothing errored.
+- 32 of 80 instances were placed wrong. The 48 mirrored instances hid it: a
+  mirrored rotation is symmetric, and a symmetric matrix is its own transpose.
+  Volume stayed correct to the digit, because a rigid transpose does not change
+  a volume — only the per-instance centroid did, and the assembly centroid was
+  off by ~38 mm.
+- The convention is now read and validated **before** the batch branch, inherited
+  by every entry that does not set its own, with `overridden_by` counted. The
+  schema says so, and top-level keys the batch did not consume are named in
+  `ignored_top_level_keys` instead of disappearing.
+- The report's suggested fix — transpose in the `basis` branch — would have
+  broken the single-call path, which was correct all along. Measured on B30 after
+  the fix: two instances, `rotation_convention='basis'` at the top level,
+  `inherited_by: 2`, local X reads back as `(0, 1, 0)` where `(0, 1, 0)` was
+  asked for. Before the fix the same call stored `(0, -1, 0)`.
+
+### Fixed — a two-section ruled loft failed with `AppendHybridShape 失败` (report §3)
+
+- `_ruled_loft` appends each blend to the geometrical set as it builds it, then
+  handed a **single** blend to `_finish`, which appends again. Appending an
+  element that is already in a body fails with
+  `方法 AppendHybridShape 失败`, which is the error the report measured twice.
+- It only happens with exactly **two** sections: three or more end in a new Join,
+  which is appended once. That is why the 2026-10-24 smoke test (three circles
+  r=10/20/10) passed and a fan blade lofted from y=40 to y=540 did not.
+- Measured on B30, two circles r=10 at z=0 and r=20 at z=100: before, `ruled=true`
+  answered `方法 AppendHybridShape 失败`; after, the surface is created and the
+  same pair still lofts smooth with `ruled=false`. Regression test asserts the
+  geoset receives exactly one append for two sections and three for three.
+
+### Added — `catia_delete_feature` reaches into geometrical sets (report §4)
+
+- The search walked `body.Shapes` and `body.Sketches` only, so every GSD element
+  answered "No feature or sketch named ...", stayed visible, and was measured by
+  the STL envelope it was supposed to be out of.
+- It now also walks `HybridBodies` depth-first — `HybridShapes`, `HybridSketches`
+  and the sets themselves (nested sets included) — and reports the kind it
+  deleted (`GSD element`, `sketch in a set`, `geometrical set`). A solid feature
+  of the same name still wins, because that is the one a caller rebuilding a
+  solid means.
+- Measured on B30: `Deleted GSD element 'TMP_CIRCLE'.` and it is gone from
+  `catia_list_features`.
+
+### Changed — a closed spline says what its closure costs (report §5, §8)
+
+- `closed=true` closes by repeating the first point. That is documented, but the
+  consequence was not: the seam has no tangent continuity, so the curve can
+  overshoot there, and a project + split + thick_surface chain built on it can
+  leave a zero-volume sliver that **both** bounding-box routes then measure.
+  The report's 81-point aerofoil did exactly that: volume correct to +0.085 %,
+  envelope wrong by 2.8 mm, one 12.75 mm degenerate edge outside every source
+  surface.
+- The reply now says this at the moment the spline is drawn. The geometry is
+  unchanged — a periodic spline is a different API, not a different flag.
+
+### NOT reproduced — `catia_fillet` failing on every edge (report §2)
+
+- The report read five failures across four parts and three radii as "systematic,
+  not a usage problem". A fresh 40 x 20 x 20 box, R10 on its first edge, succeeds
+  on B30 with 0.3.40 unchanged in that code path.
+- So the failures are real but specific to those parts or those edges — most
+  likely the edge references, since all four parts had sketches whose arcs had
+  been round-tripped through 4-6 decimals (the report's §7 records open-profile
+  failures from exactly that). Keeping this as a "known failure" would have sent
+  the next reader looking for a bug in the fillet call that is not there.
+- `scripts/b30_repro_v0339.py` repeats all four measurements; it creates its own
+  documents and closes them, and never activates an open user document.
+
+### Measured
+
+```
+766 tests (15 added).
+
+B30, one run each:
+  #1 batch basis        inherited_by 2/2, local X -> (0,1,0) == asked   MATCH
+  #2 fillet R10 box     succeeded on Edge.1                            not systematic
+  #3 ruled loft 2 sec   before: 方法 AppendHybridShape 失败 / after: created
+  #4 delete GSD element Deleted 'TMP_CIRCLE', absent from the tree      ok
+```
+
 ## [0.3.39] — 2026-10-29 · the acceptance table, done by a machine
 
 This release adds no field. It deletes three implementations of one function,

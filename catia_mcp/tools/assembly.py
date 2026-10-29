@@ -445,9 +445,13 @@ class AssemblyTools:
                             "description": (
                                 "Batch form: each entry takes the same keys as a "
                                 "single call (component_name plus rotation_rows / "
-                                "position_components / translation). When given, the "
-                                "top-level component_name/rotation_rows/translation "
-                                "are ignored."
+                                "position_components / rotation_convention / "
+                                "translation). The top-level `rotation_convention` "
+                                "is inherited by every entry that does not set its "
+                                "own, so a basis table only has to say so once. "
+                                "When given, the top-level "
+                                "component_name/rotation_rows/translation are "
+                                "ignored - and named in `ignored_top_level_keys`."
                             ),
                             "items": {"type": "object"},
                         },
@@ -475,7 +479,9 @@ class AssemblyTools:
                             "description": (
                                 "'matrix' (default): rotation_rows is row-major A in "
                                 "P_asm = A·P_local + T. 'basis': row i = where local axis i "
-                                "points in global, i.e. P_asm = Rᵀ·P_local + T."
+                                "points in global, i.e. P_asm = Rᵀ·P_local + T. With "
+                                "`placements` this value is the DEFAULT for every entry; "
+                                "an entry may set its own to override it."
                             ),
                         },
                         "position_components": {
@@ -1116,10 +1122,26 @@ class AssemblyTools:
         return json.dumps(report, indent=2, ensure_ascii=False)
 
     def _set_component_transform(self, args: dict[str, Any]) -> str:
+        # Read and check the convention BEFORE the batch branch. It used to be
+        # read inside the rotation_rows branch only, so `placements=[...]` plus
+        # a top-level `rotation_convention` returned early and dropped it: every
+        # entry fell back to 'matrix', the nine numbers went in transposed, and
+        # the reply still said "convention=matrix" - true, and useless, because
+        # the caller had asked for 'basis'. A spec-table assembly then placed 32
+        # of 80 instances wrong with no error (reported 2026-10-29, §1), and the
+        # 48 mirrored instances hid it because their rotation is symmetric.
+        convention = args.get("rotation_convention")
+        if convention is not None and convention not in ("matrix", "basis"):
+            raise ValueError(
+                "rotation_convention must be 'matrix' (P_asm = A·P_local + T, the "
+                "default) or 'basis' (row i = where local axis i points in global)"
+            )
         placements = args.get("placements")
         if placements:
             return self._apply_placements(placements,
-                                          verify=args.get("verify", True))
+                                          verify=args.get("verify", True),
+                                          convention=convention,
+                                          top_level=args)
         product = self.conn.get_active_product()
         component = self._resolve_component(product, args["component_name"])
 
@@ -1138,12 +1160,7 @@ class AssemblyTools:
         elif rows is not None:
             if len(rows) != 3 or any(len(row) != 3 for row in rows):
                 raise ValueError("rotation_rows must be a 3x3 array")
-            convention = args.get("rotation_convention", "matrix")
-            if convention not in ("matrix", "basis"):
-                raise ValueError(
-                    "rotation_convention must be 'matrix' (P_asm = A·P_local + T, the "
-                    "default) or 'basis' (row i = where local axis i points in global)"
-                )
+            convention = convention or "matrix"
             values = self._rotation_components(rows, convention) + translation
             source = (
                 "rotation_rows, convention=basis (row i = where local axis i points "
@@ -1195,14 +1212,26 @@ class AssemblyTools:
                 )
         return json.dumps(report, indent=2, ensure_ascii=False)
 
-    def _apply_placements(self, placements: list[Any], verify: bool = True) -> str:
+    def _apply_placements(self, placements: list[Any], verify: bool = True,
+                          convention: str | None = None,
+                          top_level: dict[str, Any] | None = None) -> str:
         """Place many components in one call, and report each one's deviation.
 
         Reported 2026-10-25: seventy instances meant seventy calls that each
         changed twelve numbers. The verification is what makes batching safe -
         a batch that says "70 applied" without saying "all 70 read back at 0 mm"
         is exactly the claim this tool exists to avoid.
+
+        ``convention`` is the top-level ``rotation_convention``, handed down to
+        every entry that does not carry its own. It is inherited rather than
+        copied because 'basis' is a property of the SPEC TABLE, not of one row:
+        a caller who says "these rows are axes" means all of them. Before
+        0.3.40 the batch never saw this argument, so all entries silently fell
+        back to 'matrix' and a basis table was applied transposed (reported
+        2026-10-29, §1).
         """
+        inherited = 0
+        overridden = 0
         results: list[dict[str, Any]] = []
         for index, entry in enumerate(placements, start=1):
             if not isinstance(entry, dict) or not entry.get("component_name"):
@@ -1211,6 +1240,13 @@ class AssemblyTools:
                     "'component_name' plus the same arguments a single call takes "
                     "(rotation_rows / position_components / translation)."
                 )
+            entry = dict(entry)
+            if convention is not None:
+                if entry.get("rotation_convention") in (None, convention):
+                    entry["rotation_convention"] = convention
+                    inherited += 1
+                else:
+                    overridden += 1
             try:
                 raw = self._set_component_transform(
                     {**entry, "verify": verify, "refresh": False})
@@ -1238,15 +1274,33 @@ class AssemblyTools:
             deviations = [r["max_deviation"] for r in placed
                           if isinstance(r.get("max_deviation"), (int, float))]
             worst = round(max(deviations), 12) if deviations else None
-        return json.dumps({
+        reply: dict[str, Any] = {
             "count": len(results),
             "placed": len(placed),
             "failed": len(failed),
             "worst_max_deviation": worst,
-            "placements": results,
-            "note": ("One call, one display refresh. Read 'placements' - an entry "
-                     "with ok=false did not move, and the rest still did."),
-        }, indent=2, ensure_ascii=False)
+        }
+        if convention is not None:
+            reply["rotation_convention"] = {
+                "value": convention,
+                "from": "top level",
+                "inherited_by": inherited,
+                "overridden_by": overridden,
+            }
+        ignored = [key for key in ("component_name", "rotation_rows",
+                                   "position_components", "translation")
+                   if (top_level or {}).get(key) not in (None, [], [0.0, 0.0, 0.0])]
+        if ignored:
+            reply["ignored_top_level_keys"] = ignored
+        reply["placements"] = results
+        reply["note"] = ("One call, one display refresh. Read 'placements' - an entry "
+                         "with ok=false did not move, and the rest still did.")
+        if ignored:
+            reply["note"] += (
+                f" The top-level {', '.join(ignored)} conflicted with the batch and "
+                "was not used; put per-component arguments inside the entry."
+            )
+        return json.dumps(reply, indent=2, ensure_ascii=False)
 
     def _move_component(self, args: dict[str, Any]) -> str:
         import math

@@ -1404,10 +1404,20 @@ class SketcherTools:
                     for i in range(len(points) - 1))
         self._note_element("spline", points=len(points), chord=chord)
         pts_str = ", ".join(f"({p[0]}, {p[1]})" for p in points)
-        return f"Spline created through {len(points)} points: {pts_str}" + (
-            " (closed into a single curve)" if closed and len(control) > len(points)
-            else ""
-        )
+        closed_note = ""
+        if closed and len(control) > len(points):
+            closed_note = (
+                " (closed into a single curve by repeating the first point - this is "
+                "NOT a periodic spline: the tangent does not match across the seam, "
+                "so the curve can overshoot at the closure, and a project + split + "
+                "thick_surface chain built on it can leave a zero-volume sliver that "
+                "both bounding-box routes will then measure. Reported 2026-10-29, §8: "
+                "an 81-point aerofoil closed this way left a 12.75 mm degenerate edge "
+                "beyond every source surface, with the solid volume correct to "
+                "+0.085 %. If the envelope is part of the specification, measure it "
+                "after the solid exists, not before.)"
+            )
+        return f"Spline created through {len(points)} points: {pts_str}" + closed_note
 
     def _draw_point(self, x: float, y: float, construction: bool = False) -> str:
         self._ensure_sketch_open()
