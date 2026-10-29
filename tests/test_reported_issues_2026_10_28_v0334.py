@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -297,7 +298,9 @@ def test_the_cold_note_quotes_this_call_and_a_range_of_versions():
         SimpleNamespace(Name="ASM.CATProduct"), "vertices"))
     note = reply["elapsed_note"]
     assert "parts_ms" in note and "overhead_ms" in note
-    assert "4.65x" in note and "7.6x" in note and "7.24x" in note
+    # 0.3.38 took the multipliers out: a single reading presented as a range is
+    # still a single reading (reported 2026-10-29, §6.5).
+    assert not re.search(r"\d+\.\d+x", note), note
     from catia_mcp.tools import measurement as M
     M._MEASURED_PARTS.clear()
 

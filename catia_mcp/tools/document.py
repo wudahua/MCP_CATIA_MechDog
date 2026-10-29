@@ -11,7 +11,7 @@ from typing import Any
 
 from catia_mcp import dialogs
 from catia_mcp.connection import CATIAConnection
-from catia_mcp.results import ComponentNotFound
+from catia_mcp.results import CodedError, ComponentNotFound
 
 
 class DocumentTools:
@@ -797,20 +797,36 @@ class DocumentTools:
                     doc_info["type"] = "CATProduct"
                 except Exception:
                     doc_info["type"] = "Other"
+            # Notes are COLLECTED and joined, not appended to whatever was there:
+            # 0.3.37 concatenated the two with a single space, so a document that
+            # is both a component and a duplicate read "... (or measure it by name
+            # with document=) 2 open documents carry this exact name ..." - no
+            # full stop, and the "document=) 2" looked like an argument (reported
+            # 2026-10-29, P3 on both reports).
+            shared_count = shared.get(str(doc.Name), 0)
+            notes: list[str] = []
             if doc_info["type"] == "CATPart" and str(doc.Name) in uses:
                 doc_info["component_of"] = uses[str(doc.Name)]
-                doc_info["note"] = (
-                    "used by an open assembly, so it may have no window of its own; "
-                    "if catia_activate_document refuses it, open it with "
-                    "catia_open_document (or measure it by name with document=)")
-            if shared.get(str(doc.Name), 0) > 1:
-                doc_info["name_shared_by"] = shared[str(doc.Name)]
-                doc_info["note"] = (
-                    (doc_info.get("note", "") + " ").lstrip()
-                    + f"{shared[str(doc.Name)]} open documents carry this exact name "
+                # The advice has to agree with the rest of the entry. "measure it
+                # by name with document=" is exactly what the shared-name note
+                # below forbids, and for a document that is both, only the path
+                # works (reported 2026-10-29, §6.4 on the second report).
+                notes.append(
+                    "used by an open assembly, so it may have no window of its "
+                    "own; if catia_activate_document refuses it, open it with "
+                    "catia_open_document"
+                    + ("" if shared_count > 1
+                       else " (or measure it by name with document=)")
+                    + ".")
+            if shared_count > 1:
+                doc_info["name_shared_by"] = shared_count
+                notes.append(
+                    f"This exact name is carried by {shared_count} open documents "
                     "(CATIA names an unsaved document after its part number), so "
                     "document='<name>' is ambiguous and is refused with "
-                    "DOCUMENT_NAME_AMBIGUOUS - pass this entry's path instead")
+                    "DOCUMENT_NAME_AMBIGUOUS - pass this entry's path instead.")
+            if notes:
+                doc_info["note"] = " ".join(notes)
             result.append(doc_info)
 
         if not result:
@@ -859,8 +875,31 @@ class DocumentTools:
                 tiers[3] = doc
         target = next((doc for doc in tiers if doc is not None), None)
         if target is None:
-            raise ValueError(
-                f"No open document named '{name}'. Open: {', '.join(names) or 'none'}."
+            # A name that is not in the session is a LOOKUP failure, and this is
+            # the one tool whose whole job is document names - yet it was the one
+            # tool that answered COM_ERROR and then appended the "CATIA reports
+            # most failures as a bare 'method failed'" paragraph, complete with
+            # advice to check whether in_work_object is a geometrical set, about
+            # a call that never touched a body (reported 2026-10-29, P1: four
+            # tools, two codes for one wrong name, and the odd one out was the
+            # document tool).
+            #
+            # The code is raised here rather than inferred from the wording
+            # downstream: 0.3.32 and 0.3.33 both fixed a contract that had been
+            # bound to a phrase, and this message says "named" where the phrase
+            # table looked for "matches".
+            raise CodedError(
+                f"No open document named '{name}'. Open: {', '.join(names) or 'none'}.",
+                code="DOCUMENT_NOT_FOUND",
+                modified=False,
+                next_actions=[
+                    "Pass a name from catia_list_documents (the 'name' field, with "
+                    "its extension), or open the file first with "
+                    "catia_open_document - this call changed nothing",
+                    "A document that is only a component of an open assembly is "
+                    "not in this list: open it with catia_open_document, or "
+                    "measure it by name with document=",
+                ],
             )
         # Activating one of two same-named documents is a coin toss the caller
         # cannot see either: the reply would name the document, and both answer to

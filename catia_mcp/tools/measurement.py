@@ -113,12 +113,15 @@ _MASS_NOTE = (
 # reply said nothing about where it went (reported 2026-10-28, §6.2).
 _PART_COST_NOTE = (
     "the same two buckets the assembly route publishes, for one part: 'parts_ms' "
-    "is this part's own measurement - 'measure_ms' reading volume / area / "
-    "centroid, 'tensor_ms' borrowing the activation for the inertia tensor - and "
-    "'overhead_ms' is everything else, which on this route is finding the document "
-    "you named and building the reply. parts_ms + overhead_ms = elapsed_ms. "
-    "'tensor_ms' is the field that explains a slow part: a tensor that cannot be "
-    "read still pays for the activation attempt")
+    "is this part's own measurement and 'overhead_ms' is everything else, which on "
+    "this route is finding the document you named and building the reply - "
+    "parts_ms + overhead_ms = elapsed_ms. Inside parts_ms there are three terms "
+    "that add up exactly: 'measure_ms' reading volume / area / centroid, "
+    "'tensor_ms' borrowing the activation for the inertia tensor (including the "
+    "work of saying WHY it is missing, which walks the open assemblies), and "
+    "'parts_other_ms', the remainder - fetching the main body, its shape count, "
+    "the density arithmetic. 'tensor_ms' is the field that explains a slow part: a "
+    "tensor that cannot be read still pays for the activation attempt")
 
 # How many STL vertices a part's cloud may hold while an assembly is being
 # measured. The cloud is kept per PART and transformed once per INSTANCE, so the
@@ -409,8 +412,12 @@ def _pose_note(route: str) -> str:
                 "also covers matching the name you passed against every component "
                 "in the assembly (two COM string reads each), which is why a "
                 "narrowed call on 70 instances still paid 303.3 ms for one pose in "
-                "the 2026-10-28 acceptance run - three times what a single "
-                "unfiltered read costs. 'component_lookup_ms' - published beside "
+                "one B30 run on 2026-10-28 - three times what a single unfiltered "
+                "read costs. That number is B30's, not a figure from anyone's "
+                "acceptance run: the 2026-10-28 acceptance machine reads this same "
+                "line at 166.5 ms and the 2026-10-29 one at 378.8 ms, so read it "
+                "as 'the lookup can dominate the pose', not as a constant. "
+                "'component_lookup_ms' - published beside "
                 "'overhead_breakdown', not inside it, because it is a part of that "
                 "block's first term - is the matching half; the rest is the pose. "
                 "Drop 'component' to measure the whole assembly")
@@ -448,22 +455,26 @@ def _cost_first(payload: dict[str, Any]) -> dict[str, Any]:
 
 #: What a per-part cold/warm ratio means, in the same words on every entry.
 #:
-#: The assembly-level ratio is a WEIGHTED SUM, and that is why it looked like it
-#: was drifting: 4.65x (0.3.30), 7.6x (0.3.31), 7.24x (0.3.33), 9.11x (0.3.35) on
-#: one unchanged 28-part model. Per part the spread is a RANGE, and it is quoted
-#: as one: the 0.3.36 acceptance run (2026-10-28) measured 1.15x-1.81x on
-#: 12-34-cell parts and 12.29x-17.25x on 504-1207-cell parts IN ONE SESSION, while
-#: the two reference points a release earlier (0.3.35) read 1.30x and 15.10x. So
-#: the aggregate moves when the composition moves, and a single ratio quoted as
-#: "the machine's cold/warm factor" is not reproducible across assemblies.
+#: No numbers. This note has now carried wrong numbers twice: 0.3.36 quoted
+#: 1.30x / 15.10x as "measured in one session", and 0.3.37 replaced them with a
+#: range from the 0.3.36 run - which the very next session falsified, because all
+#: seven 12-cell parts read 1.93x-3.70x, ABOVE the range's upper end, and P01 read
+#: 18.84x against a 17.25x ceiling (reported 2026-10-29, §6.2). Adding a version
+#: tag to a number that moves with the session does not make it stable; the fix is
+#: to stop publishing multipliers here and let the two fields in this entry - which
+#: ARE this call's reading - carry the value.
+#:
+#: The rule the report proposed, adopted as the standard: a range is published only
+#: if it holds in three independent sessions. Otherwise: mechanism + the field.
 _COLD_RATIO_NOTE = (
-    "this part's FIRST measurement in the session against its latest warm one. "
-    "The ratio is per PART and varies with size, so read it as a range, not a "
-    "constant: one session (0.3.36, 2026-10-28) measured 1.15x-1.81x on 12-34-cell "
-    "parts and 12.29x-17.25x on 500-1200-cell parts, and the same model read 1.30x "
-    "/ 15.10x one release earlier (0.3.35). The assembly-level 'cold costs N times "
-    "warm' figure is a weighted sum over these, not a property of CATIA or of this "
-    "code")
+    "this part's FIRST measurement in the session against its latest warm one. The "
+    "ratio is per PART - it is how much internal structure that part's first "
+    "topology read has to build - and it moves between sessions on one unchanged "
+    "model, so no multiplier is quoted here on purpose: 'cold_ms' and "
+    "'cold_warm_ratio' in this entry ARE the reading. Use those two, and do not "
+    "carry this part's ratio into a comparison with another part, assembly, "
+    "session or version. The assembly-level 'cold costs N times warm' figure is a "
+    "weighted sum over these, not a property of CATIA or of this code")
 
 #: What `nls_chars` means, in the same words on both routes.
 #:
@@ -600,6 +611,15 @@ class MeasurementTools:
         # the sum as a property of CATIA is what made 4.65x -> 7.6x -> 7.24x look
         # like drift on an unchanged model (reported 2026-10-28, §2.4).
         self._part_times: dict[str, dict[str, float]] = {}
+        # The same book for the ASSEMBLY INERTIA route, kept separate: those
+        # numbers are the vertex sweep, these are volume / area / COG, and a part
+        # whose box is warm can be cold here because the two readers build
+        # different internal structures. Dividing one by the other would produce
+        # a ratio that means nothing (reported 2026-10-29, §5.1: the inertia route
+        # answered none of the regime vocabulary the box route answers).
+        self._inertia_times: dict[str, dict[str, float]] = {}
+        self._last_inertia_cold = False
+        self._inertia_warm_elapsed: dict[str, float] = {}
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         return [
@@ -1089,11 +1109,9 @@ class MeasurementTools:
             # name both and let the caller pass a path - the saved copy carries
             # its full path as its Name, which resolves unambiguously.
             rows = self.conn.describe_matches(matches)
-            listing = "; ".join(
-                f"'{row['document']}'" + (f" at '{row['path']}'" if row["saved"] else
-                                          " (never saved - no path to name it by)")
-                + (" (active)" if row["active"] else "")
-                for row in rows)
+            # One formatter, in the connection, so this sentence and the plan
+            # route's cannot drift apart (reported 2026-10-29, §5.2).
+            listing = self.conn.format_matches(rows)
             raise CodedError(
                 f"'{name}' matches {len(rows)} open documents: {listing}. This call "
                 "did NOT pick one: the two models differ, and the name you passed "
@@ -1210,7 +1228,6 @@ class MeasurementTools:
         # temporary here: activate, read, restore (reported 2026-10-24).
         t_tensor = time.perf_counter()
         tensor = self._tensor_for(part)
-        tensor_ms = round((time.perf_counter() - t_tensor) * 1000, 1)
         if tensor:
             payload.update(tensor)
             if "mass_kg" in payload:
@@ -1249,12 +1266,29 @@ class MeasurementTools:
                 "measured on this document's own Part, independent of which document "
                 "CATIA reports as active. The inertia tensor is missing - see "
                 "tensor_reason.")
+        # The window closes HERE, not right after `_tensor_for`: working out WHY
+        # the tensor is missing is part of the tensor step (the refusal asks the
+        # connection which assemblies hold the part, and that walks every open
+        # product). Closing it earlier made the diagnosis look like unattributed
+        # overhead - 18-19 % of parts_ms on three samples, with no field to
+        # account for it (reported 2026-10-29, §6.1).
+        tensor_ms = round((time.perf_counter() - t_tensor) * 1000, 1)
         # What this route cost, in the vocabulary the assembly route already uses,
         # so "174.3 ms here, 2 117.3 ms there, same tool" has an answer inside the
         # reply instead of in a bug report (reported 2026-10-28, §6.2).
-        payload["parts_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        parts_ms = round((time.perf_counter() - started) * 1000, 1)
+        # The residual, named. `parts_ms` is not "measure + tensor" - it also holds
+        # fetching the main body, its shape count, the density arithmetic and
+        # building this payload - and calling it a sum of two gave a caller who
+        # added them a number 18-19 % short of the field beside it (reported
+        # 2026-10-29, §6.1). Same failure as the four-key breakdown this release
+        # fixed, one field over, so it gets the same treatment: a name for the
+        # remainder, and a closure that holds to 0.1 ms.
+        parts_other_ms = round(max(parts_ms - measure_ms - tensor_ms, 0.0), 1)
+        payload["parts_ms"] = parts_ms
         payload["measure_ms"] = measure_ms
         payload["tensor_ms"] = tensor_ms
+        payload["parts_other_ms"] = parts_other_ms
         payload["overhead_note"] = _PART_COST_NOTE
         return json.dumps(payload, indent=2)
 
@@ -1506,25 +1540,30 @@ class MeasurementTools:
             result["mass_g"] = round(density * volume_mm3 / 1e6, 3)
             result["density_kg_m3"] = density
 
+        t_tensor = time.perf_counter()
         try:
             # Inertia data lives on the SPAWorkbench Inertia object, not on
             # Measurable (Measurable.GetInertia does not exist in V5).
-            t_tensor = time.perf_counter()
             vals = self._evaluate_floats(self._VBS_INERTIA, "catia_mcp_inertia", [body])
             result.update(self._matrix_fields(vals))
-            result["tensor_ms"] = round((time.perf_counter() - t_tensor) * 1000, 1)
             if "mass_kg" in result:
                 result["mass_note"] = _MASS_NOTE
         except Exception as e:
             result["inertia_matrix_kg_m2"] = f"unavailable: {e}"
-            result["tensor_ms"] = round((time.perf_counter() - t_tensor) * 1000, 1)
+        tensor_ms = round((time.perf_counter() - t_tensor) * 1000, 1)
 
-        # The same two buckets the `document=` route publishes, measured from this
+        # The same buckets the `document=` route publishes, measured from this
         # call's own start so `parts_ms + overhead_ms = elapsed_ms` holds here too
         # (reported 2026-10-28, §6.2: the ACTIVE part route was the one with
-        # elapsed_ms and nothing else).
-        result["parts_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        # elapsed_ms and nothing else), including the residual that makes
+        # `measure_ms + tensor_ms + parts_other_ms = parts_ms` close (reported
+        # 2026-10-29, §6.1).
+        parts_ms = round((time.perf_counter() - started) * 1000, 1)
+        result["parts_ms"] = parts_ms
         result["measure_ms"] = measure_ms
+        result["tensor_ms"] = tensor_ms
+        result["parts_other_ms"] = round(
+            max(parts_ms - measure_ms - tensor_ms, 0.0), 1)
         result["overhead_note"] = _PART_COST_NOTE
         return self._stamp_elapsed(json.dumps(result, indent=2), started)
 
@@ -1591,6 +1630,55 @@ class MeasurementTools:
                   point: list[float]) -> list[float]:
         return [sum(matrix[i][j] * point[j] for j in range(3)) + translation[i]
                 for i in range(3)]
+
+    def _top_level_sub_assemblies(self, doc: Any) -> list[tuple[str, Any]]:
+        """``(name, nested document)`` for the top-level children that are products.
+
+        Only the narrowed route needs this - it answers "does the same part also
+        live inside a sub-assembly?" - and until 0.3.38 it answered by re-reading
+        the WHOLE component list, poses included. On a narrowed call that is a
+        second full pose read for a question about structure, which is why a
+        narrowed call could cost MORE than the full scan it replaced (reported
+        2026-10-29, §3.1: 6 309.9 ms against 4 815.1 ms on one part). Asking each
+        child whether it holds products costs one call per child and reads no
+        placement at all.
+        """
+        try:
+            product = self.conn.product_of(doc)
+            children = product.Products
+            count = children.Count
+        except Exception:  # noqa: BLE001 - no product tree, fall back below
+            return self._sub_assemblies_via_rows(doc)
+        found: list[tuple[str, Any]] = []
+        for i in range(1, count + 1):
+            try:
+                child = children.Item(i)
+                if child.Products.Count <= 0:
+                    continue
+            except Exception:  # noqa: BLE001 - a leaf, or a broken link
+                continue
+            try:
+                nested = child.ReferenceProduct.Parent
+            except Exception:  # noqa: BLE001 - no document behind it
+                nested = None
+            try:
+                name = str(child.Name)
+            except Exception:  # noqa: BLE001
+                name = ""
+            found.append((name, nested))
+        return found
+
+    def _sub_assemblies_via_rows(self, doc: Any) -> list[tuple[str, Any]]:
+        """The expensive fallback: read every row to find the sub-assemblies.
+
+        Kept because the product tree is not readable on every build (and a test
+        connection has no `product_of` at all), and because a wrong answer here
+        would silently drop the "the same part is also nested" warning.
+        """
+        return [(str(row.get("name") or ""), row.get("nested_doc"))
+                for row in self._components_doc(doc)
+                if row.get("kind") == "sub_assembly"
+                and row.get("nested_doc") is not None]
 
     def _components_doc(self, doc: Any,
                         only: str | None = None) -> list[dict[str, Any]]:
@@ -1948,6 +2036,18 @@ class MeasurementTools:
                 measured_name = str(doc.Name)
             except Exception:  # noqa: BLE001 - the numbers are the point
                 measured_name = "<assembly>"
+            # The same cost vocabulary as a non-empty answer, even when there is
+            # nothing to measure: catia_get_inertia published parts_ms /
+            # overhead_ms / breakdown for an empty product while this route
+            # published none, and the inertia note says "the same three buckets
+            # catia_get_bounding_box publishes" (reported 2026-10-29, §6.3). The
+            # numbers are tiny and irrelevant - the CONSISTENCY is not, because a
+            # caller that reads the block has to branch on which tool answered.
+            empty_elapsed = round((time.perf_counter() - started) * 1000, 1)
+            empty_components = round((t_rows - started) * 1000, 1)
+            empty_walk = round(max((t_walk - t_rows) * 1000, 0.0), 1)
+            empty_report = round(max(empty_elapsed - empty_components
+                                     - empty_walk, 0.0), 1)
             return json.dumps({
                 "dimensions": None,
                 "min": None,
@@ -1955,7 +2055,22 @@ class MeasurementTools:
                 "components": [],
                 "complete": False,
                 "empty_assembly": empty_product,
-                "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
+                "elapsed_ms": empty_elapsed,
+                "parts_ms": 0.0,
+                "overhead_ms": empty_elapsed,
+                "overhead_breakdown": {
+                    "components_doc_ms": empty_components,
+                    "walk_other_ms": empty_walk,
+                    "report_ms": empty_report,
+                },
+                "overhead_note": (
+                    "an empty product still publishes the three buckets, so this "
+                    "reply has the same keys as a measured one: parts_ms is 0 "
+                    "because no part was read, and everything spent is reading the "
+                    "(empty) component list and building this reply"),
+                **({"poses_route": poses_route,
+                    "poses_route_note": _pose_note(poses_route)}
+                   if poses_route else {}),
                 # instances.skipped == len(skipped), on every route: this counted
                 # the placeholder entry as an "instance" of an empty product,
                 # while catia_get_inertia answered 0 for the same document
@@ -2076,13 +2191,12 @@ class MeasurementTools:
                 f"{cold_parts} of {len(local_boxes)} part(s) were measured for the "
                 "FIRST time in this session. CATIA builds a part's internal "
                 "representation on the first topology read, so a cold call costs "
-                "several times a warm one: on the 28-part acceptance assembly the "
-                "ratio measured 4.65x (0.3.30), 7.6x (0.3.31), 7.24x (0.3.33) and "
-                "9.11x (0.3.35) with cells_scanned, vertices_used and nls_chars "
-                "IDENTICAL, so it is not 'less work'. Do not read those four numbers "
-                "as drift: the aggregate is a WEIGHTED SUM over parts that cost "
-                "1.30x (12 cells) to 15.10x (1207 cells), so it moves when the model "
-                "moves - 'parts[].cold_warm_ratio' carries the terms. Quote "
+                "several times a warm one - and that factor is per PART and per "
+                "session, so no multiplier is quoted here. This note carried one "
+                "reading as if it were a property for four versions in a row, and "
+                "each new session moved it again; the per-part terms for THIS call "
+                "are in 'parts[].cold_warm_ratio', and those are the only ones to "
+                "quote. Quote "
                 "THIS call's own numbers (parts_ms "
                 f"{payload.get('parts_ms')} + overhead_ms "
                 f"{payload.get('overhead_ms')} = elapsed_ms "
@@ -2216,11 +2330,10 @@ class MeasurementTools:
         # (reported 2026-10-27). Find what the narrowing left out and say it.
         also_nested: list[dict[str, Any]] = []
         if only:
-            for row in self._components_doc(doc):
-                nested = row.get("nested_doc")
-                if row.get("kind") == "sub_assembly" and nested is not None:
+            for name, nested in self._top_level_sub_assemblies(doc):
+                if nested is not None:
                     also_nested.extend(self._nested_matches(
-                        nested, only, 2, str(row["name"] or "")))
+                        nested, only, 2, name))
             for match in also_nested:
                 skipped.append({
                     "component": only.strip(),
@@ -2598,10 +2711,16 @@ class MeasurementTools:
         # compared - "4.2 s" with no breakdown, next to a box call that says where
         # every millisecond went (reported 2026-10-28, §5.6).
         cost = {"components_doc": 0.0, "part_props": 0.0}
+        # Per PART (not per instance): what its mass properties cost and which
+        # regime that reading came from. `leaves` answers "where is this instance";
+        # this answers "which part is expensive", which is the question 28 parts
+        # repeated 70 times cannot answer.
+        parts_detail: dict[Any, dict[str, Any]] = {}
         self._poses_route = None
         self._inertia_collect(doc, [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0],
                                     [0.0, 0.0, 1.0]], [0.0, 0.0, 0.0],
-                              1, "", leaves, skipped, part_cache, cost)
+                              1, "", leaves, skipped, part_cache, cost,
+                              parts_detail)
         poses_route = self._poses_route
         t_walk = time.perf_counter()
         total = sum(entry["volume_mm3"] for entry in leaves)
@@ -2637,13 +2756,23 @@ class MeasurementTools:
                 "optimisation: this route moves one centroid per instance, while "
                 "the same assembly's bounding box moves every part's whole vertex "
                 "cloud into world coordinates - 9.4 ms against 463-486 ms for one "
-                "70-instance assembly in the 2026-10-28 acceptance run. Read the "
+                "70-instance assembly on B30 on 2026-10-28. Read the "
                 "two blocks' walk_other_ms as different jobs, not as one job done "
                 "faster"),
         }
         if poses_route:
             cost_fields["poses_route"] = poses_route
             cost_fields["poses_route_note"] = _pose_note(poses_route)
+        # Which regime this call ran in, and which part is expensive: the box
+        # route has answered both since 0.3.34 / 0.3.36 and this one answered
+        # neither, so "is this inertia number cold or warm" had no answer on the
+        # route that reads every part's mass properties - the exact question
+        # after_cold exists for (reported 2026-10-29, §5.1).
+        inertia_parts = list(parts_detail.values())
+        cold_parts = sum(1 for entry in inertia_parts if entry.get("first_measure"))
+        cost_fields["cold_parts"] = cold_parts
+        cost_fields["parts_total"] = len(inertia_parts)
+        cost_fields["parts"] = inertia_parts
         try:
             doc_name = str(doc.Name)
         except Exception:  # noqa: BLE001 - the numbers are the point
@@ -2679,6 +2808,8 @@ class MeasurementTools:
                 "assembly_depth_max": depth_max,
                 "elapsed_ms": elapsed,
                 **cost_fields,
+                **self._inertia_regime(elapsed, cold_parts, len(inertia_parts),
+                                       doc_name, measured=False),
                 **({"document": doc_name} if doc_name else {}),
                 "skipped": [] if empty_product else skipped,
                 "incomplete_because": (
@@ -2703,12 +2834,18 @@ class MeasurementTools:
             "area_cm2": round(total_area / 100.0, 4),
             "center_of_gravity_mm": {k: round(acc[i] / total, 4)
                                      for i, k in enumerate("xyz")},
-            "components": leaves,
             "complete": not skipped,
             "instances": instances,
             "assembly_depth_max": depth_max,
             "elapsed_ms": elapsed,
+            # Cost model before the 70-entry component list, for the reason
+            # `_cost_first` exists: a truncated reply used to lose exactly the
+            # fields that say which regime produced the number (reported
+            # 2026-10-27). Same order here, since this route now carries them.
             **cost_fields,
+            **self._inertia_regime(elapsed, cold_parts, len(inertia_parts),
+                                   doc_name, measured=True, parts_ms=parts_ms),
+            "components": leaves,
             "note": ("volume-weighted aggregation of the components' own volumes "
                      "and centres of gravity, moved into world space by each "
                      "component's placement. Surface area is summed (it is "
@@ -2736,6 +2873,66 @@ class MeasurementTools:
                 "it in yourself.")
         return json.dumps(payload, indent=2)
 
+    def _inertia_regime(self, elapsed_ms: float, cold_parts: int,
+                        parts_total: int, doc_name: str | None,
+                        measured: bool, parts_ms: float = 0.0) -> dict[str, Any]:
+        """``after_cold`` / ``elapsed_note`` for the assembly inertia route.
+
+        Same three values as the box route, and the same reason: one call of this
+        route right after a cold pass is the slowest one, and without the field a
+        reader compares 22.1 s with 16.2 s and calls it a regression. The
+        direction is not baked in - the note quotes THIS session's own difference
+        and says the post-cold direction has measured both ways.
+
+        ``measured=False`` is the empty product: nothing was read, so the call is
+        neither cold nor warm and the flag must not move (an empty product cannot
+        make the next real call look warm).
+        """
+        if not measured:
+            return {
+                "after_cold": None,
+                "elapsed_note": (
+                    "nothing was read, so this call is neither cold nor warm - "
+                    "'after_cold: null' here means 'not applicable', and it does "
+                    "not change what the next call on this document reports"),
+            }
+        after_cold = None if cold_parts else self._last_inertia_cold
+        self._last_inertia_cold = cold_parts > 0
+        document_key = doc_name or ""
+        previous_warm = (self._inertia_warm_elapsed.get(document_key)
+                         if document_key else None)
+        if cold_parts == 0 and document_key:
+            self._inertia_warm_elapsed[document_key] = elapsed_ms
+        if cold_parts:
+            note = (
+                f"{cold_parts} of {parts_total} part(s) had their MASS PROPERTIES "
+                "read for the first time in this session, so this is a cold call: "
+                "CATIA builds a part's internal representation on the first "
+                "measurement of it, and the factor differs per part and per "
+                "session - which is why no aggregate multiplier is quoted here. "
+                "The per-part terms are in 'parts[].cold_warm_ratio', and each "
+                "part's reading came from its own first measurement in this "
+                "session. This route's book is separate from the bounding box's: "
+                "a part whose box is warm can be cold here, because the two "
+                "readers build different structures. Quote THIS call's own numbers "
+                f"(parts_ms {round(parts_ms, 1)} + overhead_ms "
+                f"{round(max(elapsed_ms - parts_ms, 0.0), 1)} = elapsed_ms "
+                f"{elapsed_ms}).")
+        else:
+            note = (
+                "every part here had its mass properties read earlier in this "
+                "session, so this is the warm number."
+                + (f" This call took {elapsed_ms} ms against {previous_warm} ms for "
+                   f"the previous warm call on this document in this session "
+                   f"({elapsed_ms - previous_warm:+.1f} ms, "
+                   f"{(elapsed_ms / previous_warm - 1) * 100:+.1f} %)."
+                   if previous_warm and not after_cold else "")
+                + (" It is also the FIRST call after a cold pass. That has "
+                   "measured both ways across versions, so read this number as "
+                   "'not yet the steady state', not as an upper bound."
+                   if after_cold else ""))
+        return {"after_cold": after_cold, "elapsed_note": note}
+
     _INERTIA_MAX_DEPTH = 8
 
     def _inertia_collect(self, doc: Any, matrix: list[list[float]],
@@ -2743,7 +2940,9 @@ class MeasurementTools:
                          leaves: list[dict[str, Any]],
                          skipped: list[dict[str, Any]],
                          part_cache: dict[Any, Any],
-                         cost: dict[str, float] | None = None) -> None:
+                         cost: dict[str, float] | None = None,
+                         parts_detail: dict[Any, dict[str, Any]] | None = None
+                         ) -> None:
         """Flatten an assembly into world-space leaves, recursing into sub-assemblies.
 
         ``matrix``/``translation`` are the accumulated placement of the assembly
@@ -2794,7 +2993,8 @@ class MeasurementTools:
                                              "this branch was not expanded"})
                     continue
                 self._inertia_collect(nested, world_matrix, world_t, depth + 1,
-                                      path, leaves, skipped, part_cache, cost)
+                                      path, leaves, skipped, part_cache, cost,
+                                      parts_detail)
                 continue
             if row["part"] is None:
                 skipped.append({"component": label, "path": path, "depth": depth,
@@ -2803,12 +3003,16 @@ class MeasurementTools:
                 continue
             props_started = time.perf_counter()
             props = self._part_mass_properties(row["part"], part_cache)
+            props_ms = round((time.perf_counter() - props_started) * 1000, 1)
             if cost is not None:
                 cost["part_props"] += time.perf_counter() - props_started
             if "error" in props:
                 skipped.append({"component": label, "path": path, "depth": depth,
                                 "kind": "part", "error": props["error"]})
                 continue
+            if parts_detail is not None:
+                self._note_inertia_part(row["part"], label, props, props_ms,
+                                        parts_detail)
             world = self._to_world(world_matrix, world_t, props["cog"])
             leaves.append({
                 "component": label,
@@ -2820,6 +3024,51 @@ class MeasurementTools:
                 "center_of_gravity_mm": {k: round(v, 4)
                                          for k, v in zip("xyz", world)},
             })
+
+    def _note_inertia_part(self, part: Any, label: str, props: dict[str, Any],
+                           props_ms: float,
+                           parts_detail: dict[Any, dict[str, Any]]) -> None:
+        """Record one part's mass-properties cost, and its two regimes.
+
+        Separate book from the box route's ``_part_times`` on purpose - see
+        ``_inertia_times``. The first reading in the session is the cold one even
+        if that part's BOX was measured long ago, because CATIA builds a
+        different internal structure for mass properties than for the vertex
+        sweep, and mixing the two would report a cold/warm ratio across two
+        different jobs.
+        """
+        try:
+            key = self._part_identity(part)
+        except Exception:  # noqa: BLE001 - an unidentifiable part is still measured
+            return
+        entry = parts_detail.get(key)
+        if entry is None:
+            first = key not in self._inertia_times
+            history = self._inertia_times.setdefault(key, {})
+            if first:
+                history["cold_ms"] = props_ms
+            else:
+                history["warm_ms"] = props_ms
+            entry = {
+                "part": label,
+                "instances": 0,
+                "volume_mm3": round(props["volume"], 4),
+                "area_mm2": round(props["area"], 4),
+                "elapsed_ms": props_ms,
+                "first_measure": first,
+            }
+            if history.get("cold_ms") is not None and history.get("warm_ms"):
+                entry["cold_ms"] = history["cold_ms"]
+                entry["cold_warm_ratio"] = round(
+                    history["cold_ms"] / history["warm_ms"], 2)
+                entry["cold_warm_note"] = _COLD_RATIO_NOTE
+            parts_detail[key] = entry
+        else:
+            # A cached part costs nothing here, and saying 0.0 ms would read as
+            # "this part got free"; the number stays the one from its first read
+            # in THIS call and the instance count says why it is not paid again.
+            pass
+        entry["instances"] = entry.get("instances", 0) + 1
 
     def _part_mass_properties(self, part: Any,
                               cache: dict[Any, Any] | None = None

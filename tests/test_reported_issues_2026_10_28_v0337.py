@@ -269,15 +269,24 @@ def test_the_lookup_time_is_published_beside_the_breakdown_not_inside_it():
     M._MEASURED_PARTS.clear()
 
 
-# ─────────────── 4. the cold/warm note is a range with versions (report 2, §6.1)
-def test_the_cold_ratio_note_names_its_versions_and_reads_as_a_range():
+# ─────────────── 4. the cold/warm note quotes no multiplier (report 2, §6.1)
+def test_the_cold_ratio_note_quotes_no_multiplier():
+    """0.3.38: the range this test used to require was falsified one session later.
+
+    The rule this release adopted, and the reason the assertions reversed: a range
+    is published only if it holds in three independent sessions. Here it held for
+    one - the 0.3.36 readings ("1.15x-1.81x on 12-34-cell parts") were followed by
+    1.93x-3.70x on every 12-cell part and 18.84x on P01 (reported 2026-10-29,
+    §6.2). So the note publishes the mechanism and points at the two fields that
+    carry THIS call's reading, and any \"N.NNx\" in it is a regression.
+    """
+    import re
+
     from catia_mcp.tools.measurement import _COLD_RATIO_NOTE
 
-    assert "(0.3.36" in _COLD_RATIO_NOTE and "(0.3.35)" in _COLD_RATIO_NOTE
-    assert "1.15x-1.81x" in _COLD_RATIO_NOTE
-    assert "12.29x-17.25x" in _COLD_RATIO_NOTE
-    # The failing shape: one session's two readings presented as the fact.
-    assert "1.30x on a 12-cell part, 15.10x" not in _COLD_RATIO_NOTE
+    assert not re.search(r"\d+\.\d+x", _COLD_RATIO_NOTE), _COLD_RATIO_NOTE
+    assert "cold_ms" in _COLD_RATIO_NOTE and "cold_warm_ratio" in _COLD_RATIO_NOTE
+    assert "session" in _COLD_RATIO_NOTE
 
 
 # ─────────────── 5. the part route has a cost account (report 2, §6.2)

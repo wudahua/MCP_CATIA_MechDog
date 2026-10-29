@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -386,10 +387,12 @@ def test_the_cold_note_quotes_the_measurement_that_prompted_it():
     tools = _assembly_tools()
     reply = json.loads(tools._assembly_box(_Doc("ASM.CATProduct"), "vertices"))
     note = reply["elapsed_note"]
-    # 0.3.34: the note now quotes a RANGE across versions plus THIS call's own
-    # parts_ms / overhead_ms / elapsed_ms, instead of the one afternoon that
-    # produced 173.4 s / 22.9 s (reported 2026-10-28, section 6).
-    assert "7.6x" in note and "4.65x" in note
+    # 0.3.34 made the note quote a range of versions instead of one afternoon;
+    # 0.3.38 removed the multipliers from it altogether, because every range so
+    # far was falsified by the next session (reported 2026-10-29, §6.2/§6.5).
+    # What is left is the mechanism plus THIS call's own numbers.
+    assert not re.search(r"\d+\.\d+x", note), note
+    assert "cold_warm_ratio" in note
     assert "parts_ms" in note and "overhead_ms" in note
     assert f"{reply['parts_ms']}" in note
     assert "warm_up=true" in note

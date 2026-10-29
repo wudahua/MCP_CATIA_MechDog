@@ -458,6 +458,24 @@ class CATIAConnection:
                  "saved": row["saved"]}
                 for row in matches]
 
+    @staticmethod
+    def format_matches(rows: list[dict[str, Any]]) -> str:
+        """One candidate per clause, for the sentence a refusal has to write.
+
+        Shared so the same ambiguity reads the same way wherever it is raised.
+        It did not: ``catia_get_inertia`` said "'X' (never saved - no path to name
+        it by)" and ``catia_run_plan`` said "'X'", which drops the one fact that
+        makes the advice ("pass the path instead") applicable - an unsaved copy
+        HAS no path, and the caller needed to know that before hunting for one
+        (reported 2026-10-29, §5.2).
+        """
+        return "; ".join(
+            f"'{row['document']}'"
+            + (f" at '{row['path']}'" if row.get("saved") and row.get("path")
+               else " (never saved - no path to name it by)")
+            + (" (active)" if row.get("active") else "")
+            for row in rows)
+
     def component_usage(self) -> dict[str, list[str]]:
         """Part document name -> the open assemblies whose components use it.
 

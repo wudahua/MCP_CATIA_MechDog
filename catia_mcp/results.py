@@ -113,7 +113,8 @@ def failure_code(message: str, error: BaseException | None = None,
         return "UNSUPPORTED_CAPABILITY"
     if "no component matches" in text or "no component '" in text:
         return "COMPONENT_NOT_FOUND"
-    if "no open document matches" in text or "is not open" in text and "open:" in text:
+    if ("no open document matches" in text or "no open document named" in text
+            or "is not open" in text and "open:" in text):
         # "I typed the name wrong / it is not open" and "CATIA is broken" need
         # different next steps, and COM_ERROR said neither (reported 2026-10-28,
         # §5.3).

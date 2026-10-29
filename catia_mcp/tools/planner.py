@@ -540,10 +540,10 @@ class PlannerTools:
             rows = self.conn.describe_matches(matches)
             raise CodedError(
                 f"'{document}' matches {len(rows)} open documents: "
-                + "; ".join(f"'{row['document']}'"
-                            + (f" at '{row['path']}'" if row["saved"] else "")
-                            + (" (active)" if row["active"] else "")
-                            for row in rows)
+                # The same formatter catia_get_inertia uses: dropping the
+                # "never saved" clause here left the caller hunting for a path
+                # that does not exist (reported 2026-10-29, §5.2).
+                + self.conn.format_matches(rows)
                 + ". Nothing was counted - pass the full path of the one you mean.",
                 code="DOCUMENT_NAME_AMBIGUOUS",
                 modified=False,

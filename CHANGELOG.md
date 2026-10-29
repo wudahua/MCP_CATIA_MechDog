@@ -2,6 +2,173 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.38] — 2026-10-29 · one wrong name is one code, and the cost a narrowed call never reported
+
+### Fixed — a wrong document name was a CATIA fault on the one tool about document names (report 1, P1)
+
+- Four tools, one input (`document='NOPE37.CATPart'`), two answers: three said
+  `DOCUMENT_NOT_FOUND` and `catia_activate_document` said **`COM_ERROR`** - and
+  then appended the blanket paragraph *"CATIA reports most automation failures as
+  a bare 'method failed' … check whether `in_work_object` is a geometrical set"*
+  to a call that never touched a body and had already printed the list of open
+  documents. The message said *"No open document named"*, the phrase table looked
+  for *"matches"*, and the mismatch fell through to the bare-call default.
+- The raise site now carries the code itself (`CodedError(code=
+  "DOCUMENT_NOT_FOUND")`, `modified=False`, two next actions about the ARGUMENT:
+  use a name from `catia_list_documents`, or open the file first). The phrase
+  table gained `"no open document named"` as well - not because the contract
+  should rest on wording (0.3.32/0.3.33 both fixed that mistake), but so a future
+  raise site that forgets the code still cannot answer `COM_ERROR`.
+- Measured on B30: all four tools answer `DOCUMENT_NOT_FOUND`; the reply has no
+  `recovery` block, no `in_work_object` paragraph, and
+  `data.next_actions` + `data.next_actions_note`.
+
+### Fixed — two notes were glued together, and one of them contradicted the other (report 1, P3 / report 2, §6.4)
+
+- A document that is both a component of an open assembly and one of two copies
+  with the same name read:
+
+  ```
+  … open it with catia_open_document (or measure it by name with document=) 2 open
+  documents carry this exact name …
+  ```
+
+  No full stop, and `document=) 2` reads like an argument. Worse, the first half
+  ADVISES the name and the second half REFUSES it.
+- Notes are now collected as sentences and joined; the component advice is
+  dropped when the name is shared, because for that document only the path works.
+  Measured on B30 with a real case (`REL38.CATPart` saved + a second unsaved copy,
+  and used by `ASM38C.CATProduct`):
+
+  ```
+  used by an open assembly, so it may have no window of its own; if
+  catia_activate_document refuses it, open it with catia_open_document. This exact
+  name is carried by 2 open documents (CATIA names an unsaved document after its
+  part number), so document='<name>' is ambiguous and is refused with
+  DOCUMENT_NAME_AMBIGUOUS - pass this entry's path instead.
+  ```
+
+### Fixed — `parts_ms` said "these two terms" and had three (report 2, §6.1, P2)
+
+- The part route's note described `parts_ms` as *"`measure_ms` reading volume /
+  area / centroid, `tensor_ms` borrowing the activation"*, and three samples were
+  **18.9 / 18.9 / 17.9 % short** of it (791.6 / 727.7 / 28.8 ms) - a stable gap,
+  not jitter. Same failure as the four-key `overhead_breakdown` this project had
+  just fixed, one field over: a caller who adds what the note names gets a number
+  that disagrees with the field beside it.
+- `parts_other_ms` names the remainder (main body, shape count, density
+  arithmetic, building the reply) on **both** part routes, and
+  `measure_ms + tensor_ms + parts_other_ms = parts_ms` closes to 0.1 ms. Measured
+  on B30: `4432.4 = 101.6 + 4318.0 + 12.8`, delta 0.0.
+- The window also moved: `tensor_ms` used to stop right after `_tensor_for`, so
+  the work of explaining WHY the tensor is missing - which asks the connection
+  which assemblies hold the part, walking every open product - landed in no field
+  at all. That was most of the 18.9 %.
+
+### Added — the assembly inertia route answers the same regime question (report 1, §5.1)
+
+- `catia_get_bounding_box` has published `after_cold` / `cold_parts` /
+  `elapsed_note` since 0.3.34-0.3.36; `catia_get_inertia` on an assembly - the
+  route that reads every part's mass properties - published none of them, so "is
+  this number cold or warm" had no answer on the route where it matters most.
+- It publishes `cold_parts`, `parts_total`, `parts[]` (`part`, `instances`,
+  `volume_mm3`, `area_mm2`, `elapsed_ms`, `first_measure`, and `cold_ms` /
+  `cold_warm_ratio` once both regimes have been seen), `after_cold` and
+  `elapsed_note`. The book is **separate** from the box route's: those numbers are
+  the vertex sweep, these are mass properties, and a part whose box is warm can be
+  cold here - dividing one by the other would produce a ratio that means nothing.
+- Measured on B30, 10 instances of a 24 000 mm³ pad: cold 411.1 ms
+  (`parts_ms` 138.8), then 371.0, then 371.1, with `after_cold` `null` → `true` →
+  `false`, real per-part `cold_warm_ratio` 1.04 → 1.07, and
+  `parts_ms + overhead_ms = elapsed_ms` exact on all three.
+- An empty product says `after_cold: null` with a note that it is *not
+  applicable* and does not move the flag for the next real call.
+
+### Fixed — a narrowed call spent time it did not report, on a re-read it did not need (report 2, §3.1)
+
+- `component=` narrows to one instance, and then asked "is the same part also
+  nested in a sub-assembly?" by re-reading the WHOLE component list, poses
+  included. On 70 instances that is a second full placement read for a question
+  about structure - which is how a narrowed call came out **+31 % dearer than the
+  full scan it replaced** (6 309.9 ms against 4 815.1 ms on one part).
+- Two things were wrong, and the second is worse than the first: the re-read was
+  unnecessary (`_top_level_sub_assemblies` asks each child whether it holds
+  products - one call per child, no placement read at all), and it happened
+  **after `elapsed_ms` had already been stamped**, so the reply was short by
+  exactly the time it took. A call costing 1.31 s reported 1.02 s.
+- Same-session A/B on B30, 10 instances, 6 calls each, alternating checkouts:
+
+  | | 0.3.37 | 0.3.38 |
+  |---|---|---|
+  | wall clock | 1 110-1 314 ms | 934-1 078 ms |
+  | spent after `elapsed_ms` was stamped | 247-288 ms | 93-118 ms |
+  | reading the component list | 340-360 ms | 170-195 ms |
+
+  On the report's 70-instance assembly the removed read is ~800 ms, which is the
+  +31 % they measured; the tool now reads the list once.
+
+### Changed — no multiplier without three sessions (report 2, §6.2 and §6.5)
+
+- 0.3.37 replaced one session's `1.30x / 15.10x` with a range from the 0.3.36
+  run. The next session falsified the range: all seven 12-cell parts read
+  1.93x-3.70x, **above** its 1.81x ceiling, and P01 read 18.84x against 17.25x.
+  Fourth time this pattern has appeared (0.3.34 `overhead_note`, 0.3.35
+  `elapsed_note`, 0.3.36 and 0.3.37 `cold_warm_note`).
+- `cold_warm_note` and the cold `elapsed_note` now quote **no** multiplier at
+  all - not a range, not a version-tagged pair. They publish the mechanism and
+  point at `parts[].cold_warm_ratio`, which is this call's reading. The rule the
+  report proposed is adopted as the standard: **a range is published only if it
+  holds in three independent sessions; otherwise mechanism + the field.**
+
+### Fixed — an empty product got the cost block from one aggregator only (report 2, §6.3)
+
+- `catia_get_inertia` answered an empty product with `parts_ms: 0.0`,
+  `overhead_ms`, a three-key `overhead_breakdown` and `poses_route`;
+  `catia_get_bounding_box` answered with `elapsed_ms` and nothing else - while the
+  inertia note says *"the same three buckets `catia_get_bounding_box` publishes"*.
+  The numbers are trivial (7.6 ms); the vocabulary is not, because a caller that
+  reads the block had to branch on which tool answered.
+- Measured on B30 (`v36_empty.CATProduct`): `parts_ms 0.0`,
+  `overhead_ms 7.6`, `overhead_breakdown {7.4, 0.0, 0.2}` summing to it,
+  `poses_route: one_call`, `after_cold: null`.
+
+### Changed — the two ambiguity refusals share one formatter (report 1, §5.2)
+
+- `catia_get_inertia` described a candidate as `'X' (never saved - no path to name
+  it by)`, `catia_run_plan` as `'X'` - dropping the one fact the advice depends on
+  ("pass the path instead" is impossible for a copy that has no path).
+  `CATIAConnection.format_matches` now writes both sentences. Measured on B30:
+  `'REL38.CATPart' at 'F://cat_bench//REL38.CATPart'; 'REL38.CATPart' (never saved
+  - no path to name it by) (active)`.
+
+### Changed — `poses_route_note`'s 303.3 ms has an owner (report 2, §6.6)
+
+- It said *"in the 2026-10-28 acceptance run"*, which reads as the reporter's own
+  run - the one where the same field read 166.5 ms (and 378.8 ms a day later). It
+  now says "one B30 run on 2026-10-28" and quotes the other two readings as what
+  they are: the same line, three machines, three numbers.
+
+### Note — `tensor_partial_route` is from 0.3.24, not new (report 2, §5.4)
+
+- It is documented under `[0.3.24]` ("replaces the seventh line of
+  `tensor_reason` prose with a `{code, tool, shape, answers, does_not_answer}`
+  object") and has been in every reply of that shape since. Nothing in 0.3.37
+  added it; the previous report's harness did not reach the branch.
+
+### Note — the warm number is not a baseline (report 2, §8.8)
+
+- The report asks that this release's 16.2 s warm figure not be written into the
+  CHANGELOG as the new baseline, because the same code measured 22.1 s one
+  session earlier and the per-call resolver can account for ~10 ms of a 5 900 ms
+  change. Agreed, and not written. What this release claims about performance is
+  only what it measured itself: the narrowed route's removed re-read (table
+  above), and nothing about the assembly's steady state, whose spread is
+  session-shaped.
+
+- 717 tests pass (12 new in `tests/test_reported_issues_2026_10_29_v0338.py`),
+  plus two 0.3.32/0.3.34 assertions updated: they required the multipliers this
+  release removed.
+
 ## [0.3.37] — 2026-10-28 · every document was its own twin, and the cost that was not per cell
 
 ### Fixed — the duplicate-name WARNING counted every document as its own twin (reported P1)

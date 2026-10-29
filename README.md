@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.37** · [what changed](CHANGELOG.md) ·
+**0.3.38** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -499,6 +499,29 @@ it with `DOCUMENT_NAME_AMBIGUOUS` instead of picking one", `catia_activate_docum
 says it activated the first of N, and `catia_list_documents` marks each duplicated
 entry with `name_shared_by`.
 
+A document can be both a component of an open assembly and one of two copies with
+the same name, and until 0.3.38 that entry carried two notes glued with a space —
+one advising `document='<name>'`, the next refusing it:
+
+```
+… open it with catia_open_document (or measure it by name with document=) 2 open
+documents carry this exact name …
+```
+
+The notes are sentences now, and when the name is shared the component advice is
+dropped rather than contradicted: for that document only the path works. The two
+refusals (`catia_get_inertia` / `catia_run_plan`) also describe a candidate the
+same way, through `CATIAConnection.format_matches` — the planner's copy used to
+omit "(never saved - no path to name it by)", which is the one fact that decides
+whether the advice ("pass the path instead") can be followed at all.
+
+A wrong name is one code on every tool. `catia_activate_document` was the odd one
+out: it raised `COM_ERROR` and appended the "CATIA reports most automation
+failures as a bare 'method failed' … check `in_work_object`" paragraph, about a
+call that never touched a body and had already printed the list of open
+documents. It raises `DOCUMENT_NOT_FOUND` with two next actions now, like the
+other three.
+
 That warning only means something if it appears when there IS another copy. 0.3.36
 compared the handles with `is`, which pywin32 never satisfies (`Documents.Item(i)`
 mints a new Python wrapper per access: `Item(1) is Item(1)` is False,
@@ -626,14 +649,14 @@ looked up in the open assembly that contains it, and the reply says so
 `after_cold` is three values, never a missing key: `null` when THIS call was the
 cold one, `true` on the first call after a cold pass, `false` in the steady state.
 `parts[].cold_ms` and `parts[].cold_warm_ratio` give the two regimes per part once
-both have been seen, because the assembly-level ratio is a weighted sum over parts
-whose per-part ratio ranged **1.15×–1.81× on 12–34-cell parts and 12.29×–17.25× on
-500–1200-cell parts, in one session** — which is why the aggregate read 4.65× /
-7.6× / 7.24× / 9.11× on one unchanged model. The note quotes both ranges with
-their versions (0.3.36 and 0.3.35 read different ones), because a multiplier
-measured once is a reading, not a property. A warm
-call also quotes this session's own difference against the previous warm call on
-the same document, instead of a constant from another session.
+both have been seen. They are the only numbers to quote: **the notes publish no
+multiplier at all** (not even a range), because every range this project wrote
+down was falsified by the next session — 1.15×–1.81× for 12-cell parts became
+1.93×–3.70×, above its own ceiling, one day later. The rule, adopted 2026-10-29:
+a range is published only if it holds in three independent sessions; otherwise
+mechanism plus the field. A warm call does still quote this session's own
+difference against the previous warm call on the same document, which is a
+reading rather than a claim about CATIA.
 
 `component_lookup_ms` (narrowed calls only, published **beside**
 `overhead_breakdown` rather than inside it) is the share of `components_doc_ms`
@@ -644,9 +667,28 @@ three add up to `overhead_ms`", and a fourth key made
 `sum(overhead_breakdown.values())` over-count silently (reported 2026-10-28, P3).
 `catia_get_inertia` publishes the same `parts_ms` / `overhead_ms` /
 `overhead_breakdown` / `poses_route` vocabulary on the assembly route **and on
-both part routes** (`measure_ms`, `tensor_ms`), so the two aggregators can be
-compared on one model, and "174 ms here, 2 117 ms there, same tool" is answered
-inside the reply.
+both part routes** (`measure_ms`, `tensor_ms`, `parts_other_ms`), so the two
+aggregators can be compared on one model, and "174 ms here, 2 117 ms there, same
+tool" is answered inside the reply. On the part routes the three terms add up:
+`measure_ms + tensor_ms + parts_other_ms = parts_ms`, where the last one names the
+remainder (main body, shape count, density arithmetic, building the reply) that
+used to be 18–19 % of `parts_ms` with no field to attribute it to.
+
+The assembly inertia route answers the regime question too: `cold_parts`,
+`parts_total`, `parts[]` (per part, with `first_measure` and, once both regimes
+have been seen, `cold_ms` / `cold_warm_ratio`), `after_cold` and `elapsed_note`.
+Its book is deliberately separate from the bounding box's — mass properties and
+the vertex sweep do not warm up together — so a part can be warm for one and cold
+for the other.
+
+A narrowed call (`component=`) reads the component list **once**. Until 0.3.38 it
+re-read the whole list — placements included — to answer "is this part also
+nested in a sub-assembly?", and did it *after* `elapsed_ms` had been stamped, so
+the reply was short by that time and the narrowed call could cost more than the
+full scan it replaced. On a 10-instance assembly that was 340–360 ms of component
+reading against 170–195 ms now, and 247–288 ms of unreported tail against 93–118.
+So the advice stands, with its true shape: `component=` saves the per-instance
+scan, and it no longer pays a hidden second read for it.
 
 `catia_list_components` filters before reading any placement, and
 `names_only: true` skips them entirely (measured: 370 ms → 32 ms on a 5-instance

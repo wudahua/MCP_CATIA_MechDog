@@ -99,6 +99,49 @@ fixed with `catia_activate_document`) or `unreadable` (CATIA raised on the query
 It used to be the single constant `no_own_window`, which asserted "component of an
 open assembly" about parts no assembly referenced.
 
+### One wrong name is one code
+
+Every tool that takes a document name answers `DOCUMENT_NOT_FOUND`, including
+`catia_activate_document` - which used to raise a bare `ValueError` whose wording
+("no open document **named**") missed the phrase table ("no open document
+**matches**"), so it answered `COM_ERROR` and, one branch later, appended the
+"check `in_work_object`" paragraph to a lookup that never touched a body
+(reported 2026-10-29, P1). The code is raised at the raise site, not inferred from
+the wording; the phrase table also knows both spellings, as a second line of
+defence rather than the contract.
+
+### Cost fields: name every term, close every sum
+
+Two independent promises, and a release that keeps one is not keeping the other:
+
+- `parts_ms + overhead_ms = elapsed_ms`, and `overhead_breakdown` has exactly
+  three keys that sum to `overhead_ms` (a fourth SUB-bucket, `component_lookup_ms`,
+  is a SIBLING of the block, not a member - `sum()` does not read key names).
+- On the `catia_get_inertia` PART routes,
+  `measure_ms + tensor_ms + parts_other_ms = parts_ms`. The third term is the
+  remainder (main body, shape count, density arithmetic, building the reply); it
+  existed all along and, unnamed, made the other two 18-19 % short of the field
+  beside them (reported 2026-10-29, §6.1).
+
+### Cold and warm: mechanism plus the field, never a multiplier
+
+`after_cold` is `null` (this call was cold), `true` (first call after a cold pass)
+or `false` (steady state) - always present, on both `catia_get_bounding_box` and
+an assembly `catia_get_inertia`. `cold_parts` counts the parts whose first
+measurement in this session happened in THIS call.
+
+The notes publish **no** cold/warm multiplier: not one reading, not a range, not a
+version-tagged pair. Every range this project published was falsified by the next
+session (1.15x-1.81x for 12-cell parts became 1.93x-3.70x one day later). The
+per-part terms are `parts[].cold_ms` and `parts[].cold_warm_ratio`, which are this
+call's reading. The rule: publish a range only if it holds in three independent
+sessions; otherwise mechanism plus the field.
+
+The two aggregators keep SEPARATE books. A part whose vertex sweep is warm can be
+cold for its mass properties, so `catia_get_bounding_box` and the assembly
+`catia_get_inertia` do not share `_part_times` - sharing them would divide one
+job's cold cost by another job's warm cost and print a ratio that means nothing.
+
 ## Error codes
 
 Use stable codes as applicable:
