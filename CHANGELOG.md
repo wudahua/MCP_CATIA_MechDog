@@ -39,6 +39,35 @@ whichever way they are turned. The report's own `PatternProbe2` measured ±505 a
 looked correct for that reason. Use a bar, an off-centre block, or anything
 without rotational symmetry.
 
+### Reviewed after shipment, and deliberately not changed
+
+Re-verified 2026-10-31 against the scanner's two probe parts, independently:
+`PatternProbe42` (default) gives bbox X ±5 / Y ±500 / **Z ±500**, inertia
+Ixx 0.0330693 with **Iyy = Izz = 0.0165373**, all three products of inertia 0,
+centroid (0, 0, 0), volume 320 000 mm³ - all three criteria hold.
+`PatternProbe42b` (explicit `false`) gives Z ±305, reproducing the old envelope
+digit for digit, which also proves the preserved behaviour is what it claims.
+
+One suggestion came back with that check: put the expected bbox shortfall in the
+`false` reply, along the lines of "Z will lack the 45° component". It is not
+being done, and here is why, so it does not come round again:
+
+- The number cannot be produced without knowing the seed's transverse extent,
+  which `circ_pattern` does not measure. Getting it means one more envelope
+  read (0.1-10 s depending on regime) added to the degraded path, for a branch
+  the caller asked for explicitly.
+- Whatever "the missing component" would say is already said, without the
+  measurement: the `false` reply states the copies stay parallel to the seed and
+  that the volume cannot show it. A tolerance printed in advance invites the
+  reader to trust a number instead of looking at their own part.
+- This layer is frozen. The rule agreed at 0.3.39 was: once two consecutive
+  acceptance rounds bring no P1/P2 and every remaining finding is wording, stop
+  shipping versions for findings of that kind. This round had none of either
+  kind.
+
+If a caller really wants the number, `catia_get_bounding_box` is one call away,
+and it is the only answer that describes the part instead of predicting it.
+
 ### Measured
 
 ```
