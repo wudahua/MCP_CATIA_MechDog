@@ -2,6 +2,57 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.42] — 2026-10-30 · eight blades that were placed at 45° and never turned
+
+`catia_circ_pattern` passed `False` in the last slot of `AddNewCircPattern` -
+CATIA's "radius aligned" flag. That flag is what applies the angle to the
+instance BODY; without it CATIA moves each copy to its angular position and
+leaves it parallel to the seed. The volume is `count × seed` either way, so the
+tool, its docs and its self-check all called it a success.
+
+### Fixed — a circular pattern that only translated its instances
+
+- Measured through the tool on B30, 8 copies of a 400 mm bar around X:
+
+  ```
+  radius_aligned=false   Y +-500   Z +-305     <- what shipped until 0.3.41
+  radius_aligned=true    Y +-500   Z +-500     <- 8-fold symmetry, correct
+  ```
+
+- `Z +-305` is exactly `p → p + (R·c − c)`: the copies sit at 0/45/…/315° and
+  each keeps the seed's orientation. Eight copies of one body at 45° must produce
+  an 8-fold symmetric union, so the difference is not subtle - it is a fan whose
+  blades point the wrong way, or a crank that does not crank.
+- `radius_aligned` is now an argument, **default true**, and the reply states
+  which mode produced the copies: "rotated with the pattern" or "placed at its
+  angle but NOT rotated". `false` remains available for the case where it is
+  right - a ring of identical bosses, where orientation carries no meaning.
+- The tool description used to say the volume change "is the only trustworthy
+  signal that the instances were actually built". That sentence is why this
+  survived eleven rounds: the volume proves the count, not the orientation. It
+  now says so, and names the bounding box of an asymmetric seed as the check.
+
+### Note for anyone verifying this
+
+A cube or a cylinder cannot tell the two modes apart: their envelope is the same
+whichever way they are turned. The report's own `PatternProbe2` measured ±505 and
+looked correct for that reason. Use a bar, an off-centre block, or anything
+without rotational symmetry.
+
+### Measured
+
+```
+773 tests (3 added: the flag reaches the factory as True by default, the
+translation-only mode says so, and the schema advertises both).
+
+B30, one run, same document builder each time:
+  shipped call (default)   Y +-500  Z +-500   correct
+  radius_aligned=false     Y +-500  Z +-305   the reported defect
+  radius_aligned=true      Y +-500  Z +-500   correct
+```
+
+`scripts/circ_pattern_probe.py` reproduces that comparison.
+
 ## [0.3.41] — 2026-10-30 · a scratch set that left the body out of work
 
 0.3.40 said the fillet failures of 2026-10-29 were "not reproduced, probably edge

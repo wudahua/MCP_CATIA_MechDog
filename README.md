@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.41** · [what changed](CHANGELOG.md) ·
+**0.3.42** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -21,7 +21,11 @@ by `tests/test_readme_tool_counts.py`, so it cannot drift from the code again.
 
 * **Every cut is measured.** `pad` / `pocket` / `hole` / `shaft` / `groove` /
   `circ_pattern` report the volume they moved before and after, so a feature that
-  silently did nothing is visible on the spot.
+  silently did nothing is visible on the spot. Volume proves a pattern built its
+  **copies**, not that they point anywhere: an 8-blade fan came out with blades
+  that were placed at 45° and never turned, at exactly 8× the seed's volume
+  (2026-10-30). `catia_circ_pattern` now rotates each copy
+  (`radius_aligned=true`, the default) and says which mode it used.
 * **Edges have fingerprints, not indices.** `catia_list_edges` returns
   `L17.6112|Pad.6;2|Sketch.7;2`; `fillet` / `chamfer` resolve it at call time, so
   a multi-fillet script survives its own edits.

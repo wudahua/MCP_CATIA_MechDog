@@ -677,8 +677,13 @@ class PartDesignTools:
                     "there - a Reference to another document's geometry dies when "
                     "that document closes, which is why this tool used to fail "
                     "100% of the time at update. The reply reports the volume "
-                    "change, which is the only trustworthy signal that the "
-                    "instances were actually built."
+                    "change - which proves the INSTANCES were built, and says "
+                    "nothing about their orientation. That distinction is not "
+                    "academic: with radius_aligned=false CATIA places every copy "
+                    "at the right angle and leaves its body parallel to the seed, "
+                    "and the volume is still exactly count x seed (reported "
+                    "2026-10-30: an 8-blade fan came out with blades that did "
+                    "not turn, bbox Z +-305 where 8-fold symmetry needs +-500)."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -704,6 +709,23 @@ class PartDesignTools:
                         "feature_name": {
                             "type": "string",
                             "description": "Feature to pattern. Defaults to last feature.",
+                        },
+                        "radius_aligned": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": (
+                                "Whether each copy is ROTATED with the pattern "
+                                "(CATIA's 'radius aligned'). True by default, "
+                                "because a circular pattern of a real part - a "
+                                "blade, a crank, a lug - means the copy points "
+                                "outward. With false, CATIA translates each copy "
+                                "to its angular position and keeps it parallel to "
+                                "the seed: correct for a ring of identical bosses, "
+                                "wrong for anything with a direction. Measured on "
+                                "B30 2026-10-30: an 8-copy pattern of a 400 mm "
+                                "bar gave Z +-305 with false and +-500 with true, "
+                                "while the volume was 8x the seed in both."
+                            ),
                         },
                     },
                     "required": ["count"],
@@ -3678,6 +3700,15 @@ class PartDesignTools:
         # AddNewCircPattern takes 12 parameters; instances around the axis
         # belong in the ANGULAR slot (3rd). Flags as field-validated
         # (4 bosses at radius 40, angles 0/90/180/270 on V5R20).
+        # The last flag is not a cosmetic option: it is what makes a copy TURN.
+        # With False, CATIA puts every instance at the right angle and leaves its
+        # body parallel to the seed - the volume is still count x seed, so both
+        # the reply and the docs used to call that a success. Reported
+        # 2026-10-30: an 8-blade fan, bbox Z +-305 where 8-fold symmetry needs
+        # +-500. Measured on B30 the same day: the same call with True gives
+        # +-500, and nothing else changes.
+        radius_aligned = args.get("radius_aligned")
+        radius_aligned = True if radius_aligned is None else bool(radius_aligned)
         pattern = sf.AddNewCircPattern(
             feature,
             1, count,              # radial copies, angular copies
@@ -3686,7 +3717,7 @@ class PartDesignTools:
             center_ref, axis_ref,  # rotation center (from axis line), axis
             False,                 # reversed rotation axis
             0.0,                   # rotation angle
-            False,                 # radius aligned
+            radius_aligned,        # rotate each copy with the pattern
         )
 
         update_error = self._try_update(part, pattern)
@@ -3725,10 +3756,23 @@ class PartDesignTools:
         if update_error is not None:
             detail += (" (CATIA raised during the update, but the volume did "
                        "change, so the feature is kept.)")
+        if radius_aligned:
+            orientation = (
+                " Each copy is rotated with the pattern (radius_aligned=true), so "
+                "an asymmetric seed comes out 8-fold symmetric for count=8 - check "
+                "that with the bounding box, not the volume: the volume only "
+                "proves the copies exist.")
+        else:
+            orientation = (
+                " Each copy is placed at its angle but NOT rotated "
+                "(radius_aligned=false), so it stays parallel to the seed. The "
+                "volume is still count x seed and cannot show this - if the copies "
+                "were supposed to point outward, re-run with radius_aligned=true "
+                "and delete this feature.")
         return (
             f"Circular pattern '{pattern.Name}' created: {count} instances "
             f"({count - 1} added), {angular_spacing} deg spacing around the "
-            f"{axis.upper()} axis through {center}.{detail}"
+            f"{axis.upper()} axis through {center}.{detail}{orientation}"
         )
 
     def _user_pattern(self, args: dict[str, Any]) -> str:
