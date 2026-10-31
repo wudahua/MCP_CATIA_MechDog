@@ -223,7 +223,13 @@ def test_the_description_quotes_both_regimes_not_only_the_cold_one():
     assert "9.5 ms" in description  # the 0.3.31 figure, kept as the comparison
     assert "16-90 ms per cell" in description
     assert "RANGES, not constants" in description
-    assert "first_measure" in description and "cold_parts" in description
+    # 0.3.43: this line used to assert `cold_parts` - a field renamed to
+    # session_first_parts in 0.3.39. The test therefore PINNED the ghost name in
+    # place: 0.3.39 changed the field and the description, then this assertion
+    # quietly required the description to keep naming a key that no longer
+    # exists. That is why the ghost survived three versions (reported
+    # 2026-10-31). A test that quotes a field name has to quote the live one.
+    assert "first_measure" in description and "session_first_parts" in description
 
 
 # ─────────────────── 4. nls_chars is a size, not a cost

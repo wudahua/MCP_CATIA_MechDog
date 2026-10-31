@@ -24,6 +24,7 @@ from catia_mcp.regime import (
     SessionBooks,
 )
 from catia_mcp.results import CodedError
+from catia_mcp.results import ArgumentOutOfRange, ArgumentRejected
 from catia_mcp.topo_search import is_construction, nls_of, search_topology
 
 
@@ -721,6 +722,18 @@ class MeasurementTools:
                                 "a matrix."
                             ),
                         },
+                        "document_name": {
+                            "type": "string",
+                            "description": (
+                                "Alias of 'document', kept because callers used it "
+                                "before the key was spelled 'document'. It is "
+                                "declared here rather than only read below, so the "
+                                "server's unknown-argument check can tell an alias "
+                                "from a key this tool never uses (reported "
+                                "2026-10-31, P2: 'component' used to land in that "
+                                "gap and was dropped without a word)."
+                            ),
+                        },
                     },
                 },
             },
@@ -774,7 +787,8 @@ class MeasurementTools:
                     "the same geometry, and quoting one number as the model of the "
                     "machine is how a later run gets read as a regression. "
                     "'first_measure' per part "
-                    "in 'parts', 'cold_parts' and 'elapsed_note' say which regime a "
+                    "in 'parts', 'session_first_parts' and 'elapsed_note' say "
+                    "which regime a "
                     "number came from; compare elapsed_ms across sessions only with "
                     "that in view. A 70-instance assembly is MINUTES cold, ~25 s "
                     "warm, and the server runs tools one at a time. warm_up=true runs "
@@ -843,7 +857,7 @@ class MeasurementTools:
                             "description": (
                                 "Pay the COLD cost on purpose: run the same "
                                 "measurement, discard the geometry, and return what "
-                                "it cost (parts_measured, cold_parts, elapsed_ms, "
+                                "it cost (parts_measured, session_first_parts, "
                                 "per-part times). The first topology read of a part "
                                 "costs 4-7x the later ones and lands inside whichever "
                                 "call comes first - on the 28-part acceptance assembly "
@@ -1030,7 +1044,7 @@ class MeasurementTools:
                 search_topology(sel, kind)
                 count = sel.Count
                 if idx < 1 or idx > count:
-                    raise RuntimeError(
+                    raise ArgumentOutOfRange(
                         f"'{name}' is out of range: the final shape exposes "
                         f"{count} {kind.lower()}(s). Use catia_list_faces / "
                         "catia_list_edges to enumerate valid indices."
@@ -1040,7 +1054,7 @@ class MeasurementTools:
             sel.Clear()
             sel.Search(f"Name={name},all")
             if sel.Count == 0:
-                raise RuntimeError(
+                raise ArgumentRejected(
                     f"Element '{name}' not found by tree name. Use feature "
                     "or sketch names (e.g. 'Pad.1'), or the indexed topology "
                     "form Face.N / Edge.N from catia_list_faces / "

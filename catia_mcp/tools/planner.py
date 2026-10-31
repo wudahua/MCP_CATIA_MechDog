@@ -222,6 +222,22 @@ class PlannerTools:
                 continue
             if tool not in self._router:
                 problems.append(f"step {index}: unknown tool '{tool}'")
+                continue
+            # The same check the server makes for a bare call, applied to a step:
+            # without it a plan could pass an argument the tool never reads and
+            # get a plan of successful, wrong steps back. Plan validation is the
+            # only place a dry run can catch it, so it belongs here rather than
+            # at execution time (reported 2026-10-31, P2).
+            schema = self._tool_schemas().get(tool) or {}
+            props = schema.get("properties")
+            if isinstance(props, dict):
+                args = step.get("args") or {}
+                unknown = [key for key in args if key not in props]
+                if unknown:
+                    problems.append(
+                        f"step {index}: {tool} does not read "
+                        f"{', '.join(repr(k) for k in sorted(unknown))} - it takes "
+                        f"{', '.join(sorted(props)) or 'no arguments'}")
         return problems
 
     def _tool_schemas(self) -> dict[str, dict[str, Any]]:

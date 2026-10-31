@@ -11,6 +11,7 @@ from typing import Any
 
 from catia_mcp.connection import CATIAConnection
 from catia_mcp.results import CodedError
+from catia_mcp.results import ArgumentOutOfRange
 from catia_mcp.topo_search import topology_reference
 
 # Plane name mapping
@@ -1702,7 +1703,7 @@ class SketcherTools:
             geom = sketch.GeometricElements
             total_before = geom.Count
             if index < 1 or index > geom.Count:
-                raise RuntimeError(
+                raise ArgumentOutOfRange(
                     f"Element index {index} is out of range: sketch '{name}' has "
                     f"{geom.Count} element(s). Use catia_sketch_get_geometry."
                 )

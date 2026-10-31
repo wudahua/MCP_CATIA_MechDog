@@ -83,6 +83,56 @@ class ComponentNotFound(CodedError, ValueError):
     code = "COMPONENT_NOT_FOUND"
 
 
+class ArgumentRejected(CodedError):
+    """The tool said no to its own arguments, before it called CATIA at all.
+
+    0.3.39 promised that every pre-execution rejection has one envelope -
+    ``ok:false``, ``failure_stage:"validate"``, ``modified:false``, no
+    ``recovery``, ``data.next_actions``. It covered three entry points (schema
+    validation, unknown tool, plan validation) and missed the fourth: the
+    lookups a TOOL does for itself after the schema passed - "Edge.99 is out of
+    range: the final shape exposes 12 edge(s)", "called without 'feature_name'".
+    Those answered a full ``COM_ERROR`` envelope: a communication failure for a
+    call that never opened a socket, ``modified: null`` for a call that provably
+    changed nothing, and the "check in_work_object" paragraph appended to a
+    message that had just said the edge number was too high (reported
+    2026-10-31, P1 - the reviewer's row T3 vs R2 is the case that makes it
+    matter: a fixable argument and a rejected-and-rolled-back feature were
+    indistinguishable to anything branching on fields).
+
+    ``stage`` is carried on the exception because only the raise site knows
+    whether CATIA was ever reached. ``server._execute_tool`` reads it before it
+    reads anything else, and a ``validate`` stage suppresses both the COM_ERROR
+    paragraph and the recovery block - which is exactly what
+    ``reject_validation`` does for the three entry points it already covered.
+    """
+
+    code = "ARGUMENT_REJECTED"
+    modified = False
+    stage = "validate"
+    next_actions = [
+        "Fix the argument named in the message and retry - the tool rejected "
+        "it from its own tables, before any CATIA call, so nothing was opened, "
+        "measured or changed",
+    ]
+
+
+class ArgumentOutOfRange(ArgumentRejected):
+    """An index or a name that is past the end of a list the tool just read.
+
+    Split from the parent because the caller's fix differs: out of range means
+    "enumerate first, the right number is in the reply", while a missing
+    argument means "you left a key out". Both are validate-stage rejections.
+    """
+
+    code = "ARGUMENT_OUT_OF_RANGE"
+    next_actions = [
+        "Run catia_list_edges / catia_list_faces (or catia_list_features) and "
+        "use one of the names or indices it returns - nothing was changed by "
+        "this call",
+    ]
+
+
 def failure_code(message: str, error: BaseException | None = None,
                 default: str = "STEP_EXCEPTION") -> str:
     """A code a script can branch on: the exception's own, else read the message.
@@ -294,8 +344,8 @@ def operation_result(
             **payload["data"],
             "next_actions": actions,
             "next_actions_note": (
-                "this tool does not modify the model, so there is no 'recovery' "
-                "block to carry these: they are about the ARGUMENT this call used, "
-                "not about a model state to repair"),
+                "there is no 'recovery' block to carry these: they are about the "
+                "ARGUMENT this call used, and nothing was written, so there is no "
+                "model state to repair"),
         }
     return payload

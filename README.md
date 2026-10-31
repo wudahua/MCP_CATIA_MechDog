@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.42** · [what changed](CHANGELOG.md) ·
+**0.3.43** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -670,6 +670,45 @@ failure actually came from COM — otherwise it sat directly below a line saying
 sketch name does not exist, or, for `DOCUMENT_NOT_FOUND`, sent you to inspect a
 body in a document you do not have open.
 
+### A refusal the TOOL makes is the same envelope
+
+The three entry points above are all checks the *server* makes before dispatch.
+There is a fourth, and it is the largest: the lookups a tool does for itself once
+the schema has passed — `Edge.99 is out of range: the final shape exposes 12
+edge(s)`, `was called without 'feature_name'`. Those used to raise a bare
+`RuntimeError`, and a bare `RuntimeError` looks exactly like a COM failure to a
+server that classifies by what the exception declares.
+
+```
+before:  COM_ERROR · failure_stage "execute" · modified null · recovery block
+         + "check whether in_work_object is a geometrical set"
+after:   ARGUMENT_REJECTED / ARGUMENT_OUT_OF_RANGE · "validate" · modified false
+         · no recovery · data.next_actions
+```
+
+A refusal that never opened a socket is not a communication failure, and the
+sermon about `in_work_object` had no business under a message that had just said
+the edge number was too high. `ArgumentRejected` carries `stage = "validate"`
+with it, so the server stops deciding that from the exception's Python type.
+
+The case that makes it matter: an out-of-range edge (fix the argument) and a
+fillet CATIA rejected and the tool rolled back (the model needs a look) used to
+share a code, a stage and a shape. `rolled_back: null` was the only difference,
+inside a block that the first case should not have had at all.
+
+### An argument the tool does not read is refused, not dropped
+
+`catia_get_inertia({component: "NP42.1"})` used to answer **5760.0 mm³** — the
+*active* part's volume — for a part of 1536.0 mm³, with `isError: false` and no
+warning. `component` is declared by `catia_get_bounding_box`, nothing in the
+measurement module reads it, and a key nobody reads is a key nobody notices.
+A reply of the wrong number in the right shape is the hardest failure there is.
+
+The server now compares the arguments against the tool's own schema and refuses
+anything undeclared (`UNKNOWN_ARGUMENT`, with `unknown_arguments` and
+`declared_arguments` in `data`). `catia_run_plan` applies the same rule to every
+step at validation time, so a dry run reports it too.
+
 Tools run on a single worker thread, so a long box blocks every other MCP call
 until it finishes. The reply states `elapsed_ms` (total and per part, `parts[]`),
 `first_measure` (was this part touched for the first time in this session),
@@ -931,6 +970,38 @@ placed as a batch went in transposed and the per-entry reply still said
 `convention=matrix` — true, and useless. One acceptance build placed 32 of 80
 instances wrong that way; the 48 mirrored ones hid it, because a mirrored
 rotation is symmetric and its transpose is itself.
+
+### Counts, volumes and bounding boxes do not see orientation
+
+Three defects of the last two weeks — a transposed placement (0.3.40), a circular
+pattern that translated its copies instead of turning them (0.3.42), and a
+bounding box that measured a GSD surface nothing had cut (0.3.39) — share one
+property: **the number that was checked stayed correct**. Volume is invariant
+under a rigid transpose. A pattern's volume is `count × seed` whether the copies
+turn or not. A symmetric seed's envelope is the same whichever way it faces.
+
+So check the invariant the operation is supposed to produce, not the total:
+
+| operation | what to assert | why the obvious check fails |
+|---|---|---|
+| `catia_circ_pattern` | `bbox_y == bbox_z` and `y_max == -y_min` for an n-fold pattern | volume is `count × seed` in both modes |
+| rectangular pattern | `x_max − x_min == (n−1)·pitch + seed_w` | same |
+| `catia_set_component_transform` | per-instance centroid, or `basis_rows` from the reply | 48 mirrored instances make a transpose invisible |
+| mirror / symmetry | the mirror plane's coordinate is unchanged, the off-plane one flips | volume and face count are identical |
+
+Two rules that follow, and cost nothing to follow:
+
+1. **Use a seed without rotational symmetry.** A cube, a cylinder and a disc
+   cannot tell "rotated" from "moved to that angle" apart — their envelope is the
+   same either way. A 400 mm bar can. One acceptance probe measured ±505 on a
+   cube and looked correct for exactly this reason.
+2. **Prefer per-instance readings to aggregates.** An aggregate averages what it
+   sums and cancels what it mirrors; a centroid per instance does neither.
+
+These are the checks an acceptance round can run in one call each. They are also
+the reason `catia_circ_pattern` now says which mode produced its copies: a reply
+that states its own assumptions can be contradicted by the next measurement,
+while a reply that only reports success cannot.
 
 ## Tool reference
 

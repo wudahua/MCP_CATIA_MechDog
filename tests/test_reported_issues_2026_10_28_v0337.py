@@ -185,7 +185,11 @@ def test_a_read_only_failure_publishes_next_actions_in_data():
     assert "recovery" not in payload
     assert payload["data"]["next_actions"] == [
         "Pass the full path of the one you mean"]
-    assert "does not modify the model" in payload["data"]["next_actions_note"]
+    # 0.3.43: the sentence had to cover one more case - a WRITE tool whose own
+    # argument lookup refused before CATIA was called (stage "validate"). It
+    # said "this tool does not modify the model", which is false for those, so
+    # it now states the reason both share: nothing was written.
+    assert "nothing was written" in payload["data"]["next_actions_note"]
     assert payload["data"]["candidates"] == [{"document": "A.CATPart"}]
 
 

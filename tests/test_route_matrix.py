@@ -25,8 +25,8 @@ is exactly what happened to the acceptance table.
 
 from __future__ import annotations
 
+import ast
 import json
-import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -293,30 +293,72 @@ def test_the_breakdown_still_sums_to_the_overhead(route):
 
 
 def _routes_in_the_code() -> set[str]:
+    """Every `route=` value written in measurement.py, read as syntax, not as text.
+
+    This used to be ``re.findall(r'route="([a-z_.]+)"', text)``. A regex sees one
+    spelling and misses the others: ``route=route`` (measurement.py passes the
+    variable through `_mass_property_regime`, so that line was invisible), and
+    ``route=f"box.{kind}"`` would have been invisible too. The values happen to
+    be literals everywhere today, which is why the hole never produced a false
+    pass - but "it happens to be a literal" is not a guard, it is a coincidence
+    that ends the day someone builds the name from a variable (reported
+    2026-10-31, observation 1).
+
+    A syntax tree has no such blind spot for the literal case, and the variable
+    case is now covered at runtime: `SessionBooks.describe` refuses a route that
+    is not in KNOWN_ROUTES, so a name assembled from a format string fails on
+    the call that assembles it rather than on the next acceptance round.
+    """
     source = Path(__file__).resolve().parents[1] / "catia_mcp" / "tools" / "measurement.py"
-    text = source.read_text(encoding="utf-8")
-    return set(re.findall(r'route="([a-z_.]+)"', text))
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg == "route" and isinstance(keyword.value, ast.Constant):
+                if isinstance(keyword.value.value, str):
+                    found.add(keyword.value.value)
+    return found
 
 
 def test_every_route_in_the_code_is_in_this_matrix():
     """A new branch may not be added without a row here."""
+    from catia_mcp.regime import KNOWN_ROUTES
+
     coded = _routes_in_the_code()
-    assert coded, "no route= literals found - has the call been renamed?"
-    assert coded - set(ROUTES) == set(), (
-        "routes in measurement.py with no row in this matrix: "
-        f"{sorted(coded - set(ROUTES))}")
-    assert set(ROUTES) - coded == set(), (
-        "rows here with no route in the code (dead table row): "
-        f"{sorted(set(ROUTES) - coded)}")
+    assert coded, "no route= values found - has the call been renamed?"
+    assert coded - KNOWN_ROUTES == set(), (
+        "routes in measurement.py that regime.py does not know: "
+        f"{sorted(coded - KNOWN_ROUTES)} - adding one means adding it to "
+        "KNOWN_ROUTES and giving it a row below")
+    assert KNOWN_ROUTES - coded == set(), (
+        "KNOWN_ROUTES entries never passed as a literal (dead row?): "
+        f"{sorted(KNOWN_ROUTES - coded)}")
+    # The table below and the runtime set must be the same list, or the matrix
+    # tests one set of routes while the server publishes another.
+    assert set(ROUTES) == set(KNOWN_ROUTES), (
+        f"matrix rows differ from KNOWN_ROUTES: {sorted(set(ROUTES) ^ set(KNOWN_ROUTES))}")
 
 
-def test_the_written_routes_exist():
-    """No route name is invented in a test either."""
-    from catia_mcp.regime import SessionBooks
+def test_an_invented_route_name_is_refused():
+    """No route name is invented in a test either - including by this test.
 
-    reply = SessionBooks().describe(book="topology", route="probe", measured=True,
-                                    parts_total=1, session_first=1)
-    assert set(reply) == set(REGIME_KEYS)
+    It used to call ``describe(route="probe", ...)``, a name made up right here,
+    and assert that the reply had the six keys. So the file that exists to stop
+    invented route names was itself inventing one, and the inventing worked. The
+    runtime guard in ``SessionBooks.describe`` is what makes that impossible now,
+    and this test asserts the guard rather than the old permissiveness.
+    """
+    from catia_mcp.regime import KNOWN_ROUTES, SessionBooks
+
+    with pytest.raises(ValueError, match="not one of the 7 measuring routes"):
+        SessionBooks().describe(book="topology", route="probe", measured=True,
+                                parts_total=1, session_first=1)
+    for route in sorted(KNOWN_ROUTES):
+        reply = SessionBooks().describe(book="topology", route=route, measured=True,
+                                        parts_total=1, session_first=1)
+        assert set(reply) == set(REGIME_KEYS), route
 
 
 # ─────────────────────────────── 3. the book is session state, not call state

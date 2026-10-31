@@ -13,6 +13,7 @@ from typing import Any
 
 from catia_mcp.connection import CATIAConnection
 from catia_mcp.results import CodedError, FeatureRejected
+from catia_mcp.results import ArgumentOutOfRange, ArgumentRejected
 from catia_mcp.topo_search import (
     edge_fingerprint,
     face_keys,
@@ -1516,7 +1517,7 @@ class PartDesignTools:
 
         trouble = self._anchor_trouble_text(missed, ambiguous, tol)
         if trouble and on_miss != "skip":
-            raise RuntimeError(
+            raise ArgumentRejected(
                 trouble + ". Nothing was filleted - the whole batch is refused so "
                 "that no edge gets a feature nobody asked for. Fix the coordinates "
                 "above, raise anchor_tol, or pass on_anchor_miss='skip' to fillet "
@@ -1525,7 +1526,7 @@ class PartDesignTools:
         if trouble:
             report.append("SKIPPED (on_anchor_miss='skip'): " + trouble)
         if not matches:
-            raise RuntimeError(
+            raise ArgumentRejected(
                 "None of the given edge_anchors matched a distinct edge"
                 + (": " + trouble if trouble else ".")
             )
@@ -2500,7 +2501,7 @@ class PartDesignTools:
             index, faces, length = self._parse_edge_spec(spec)
             if index is not None:
                 if not 1 <= index <= len(table):
-                    raise RuntimeError(
+                    raise ArgumentOutOfRange(
                         f"Edge.{index} is out of range: the final shape exposes "
                         f"{len(table)} edge(s).")
                 entry = table[index - 1]
@@ -2543,14 +2544,14 @@ class PartDesignTools:
             return candidates[0]
         if not candidates:
             near = sorted(table, key=lambda e: abs((e["length"] or 0.0) - (length or 0.0)))[:5]
-            raise RuntimeError(
+            raise ArgumentRejected(
                 f"No edge matches '{spec}'. The body's edges are (nearest first): "
                 + "; ".join(f"{e['fingerprint']}" for e in near)
                 + ". Fingerprints come from catia_list_edges and are re-resolved "
                 "on every call, so they survive renumbering - an Edge.N does not."
             )
         same_print = len({e["fingerprint"] for e in candidates}) == 1
-        raise RuntimeError(
+        raise ArgumentRejected(
             f"'{spec}' matches {len(candidates)} edges: "
             + "; ".join(f"{e['name']} len={e['length']} {e['fingerprint']}"
                         for e in candidates[:6])
@@ -4063,7 +4064,7 @@ class PartDesignTools:
                 would = ("the body is empty" if shapes.Count == 0
                          else f"'{shapes.Item(shapes.Count).Name}' (feature "
                               f"{shapes.Count} of {shapes.Count})")
-                raise RuntimeError(
+                raise ArgumentRejected(
                     "catia_delete_feature was called without 'feature_name' or "
                     f"'index', and the shortcut would delete {would}. That is the "
                     "LAST CREATED feature, which on a long tree is usually not the "
@@ -4077,7 +4078,7 @@ class PartDesignTools:
             shapes = self.conn.get_active_part_body().Shapes
             index = int(args["index"])
             if index < 1 or index > shapes.Count:
-                raise RuntimeError(
+                raise ArgumentOutOfRange(
                     f"index {index} is out of range: the active body has "
                     f"{shapes.Count} feature(s)."
                 )
@@ -4115,7 +4116,7 @@ class PartDesignTools:
             # (reported 2026-10-29, §4). Sets nest, so the walk recurses.
             feature, kind = self._find_in_geometrical_sets(part, target)
         if feature is None:
-            raise RuntimeError(
+            raise ArgumentRejected(
                 f"No feature, sketch or GSD element named '{target}' in the active "
                 "part - searched every body's feature list, its sketches, and every "
                 "geometrical set (nested ones included). Use catia_list_features to "

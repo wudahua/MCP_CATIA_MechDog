@@ -96,6 +96,25 @@ def _reason_sentence(cold_reasons: dict[str, int]) -> str:
     return "; ".join(parts)
 
 
+# The seven routes that publish the regime fields. This set is the single source
+# of truth, and `describe` refuses anything outside it at RUNTIME - which is the
+# half the matrix test could not cover: `tests/test_route_matrix.py` read
+# `route="..."` literals with a regex, so a branch written as
+# `describe(route=route, ...)` (measurement.py does exactly that on the mass
+# properties path) was invisible to it, and a new route assembled from a format
+# string would have been invisible too (reported 2026-10-31, observation 1).
+# A regex cannot follow a variable; a runtime check does not have to.
+KNOWN_ROUTES = frozenset({
+    "box.assembly",
+    "box.empty",
+    "box.part",
+    "inertia.assembly",
+    "inertia.empty",
+    "inertia.part_document",
+    "inertia.part_active",
+})
+
+
 class SessionBooks:
     """What this server has read in this session, kept per JOB.
 
@@ -198,6 +217,14 @@ class SessionBooks:
         reading `elapsed_note` still gets one answer, not one answer plus a
         footnote in a field of its own.
         """
+        if route not in KNOWN_ROUTES:
+            raise ValueError(
+                f"route={route!r} is not one of the {len(KNOWN_ROUTES)} measuring "
+                f"routes this server publishes ({', '.join(sorted(KNOWN_ROUTES))}). "
+                "Adding a route means adding it to KNOWN_ROUTES here AND giving it "
+                "a row in tests/test_route_matrix.py - the matrix takes its rows "
+                "from that set, so a route that exists only in this call is how "
+                "the acceptance table rotted in the first place.")
         cold_reasons = {name: count for name, count in (cold_reasons or {}).items()
                         if count}
         if not measured:

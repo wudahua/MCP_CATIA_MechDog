@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 from typing import Any, NamedTuple
+from catia_mcp.results import ArgumentOutOfRange
 
 # Verified localized type names (Simplified Chinese CATIA V5).
 _LOCALIZED_TYPE_NAMES: dict[str, str] = {
@@ -317,7 +318,7 @@ def topology_reference(conn: Any, body: Any, kind: str, index: int,
             sel.Clear()
         except Exception:
             pass
-        raise RuntimeError(
+        raise ArgumentOutOfRange(
             f"{kind}.{index} is out of range: the final shape exposes "
             f"{count} {kind.lower()}(s). {where}"
         )
@@ -346,7 +347,7 @@ def topology_references(conn: Any, body: Any, kind: str,
     out = []
     for index in indices:
         if index < 1 or index > len(cells):
-            raise RuntimeError(
+            raise ArgumentOutOfRange(
                 f"{kind}.{index} is out of range: the final shape exposes "
                 f"{len(cells)} {kind.lower()}(s)."
             )

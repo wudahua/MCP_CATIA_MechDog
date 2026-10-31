@@ -163,6 +163,19 @@ class CATIAMCPServer:
             )
             raise
 
+    def _declared_arguments(self, name: str) -> set[str] | None:
+        """The top-level keys this tool's schema declares, or None if it declares none.
+
+        None means "cannot tell an alias from a typo": a tool whose inputSchema
+        has no ``properties`` block is left alone rather than having every
+        argument it receives rejected as unknown.
+        """
+        schema = self._schemas.get(name) or {}
+        props = schema.get("properties")
+        if not isinstance(props, dict):
+            return None
+        return set(props)
+
     def _session_state(self) -> str:
         """A short snapshot of the document state, for failure messages.
 
@@ -219,6 +232,42 @@ class CATIAMCPServer:
                     "Fix the argument named in the message and retry - this call "
                     "was rejected before it reached CATIA, so nothing was opened, "
                     "measured or changed"]))
+        # An argument this tool never reads is not harmless. The call succeeds,
+        # measures something else, and returns a well-formed reply: on
+        # 2026-10-31 catia_get_inertia answered the ACTIVE part's volume for
+        # {"component": "NP42.1"} (5760.0 mm3 where the named part is 1536.0),
+        # with isError=false and no warning - the failure class that is hardest
+        # to notice, because nothing about the shape of the reply is wrong.
+        # `component` is declared by catia_get_bounding_box and read by nobody
+        # here, so a caller who learned the habit from the sister tool gets a
+        # silent wrong number.
+        #
+        # Rejected rather than warned: a warning on a successful reply is read
+        # by the same people who did not read the schema. This happens at the
+        # validate stage, before ensure_connected, so nothing is opened and
+        # `modified` is a known no.
+        declared_arguments = self._declared_arguments(name)
+        if declared_arguments is not None:
+            unknown = [key for key in arguments if key not in declared_arguments]
+            if unknown:
+                return structured_result(reject_validation(
+                    tool=name, code="UNKNOWN_ARGUMENT",
+                    message=(
+                        f"{name} does not read "
+                        f"{', '.join(repr(k) for k in sorted(unknown))}. Its "
+                        f"arguments are: "
+                        f"{', '.join(sorted(declared_arguments)) or 'none'}. "
+                        "Nothing was called, so no number in a reply could have "
+                        "been about the argument you passed."),
+                    next_actions=[
+                        "Drop the argument listed above, or use the tool that "
+                        "declares it - 'component' belongs to "
+                        "catia_get_bounding_box and the assembly tools, while "
+                        "the measurement tools take 'document' to name a file",
+                    ],
+                    data={"unknown_arguments": sorted(unknown),
+                          "declared_arguments": sorted(declared_arguments)}))
+
         logger.info("Tool call: %s(%s)", name, arguments)
         stage = "connect"
         try:
@@ -251,6 +300,16 @@ class CATIAMCPServer:
             # do not have open (reported 2026-10-28, §5.4). The session line stays:
             # it is a reading, not a diagnosis.
             declared = getattr(error, "code", None)
+            # The raise site knows whether CATIA was ever reached. A tool that
+            # refuses an argument from its own tables raises ArgumentRejected,
+            # whose `stage` is "validate"; without this line that refusal was
+            # reported as an execution failure - COM_ERROR for a call that made
+            # no COM call, with "check the state above: in_work_object may be a
+            # geometrical set" printed under a message that had just said
+            # "Edge.99 is out of range: the final shape exposes 12 edge(s)"
+            # (reported 2026-10-31, P1). Read before the message branches, so
+            # both the paragraph and the recovery block below agree with it.
+            stage = getattr(error, "stage", stage)
             if code == "UNSUPPORTED_CAPABILITY":
                 message = (
                     f"UNSUPPORTED_CAPABILITY in {name}: the required CATIA automation API "
@@ -279,11 +338,16 @@ class CATIAMCPServer:
             # with a sentence that is wrong. Modified is a known no, not unknown.
             # A tool that DOES write can still know it wrote nothing - a refusal
             # that happened at the name lookup carries `modified=False` with it.
-            modified = False if (read_only or stage == "connect") else \
+            # `stage == "validate"` joins `read_only` here for the same reason
+            # 0.3.39 gave `reject_validation` NO_RECOVERY: the failure is about
+            # the ARGUMENT and there is no model state to repair, because none
+            # was touched. Its next_actions still survive - operation_result
+            # moves them into data when the block is suppressed.
+            modified = False if (read_only or stage in {"connect", "validate"}) else \
                 getattr(error, "modified", None)
             return failure(code, message, stage, modified, name,
                            rolled_back=getattr(error, "rolled_back", None),
-                           recovery=NO_RECOVERY if read_only else None,
+                           recovery=NO_RECOVERY if (read_only or stage == "validate") else None,
                            next_actions=getattr(error, "next_actions", None),
                            data_extra=getattr(error, "data", None))
 

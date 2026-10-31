@@ -19,6 +19,7 @@ import re
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
+from catia_mcp.results import ArgumentOutOfRange, ArgumentRejected
 from catia_mcp.topo_search import search_topology
 
 # Origin plane aliases (same convention as sketcher.py)
@@ -996,7 +997,7 @@ class GSDTools:
             search_topology(sel, kind)
             total = sel.Count
             if not 1 <= index <= total:
-                raise RuntimeError(
+                raise ArgumentOutOfRange(
                     f"'{name}' is out of range: the active body has {total} "
                     f"{kind.lower()}s. Use catia_list_edges / catia_list_faces."
                 )
@@ -1117,7 +1118,7 @@ class GSDTools:
                 return f"Active geometrical set: '{name}'"
 
         available = [hb.Name for hb in self._iter_geosets(part.HybridBodies)]
-        raise RuntimeError(
+        raise ArgumentRejected(
             f"Geometrical set '{name}' not found. Available: {available or 'none'}"
         )
 

@@ -2,6 +2,97 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.43] — 2026-10-31 · the refusal that never reached CATIA
+
+Two acceptance reports against 0.3.42, both dated 2026-10-31. Both found real
+defects; neither asked for a new tool.
+
+### Fixed — a tool's own refusal still answered COM_ERROR
+
+0.3.39 promised one envelope for every pre-execution refusal and shipped three of
+the four entry points. The missing one was the largest: the lookups a TOOL does
+for itself after the schema passed. Those raised a bare `RuntimeError`, so the
+server saw no declared code and reached for the worst defaults it has.
+
+| call | before | now |
+|---|---|---|
+| `catia_delete_feature {}` | `COM_ERROR` / `execute` / `modified: null` | `ARGUMENT_REJECTED` / `validate` / `false` |
+| `catia_delete_feature {index: 99}` | same | `ARGUMENT_OUT_OF_RANGE` / `validate` / `false` |
+| `catia_fillet {edge_names: ["Edge.99"]}` | same | `ARGUMENT_OUT_OF_RANGE` / `validate` / `false` |
+| `catia_fillet {edge_name: "NO_SUCH_EDGE"}` | same | `ARGUMENT_REJECTED` / `validate` / `false` |
+| `catia_shell {faces_to_remove: ["Face.99"]}` | same | `ARGUMENT_OUT_OF_RANGE` / `validate` / `false` |
+| `catia_fillet {edge_anchors: [[999, 999, 999]]}` | same | `ARGUMENT_REJECTED` / `validate` / `false` |
+
+The code was the least of it. The envelope also carried a `recovery` block
+telling the caller to inspect a model nothing had opened, and the COM_ERROR
+paragraph — *"check the state above: a Part Design factory called while
+in_work_object is a geometrical set fails exactly this way"* — printed directly
+under a message that had just said the edge number was too high. Read by anyone
+branching on fields, the fixable argument (T3) and the feature CATIA had rejected
+and the tool had rolled back (R2) were the same failure.
+
+The raise site now says whether CATIA was ever reached: `ArgumentRejected` and
+`ArgumentOutOfRange` carry `stage = "validate"`, `modified = False` and their own
+`next_actions`, and `_execute_tool` reads `stage` off the exception **before** it
+chooses a message. Fifteen sites across five modules; the messages themselves are
+unchanged, because they were always right — only the envelope was wrong.
+
+The distinction the fix had to preserve is tested: a real `FeatureRejected` still
+answers `failure_stage: "execute"` with `rolled_back: true`. A rejection and a
+rejection you have to repair must not look alike.
+
+### Fixed — an argument the tool never reads is no longer dropped in silence
+
+`catia_get_inertia({component: "NP42.1"})` answered **5760.0 mm³** — the ACTIVE
+part's volume — for a part that is 1536.0 mm³, with `isError: false` and no
+warning. `component` is declared by `catia_get_bounding_box`; nothing in the
+measurement module reads it; so a habit learned from the sister tool became a
+silently wrong number. A nonsense key (`componentx`) succeeded too.
+
+Rejected now, at the validate stage, by the server rather than tool by tool:
+`UNKNOWN_ARGUMENT`, with `data.unknown_arguments` and `data.declared_arguments`
+so the reply says what to pass instead of only what not to. `catia_run_plan`
+applies the same check to each step, because a plan could otherwise pass an
+argument the tool never reads and come back as a list of successful, wrong steps.
+
+`document_name` was the one argument the dispatcher read without declaring it — a
+real alias, so it is now in the schema rather than on a whitelist.
+
+### Fixed — `cold_parts`, three versions after the rename
+
+0.3.39 renamed the field to `session_first_parts`. Two schema descriptions kept
+naming `cold_parts`, and the reason they survived is worth more than the fix:
+a 0.3.30 test asserted that the bounding box description **contained the string
+"cold_parts"**. The suite was holding the ghost in place. That assertion now
+quotes the live name.
+
+Two guards, so the class of defect does not need another round:
+
+- **Ghost fields.** Every string used as a dict key anywhere in the package is
+  collected by parsing the source; every quoted snake_case token in a schema
+  description is checked against that set when it is shaped like a published
+  field (`*_parts`, `*_ms`, `*_total`, `*_note`, `*_reason`, …). 433 emit keys,
+  zero false positives today.
+- **Routes.** `SessionBooks.describe` now refuses a `route` outside
+  `KNOWN_ROUTES` at runtime, and the matrix test reads `route=` values from the
+  syntax tree instead of a regex. The regex only saw `route="literal"`, so
+  `route=route` — which `measurement.py` really does, on the mass-properties path
+  — was invisible to it, and `route=f"box.{kind}"` would have been too. A regex
+  cannot follow a variable; a runtime check does not have to.
+
+### Changed — an undeclared argument is refused (breaking)
+
+A call that passes a key the tool does not declare now fails instead of
+succeeding with a number about something else. If you have been passing
+`component=` to `catia_get_inertia`, it never worked — the number you got was the
+active document's. Use `document="<name>.CATPart"`.
+
+### Fixed — test files named one version behind
+
+`test_reported_issues_2026_10_29_v0339.py` contained 0.3.40, `..._v0340.py`
+contained 0.3.41, `..._v0341.py` contained 0.3.42. Renamed to their contents, so
+"which version fixed this" is answerable from the filename again.
+
 ## [0.3.42] — 2026-10-30 · eight blades that were placed at 45° and never turned
 
 `catia_circ_pattern` passed `False` in the last slot of `AddNewCircPattern` -
@@ -27,6 +118,10 @@ tool, its docs and its self-check all called it a success.
   which mode produced the copies: "rotated with the pattern" or "placed at its
   angle but NOT rotated". `false` remains available for the case where it is
   right - a ring of identical bosses, where orientation carries no meaning.
+  **This default is a breaking change**: a script that never passed the flag gets
+  different geometry from 0.3.42 on, and the geometry it gets now is the one the
+  call was always meant to produce. (Noted 2026-10-31 — the value changed in
+  silence, which is the same mistake the flag itself had been making.)
 - The tool description used to say the volume change "is the only trustworthy
   signal that the instances were actually built". That sentence is why this
   survived eleven rounds: the volume proves the count, not the orientation. It

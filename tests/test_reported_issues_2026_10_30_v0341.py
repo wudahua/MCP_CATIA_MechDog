@@ -1,109 +1,181 @@
-"""0.3.42 - report 2026-10-30: a circular pattern that placed copies but never turned them.
+"""0.3.41 - report 2026-10-30: the fillet that failed only after a GSD write.
 
-The report's measurement: an 8-copy pattern around X of a 400 mm bar gives
-Y +-500 and Z +-305. Eight copies of one body at 45 degrees must be 8-fold
-symmetric, so Z should have been +-500; +-305 is exactly what
-`p -> p + (R*c - c)` produces, i.e. every copy translated to its angle and left
-parallel to the seed. The volume was 8x the seed either way, which is why the
-tool's own documentation ("the only trustworthy signal that the instances were
-actually built") could not catch it.
+The report's §1 said `catia_fillet(edge_anchors=...)` fails with E_FAIL in any
+document that has seen a GSD write, while `edge_name` still works, and that it
+survives deleting the GSD elements and reopening the file. The 0.3.40 note
+recorded the opposite ("not reproduced") - that measurement used a fresh
+document, which is precisely the case that works.
 
-Reproduced on B30 through the tool, and the cause is the last argument of
-AddNewCircPattern - CATIA's "radius aligned" flag, which is what applies the
-angle to the INSTANCE BODY rather than only to its position:
+Reproduced on B30 2026-10-30 by adding one `catia_gsd_point` to the same box:
 
-    radius_aligned=false   Y +-500   Z +-305
-    radius_aligned=true    Y +-500   Z +-500
+    before the point      anchors CREATED
+    after the point       anchors REFUSED (E_FAIL)   name CREATED
+    after deleting it     anchors REFUSED            name CREATED
 
-The default is now true; the flag is exposed for the one case where
-translation-only is what you want (a ring of identical bosses).
+The cause is not the edge reference: adding a HybridBody moves CATIA's
+InWorkObject onto the geometrical set, and the scratch probe set that the anchor
+path creates for its distance measurements does exactly that. Deleting the probe
+set does not move it back, so the Part Design factory is called with a
+geometrical set in work and answers a bare E_FAIL. Setting InWorkObject back to
+the body makes the same reference build the fillet immediately - measured, one
+line apart.
+
+Two defects are asserted here: that restore, and a rollback path that raised
+`NameError: name 'body' is not defined` instead of reporting the rejection.
 """
-
-import json
 
 import pytest
 
 
-class _Pattern:
-    Name = "圆形阵列.1"
+class _Set:
+    def __init__(self, name):
+        self.Name = name
 
-
-class _ShapeFactory:
-    def __init__(self):
-        self.calls = []
-
-    def AddNewCircPattern(self, *args):
-        self.calls.append(args)
-        return _Pattern()
-
-
-class _Part:
-    def __init__(self):
-        self.ShapeFactory = _ShapeFactory()
-        self.InWorkObject = None
-
-    def CreateReferenceFromName(self, name):
-        return f"ref:{name}"
-
-    def Update(self):
+    def AppendHybridShape(self, shape):
         pass
 
 
-def _tools():
+class _Sets:
+    """CATIA's HybridBodies: adding one moves the in-work object onto it."""
+
+    def __init__(self, part=None):
+        self.part = part
+        self.items = []
+        self.Count = 0
+
+    def Add(self):
+        item = _Set("MCP_probe_points")
+        self.items.append(item)
+        self.Count = len(self.items)
+        if self.part is not None:
+            self.part.InWorkObject = item
+        return item
+
+    def Item(self, index):
+        return self.items[index - 1]
+
+
+class _Selection:
+    def Clear(self):
+        pass
+
+    def Add(self, item):
+        pass
+
+    def Delete(self):
+        pass
+
+
+class _Body:
+    def __init__(self, name="零件几何体"):
+        self.Name = name
+
+
+class _Factory:
+    def AddNewPointCoord(self, x, y, z):
+        return _Set(f"点.{x}")
+
+
+class _Part:
+    """A part whose in-work object follows HybridBodies.Add, like CATIA's."""
+
+    def __init__(self):
+        self.Bodies = type("B", (), {"Count": 1, "Item": staticmethod(lambda i: _Body())})()
+        self.HybridBodies = _Sets(self)
+        self.HybridShapeFactory = _Factory()
+        self._in_work = _Body()
+        self.updates = 0
+
+    @property
+    def InWorkObject(self):
+        return self._in_work
+
+    @InWorkObject.setter
+    def InWorkObject(self, value):
+        self._in_work = value
+
+    def Update(self):
+        self.updates += 1
+
+
+def _part_design(part):
     from catia_mcp.tools.part_design import PartDesignTools
 
-    part = _Part()
     tools = PartDesignTools(connection=None)
     tools.conn = type("C", (), {
         "ensure_connected": staticmethod(lambda: None),
         "get_active_part": staticmethod(lambda: part),
+        "get_active_part_body": staticmethod(lambda: _Body()),
         "refresh_display": staticmethod(lambda: None),
-        "hso": None,
+        "hso": _Selection(),
     })()
-    tools._prepare_body = lambda p: "BODY"
-    tools._pattern_seed = lambda body, name: "SEED"
-    tools._pattern_axis_reference = lambda p, axis, center: "AXIS"
-    tools._volume_probe = lambda p, body: (100.0, "")
-    tools._body_volume_mm3 = lambda p, body: 800.0
-    tools._try_update = lambda p, pattern: None
-    return tools, part
+    return tools
 
 
-def _call(tools, **extra):
-    arguments = {"axis": "x", "center": [0.0, 0.0, 0.0], "count": 8}
-    arguments.update(extra)
-    reply = tools.execute("catia_circ_pattern", arguments)
-    return reply, tools.conn.get_active_part().ShapeFactory.calls[-1]
+# ─────────────── 1. the probe set hands the body back
+def test_the_probe_set_restores_the_in_work_object():
+    from catia_mcp.tools.part_design import _ProbePoints
+
+    part = _Part()
+    body = _Body()
+    part.InWorkObject = body
+    probe = _ProbePoints(type("C", (), {"hso": _Selection()})(), part)
+    # Adding the scratch set moved the in-work object onto it, which is what
+    # CATIA does and what made every later fillet fail.
+    assert part.InWorkObject is probe.set
+    probe.close()
+    assert part.InWorkObject is body
 
 
-def test_the_last_argument_of_the_pattern_call_rotates_the_copies():
-    tools, part = _tools()
-    reply, call = _call(tools)
-    # (seed, radial, angular, radial step, angular step, radial pos, angular pos,
-    #  centre, axis, reversed, rotation angle, radius aligned)
-    assert call[0] == "SEED"
-    assert call[1] == 1 and call[2] == 8
-    assert call[4] == pytest.approx(45.0)
-    assert call[-1] is True, "radius_aligned must default to True: it is the flag " \
-                            "that makes a copy turn with the pattern"
-    assert "rotated with the pattern" in reply
+def test_the_probe_set_leaves_a_foreign_in_work_object_alone():
+    """A caller that deliberately put a datum plane in work gets it back."""
+    from catia_mcp.tools.part_design import _ProbePoints
+
+    part = _Part()
+    datum = _Body("Datum_xy")
+    part.InWorkObject = datum
+    probe = _ProbePoints(type("C", (), {"hso": _Selection()})(), part)
+    probe.close()
+    assert part.InWorkObject is datum
 
 
-def test_translation_only_is_available_and_says_so():
-    tools, _ = _tools()
-    reply, call = _call(tools, radius_aligned=False)
-    assert call[-1] is False
-    assert "NOT rotated" in reply
-    assert "radius_aligned=true" in reply
+# ─────────────── 2. a rejected feature reports the rejection, not a NameError
+class _RejectingPart(_Part):
+    def __init__(self):
+        super().__init__()
+        self.removed = []
+
+    def UpdateObject(self, feature):
+        raise RuntimeError("方法 UpdateObject 失败")
 
 
-def test_the_schema_advertises_the_flag_with_true_as_default():
-    from catia_mcp.tools.part_design import PartDesignTools
+def test_a_rejected_single_feature_rolls_back_instead_of_raising_name_error():
+    from catia_mcp.tools.part_design import FeatureRejected
 
-    schema = [d for d in PartDesignTools(connection=None).get_tool_definitions()
-              if d["name"] == "catia_circ_pattern"][0]
-    prop = schema["inputSchema"]["properties"]["radius_aligned"]
-    assert prop["type"] == "boolean"
-    assert prop["default"] is True
-    # The description must stop claiming the volume proves the orientation.
-    assert "nothing about their orientation" in schema["description"]
+    part = _RejectingPart()
+    body = _Body()
+    tools = _part_design(part)
+    tools._remove_feature = lambda p, f, b=None: part.removed.append(f) or True
+    feature = type("F", (), {"Name": "倒圆角.1"})()
+
+    with pytest.raises(FeatureRejected) as error:
+        tools._safe_update(part, feature, body)
+    assert "rolled_back: true" in str(error.value)
+    assert part.removed == [feature]
+
+
+def test_the_rollback_puts_the_body_back_in_work():
+    from catia_mcp.tools.part_design import FeatureRejected
+
+    part = _RejectingPart()
+    part.InWorkObject = _Body("GSD_Set")
+    tools = _part_design(part)
+
+    def remove(part_arg, feature, body=None):
+        # what Selection.Delete + Update leaves behind on B30: still the set
+        assert body is not None, "the body has to reach the rollback"
+        return True
+
+    tools._remove_feature = remove
+    with pytest.raises(FeatureRejected):
+        tools._safe_update(part, type("F", (), {"Name": "倒圆角.1"})(), _Body())
