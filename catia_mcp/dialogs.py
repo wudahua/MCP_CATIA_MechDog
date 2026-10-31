@@ -30,6 +30,8 @@ import threading
 import time
 from ctypes import wintypes as _wt
 
+from catia_mcp.results import PathNotSupported
+
 YES_WORDS = ("是", "Yes", "确定", "OK", "&Yes", "&是(Y)", "是(Y)")
 NO_WORDS = ("否", "No", "&No", "否(N)", "&否(N)")
 
@@ -184,6 +186,24 @@ def save_as(doc, path: str, tries: int = 6, wait: float = 0.6) -> str:
     confirmation prompt, and the caller asked for this path anyway.
     """
     target = _normalize(path)
+    # Reject a non-ASCII FILE NAME before CATIA sees it. Measured on B30: the
+    # same folder, same length, 'ascii_probe.CATPart' saves and '中文探针.CATPart'
+    # fails with DISP_E_EXCEPTION on all six attempts, each one popping a modal
+    # "上述文件名无效" dialog. A non-ASCII FOLDER is fine, so only the basename is
+    # checked. Without this the caller waits ~4 s, answers dialogs, and is told
+    # "could not be saved" - which reads as a lock, and a retry cannot help
+    # (reported 2026-10-31).
+    name = os.path.basename(target)
+    if not name.isascii():
+        raise PathNotSupported(
+            "CATIA cannot SaveAs a non-ASCII file name on this build - use an "
+            "ASCII name and rename the file afterwards.\n"
+            f"  path: {target}\n"
+            "  measured on V5-6R2020 B30: the same folder saved "
+            "'ascii_probe.CATPart' and failed '中文探针.CATPart' with "
+            "DISP_E_EXCEPTION, while a non-ASCII FOLDER ('中文目录\\probe.CATPart') "
+            "saved normally - the limit is the file name, not the path."
+        )
     parent = os.path.dirname(target)
     if parent:
         os.makedirs(parent, exist_ok=True)

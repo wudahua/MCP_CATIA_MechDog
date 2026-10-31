@@ -2,6 +2,94 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.44] — 2026-10-31 · the check that refused a spelling the tool reads
+
+Two more reports against 0.3.43, plus the first feedback from a real 2 700-step
+build (a 63-link tracked belt, 143 029 376 mm3, +0.84 % against the analytic
+integral). Everything here is a defect 0.3.43 introduced, worsened, or left behind.
+
+### Fixed — `UNKNOWN_ARGUMENT` refused a spelling the tool accepts
+
+`catia_measure_distance` takes `element1`, `elem1_name`, `element1_name` and
+`elem1` — `_pick()` reads all four, and the tool's own description said so:
+
+    "Aliases accepted: elem1_name, element1_name, elem1."
+
+The schema declared two of them. Before 0.3.43 that was invisible, because the
+server trusted every argument. The new check made it a refusal of a spelling the
+tool documents as valid: the same class of defect this project keeps closing — the
+code knew something the declaration did not — reintroduced by a fix.
+
+The list now lives in `catia_mcp/arguments.py` and **both sides read it**:
+`_pick(arguments, *ELEMENT1_NAMES)` and `**alias_properties(ELEMENT1_NAMES, …)`.
+Listing the names twice would have fixed four tools and re-opened the gap on the
+fifth.
+
+Two things found while checking the report's table, which was not accurate about
+them:
+
+- `catia_coincidence_constraint` declared `element1` / `element2` and **read
+  neither** — `AddBiEltCst(0, comp1, comp2)` aligns two whole components. Passing
+  one was accepted, ignored, and answered with "Coincidence constraint created".
+  Removed, so the call now says it does not take that.
+- `catia_gsd_intersection` / `catia_gsd_trim` read `args["element1"]` and have
+  never accepted an alias. Refusing `elem1_name` there is **correct**; the reply
+  lists what the tool does take. Left alone.
+
+Guard: every spelling passed to `_pick()` must be declared by some tool's schema.
+
+### Fixed — the ghost-field guard could not see a bare word
+
+The reviewer put `cold_parts` back into a `warm_up` description and the guard
+**passed**: it scanned quoted tokens, and that ghost was never quoted anywhere
+(`"(parts_measured, cold_parts, elapsed_ms, …)"`). Re-injected here; the old guard
+passes, the new one fails.
+
+- `RETIRED_FIELD_NAMES` — every renamed field, searched for as a **bare word** in
+  any schema prose. Renaming a field now means adding to it, and a test keeps the
+  list honest by checking that each replacement really is emitted.
+- The emit-key set counted only `Dict` literals (435 keys); `payload["k"] = …`
+  is a subscript store and was invisible. 548 now.
+
+### Fixed — a plan of 285 steps answered with 285 step records
+
+The client truncated the reply and the two failed steps were inside the cut, so
+finding them cost a re-run of the whole plan. `catia_run_plan {summary: true}`
+returns only the failed steps plus `steps_omitted`, `failed_indices` and the
+totals. The default is unchanged.
+
+### Fixed — a file name CATIA will not write
+
+`catia_save_document {file_path: "零件.CATPart"}` failed after six attempts, each
+one popping a modal dialog, and reported "could not be saved" — which reads like a
+lock, and no retry can help. Measured on V5-6R2020 B30, same folder, same length,
+only the name differing:
+
+| path | result |
+|---|---|
+| `…\zh_probe\ascii_probe.CATPart` | saved |
+| `…\zh_probe\中文探针.CATPart` | `DISP_E_EXCEPTION`, 6 attempts |
+| `…\zh_probe\中文目录\probe.CATPart` | saved |
+
+So the limit is the file **name**; a non-ASCII **folder** is fine. Refused now
+before CATIA is asked (`PATH_NOT_ASCII`, validate stage), with the measured table
+and the one route that works: save under an ASCII name, rename the file after.
+
+### Changed — an unknown key is reported before a missing one
+
+`catia_coincidence_constraint {element1: …, elem2_name: …}` answered
+`INVALID_ARGUMENT` (missing `element2`). The typo is the cause and the missing
+argument is its symptom, so the unknown key is checked first.
+
+### Upgrading
+
+0.3.43 renamed three test files to match their contents
+(`…_v0339.py` → `…_v0340.py`, `…_v0340.py` → `…_v0341.py`,
+`…_v0341.py` → `…_v0342.py`). An install that copies over an existing checkout
+leaves the old names behind and runs those tests twice — which shows up as
+`802 passed` instead of `783`. Delete the three old files, or unpack into a clean
+directory.
+
 ## [0.3.43] — 2026-10-31 · the refusal that never reached CATIA
 
 Two acceptance reports against 0.3.42, both dated 2026-10-31. Both found real

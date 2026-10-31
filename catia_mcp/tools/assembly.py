@@ -187,14 +187,18 @@ class AssemblyTools:
                             "type": "string",
                             "description": "Name of second component",
                         },
-                        "element1": {
-                            "type": "string",
-                            "description": "Geometry element on component1 (e.g., 'xy plane', 'Face.1')",
-                        },
-                        "element2": {
-                            "type": "string",
-                            "description": "Geometry element on component2",
-                        },
+                        # element1 / element2 used to be declared here and read
+                        # nowhere: the implementation calls AddBiEltCst(0, comp1,
+                        # comp2) and never touches an element, so a caller who
+                        # passed one got a constraint between two whole components
+                        # and a reply saying it worked. Removing them turns a
+                        # silent no-op into the only honest answer - "this tool
+                        # does not take that" (found while fixing the
+                        # unknown-argument check, 2026-10-31).
+                        #
+                        # Coincidence takes components, not elements. Aligning two
+                        # specific faces is catia_offset_constraint with an offset
+                        # of 0, or catia_gsd_* for the geometry itself.
                     },
                     "required": ["component1", "component2"],
                 },

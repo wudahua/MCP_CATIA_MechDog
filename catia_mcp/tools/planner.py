@@ -158,6 +158,22 @@ class PlannerTools:
                             "default": True,
                             "description": "Abort the remaining steps after the first failure",
                         },
+                        "summary": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Return only the steps that FAILED, plus the totals "
+                                "and the final measurement. A 285-step plan "
+                                "otherwise answers with 285 step records, which is "
+                                "more than most clients will pass through - and the "
+                                "two failed steps end up inside the truncation, "
+                                "which costs a re-run of the whole plan to find "
+                                "them (reported 2026-10-31). 'executed', "
+                                "'measurements' and 'assertions' are unaffected; "
+                                "data.steps_omitted says how many records were "
+                                "left out."
+                            ),
+                        },
                         "dry_run": {
                             "type": "boolean",
                             "default": False,
@@ -586,6 +602,21 @@ class PlannerTools:
             data["assertions_skipped_because"] = assertions_skipped_because
         if measurements_note:
             data["measurements_note"] = measurements_note
+        if arguments.get("summary"):
+            # A 285-step plan answered with 285 step records: the caller's client
+            # truncated the reply and the two failed steps were somewhere inside
+            # the cut, so the plan had to be re-run to find them (reported
+            # 2026-10-31, §13). The full list is worth having; it is not worth
+            # having INSTEAD of the failures.
+            failures = [entry for entry in report if not entry["ok"]]
+            data["steps"] = failures
+            data["steps_omitted"] = len(report) - len(failures)
+            data["failed_indices"] = [entry["index"] for entry in failures]
+            data["summary_note"] = (
+                f"summary=true: data.steps lists ONLY the {len(failures)} step(s) "
+                f"that failed. The other {len(report) - len(failures)} succeeded "
+                "and are counted in 'executed' - re-run the same plan without "
+                "summary to get every step record.")
         return {
             "ok": ok,
             "code": code,

@@ -133,6 +133,33 @@ class ArgumentOutOfRange(ArgumentRejected):
     ]
 
 
+class PathNotSupported(CodedError):
+    r"""The target path cannot work on this CATIA build, whatever the model is.
+
+    Measured on V5-6R2020 B30 SP0 (2026-10-31), same folder, same length, only
+    the file name differing:
+
+        C:\...\zh_probe\ascii_probe.CATPart   -> saved, file on disk
+        C:\...\zh_probe\中文探针.CATPart      -> DISP_E_EXCEPTION, six attempts
+        C:\...\zh_probe\中文目录\probe.CATPart -> saved (a non-ASCII DIRECTORY is fine)
+
+    So the limit is the file NAME. Left unreported, it costs six retries, a modal
+    dialog per attempt and a document that exists with no path - and the caller
+    is told "could not be saved", which reads like a lock or a permission problem
+    and invites a retry that cannot work. ``stage`` is validate: nothing was
+    written, and CATIA was not asked to try.
+    """
+
+    code = "PATH_NOT_ASCII"
+    modified = False
+    stage = "validate"
+    next_actions = [
+        "Save under an ASCII file name in the folder you want, then rename the "
+        "file afterwards - the .CATPart does not care what it is called, only "
+        "CATIA's own SaveAs does",
+    ]
+
+
 def failure_code(message: str, error: BaseException | None = None,
                 default: str = "STEP_EXCEPTION") -> str:
     """A code a script can branch on: the exception's own, else read the message.

@@ -215,23 +215,11 @@ class CATIAMCPServer:
                 next_actions=[
                     "Check the name against the catia_* tools this server "
                     "publishes - nothing was called"]))
-        try:
-            validate(arguments, self._schemas[name])
-        except ValidationError as error:
-            # Nothing was opened, read or written - for EVERY tool, not only the
-            # read-only ones. `recovery=NO_RECOVERY if read_only else None` was
-            # the same mistake as `run_plan(steps=[])`: a WRITER whose arguments
-            # failed to validate was told "model changes were not verified,
-            # inspect the CATIA model" before it had touched one (reported
-            # 2026-10-29, report B §5.1, which reached the caller through
-            # `catia_run_plan`). A rejection at the validate stage happens before
-            # the first COM call, whoever the tool is.
-            return structured_result(reject_validation(
-                tool=name, code="INVALID_ARGUMENT", message=error.message,
-                next_actions=[
-                    "Fix the argument named in the message and retry - this call "
-                    "was rejected before it reached CATIA, so nothing was opened, "
-                    "measured or changed"]))
+        # BEFORE the schema check, deliberately. A caller who passed
+        # `elem2_name` while also forgetting `element2` used to be told about the
+        # missing one, because jsonchema ran first - and the missing one is the
+        # symptom of the typo, not its cause. The unknown key is the diagnosis
+        # (reported 2026-10-31, observation 2).
         # An argument this tool never reads is not harmless. The call succeeds,
         # measures something else, and returns a well-formed reply: on
         # 2026-10-31 catia_get_inertia answered the ACTIVE part's volume for
@@ -268,6 +256,23 @@ class CATIAMCPServer:
                     data={"unknown_arguments": sorted(unknown),
                           "declared_arguments": sorted(declared_arguments)}))
 
+        try:
+            validate(arguments, self._schemas[name])
+        except ValidationError as error:
+            # Nothing was opened, read or written - for EVERY tool, not only the
+            # read-only ones. `recovery=NO_RECOVERY if read_only else None` was
+            # the same mistake as `run_plan(steps=[])`: a WRITER whose arguments
+            # failed to validate was told "model changes were not verified,
+            # inspect the CATIA model" before it had touched one (reported
+            # 2026-10-29, report B §5.1, which reached the caller through
+            # `catia_run_plan`). A rejection at the validate stage happens before
+            # the first COM call, whoever the tool is.
+            return structured_result(reject_validation(
+                tool=name, code="INVALID_ARGUMENT", message=error.message,
+                next_actions=[
+                    "Fix the argument named in the message and retry - this call "
+                    "was rejected before it reached CATIA, so nothing was opened, "
+                    "measured or changed"]))
         logger.info("Tool call: %s(%s)", name, arguments)
         stage = "connect"
         try:

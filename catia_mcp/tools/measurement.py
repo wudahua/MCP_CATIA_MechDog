@@ -23,6 +23,11 @@ from catia_mcp.regime import (
     TOPOLOGY,
     SessionBooks,
 )
+from catia_mcp.arguments import (
+    ELEMENT1_NAMES,
+    ELEMENT2_NAMES,
+    alias_properties as _alias_properties,
+)
 from catia_mcp.results import CodedError
 from catia_mcp.results import ArgumentOutOfRange, ArgumentRejected
 from catia_mcp.topo_search import is_construction, nls_of, search_topology
@@ -647,24 +652,19 @@ class MeasurementTools:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "element1": {
-                            "type": "string",
-                            "description": (
-                                "Name of first element (feature, face, edge, point). "
-                                "Aliases accepted: elem1_name, element1_name, elem1."
-                            ),
-                        },
-                        "element2": {
-                            "type": "string",
-                            "description": (
-                                "Name of second element. Aliases: elem2_name, "
-                                "element2_name, elem2."
-                            ),
-                        },
-                        "elem1_name": {"type": "string", "description": "Alias of element1."},
-                        "element1_name": {"type": "string", "description": "Alias of element1."},
-                        "elem2_name": {"type": "string", "description": "Alias of element2."},
-                        "element2_name": {"type": "string", "description": "Alias of element2."},
+                        # The spellings come from the same tuple _pick() reads, and
+                        # the list used to be maintained twice: elem1 and elem2 were
+                        # accepted by the code and missing from here, so 0.3.43's
+                        # unknown-argument check refused a spelling this tool's own
+                        # description called accepted (reported 2026-10-31, P2-A).
+                        **_alias_properties(
+                            ELEMENT1_NAMES,
+                            role="the first element",
+                            description="Name of first element (feature, face, edge, point)."),
+                        **_alias_properties(
+                            ELEMENT2_NAMES,
+                            role="the second element",
+                            description="Name of second element."),
                     },
                     # Deliberately not required: the aliases above are equally
                     # valid, and jsonschema would reject them before the
@@ -942,8 +942,8 @@ class MeasurementTools:
         match tool_name:
             case "catia_measure_distance":
                 return self._measure_distance(
-                    _pick(arguments, "element1", "elem1_name", "element1_name", "elem1"),
-                    _pick(arguments, "element2", "elem2_name", "element2_name", "elem2"))
+                    _pick(arguments, *ELEMENT1_NAMES),
+                    _pick(arguments, *ELEMENT2_NAMES))
             case "catia_get_inertia":
                 return self._get_inertia(arguments.get("density"),
                                          arguments.get("document")

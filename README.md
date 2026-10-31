@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.43** · [what changed](CHANGELOG.md) ·
+**0.3.44** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -708,6 +708,53 @@ The server now compares the arguments against the tool's own schema and refuses
 anything undeclared (`UNKNOWN_ARGUMENT`, with `unknown_arguments` and
 `declared_arguments` in `data`). `catia_run_plan` applies the same rule to every
 step at validation time, so a dry run reports it too.
+
+Two lessons from the day it shipped, both worth keeping:
+
+**A refusal must not name a spelling the tool accepts.** `catia_measure_distance`
+reads `element1`, `elem1_name`, `element1_name` and `elem1` — and its own
+description said "Aliases accepted: … elem1." The schema declared two of the four,
+so the new check refused a call the documentation called valid. The list now lives
+in one place (`catia_mcp/arguments.py`) and `_pick()` and the schema both read it.
+Listing the spellings twice fixes today's tools and re-opens the gap on the next
+one.
+
+**A declared argument nobody reads is the same defect from the other side.**
+`catia_coincidence_constraint` declared `element1` / `element2` and read neither —
+it aligns two whole components — so passing one was accepted, ignored, and
+answered "constraint created". Those two keys are gone. The check cannot catch
+this direction (a schema can only lie about what it declares); reading the
+implementation did.
+
+The unknown key is now reported **before** a missing one: a caller who typed
+`elem2_name` and therefore has no `element2` is told about the typo, which is the
+cause, rather than about the argument it left out, which is its symptom.
+
+### A file name CATIA will not write
+
+`catia_save_document {file_path: "零件.CATPart"}` used to spend six attempts,
+pop a modal dialog on each, and answer "could not be saved" — which reads like a
+file lock, and no retry can clear it. Measured on V5-6R2020 B30, same folder, same
+length, only the name differing:
+
+| path | result |
+|---|---|
+| `…\ascii_probe.CATPart` | saved |
+| `…\中文探针.CATPart` | `DISP_E_EXCEPTION`, 6 attempts |
+| `…\中文目录\probe.CATPart` | saved |
+
+The limit is the file **name**; a non-ASCII **folder** is fine. It is now refused
+before CATIA is asked, at the validate stage, with that table in the message and
+the one route that works: save under an ASCII name and rename the file afterwards.
+The `.CATPart` does not care what it is called — only CATIA's own SaveAs does.
+
+### A plan that answers with its own size
+
+A 285-step plan returned 285 step records. The client truncated the reply, and the
+two failed steps were inside the cut, so locating them cost a re-run of the whole
+plan. `catia_run_plan {summary: true}` returns the failed steps only, plus
+`failed_indices`, `steps_omitted` and the totals — `executed`, `measurements` and
+`assertions` are unchanged. Without `summary` nothing changes.
 
 Tools run on a single worker thread, so a long box blocks every other MCP call
 until it finishes. The reply states `elapsed_ms` (total and per part, `parts[]`),

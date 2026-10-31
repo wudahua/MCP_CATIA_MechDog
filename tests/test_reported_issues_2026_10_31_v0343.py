@@ -174,7 +174,16 @@ _FIELD_SHAPE = re.compile(r"(_parts|_ms|_total|_note|_reason|_measured|_count)$"
 
 
 def _declared_emit_keys() -> set[str]:
-    """Every string used as a dict key anywhere in the package."""
+    """Every string used as a dict key anywhere in the package.
+
+    Two spellings, because a payload is built both ways and only one of them used
+    to be counted: ``{"volume_mm3": v}`` is a Dict key, ``payload["volume_mm3"] =
+    v`` is a Subscript store. The first version of this guard read only Dicts
+    (435 keys where the package really publishes 548), which is a hole in the
+    *guard* rather than in the product: a field that only ever appears as
+    ``payload["x"] = ...`` and is then quoted in a description would have been
+    reported as a ghost (reported 2026-10-31, observation 1).
+    """
     keys: set[str] = set()
     for path in (Path(__file__).resolve().parents[1] / "catia_mcp").rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -183,6 +192,10 @@ def _declared_emit_keys() -> set[str]:
                 for key in node.keys:
                     if isinstance(key, ast.Constant) and isinstance(key.value, str):
                         keys.add(key.value)
+            elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store):
+                index = node.slice
+                if isinstance(index, ast.Constant) and isinstance(index.value, str):
+                    keys.add(index.value)
     return keys
 
 
@@ -222,6 +235,58 @@ def test_no_schema_names_a_field_that_the_package_never_emits():
                     for token, where in sorted(ghosts.items())))
 
 
+# Names this package has retired, and what replaced them. A renamed field leaves
+# two traces: the new name in the code, the old one in prose that nobody re-read.
+# The quoted-token guard above catches the old name only when it is written in
+# quotes - and `cold_parts`, the ghost that lived three versions, was never quoted
+# anywhere ("parts_measured, cold_parts, elapsed_ms"). A reviewer proved it by
+# putting the bare word back: the guard passed (reported 2026-10-31, P2-B).
+#
+# So retired names are listed here and searched for as bare words. Adding to this
+# dict is part of renaming a field - which is why the entry is checked below: the
+# replacement has to exist, or the list itself has rotted.
+RETIRED_FIELD_NAMES = {
+    "cold_parts": "session_first_parts",
+}
+
+
+def test_no_schema_mentions_a_retired_field_name_even_bare():
+    """`cold_parts` survived three versions because nothing looked for it plainly."""
+    mentioned = _schema_mentions()
+    retired = {
+        old: sorted(where)
+        for old, where in (
+            (old, {name for name, text in _schema_texts().items() if old in text})
+            for old in RETIRED_FIELD_NAMES)
+        if where
+    }
+    assert not retired, (
+        "schema text still names retired fields: "
+        + ", ".join(f"{old!r} (in {where[:2]})" for old, where in sorted(retired.items()))
+        + " - rename it to " + ", ".join(sorted(RETIRED_FIELD_NAMES.values())))
+    # The list is only useful while its replacements are real.
+    emitted = _declared_emit_keys()
+    for old, new in RETIRED_FIELD_NAMES.items():
+        assert new in emitted, (
+            f"RETIRED_FIELD_NAMES maps {old!r} to {new!r}, which the package never "
+            "emits - the list has rotted")
+
+
+def _schema_texts() -> dict[str, str]:
+    """Tool name -> all of the prose it publishes, as one string."""
+    from catia_mcp.server import CATIAMCPServer
+
+    server = CATIAMCPServer()
+    texts: dict[str, str] = {}
+    for module in server._tool_modules:
+        for definition in module.get_tool_definitions():
+            blob = [definition.get("description") or ""]
+            for prop in (definition.get("inputSchema") or {}).get("properties", {}).values():
+                blob.append(prop.get("description") or "")
+            texts[definition["name"]] = " ".join(blob)
+    return texts
+
+
 def test_the_renamed_regime_field_is_named_where_it_is_described():
     """The specific three-version ghost, both places, by name."""
     from catia_mcp.server import CATIAMCPServer
@@ -237,3 +302,172 @@ def test_the_renamed_regime_field_is_named_where_it_is_described():
                    if d["name"] == "catia_get_bounding_box"][0]["description"]
     assert "session_first_parts" in description
     assert "cold_parts" not in description
+
+
+# ────────────────── 4. the spellings a tool accepts must be the ones it declares
+#
+# 0.3.43 introduced the unknown-argument check and immediately refused `elem1`
+# on catia_measure_distance - a spelling that tool's own description listed as
+# accepted, because `_pick` knew it and the schema did not (reported 2026-10-31,
+# P2-A). Fixed by giving both sides one list, in catia_mcp/arguments.py.
+
+
+def test_every_spelling_measure_distance_accepts_is_declared():
+    from catia_mcp.arguments import ELEMENT1_NAMES, ELEMENT2_NAMES
+    from catia_mcp.server import CATIAMCPServer
+
+    props = CATIAMCPServer()._schemas["catia_measure_distance"]["properties"]
+    for name in ELEMENT1_NAMES + ELEMENT2_NAMES:
+        assert name in props, f"{name} is accepted by _pick and missing from the schema"
+
+
+def test_a_short_alias_reaches_the_resolver_now():
+    """The exact call the report made: elem1 must not be an unknown argument."""
+    from catia_mcp.server import CATIAMCPServer
+
+    reply = _envelope(CATIAMCPServer()._execute_tool(
+        "catia_measure_distance",
+        {"element1": "Pad.1", "element2": "Pad.2", "elem1": "Pad.1"}))
+    # Not a CATIA failure about the KEY - whatever happens next, it got past the
+    # unknown-argument check, which is the regression being tested.
+    assert reply["code"] != "UNKNOWN_ARGUMENT", reply
+
+
+def test_every_picked_argument_is_declared_by_some_tool():
+    """Guard: no tool may read a spelling its schema does not publish."""
+    package = Path(__file__).resolve().parents[1] / "catia_mcp"
+    from catia_mcp.server import CATIAMCPServer
+
+    server = CATIAMCPServer()
+    declared: set[str] = set()
+    for schema in server._schemas.values():
+        declared |= set(schema.get("properties") or {})
+
+    picked: dict[str, int] = {}
+    for path in package.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if getattr(func, "id", None) != "_pick" and getattr(func, "attr", None) != "_pick":
+                continue
+            for arg in node.args[1:]:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    picked[arg.value] = node.lineno
+                elif isinstance(arg, ast.Starred) and isinstance(arg.value, ast.Name):
+                    # `*ELEMENT1_NAMES` - the shared list, checked above
+                    picked[arg.value.id] = node.lineno
+    plain = {name: line for name, line in picked.items() if name.islower() and "_" in name}
+    missing = {name: line for name, line in plain.items()
+               if name not in declared and name.endswith(("1", "2", "name"))}
+    assert not missing, (
+        "these spellings are accepted by _pick and declared by no schema: "
+        f"{missing} - add them to the tool's inputSchema, or read them from "
+        "catia_mcp.arguments so both sides share one list")
+
+
+def test_coincidence_no_longer_declares_elements_it_never_reads():
+    """The reverse defect, found while fixing the first: a declared no-op."""
+    from catia_mcp.server import CATIAMCPServer
+
+    props = CATIAMCPServer()._schemas["catia_coincidence_constraint"]["properties"]
+    assert set(props) == {"component1", "component2"}, (
+        "element1/element2 were declared and never read - AddBiEltCst aligns two "
+        "whole components and never touches an element")
+
+
+# ────────────────────────────── 5. the order of the two checks
+
+
+def test_an_unknown_key_is_reported_before_a_missing_one():
+    """A typo is the cause; the missing argument is its symptom."""
+    from catia_mcp.server import CATIAMCPServer
+
+    reply = _envelope(CATIAMCPServer()._execute_tool(
+        "catia_coincidence_constraint",
+        {"component1": "A.1", "elem2_name": "Face.1"}))
+    assert reply["code"] == "UNKNOWN_ARGUMENT"
+    assert reply["data"]["unknown_arguments"] == ["elem2_name"]
+
+
+# ────────────────────────────── 6. a path CATIA cannot write
+
+
+def test_a_non_ascii_file_name_is_refused_before_catia_is_asked():
+    r"""Measured limit, not a guess: a non-ASCII FOLDER works, a NAME does not.
+
+    same folder, same length, only the name differing (V5-6R2020 B30, 2026-10-31):
+        ascii_probe.CATPart        -> saved
+        中文探针.CATPart           -> DISP_E_EXCEPTION, six attempts, modal dialog
+        中文目录\probe.CATPart     -> saved
+    """
+    from catia_mcp.dialogs import save_as
+    from catia_mcp.results import PathNotSupported
+
+    with pytest.raises(PathNotSupported) as caught:
+        save_as(None, r"C:/any/中文探针.CATPart")
+    assert caught.value.code == "PATH_NOT_ASCII"
+    assert caught.value.stage == "validate"
+    assert caught.value.modified is False
+    assert "rename the file afterwards" in str(caught.value)
+
+
+def test_a_non_ascii_folder_is_not_refused():
+    """The limit is the file name - refusing the folder too would be a new bug."""
+    from catia_mcp.dialogs import save_as
+
+    with pytest.raises(Exception) as caught:
+        save_as(None, r"C:/中文目录/probe.CATPart")
+    assert type(caught.value).__name__ != "PathNotSupported"
+
+
+# ────────────────────────────── 7. a 285-step plan has to fit
+
+
+def test_summary_returns_only_the_steps_that_failed():
+    """A three-hundred-step reply is truncated; the two failures were inside it."""
+    from catia_mcp.tools.planner import PlannerTools
+
+    class _Module:
+        def execute(self, name, arguments):
+            if arguments.get("fail"):
+                raise RuntimeError("boom")
+            return "built"
+
+    planner = PlannerTools(connection=None)
+    planner.bind({"catia_pad": _Module()})
+    planner._schemas = {"catia_pad": {"properties": {"height": {}, "fail": {}}}}
+    reply = planner._run_plan({
+        "steps": [
+            {"tool": "catia_pad", "args": {"height": 1}},
+            {"tool": "catia_pad", "args": {"height": 2, "fail": True}},
+            {"tool": "catia_pad", "args": {"height": 3}},
+        ],
+        "measure": False, "stop_on_error": False, "summary": True,
+    })
+    data = reply["data"]
+    assert data["executed"] == 3
+    assert [step["index"] for step in data["steps"]] == [2]
+    assert data["steps_omitted"] == 2
+    assert data["failed_indices"] == [2]
+    assert "summary=false" in data["summary_note"] or "without" in data["summary_note"]
+
+
+def test_without_summary_every_step_is_still_listed():
+    """The default must not change: the old behaviour is the detailed one."""
+    from catia_mcp.tools.planner import PlannerTools
+
+    class _Module:
+        def execute(self, name, arguments):
+            return "built"
+
+    planner = PlannerTools(connection=None)
+    planner.bind({"catia_pad": _Module()})
+    planner._schemas = {"catia_pad": {"properties": {"height": {}}}}
+    reply = planner._run_plan({
+        "steps": [{"tool": "catia_pad", "args": {"height": i}} for i in range(3)],
+        "measure": False,
+    })
+    assert len(reply["data"]["steps"]) == 3
+    assert "steps_omitted" not in reply["data"]
