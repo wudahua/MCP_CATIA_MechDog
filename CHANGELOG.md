@@ -2,6 +2,103 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.46] — 2026-11-01 · a new spelling of a field, and five readers that never heard
+
+The report is one paragraph and one line of traceback, and it is right: 0.3.45
+promised "method='mesh' on an assembly now means every part from its mesh", and
+the first real call died with
+
+    STEP_EXCEPTION: 'float' object is not subscriptable
+
+after the STL export had already been paid for (1.3 s for the whole product,
+4.6 s for one component). Five of the six release items passed; this one crashed.
+
+### Root cause — the producer learned a third value, the readers did not
+
+`_part_box_entry(force_mesh=True)` returns a box bounded from the mesh:
+
+    {"points": [x0, y0, z0, x1, ...], "source": "mesh"}      <- FLAT list
+
+The existing mesh value, from the fallback path, is `source: "mesh_fallback"` —
+same flat list, different word. `_box_walk` asked `if cached["source"] ==
+"mesh_fallback"` to decide whether to transform the points one vertex at a time,
+so `source: "mesh"` fell into the vertices branch, which indexes each element as
+a triplet: `p[j]` on a float.
+
+The report found the two lines in `_box_walk`. There were **five** readers
+spelling the same question out by hand, and two of them were wrong in a way that
+does not raise:
+
+    _box_walk, world box        == "mesh_fallback"   -> TypeError (the crash)
+    _box_walk, part detail      == "mesh_fallback"   -> mesh_vertices / points_route
+                                                        / sweep_route silently absent
+    cold_reasons                == "mesh_fallback"   -> a mesh-bounded part counted
+                                                        as a topology build
+    part_boxes_by_mesh          keyed "mesh_fallback" -> 0, while part_boxes was 46:
+                                                        three numbers contradicting
+                                                        each other in one reply
+    from_mesh / _BOOKS.note     already correct, written as a two-item tuple
+
+Fixing only the two lines the report named would have shipped three more silent
+wrong numbers. The question is asked in **one** place now:
+
+    MESH_SOURCES = frozenset({"mesh", "mesh_fallback"})
+
+    def _from_mesh(source) -> bool: ...
+
+and the one reader that genuinely needs to know *which* mesh route ran reads a
+field the producer records rather than re-deriving it: `mesh_reason` is
+`method_mesh` or `no_vertex_at_extremum`, so the sentence under the number can
+say "because you asked for it" or "because no vertex lies at this part's
+extremum" without guessing from a string.
+
+`tests/test_reported_issues_2026_11_01_v0346.py` refuses the sixth spelling: an
+AST scan fails the suite if any `["source"]` / `.get("source")` value is compared
+against a mesh spelling anywhere in the package, or if the pair is written out by
+hand. (Injected to check: putting `== "mesh_fallback"` back in `_box_walk` fails
+8 tests, this one among them.)
+
+### Measured on B30, same day — the call that crashed, and its control
+
+A box 40×20×20, a cylinder R12 × h10, three instances, one placed at (100, 0, 50):
+
+    whole product, method=mesh        ok  x[-20, 112] y[±11.8177] z[0, 60]
+                                         counters (by_mesh, by_vertices, part_boxes) = (2, 0, 2)
+    whole product, method=vertices    ok  same integers, counters (1, 1, 2)
+    component MESH_DRUM.1, mesh       ok  x[88, 112] y[±11.8177] z[50, 60]
+    component MESH_DRUM.1, vertices   ok  same, via the fallback
+
+`scripts/b30_mesh_assembly.py` reproduces it: it creates its own three documents,
+closes them without saving, and never activates anything it did not create.
+
+### The number in the prose was too narrow, and the measurement says so
+
+The mesh notes claimed "0.47–0.73 % small" without saying on what. An R12
+cylinder's mesh box reads ±11.8177, which is **1.52 %** short of 12 — the STL
+chord tolerance scales with the feature. Both spellings now name what was
+measured and say to read the figure as an order of magnitude: a wrong-looking
+constant is exactly the kind of thing the next acceptance runs into.
+
+### Changed
+
+* `parts[].mesh_reason` is published, alongside `source` / `points_route` /
+  `sweep_route`; `source_note` distinguishes "you asked for the mesh" from "no
+  vertex lies at an extremum".
+* `bounds` on a fully meshed assembly says "every component's box came from its
+  mesh" instead of the generic lower-bound sentence; a mixed one still says
+  "mixed: N instance(s)".
+* README: the assembly paragraph no longer tells you to fall back to per-part
+  `document=...` calls — `method="mesh"` on the assembly does that now.
+* `sketch_arc.major` says it has no effect on an arc already ≤ 180° (reported as
+  a possible defect; it is not one).
+
+### Not changed, and why
+
+* `DOCUMENT_ALREADY_OPEN` was reported as having no way forward. It has three
+  `next_actions` — activate it, close it, or pick another path — plus an explicit
+  `next_actions_note`. Nothing to add.
+* The fillet anchor error message the report calls high quality stays as it is.
+
 ## [0.3.45] — 2026-11-01 · two documents on one path, and an arc that went the long way
 
 The first report from a finished build rather than a probe: a 20-part monitor

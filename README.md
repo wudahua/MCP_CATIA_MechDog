@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.45** · [what changed](CHANGELOG.md) ·
+**0.3.46** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1109,13 +1109,21 @@ while a reply that only reports success cannot.
 exact on planar-faced solids, a **lower bound ~0.5-0.7 % small** on curved ones.
 `method="vertices"` is the cheap sweep, exact only when every face is planar (a
 revolved face has no vertex at its extremum, which is how an `auto` box once came
-out 37.5 % small). On an assembly the per-component world boxes are vertex-based,
-so any part whose extremum lies on a curved face is under-reported there;
-`document="<part>.CATPart", method="mesh"` gives a true per-part box - the part is
-opened by path if it exists only as a component, and exported from a temporary
-copy when CATIA refuses to export it while it is edited in context (that refusal
-is a modal dialog, and reads as a bare `[WinError 2]`). Place the result with
-`catia_get_component_transform`.
+out 37.5 % small). On an assembly the two routes differ, and it matters:
+`auto` / `vertices` read each component's **vertices** and fall back to a mesh only
+for a part with no vertices at all, so a part whose extremum sits on a curved face
+is under-reported there — measured 2.392 mm and 8.99 mm on a 20-part bracket, in
+the two directions its acceptance was being checked in. `method="mesh"` takes
+**every part's mesh**, one per distinct part rather than per instance, which is
+what you want when a criterion is measuring an envelope: the reply says which
+route ran per part (`source: "mesh"`) and why (`mesh_reason`), and the counters
+`part_boxes_by_mesh` + `part_boxes_by_vertices` add up to `part_boxes`.
+
+Per-part `document="<part>.CATPart", method="mesh"` still works for one part at a
+time — the part is opened by path if it exists only as a component, and exported
+from a temporary copy when CATIA refuses to export it while it is edited in
+context (that refusal is a modal dialog, and reads as a bare `[WinError 2]`).
+Place the result with `catia_get_component_transform`.
 
 ## Known limits
 

@@ -144,6 +144,32 @@ _PART_COST_NOTE = (
 # still only 4.8 MB per part as a flat list of floats.
 _MESH_CLOUD_LIMIT = 200_000
 
+# The values `source` takes when a part's box was bounded from its MESH, whose
+# points are a FLAT list [x0, y0, z0, x1, ...] rather than a list of triplets.
+#
+# Two spellings because the two cases are different facts - "you asked for the
+# mesh" and "the vertex sweep had nothing at an extremum, so the mesh was the
+# fallback" - and one place that answers the question both readers ask. 0.3.45
+# added the first spelling and taught the PRODUCER about it only; five readers
+# still compared against the second one by hand, and the assembly route died with
+# `'float' object is not subscriptable` on its first real call (reported
+# 2026-11-01). Never compare a source against these strings directly - call
+# _from_mesh, and `tests/test_reported_issues_2026_11_01_v0346.py` will fail if a
+# sixth spelling appears.
+MESH_SOURCES = frozenset({"mesh", "mesh_fallback"})
+
+
+# WHY a box came from a mesh. The producer knows - it is the branch it took -
+# so it records it, and the reader that writes the sentence does not have to
+# guess from the source string. That guess is exactly what 0.3.45 got wrong.
+MESH_ASKED_FOR = "method_mesh"
+MESH_NO_VERTEX = "no_vertex_at_extremum"
+
+
+def _from_mesh(source: Any) -> bool:
+    """Whether this box was bounded from a mesh cloud (flat points, not triplets)."""
+    return source in MESH_SOURCES
+
 # Mesh boxes measured from the SAVED file, keyed by that file's identity. The copy
 # route (the only one used for an in-context part) reads the file, so an unchanged
 # file gives the same box - and the route costs 12-17 s per part on B30 (measured
@@ -1978,7 +2004,8 @@ class MeasurementTools:
                 stats["mesh_error"] = str(exc).splitlines()[0][:120]
             if cloud:
                 return {"points": cloud, "used": len(cloud) // 3,
-                        "source": "mesh", "mesh_vertices": mesh_vertices,
+                        "source": "mesh", "mesh_reason": MESH_ASKED_FOR,
+                        "mesh_vertices": mesh_vertices,
                         "truncated": mesh_vertices > len(cloud) // 3,
                         "copy_note": copy_note or ""}
             # A mesh that yields nothing is not a reason to have no box; it is a
@@ -2012,14 +2039,15 @@ class MeasurementTools:
             return {"error": "no vertices and no mesh: neither route could bound "
                              "this part"}
         return {"points": cloud, "used": len(cloud) // 3,
-                "source": "mesh_fallback", "mesh_vertices": mesh_vertices,
+                "source": "mesh_fallback", "mesh_reason": MESH_NO_VERTEX,
+                "mesh_vertices": mesh_vertices,
                 "truncated": mesh_vertices > len(cloud) // 3,
                 "copy_note": copy_note or ""}
 
     @staticmethod
     def _local_dimensions(points: Any, source: str) -> dict[str, float]:
         """The part's own box size, so a part detail needs no second call."""
-        if source in ("mesh", "mesh_fallback"):
+        if _from_mesh(source):
             xs = points[0::3]
             ys = points[1::3]
             zs = points[2::3]
@@ -2195,7 +2223,8 @@ class MeasurementTools:
                 "(measured: a camera bracket's arch, 33.27 mm reported against "
                 "41.40 mm true, -19.6 %). A part with no vertex at an extremum is "
                 "bounded from its mesh instead, and its entry says "
-                "source='mesh_fallback'. To bound one part on its own, open it "
+                "source='mesh_fallback' - or source='mesh' for every part, when "
+                "you asked for method='mesh'. To bound one part on its own, open it "
                 "(catia_open_document) and call "
                 "catia_get_bounding_box(document='<part>.CATPart', method='mesh'). "
                 "catia_get_component_transform READS an instance's placement; it "
@@ -2207,10 +2236,14 @@ class MeasurementTools:
                 "assembly (the two placements composed), and each entry says which "
                 "level it came from with 'path' and 'depth'.")
         from_mesh = [entry["component"] for entry in entries
-                     if entry.get("source") in ("mesh", "mesh_fallback")]
+                     if _from_mesh(entry.get("source"))]
         bounds = ("lower bound: each component's box came from its vertices, so any "
                   "part whose extremum lies on a curved face is under-reported")
-        if from_mesh:
+        if from_mesh and len(from_mesh) == len(entries):
+            bounds = ("every component's box came from its mesh (method='mesh'): "
+                      "exact on planar faces, short only by the chord tolerance on "
+                      "curved ones - not the vertex sweep's lower bound")
+        elif from_mesh:
             bounds = (f"mixed: {len(from_mesh)} instance(s) are bounded from their "
                       "mesh (a lower bound on curved faces, measured 0.47-0.73 % "
                       "small), the rest from vertices")
@@ -2234,7 +2267,7 @@ class MeasurementTools:
         for cached in local_boxes.values():
             if not cached.get("first_measure"):
                 continue
-            reason = (MESH_EXPORT if cached.get("source") == "mesh_fallback"
+            reason = (MESH_EXPORT if _from_mesh(cached.get("source"))
                       else TOPOLOGY)
             cold_reasons[reason] = cold_reasons.get(reason, 0) + 1
         payload["part_boxes_total"] = len(local_boxes)
@@ -2271,13 +2304,16 @@ class MeasurementTools:
         # 0.3.23 only said it in the `bounds` sentence, so "how many curved parts
         # should this assembly have" could not be checked without parsing prose
         # (reported 2026-10-26).
-        by_route = {"vertices": 0, "mesh_fallback": 0}
-        for cached in local_boxes.values():
-            source = cached.get("source")
-            if source in by_route:
-                by_route[source] += 1
-        payload["part_boxes_by_vertices"] = by_route["vertices"]
-        payload["part_boxes_by_mesh"] = by_route["mesh_fallback"]
+        # Counted in two buckets that have to add up to part_boxes. 0.3.45 only
+        # counted the key "mesh_fallback", so a method='mesh' call reported
+        # by_vertices=0 and by_mesh=0 while part_boxes was 46 - three numbers that
+        # contradict each other in one reply.
+        by_vertices = sum(1 for cached in local_boxes.values()
+                          if cached.get("source") == "vertices")
+        by_mesh = sum(1 for cached in local_boxes.values()
+                      if _from_mesh(cached.get("source")))
+        payload["part_boxes_by_vertices"] = by_vertices
+        payload["part_boxes_by_mesh"] = by_mesh
         # Per PART, once: the counts and caveats are properties of the part, and
         # repeating them on every instance entry meant 70 entries carried 28
         # distinct values (reported 2026-10-26). The instance entries keep the
@@ -2570,8 +2606,7 @@ class MeasurementTools:
                     # moment of the reading, not later from a table of sizes.
                     _BOOKS.note(
                         BOOK_TOPOLOGY, key,
-                        MESH_EXPORT if local_boxes[key].get("source")
-                        in ("mesh", "mesh_fallback")
+                        MESH_EXPORT if _from_mesh(local_boxes[key].get("source"))
                         else TOPOLOGY)
                 # What this part actually cost, once. `cells_scanned` is the work
                 # estimate; this is the measured price of it, which is the number
@@ -2591,7 +2626,7 @@ class MeasurementTools:
                                 "depth": depth, "kind": "part",
                                 "error": cached["error"]})
                 continue
-            if cached["source"] == "mesh_fallback":
+            if _from_mesh(cached["source"]):
                 # Transform EVERY mesh vertex, not the local box's two corners.
                 # The corners are a diagonal; rotate a diagonal and it becomes a
                 # line with almost no extent across it, so the aggregated box came
@@ -2655,20 +2690,37 @@ class MeasurementTools:
                 # work, and concludes the tool got 7x faster (reported 2026-10-27).
                 if cached.get("first_measure") is not None:
                     detail["first_measure"] = cached["first_measure"]
-                if cached["source"] == "mesh_fallback":
+                if _from_mesh(cached["source"]):
                     detail["mesh_vertices"] = cached["mesh_vertices"]
                     detail["points_route"] = "mesh"
                     # No vertex sweep ran for this part, and saying nothing would
                     # make the key set differ per part again. "mesh" is the third
                     # honest value of the same field.
                     detail["sweep_route"] = "mesh"
-                    detail["source_note"] = (
-                        "no vertex lies at this part's extremum, so its box came "
-                        "from the mesh - a lower bound on curved faces, measured "
-                        "0.47-0.73 % small"
-                        + ("; the cloud was capped at %d of %d vertices"
-                           % (cached["used"], cached["mesh_vertices"])
-                           if cached.get("truncated") else "") + ".")
+                    detail["mesh_reason"] = cached.get("mesh_reason")
+                    if cached.get("mesh_reason") == MESH_ASKED_FOR:
+                        # Same route, different reason: the caller asked for it.
+                        detail["source_note"] = (
+                            "bounded from its mesh because method='mesh' asks for "
+                            "every part's mesh: exact on planar faces, and short "
+                            "only by the STL chord tolerance on curved ones - "
+                            "0.47-0.73 % on the 2026-11-01 acceptance parts, "
+                            "1.52 % on a bare R12 cylinder (its mesh box read "
+                            "+-11.8177, measured on B30 the same day). The "
+                            "tolerance scales with the feature, so read the "
+                            "percentage as an order, not a constant"
+                            + ("; the cloud was capped at %d of %d vertices"
+                               % (cached["used"], cached["mesh_vertices"])
+                               if cached.get("truncated") else "") + ".")
+                    else:
+                        detail["source_note"] = (
+                            "no vertex lies at this part's extremum, so its box "
+                            "came from the mesh - a lower bound on curved faces, "
+                            "0.47-0.73 % small on the 2026-11-01 acceptance "
+                            "parts"
+                            + ("; the cloud was capped at %d of %d vertices"
+                               % (cached["used"], cached["mesh_vertices"])
+                               if cached.get("truncated") else "") + ".")
                 else:
                     detail["vertices_used"] = cached["used"]
                     if cached.get("cells") is not None:
@@ -3289,11 +3341,14 @@ class MeasurementTools:
             corners,
             f"STL mesh sweep of '{part.Parent.Name}' over {triangles} triangle "
             "vertices; the mesh chords curved faces, so these bounds are a LOWER "
-            "bound on the true envelope (measured 0.47-0.73 % small)"
+            "bound on the true envelope (0.47-0.73 % small on the parts this was "
+            "first measured on; 1.52 % on a bare R12 cylinder, 2026-11-01)"
             + copy_note + auto_note,
-            bounds=("lower bound: mesh chording, measured 0.47-0.73 % small on "
-                    "curved faces. Exact for a solid whose diameter runs through "
-                    "a planar edge or a vertex"),
+            bounds=("lower bound: mesh chording, 0.47-0.73 % small on the curved "
+                    "faces of the parts this was first measured on and 1.52 % on "
+                    "an R12 cylinder - the tolerance scales with the feature, so "
+                    "treat the figure as an order. Exact for a solid whose "
+                    "diameter runs through a planar edge or a vertex"),
             extra={"points_route": "mesh", "mesh_vertices": triangles,
                    **regime_fields(MESH_EXPORT)},
         )

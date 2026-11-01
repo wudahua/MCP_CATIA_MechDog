@@ -339,7 +339,11 @@ class SketcherTools:
                                 "shaft built on it failed three steps later with a "
                                 "bare 'UpdateObject 失败' (reported 2026-11-01). "
                                 "When this flips the arc, the reply says so and "
-                                "names both sweeps."
+                                "names both sweeps. It has NO effect on a request "
+                                "that is already a half circle or less: the sweep "
+                                "is the same either way, so setting it on a short "
+                                "arc changes nothing (reported 2026-11-01 as a "
+                                "possible defect, which it is not)."
                             ),
                         },
                     },
