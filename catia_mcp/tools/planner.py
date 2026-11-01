@@ -612,11 +612,27 @@ class PlannerTools:
             data["steps"] = failures
             data["steps_omitted"] = len(report) - len(failures)
             data["failed_indices"] = [entry["index"] for entry in failures]
+            # A step can succeed and still be the reason the NEXT one failed:
+            # an arc drawn 355 degrees the wrong way round builds fine and then
+            # takes the shaft down with it, and its "MAJOR arc" line is the only
+            # thing that explains the failure. Dropping every successful step's
+            # text dropped that too, so the whole plan had to be re-run without
+            # summary to see it (reported 2026-11-01, P3).
+            warned = [
+                {"index": entry["index"], "tool": entry["tool"],
+                 "message": self._trim(str(entry.get("result") or ""))}
+                for entry in report
+                if entry["ok"] and "WARNING" in str(entry.get("result") or "").upper()
+            ]
+            if warned:
+                data["step_warnings"] = warned
             data["summary_note"] = (
                 f"summary=true: data.steps lists ONLY the {len(failures)} step(s) "
                 f"that failed. The other {len(report) - len(failures)} succeeded "
-                "and are counted in 'executed' - re-run the same plan without "
-                "summary to get every step record.")
+                "and are counted in 'executed'; any successful step whose reply "
+                "carried a WARNING line is kept in 'step_warnings', because it is "
+                "usually the reason a later step failed. Re-run without summary "
+                "for every step record.")
         return {
             "ok": ok,
             "code": code,

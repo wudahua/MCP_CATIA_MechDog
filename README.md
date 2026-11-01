@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.44** · [what changed](CHANGELOG.md) ·
+**0.3.45** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -747,6 +747,47 @@ The limit is the file **name**; a non-ASCII **folder** is fine. It is now refuse
 before CATIA is asked, at the validate stage, with that table in the message and
 the one route that works: save under an ASCII name and rename the file afterwards.
 The `.CATPart` does not care what it is called — only CATIA's own SaveAs does.
+
+### A path can only hold one document
+
+`catia_new_part(file_path=X)` twice on the same path used to leave **two**
+documents in the session: one holding the file (an empty part, saved before any
+geometry existed) and one with no path at all holding everything that was built.
+After that every `document="P05"` answered "matches 2 open documents", and the
+file on disk looked finished while containing nothing.
+
+The second call is refused now — before the document is created, because there is
+no recovery afterwards. `DOCUMENT_ALREADY_OPEN` names the document that holds the
+path and the three ways forward. `catia_new_product(file_path=...)` gets the same
+guard, and the same argument, which it had been missing: without it "create an
+assembly" is two calls, and the one people forget is the one that leaves a product
+nothing can be added to.
+
+### An arc between two points takes the short way
+
+```
+catia_sketch_arc {cx, cy, radius, p1, p2, direction: "ccw"}
+-> swept 355.6117° counter-clockwise, arc length 1608.4415 mm
+```
+
+for two endpoints 4.39° apart. `ccw` from −71.0° to −75.4° **is** 355.6°; the
+argument was doing its job on a caller who meant "a little bit the other way".
+The shaft built on that arc then failed with a bare `UpdateObject 失败`, and the
+only clue had been a parenthetical two calls earlier.
+
+`major` is an argument now, default **false**: two endpoints give the short arc,
+and the reply names both sweeps so the choice is visible. `major=true` keeps the
+240-degree arcs that are legitimate. Two endpoints at the same angle are refused
+rather than swept a full turn, and an exact half circle says that direction
+decides nothing there.
+
+### Which way a `frame` normal points
+
+`normal = u × v`, right-hand rule, and the sketch's H/V axes are `u` and `v`
+exactly as given; `origin` is in global coordinates. To put material on the other
+side, reverse `v` — not the profile, because mirroring the profile changes which
+side of the sketch the geometry occupies, which is a different operation wearing
+the same result.
 
 ### A plan that answers with its own size
 

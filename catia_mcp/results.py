@@ -62,7 +62,8 @@ class CodedError(RuntimeError):
     def __init__(self, message: str, code: str | None = None,
                  modified: bool | None = None,
                  next_actions: list[str] | None = None,
-                 data: dict[str, Any] | None = None) -> None:
+                 data: dict[str, Any] | None = None,
+                 stage: str | None = None) -> None:
         super().__init__(message)
         if code:
             self.code = str(code)
@@ -72,6 +73,12 @@ class CodedError(RuntimeError):
             self.next_actions = list(next_actions)
         if data:
             self.data = dict(data)
+        if stage:
+            # A refusal can know it never reached the model without being an
+            # ArgumentRejected: "that path is already open" is a fact about the
+            # session, checked before any write. `_execute_tool` reads this
+            # before it picks a message, so the COM_ERROR paragraph stays off it.
+            self.stage = stage
 
 
 class ComponentNotFound(CodedError, ValueError):

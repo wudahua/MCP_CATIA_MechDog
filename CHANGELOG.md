@@ -2,6 +2,100 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.45] — 2026-11-01 · two documents on one path, and an arc that went the long way
+
+The first report from a finished build rather than a probe: a 20-part monitor
+bracket plus a 46-instance rigid assembly, all of it built through this server on
+B32, nine parts with volume, area and topology all exact. Six findings; four fixed
+here, one added, one documented.
+
+### Fixed — `catia_new_part(file_path=X)` twice left two documents on one path
+
+`new_part` always calls `Documents.Add`, and the SaveAs onto a path another open
+document holds then fails — correctly, the file is locked. What was left is a
+second document with the same name and **no path**, holding all the geometry,
+beside the empty part the first call had already written to disk.
+
+    catia_list_documents ->
+      { name: "P05.CATPart", path: "E:\\...\\P05.CATPart" }   <- empty on disk
+      { name: "P05.CATPart", path: "P05.CATPart" }              <- everything built
+
+After that every `document="P05"` answered "matches 2 open documents", and the
+file looked finished but had no solid. Hit three times in one 20-part build.
+
+Refused now, **before** the document is created — the failure is unrecoverable
+once one exists. `DOCUMENT_ALREADY_OPEN`, validate stage, with the three ways
+forward (activate it, close it, or pick another path).
+
+### Fixed — an arc from two endpoints took the 355-degree way round
+
+    arc(cx, cy, R, p1, p2, direction="ccw")
+    -> "swept 355.6117 deg counter-clockwise, arc length 1608.4415 mm"
+
+The endpoints were 4.39 degrees apart. `ccw` from -71.0 to -75.4 degrees really is
+355.6 degrees, so the code was not wrong — it was doing what the argument said,
+to a caller who did not mean it. The shaft built on that arc then failed with
+`UpdateObject 失败`, which points at nothing, and the only clue had been a
+parenthetical "MAJOR arc" two calls earlier.
+
+`major` is now an argument, **default false**: with two endpoints the arc takes
+the short way and the reply says so, naming both sweeps. `major=true` restores the
+old behaviour for the 240-degree arcs that are legitimate. Two smaller things in
+the same call: two endpoints at the same angle are refused (`DEGENERATE_ARC`,
+previously a 360-degree sweep that failed three steps later), and an exact half
+circle says that direction decides nothing there.
+
+**Breaking**: an arc that used to come out as a major arc now comes out minor
+unless `major=true`.
+
+### Fixed — `summary` dropped a successful step's warning
+
+The MAJOR-arc line was the only thing that explained the shaft failure, and
+`summary=true` keeps only the steps that failed — so finding it cost a re-run of
+the whole plan without summary. Successful steps whose reply carries a `WARNING`
+line are now kept in `data.step_warnings`, because such a step is usually the
+reason a later one fails.
+
+### Fixed — an assembly box could not use the parts' meshes
+
+`get_bounding_box(method="mesh")` on a product was refused outright. The refusal
+was right about the cost (a mesh per part) and wrong about the need, and the
+reason is narrower than it looked: the per-part mesh route already existed, but it
+only fired for a part with **no vertices at all**. A part whose extremum sits on a
+curved face has vertices, so the fallback never fired and its contribution was
+short by however far the surface bulges — measured on the bracket as 2.392 mm (a
+drum-shaped end cap) and 8.99 mm (a spherical boss), in exactly the two directions
+its acceptance criterion was checking.
+
+`method="mesh"` on an assembly now means what it says: every part from its mesh,
+one per distinct part rather than per instance. `auto` keeps the old vertices-first
+route, and the reply now states which route produced the box in `mesh_route`.
+
+### Added — `catia_new_product(file_path=...)`
+
+`new_part` had it and `new_product` did not, so "create an assembly" was always
+two calls and the second is the one people forget — and an assembly with no path
+cannot be referenced by `catia_add_component`, which surfaces three steps later as
+"the component is missing". Same duplicate-path guard as `new_part`.
+
+### Documented — which way a `frame` plane's normal points
+
+The schema said "the sketch's H direction" and "the sketch's V direction" and
+nothing about the normal, so a side lip landed at +Z where -Z was meant. It now
+says: **normal = u × v** (right-hand rule), the axes are `u` and `v` exactly as
+given, `origin` is in global coordinates — and to put material on the other side,
+reverse `v` rather than mirroring the profile, because those two are not the same
+operation.
+
+### Recorded, not fixed
+
+`catia_fillet` on an R6.35 edge of a 2 mm plate: 4 of 12 succeeded, and the reply
+explained the topology reasons well but never said what the report calls the real
+one — **R larger than the local thickness is a full round**, a different operation
+that CATIA's edge fillet will not approximate. Also listed: no solid rib/slot, no
+pad draft, no sketch fillet, and `catia_shaft` only turns about the sketch's own
+H/V axes.
+
 ## [0.3.44] — 2026-10-31 · the check that refused a spelling the tool reads
 
 Two more reports against 0.3.43, plus the first feedback from a real 2 700-step

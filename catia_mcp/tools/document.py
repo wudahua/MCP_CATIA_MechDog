@@ -84,6 +84,18 @@ class DocumentTools:
                             "type": "string",
                             "description": "Optional name for the product/assembly",
                         },
+                        "file_path": {
+                            "type": "string",
+                            "description": (
+                                "Save the new Product here in the same call, the "
+                                "way catia_new_part does. An assembly with no path "
+                                "cannot be referenced by catia_add_component, so "
+                                "leaving this out makes every plan two steps and "
+                                "one forgotten save away from a product nothing "
+                                "can be added to (reported 2026-11-01). The path "
+                                "must not already be open in this session."
+                            ),
+                        },
                     },
                 },
             },
@@ -284,7 +296,8 @@ class DocumentTools:
                 return self._new_part(arguments.get("name"),
                                       arguments.get("file_path"))
             case "catia_new_product":
-                return self._new_product(arguments.get("name"))
+                return self._new_product(arguments.get("name"),
+                                         arguments.get("file_path"))
             case "catia_open_document":
                 return self._open_document(arguments["file_path"])
             case "catia_save_document":
@@ -382,6 +395,35 @@ class DocumentTools:
                   file_path: str | None = None) -> str:
         self.conn.ensure_connected()
         docs = self.conn.documents
+        # Refuse BEFORE adding a document, because the failure is unrecoverable
+        # once it has been added: `docs.Add` always makes a NEW document, and the
+        # SaveAs onto a path another open document holds then fails (correctly -
+        # the file is locked). What is left is a second document with the same
+        # name and no path, and every later `document="P05_spherical_washer"`
+        # answers "matches 2 open documents". Worse, the save had already put an
+        # EMPTY part on disk, so the 14 steps of geometry went into the pathless
+        # twin and the file looked finished-but-empty (reported 2026-11-01, P1,
+        # hit three times in a 20-part build).
+        if file_path:
+            holder = self._document_at_path(str(file_path))
+            if holder is not None:
+                raise CodedError(
+                    f"'{file_path}' is already open as '{holder.Name}', so this "
+                    "call would leave a SECOND document with the same name and no "
+                    "path, and the geometry would go into that one while the file "
+                    "on disk stayed empty. Nothing was created.",
+                    code="DOCUMENT_ALREADY_OPEN",
+                    modified=False,
+                    next_actions=[
+                        "To keep building in the document that is already open: "
+                        "catia_activate_document(name='...'), then continue - "
+                        "nothing is lost",
+                        "To start over on this file: catia_close_document(save=false) "
+                        "first (or close it in CATIA), then call catia_new_part again",
+                        "To write a second part beside it: pass a different file_path",
+                    ],
+                    data={"path": str(file_path), "open_document": str(holder.Name)},
+                    stage="validate")
         doc = docs.Add("Part")
         # A fresh part has no sketches; carrying the previous part's would make
         # the first pad/pocket in this document use the wrong profile.
@@ -437,9 +479,28 @@ class DocumentTools:
                 + (f" [{part_number}]" if part_number else "")
                 + f".{note}{saved}{hint}" + self._name_collision_note(doc))
 
-    def _new_product(self, name: str | None = None) -> str:
+    def _new_product(self, name: str | None = None,
+                     file_path: str | None = None) -> str:
         self.conn.ensure_connected()
         docs = self.conn.documents
+        # The same guard new_part got: a path another open document holds would
+        # leave a second document with no path, and the model would be built in
+        # that one while the file on disk stayed as it was (reported 2026-11-01).
+        if file_path:
+            holder = self._document_at_path(str(file_path))
+            if holder is not None:
+                raise CodedError(
+                    f"'{file_path}' is already open as '{holder.Name}'. Nothing "
+                    "was created.",
+                    code="DOCUMENT_ALREADY_OPEN", modified=False, stage="validate",
+                    next_actions=[
+                        "catia_activate_document(name='...') to keep working in "
+                        "the document that is already open",
+                        "catia_close_document(save=false) first if you meant to "
+                        "start over on this file",
+                    ],
+                    data={"path": str(file_path),
+                          "open_document": str(holder.Name)})
         doc = docs.Add("Product")
         product = self.conn.product_of(doc)
         rename_note = ""
@@ -478,11 +539,27 @@ class DocumentTools:
         # which stopped being true once PartNumber started working: the document
         # is now named after it. Saying both in one breath made the reply
         # contradict itself (reported 2026-10-24, twice).
+        # `file_path` was added because leaving it out made "create an assembly"
+        # two calls in every plan, and the second one is the one people forget -
+        # an assembly with no path cannot be referenced by catia_add_component,
+        # which reads like "the component is missing" three steps later (reported
+        # 2026-11-01, P6).
+        saved = ""
+        if file_path:
+            try:
+                saved = " " + self._save_document(str(file_path))
+            except Exception as exc:  # noqa: BLE001 - the product itself exists
+                saved = (f" The product was created but could not be saved to "
+                         f"'{file_path}' ({str(exc).splitlines()[0][:200]}). Call "
+                         "catia_save_document(file_path=...) before adding "
+                         "components - an assembly with no path cannot be "
+                         "referenced.")
         return (
             f"Created a Product document '{doc_name}' whose root product is "
             f"'{product_name}'{rename_note}. In this session the document is called "
             f"'{doc_name}'; a path you save it to decides the FILE name "
             "(catia_save_document(file_path=...))."
+            + saved
             + self._name_collision_note(doc)
         )
 
@@ -526,7 +603,9 @@ class DocumentTools:
 
         wanted = os.path.normcase(os.path.abspath(path))
         docs = self.conn.documents
-        for i in range(1, docs.Count + 1):
+        # `Count` may be absent on a connection double (tests) - the same reason
+        # the per-document FullName read is guarded below.
+        for i in range(1, int(getattr(docs, "Count", 0)) + 1):
             doc = docs.Item(i)
             try:
                 if os.path.normcase(os.path.abspath(str(doc.FullName))) == wanted:

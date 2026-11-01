@@ -107,14 +107,26 @@ def test_an_unknown_component_says_it_was_not_measured():
     assert "catia_activate_document" in text
 
 
-def test_mesh_plus_component_still_refuses():
-    """The refusal that already existed must not slip through the new route."""
+def test_mesh_plus_component_is_available_now():
+    """0.3.45: method='mesh' on an assembly is a route, not a refusal.
+
+    The refusal was right about the cost - a mesh per distinct part - and wrong
+    about the need. The parts that made it hurt (a drum-shaped end cap, a
+    spherical boss) have vertices, so the vertices-first fallback never fired for
+    them and their contribution to the world box came out 2.392 mm and 8.99 mm
+    short, in the two directions an acceptance criterion was being measured in
+    (reported 2026-11-01, P5).
+    """
+    import json
+
     tools = _box_tools(
         [_Doc("P26A.CATPart"), _Doc("ASM26.CATProduct", "Product")],
         holds={"ASM26.CATProduct": ["P26B.1"]})
-    with pytest.raises(RuntimeError) as error:
-        tools._get_bounding_box(component="P26B.1", method="mesh")
-    assert "method='mesh' is not available for an assembly" in str(error.value)
+    # This path answers a narrower reply (component + measured_in + dimensions),
+    # so the assertion is the absence of the refusal, not a field of the wide one.
+    reply = json.loads(tools._get_bounding_box(component="P26B.1", method="mesh"))
+    assert "not available for an assembly" not in json.dumps(reply)
+    assert reply.get("component") == "P26B.1"
 
 
 # --------------------------------------------------------------------------

@@ -57,7 +57,12 @@ def test_arc_from_two_endpoints_sweeps_the_major_way_when_asked():
     tools = _sketcher_with_factory()
     p1 = [20 * math.cos(math.radians(10)), 20 * math.sin(math.radians(10))]
     p2 = [20 * math.cos(math.radians(250)), 20 * math.sin(math.radians(250))]
-    reply = tools._draw_arc(0, 0, 20, p1=p1, p2=p2, direction="ccw")
+    # major=True: 0.3.45 made the SHORT way the default for two given endpoints,
+    # because "ccw" between points 4 degrees apart used to mean 355 degrees round
+    # and that arc then took a shaft down with it (reported 2026-11-01). A 240-
+    # degree arc is a legitimate thing to want - it is now something you ASK for,
+    # which is what this test's own name has always said.
+    reply = tools._draw_arc(0, 0, 20, p1=p1, p2=p2, direction="ccw", major=True)
     assert "swept 240.0000°" in reply
     assert "MAJOR" in reply
     start, end = tools._active_factory.calls[0][3:]

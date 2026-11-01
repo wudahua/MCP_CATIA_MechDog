@@ -824,11 +824,22 @@ class MeasurementTools:
                             "enum": ["auto", "vertices", "mesh"],
                             "default": "auto",
                             "description": (
-                                "auto (default) = always the STL mesh, exact for "
-                                "planar-faced solids and a lower bound for curved "
-                                "ones; vertices = cheap vertex sweep, exact only when "
-                                "every face is planar (fails on a fully curved solid); "
-                                "mesh = the same as auto, named explicitly"
+                                "On a PART: auto (default) always takes the STL "
+                                "mesh, exact for planar-faced solids and a lower "
+                                "bound for curved ones; vertices is the cheap "
+                                "sweep, exact only when every face is planar; mesh "
+                                "is the same as auto, named explicitly. "
+                                "On an ASSEMBLY they differ, and it matters: auto "
+                                "reads each component's VERTICES and falls back to "
+                                "a mesh only for a part with no vertices at all, "
+                                "so a part whose extremum sits on a curved face "
+                                "(a drum-shaped end cap, a spherical boss) is "
+                                "under-reported by however far the surface bulges "
+                                "- measured 2.392 mm and 8.99 mm on a 20-part "
+                                "bracket, in the two directions its acceptance was "
+                                "being checked in. mesh takes every part's mesh, "
+                                "one per distinct part rather than per instance, "
+                                "which is exact on curved faces and slower."
                             ),
                         },
                         "component": {
@@ -1940,7 +1951,8 @@ class MeasurementTools:
             return False
 
     def _part_box_entry(self, part: Any, body: Any,
-                        include_curved: bool) -> dict[str, Any]:
+                        include_curved: bool,
+                        force_mesh: bool = False) -> dict[str, Any]:
         """One part's local box: vertices when possible, mesh when not.
 
         The mesh fallback is what makes ``complete`` mean something. A fully
@@ -1951,12 +1963,37 @@ class MeasurementTools:
         it instead).
         """
         stats: dict[str, Any] = {}
+        if force_mesh:
+            # method='mesh' means "bound every part from its mesh", not "fall back
+            # to the mesh when the vertices run out". The difference is the whole
+            # point: a part whose extremum sits on a curved face HAS vertices, so
+            # the fallback never fires for it and its box is short by however far
+            # the surface bulges - measured 2026-11-01 on a 20-part bracket: 2.392
+            # mm on a drum-shaped end cap and 8.99 mm on a spherical boss, both of
+            # which were exactly the acceptance criterion being checked.
+            try:
+                cloud, mesh_vertices, copy_note = self._mesh_cloud(part)
+            except Exception as exc:  # noqa: BLE001 - fall back, but say so
+                cloud, mesh_vertices, copy_note = [], 0, ""
+                stats["mesh_error"] = str(exc).splitlines()[0][:120]
+            if cloud:
+                return {"points": cloud, "used": len(cloud) // 3,
+                        "source": "mesh", "mesh_vertices": mesh_vertices,
+                        "truncated": mesh_vertices > len(cloud) // 3,
+                        "copy_note": copy_note or ""}
+            # A mesh that yields nothing is not a reason to have no box; it is a
+            # reason to say the box came from the weaker route.
+            stats["mesh_fallback_note"] = (
+                "method='mesh' produced no mesh cloud for this part"
+                + (f" ({stats['mesh_error']})" if stats.get("mesh_error") else "")
+                + ", so its box is the vertex sweep - a LOWER bound on curved faces")
         try:
             points, used = self._local_box(part, body, stats)
         except Exception as exc:  # noqa: BLE001 - reported per component
             return {"error": f"local box: {str(exc).splitlines()[0][:80]}"}
         if points:
             return {"points": points, "used": used, "source": "vertices",
+                    "mesh_note": stats.get("mesh_fallback_note"),
                     "mesh_vertices": None, "copy_note": "",
                     "cells": stats.get("cells"),
                     "nls_chars": stats.get("nls_chars"),
@@ -1982,7 +2019,7 @@ class MeasurementTools:
     @staticmethod
     def _local_dimensions(points: Any, source: str) -> dict[str, float]:
         """The part's own box size, so a part detail needs no second call."""
-        if source == "mesh_fallback":
+        if source in ("mesh", "mesh_fallback"):
             xs = points[0::3]
             ys = points[1::3]
             zs = points[2::3]
@@ -2029,6 +2066,9 @@ class MeasurementTools:
             "entries": [], "corners": [], "skipped": [], "warnings": [],
             "parts_detail": {}, "warned": set(), "local_boxes": {},
             "include_curved": include_curved,
+            # method='mesh' is the whole signal - no second flag to keep in sync
+            # with it. 'auto' and 'vertices' keep the old vertices-first route.
+            "force_mesh": method == "mesh",
         }
         self._box_walk(rows, [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
                        [0.0, 0.0, 0.0], 1, "", ctx)
@@ -2167,7 +2207,7 @@ class MeasurementTools:
                 "assembly (the two placements composed), and each entry says which "
                 "level it came from with 'path' and 'depth'.")
         from_mesh = [entry["component"] for entry in entries
-                     if entry.get("source") == "mesh_fallback"]
+                     if entry.get("source") in ("mesh", "mesh_fallback")]
         bounds = ("lower bound: each component's box came from its vertices, so any "
                   "part whose extremum lies on a curved face is under-reported")
         if from_mesh:
@@ -2355,6 +2395,11 @@ class MeasurementTools:
         # bound in the directions they could have driven (reported 2026-10-25).
         payload["complete"] = not skipped
         payload["include_curved"] = include_curved
+        payload["mesh_route"] = (
+            "every part from its mesh (method='mesh'): accurate on curved faces, "
+            "one mesh per distinct part - not per instance"
+            if method == "mesh" else
+            "vertices first, mesh only for parts that have no vertices at all")
         if from_mesh:
             # Parts, not instances: `warnings` is per part, and two fields in one
             # reply counting different things made 6-vs-2 look like a defect
@@ -2508,8 +2553,13 @@ class MeasurementTools:
             if key not in local_boxes:
                 part_started = time.perf_counter()
                 first_measure = _BOOKS.is_new(BOOK_TOPOLOGY, key)
-                local_boxes[key] = self._part_box_entry(row["part"], body,
-                                                        include_curved)
+                # The fourth argument is passed only when a mesh was asked for,
+                # so the default call keeps the three-argument signature every
+                # caller and test double already has.
+                local_boxes[key] = (
+                    self._part_box_entry(row["part"], body, include_curved, True)
+                    if ctx.get("force_mesh")
+                    else self._part_box_entry(row["part"], body, include_curved))
                 local_boxes[key]["first_measure"] = first_measure
                 if "error" not in local_boxes[key]:
                     # The reason is only known once the route is: a part bounded
@@ -2520,7 +2570,8 @@ class MeasurementTools:
                     # moment of the reading, not later from a table of sizes.
                     _BOOKS.note(
                         BOOK_TOPOLOGY, key,
-                        MESH_EXPORT if local_boxes[key].get("source") == "mesh_fallback"
+                        MESH_EXPORT if local_boxes[key].get("source")
+                        in ("mesh", "mesh_fallback")
                         else TOPOLOGY)
                 # What this part actually cost, once. `cells_scanned` is the work
                 # estimate; this is the measured price of it, which is the number
@@ -3293,22 +3344,15 @@ class MeasurementTools:
     def _assembly_box_checked(self, doc: Any, method: str, component: str | None,
                               include_curved: bool) -> str:
         """`_assembly_box` with the one refusal that belongs to every caller."""
-        if method == "mesh":
-            # Refuse instead of silently returning vertex-sweep numbers:
-            # a wrong number that looks plausible is worse than an error.
-            raise RuntimeError(
-                f"method='mesh' is not available for an assembly "
-                f"('{getattr(doc, 'Name', '<assembly>')}'): a per-component world "
-                "box would need every component's own mesh, and the aggregated "
-                "path only reads the vertices the assembly exposes. Two working "
-                "routes: (a) get_bounding_box(document='<part>.CATPart', "
-                "method='mesh') per component - the part does not have to be open "
-                "first, it is opened by path if it exists only as a component - "
-                "then apply the placement from catia_get_component_transform; or "
-                "(b) omit method for the vertex-based aggregation, whose "
-                "under-reporting on any part with a curved extremum is stated in "
-                "the reply."
-            )
+        # This used to refuse method='mesh' outright, on the reasoning that a
+        # world box needs every component's own mesh and the aggregated path only
+        # read vertices. The first half is true and the second was the bug: the
+        # per-part mesh route already existed for wholly curved parts, and the
+        # parts that made this refusal hurt - a drum-shaped end cap and a
+        # spherical boss - have vertices, so the fallback never fired for them and
+        # their box came out 2.392 mm and 8.99 mm short exactly where the
+        # acceptance criterion was measured (reported 2026-11-01, P5). A mesh per
+        # PART (not per instance) is what it costs now.
         return self._assembly_box(doc, method, component, include_curved)
 
     def _assemblies_with_component(self, component: str) -> list[Any]:
@@ -3419,15 +3463,6 @@ class MeasurementTools:
                 # because "activate it first" is the one thing a second client on
                 # the same CATIA can invalidate between two calls (reported
                 # 2026-10-26, twice).
-                if method == "mesh":
-                    raise RuntimeError(
-                        f"method='mesh' is not available for an assembly ('{document}'): "
-                        "a mesh box is per part, and the aggregation reads each "
-                        "component's vertices. Two working routes: (a) "
-                        "get_bounding_box(document='<part>.CATPart', method='mesh') "
-                        "per component, then apply its placement; or (b) drop "
-                        "method for the vertex-based aggregation."
-                    )
                 return self._assembly_box(doc, method, component,
                                           include_curved)
             try:

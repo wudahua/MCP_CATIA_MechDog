@@ -11,7 +11,7 @@ from typing import Any
 
 from catia_mcp.connection import CATIAConnection
 from catia_mcp.results import CodedError
-from catia_mcp.results import ArgumentOutOfRange
+from catia_mcp.results import ArgumentOutOfRange, ArgumentRejected
 from catia_mcp.topo_search import topology_reference
 
 # Plane name mapping
@@ -106,21 +106,46 @@ class SketcherTools:
                                             "items": {"type": "number"},
                                             "minItems": 3,
                                             "maxItems": 3,
-                                            "description": "For type='frame': plane origin [x, y, z] in mm.",
+                                            "description": (
+                                                "For type='frame': the plane origin "
+                                                "[x, y, z], in GLOBAL coordinates "
+                                                "(millimetres, the assembly/document "
+                                                "system - not the sketch's own)."),
                                         },
                                         "u": {
                                             "type": "array",
                                             "items": {"type": "number"},
                                             "minItems": 3,
                                             "maxItems": 3,
-                                            "description": "For type='frame': the sketch's H direction.",
+                                            "description": (
+                                                "For type='frame': the sketch's H "
+                                                "direction, as a global vector. "
+                                                "Does not have to be unit length "
+                                                "(it is normalized)."),
                                         },
                                         "v": {
                                             "type": "array",
                                             "items": {"type": "number"},
                                             "minItems": 3,
                                             "maxItems": 3,
-                                            "description": "For type='frame': the sketch's V direction.",
+                                            "description": (
+                                                "For type='frame': the sketch's V "
+                                                "direction, as a global vector. The "
+                                                "plane NORMAL is u x v, right-hand "
+                                                "rule, and the sketch's H/V axes are "
+                                                "u and v exactly as given - so a "
+                                                "profile drawn at u 0..10, v 0..4 "
+                                                "pads 2 mm along u x v. To put the "
+                                                "material on the other side, reverse "
+                                                "v (or u) rather than flipping the "
+                                                "profile: a reversed v flips the "
+                                                "normal, while a mirrored profile "
+                                                "changes which side of the sketch "
+                                                "the geometry occupies. Reported "
+                                                "2026-11-01: a side lip landed at "
+                                                "+Z where -Z was meant, and nothing "
+                                                "in the schema said which way the "
+                                                "normal pointed."),
                                         },
                                         "base": {
                                             "type": "string",
@@ -295,9 +320,26 @@ class SketcherTools:
                             "enum": ["ccw", "cw"],
                             "default": "ccw",
                             "description": (
-                                "Which way the arc runs from p1 to p2. Decides "
-                                "minor vs major arc when the two points are more "
-                                "than 180 degrees apart."
+                                "Which way round the circle the arc runs from p1 "
+                                "to p2. With two endpoints this only matters when "
+                                "the two ways are both under half a circle; "
+                                "'major' decides the rest."
+                            ),
+                        },
+                        "major": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Allow an arc longer than a half circle. False by "
+                                "default, and deliberately: with p1/p2 given, "
+                                "'ccw' from a point at -71 deg to one at -75 deg "
+                                "means 355.6 deg the long way round, which is "
+                                "almost never what was meant - it is what produced "
+                                "a 1608 mm arc where 20 mm was wanted, and the "
+                                "shaft built on it failed three steps later with a "
+                                "bare 'UpdateObject 失败' (reported 2026-11-01). "
+                                "When this flips the arc, the reply says so and "
+                                "names both sweeps."
                             ),
                         },
                     },
@@ -514,6 +556,7 @@ class SketcherTools:
                     arguments.get("start_angle"), arguments.get("end_angle"),
                     p1=arguments.get("p1"), p2=arguments.get("p2"),
                     direction=arguments.get("direction") or "ccw",
+                    major=bool(arguments.get("major", False)),
                 )
             case "catia_sketch_spline":
                 return self._draw_spline(
@@ -1284,7 +1327,7 @@ class SketcherTools:
         self, cx: float, cy: float, radius: float,
         start_angle: float | None = None, end_angle: float | None = None,
         p1: list[float] | None = None, p2: list[float] | None = None,
-        direction: str = "ccw",
+        direction: str = "ccw", major: bool = False,
     ) -> str:
         self._ensure_sketch_open()
         factory = self._active_factory
@@ -1317,16 +1360,52 @@ class SketcherTools:
                     "ends moved by that much. Check the centre/radius against the "
                     "point pair - this is how a profile ends up with a gap."
                 )
-            if direction == "cw":
-                # CreateCircle always runs counter-clockwise from start to end,
-                # so a clockwise arc is the same sweep with the endpoints
-                # swapped. That keeps a 240-degree major arc at 240 instead of
-                # silently turning it into 120.
-                start_rad, end_rad = a2, a1
+            # How far it is to walk counter-clockwise from p1 to p2. Zero means
+            # the two points are the same point on the circle, which is a
+            # degenerate arc, not a full circle: CreateCircle is the tool for
+            # that, and a shaft built on a 0-degree arc fails with "UpdateObject
+            # 失败" three steps later (one of the three causes in the 2026-11-01
+            # report, §补充 4).
+            ccw = (a2 - a1) % (2 * math.pi)
+            if ccw < 1e-9:
+                raise ArgumentRejected(
+                    f"catia_sketch_arc got two endpoints at the same angle "
+                    f"({math.degrees(a1):.4f} deg) on the R{radius} circle around "
+                    f"({cx}, {cy}), so the arc would sweep nothing. Use "
+                    "catia_sketch_circle for a full circle, or move one endpoint.",
+                    code="DEGENERATE_ARC")
+            # `direction` picks which of the two ways round; `major` says whether
+            # a sweep past half a circle is what the caller meant. It defaults to
+            # no, because it almost never is: reported 2026-11-01, an arc whose
+            # endpoints were 4.39 degrees apart answered "355.6117 degrees
+            # counter-clockwise" (1608 mm) and the shaft built on it failed with
+            # a bare "UpdateObject 失败" - the caller had said "ccw" without
+            # meaning "the long way round", which is what ccw means when the two
+            # points are 4 degrees apart.
+            chosen_ccw = direction != "cw"
+            sweep_rad = ccw if chosen_ccw else (2 * math.pi - ccw)
+            flipped = False
+            if not major and sweep_rad > math.pi + 1e-9:
+                chosen_ccw = not chosen_ccw
+                sweep_rad = 2 * math.pi - sweep_rad
+                flipped = True
+            if chosen_ccw:
+                start_rad, end_rad = a1, a1 + sweep_rad
             else:
-                start_rad, end_rad = a1, a2
+                start_rad, end_rad = a2, a2 + sweep_rad
             start_angle = math.degrees(start_rad)
             end_angle = math.degrees(end_rad)
+            if flipped:
+                notes.append(
+                    f" Took the SHORT way round ({math.degrees(sweep_rad):.4f} "
+                    f"deg): going {direction} from p1 to p2 the long way is "
+                    f"{360 - math.degrees(sweep_rad):.4f} deg. Pass major=true if "
+                    "that arc really is more than half a circle.")
+            elif abs(math.degrees(sweep_rad) - 180) < 0.5:
+                notes.append(
+                    " The endpoints are 180 deg apart, so direction decides "
+                    "nothing here - the arc is a half circle either way, and it "
+                    "was drawn exactly as written.")
         elif start_angle is not None and end_angle is not None:
             start_rad = math.radians(start_angle)
             end_rad = math.radians(end_angle)
