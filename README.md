@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.47** · [what changed](CHANGELOG.md) ·
+**0.3.48** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1127,6 +1127,13 @@ Place the result with `catia_get_component_transform`.
 
 ## Known limits
 
+* **`rect_pattern`'s axis arguments are unreliable** — measured 2026-11-02:
+  `dir1_axis="x"` with 3 copies at 20 mm puts them along -Y, and `dir2_axis="y"`
+  puts them along -X; the reply's "axis x+ -> dir1" is not what happens. The
+  direction a plane reference produces depends on its partner, so no table of
+  plane names fixes it. Read the body's bounding box after the call and correct
+  with `reverse_dir1` / `reverse_dir2`, or exchange the spacings. `circ_pattern`
+  and `user_pattern` were both measured on the same day and are exact.
 * No lump-count check (upstream has none either) — the only reliable detector for
   an isolated floating boss.
 * Assembly **inertia tensors** are not aggregated (volumes, areas and centroids

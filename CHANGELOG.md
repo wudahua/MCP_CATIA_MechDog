@@ -2,6 +2,82 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.48] — 2026-11-02 · the two array findings that could be fixed, and the one that could not
+
+The 2026-10-31 report listed three array problems and asked for them to be
+reproduced on real geometry. They were, on B30, with a 4x4x10 pad and one
+bounding box per call — and the three turned out to be three different things.
+
+### Fixed — `circ_pattern` had no way to ask for the other direction (#7)
+
+A 4x4 pad seeded at (30, 0), two copies at 90 degrees about Z, lands the copy at
+(0, -30): **clockwise**, the opposite of the right-hand rule a caller reads off
+"axis z". The flag that controls it (`AddNewCircPattern`'s reversed-axis) was
+hardcoded `False`, so the only workaround was a negative `angular_spacing`.
+
+    reverse=false (default)  copy at (0, -30)   unchanged behaviour
+    reverse=true             copy at (0, +30)
+
+The default is unchanged — a model built with negative angles keeps its geometry
+— the argument is new, and the reply now says which way the copies went instead
+of leaving it to be discovered.
+
+### Fixed — `user_pattern` reported a number CATIA ignores (#6)
+
+A 1000 mm3 through pocket, a 3-point locate sketch, and the same plate measured
+after each call:
+
+    count=1 -> 3000 mm3 removed (3 copies)
+    count=3 -> 3000 mm3 removed
+    count=5 -> 3000 mm3 removed
+
+`count` does not decide anything: the locating points do. The reply used to
+repeat the argument back — "5 instances placed" beside a tree holding three
+copies — which is how a caller ends up explaining a volume that looks like twice
+what he asked for. It now counts the sketch's locating points (subtracting the
+sketch's own absolute axis, which is one of its geometric elements: three points
+read as four elements, the first named "绝对轴") and says so when the argument
+disagrees.
+
+### NOT fixed — `rect_pattern` puts the copies on the wrong axis (#5)
+
+Measured, and worse than reported: with `dir1_axis="x"`, three copies at 20 mm
+came out along **-Y**, and `dir2_axis="y"` came out along **-X** — the roles are
+exchanged *and* both directions are negative, on both the axis form and the
+default. The reply said "axis x+ -> dir1" for all of it.
+
+It is not a one-line mapping error, which is why this release does not touch it:
+
+* the direction a plane reference produces depends on its **partner** — the same
+  `PlaneYZ` drove Y next to `PlaneZX` and Z next to `PlaneXY`;
+* swapping the two references is rejected at `UpdateObject`, so the order is not
+  ours to choose;
+* line references (the way `circ_pattern` builds its axis) are rejected outright
+  by `AddNewRectPattern`.
+
+A candidate fix was written and thrown away: it made (x, y) correct and (y, z)
+wrong, which is worse than a known-wrong default because it moves the error
+around. The next attempt has to check the result at run time — build, measure
+which axis grew, rebuild with the slots exchanged if it disagrees — rather than
+encode a table that this API contradicts.
+
+Until then: **do not trust `dir1_axis`/`dir2_axis` to name the axis.** Read the
+body's box after the call and use `reverse_dir1`/`reverse_dir2` or exchanged
+spacings to get what you meant. The reply now says the reference pair may be
+reordered; the README's known-limits section says the rest.
+
+### Also measured, and not a defect — P12_Fan rebuilds
+
+The 0.3.41 incident left an open question: after three R5 fillets were added to
+`P12_Fan.CATPart` in memory (never saved) its `Update()` failed, and it was never
+established whether the part or the probe was at fault. Opened from disk and
+updated on 2026-11-02: **`Update()` succeeds**, with all four features intact
+(凸台.1, 凹槽.1, 加厚曲面.5, 圆形阵列.11). The failure does not reproduce on the
+file as it stands, and the file was written after that session, so the most it
+can prove is that nothing in the part is broken today.
+
+**Tests:** 830 passed (823 -> +7).
+
 ## [0.3.47] — 2026-11-02 · a remainder clamped to zero is a breakdown that does not add up
 
 Not from a report: from the one test in this suite that failed about once per full

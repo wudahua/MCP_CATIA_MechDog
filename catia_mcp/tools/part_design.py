@@ -728,6 +728,21 @@ class PartDesignTools:
                                 "while the volume was 8x the seed in both."
                             ),
                         },
+                        "reverse": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Turn the copies the other way round the axis. "
+                                "The measured default is CLOCKWISE about the named "
+                                "axis - a 4x4 pad seeded at (30, 0) copied to "
+                                "(0, -30) with angular_spacing 90 about Z, on B30 "
+                                "2026-11-02 - which is the opposite of the "
+                                "right-hand rule a caller reads off 'axis z'. "
+                                "Until 0.3.48 the only workaround was a negative "
+                                "angular_spacing, and the flag behind it was hard "
+                                "coded. The reply now says which way it went."
+                            ),
+                        },
                     },
                     "required": ["count"],
                 },
@@ -3538,6 +3553,26 @@ class PartDesignTools:
                           f"axis {second}{'-' if reverse2 else '+'} -> dir2")
             if swapped:
                 directions += " (axes swapped internally: CATIA rejects a left-handed pair)"
+            # Measured on B30 2026-11-02 and not yet fixed: a plane reference's
+            # direction depends on its PARTNER here, so the pair above can put
+            # dir1 on the other axis (dir1_axis="x" landed 3 copies on -Y).
+            # Saying so costs one sentence and stops the reply from asserting a
+            # geometry it cannot guarantee - see README "Known limits".
+            directions += (" WARNING: the axis each direction actually takes is "
+                           "measured unreliable for plane references (2026-11-02: "
+                           "dir1_axis='x' moved the copies along -Y). Read the "
+                           "body's bounding box after this call, and correct with "
+                           "reverse_dir1/reverse_dir2 or exchanged spacings.")
+            # Measured on B30 2026-11-02 and not yet fixed: a plane reference's
+            # direction depends on its PARTNER here, so the pair above can put
+            # dir1 on the other axis (dir1_axis="x" landed 3 copies on -Y).
+            # Saying so costs one sentence and stops the reply from asserting a
+            # geometry it cannot guarantee - see README "Known limits".
+            directions += (" WARNING: the axis each direction actually takes is "
+                           "measured unreliable for plane references (2026-11-02: "
+                           "dir1_axis='x' moved the copies along -Y). Read the "
+                           "body's bounding box after this call, and correct with "
+                           "reverse_dir1/reverse_dir2 or exchanged spacings.")
         elif dir1_edge:
             r1, r2 = topology_references(
                 self.conn, body, "Edge",
@@ -3710,13 +3745,20 @@ class PartDesignTools:
         # +-500, and nothing else changes.
         radius_aligned = args.get("radius_aligned")
         radius_aligned = True if radius_aligned is None else bool(radius_aligned)
+        # The direction of travel, which used to be hardcoded. Measured on B30
+        # 2026-11-02 with a 4x4 pad seeded at (30, 0): +90 deg about Z puts the
+        # copy at (0, -30), i.e. CLOCKWISE, which is the opposite of the
+        # right-hand rule a caller reads off "axis z" (reported 2026-10-31, #7 -
+        # the only workaround was a negative angular_spacing). `reverse` asks for
+        # the other way without changing the default that other models rely on.
+        reversed_axis = bool(args.get("reverse", False))
         pattern = sf.AddNewCircPattern(
             feature,
             1, count,              # radial copies, angular copies
             0.0, angular_spacing,  # radial step, angular step (deg)
             1, 1,                  # position of the original
             center_ref, axis_ref,  # rotation center (from axis line), axis
-            False,                 # reversed rotation axis
+            reversed_axis,         # reversed rotation axis
             0.0,                   # rotation angle
             radius_aligned,        # rotate each copy with the pattern
         )
@@ -3757,6 +3799,15 @@ class PartDesignTools:
         if update_error is not None:
             detail += (" (CATIA raised during the update, but the volume did "
                        "change, so the feature is kept.)")
+        # Which way the copies went, stated rather than implied: the measured
+        # default is clockwise about the named axis, and a caller who assumed
+        # the right-hand rule got a mirror image without a word of warning.
+        if count > 1:
+            detail += (" Copies go " + ("the other way round from the right-hand rule"
+                                        if reversed_axis else
+                                        "CLOCKWISE about the named axis, as measured "
+                                        "- pass reverse=true for the other direction")
+                       + ".")
         if radius_aligned:
             orientation = (
                 " Each copy is rotated with the pattern (radius_aligned=true), so "
@@ -3802,6 +3853,30 @@ class PartDesignTools:
         # Field-proven on V5R20: AddNewUserPattern(shape, n) then
         # AddFeatureToLocatePositions(points sketch). A locating point that
         # coincides with the seed makes the update fail (0x80020009).
+        # How many points the sketch actually has. `count` is passed to CATIA
+        # and then ignored: measured on B30 2026-11-02, a 1000 mm3 pocket and a
+        # 3-point sketch removed 4000 mm3 - four pockets - with count=1, 3 and 5
+        # alike. The reply used to repeat the argument back ("5 instances
+        # placed") while the tree held four, which is how a caller ends up
+        # explaining a "2x" volume to himself (reported 2026-10-31, #6).
+        points = None
+        try:
+            elements = sketch.GeometricElements
+            total = int(elements.Count)
+            # The sketch carries its own absolute axis as one of those elements
+            # (measured on B30 2026-11-02: three points read as 4 elements, the
+            # first named "绝对轴"), so the axis is subtracted by name. If the
+            # names are not readable the count stays unknown rather than off by
+            # one - a wrong instance count is the whole bug being fixed here.
+            axes = 0
+            for index in range(1, total + 1):
+                name = str(getattr(elements.Item(index), "Name", ""))
+                if "轴" in name or "AXIS" in name.upper():
+                    axes += 1
+            points = total - axes
+        except Exception:  # noqa: BLE001 - the count is a courtesy, not the result
+            points = None
+
         pattern = sf.AddNewUserPattern(feature, count)
         pattern.AddFeatureToLocatePositions(sketch)
         self._safe_update(part, pattern)
@@ -3810,10 +3885,22 @@ class PartDesignTools:
         effect = ""
         if before is not None and after is not None:
             effect = f" Volume {before:.1f} -> {after:.1f} mm3."
-        return (
-            f"User pattern '{pattern.Name}' created: {count} instances placed "
-            f"on the points of sketch '{sketch.Name}'." + effect
-        )
+        if points is None:
+            note = (f" The sketch's point count could not be read, so the number "
+                    f"of copies is not stated - CATIA places one per locating "
+                    f"point, and 'count' ({count}) does not decide it.")
+            summary = f"instances placed on the points of sketch '{sketch.Name}'."
+        else:
+            summary = (f"{points} cop{'y' if points == 1 else 'ies'} placed on the "
+                       f"{points} point(s) of sketch '{sketch.Name}', plus the "
+                       f"original.")
+            note = ("" if points == count else
+                    f" CATIA ignores 'count' here: the sketch's {points} locating "
+                    f"point(s) decide, so the pattern made {points} cop"
+                    f"{'y' if points == 1 else 'ies'}, not {count}. Nothing was "
+                    f"rolled back - this is the shape of the feature, not a "
+                    f"failure.")
+        return f"User pattern '{pattern.Name}' created: " + summary + effect + note
 
     def _mirror(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
