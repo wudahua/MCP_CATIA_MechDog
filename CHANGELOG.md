@@ -2,6 +2,64 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.47] — 2026-11-02 · a remainder clamped to zero is a breakdown that does not add up
+
+Not from a report: from the one test in this suite that failed about once per full
+run and always passed on its own.
+
+    test_the_documented_part_route_names_the_remainder_that_used_to_vanish
+    -> assert abs(round(closed, 1) - reply["parts_ms"]) <= 0.1
+
+`parts_ms` is split into `measure_ms` + `tensor_ms` + `parts_other_ms`, and the note
+beside them says the three **add up exactly**. They did not, occasionally:
+
+    parts_other_ms = round(max(parts_ms - measure_ms - tensor_ms, 0.0), 1)
+
+Three separate clock readings, each rounded to 0.1 ms. Round both windows up by
+0.05 and the total down by 0.05, and the two windows come out 0.15 ms past the
+total — at which point `max(..., 0.0)` publishes a remainder of 0.0 and the reply
+adds up to 0.15 ms more than the field it claims to decompose. The clamp was there
+to avoid printing a negative number, and it bought that by breaking the one thing a
+breakdown is for.
+
+### Fixed — the last bucket absorbs the rounding, unclamped
+
+    parts_other_ms, note = _cost_remainder(parts_ms, measure_ms, tensor_ms)
+
+The remainder is now the rounded difference, signed. The three fields close to the
+digit (|error| <= 0.05 ms, from rounding the remainder itself and nothing else), and
+when it lands below zero the reply says why, in `parts_other_note`:
+
+> the windows above were each rounded to 0.1 ms and round 0.1 ms past this part's
+> total, so the remainder is negative by that much - no step took negative time, and
+> the three fields still add up to parts_ms exactly
+
+Both routes publish it the same way: `document=<name>` (`_part_inertia`) and the
+active-part route (`_get_inertia`).
+
+### Tests — `tests/test_cost_breakdown.py` (7)
+
+* a positive remainder is just the difference, with no note;
+* 5.1 + 5.0 against a total of 10.0 gives -0.1 **and** the sentence that says it is
+  not negative time;
+* 2 000 randomised cases of independently rounded totals and windows, asserting the
+  closure holds every time;
+* a source guard: `max(parts_ms - measure_ms - tensor_ms` may not come back;
+* both routes, end to end, through their real payloads;
+* a scripted monotonic clock (5.06 + 5.06 inside 10.12) that produces the negative
+  remainder for real — no fake clock that runs backwards, which would have proved
+  nothing about the failure being reproduced.
+
+**Suite: 823 passed** (816 -> +7), run three times back to back to check the flake
+is gone rather than merely absent this time: 823 / 823 / 823.
+
+### Why this took a release of its own
+
+A test that only fails in company is worse than a failing test: it teaches everyone
+to re-run until green, and the next real regression gets re-run too. The arithmetic
+is one line; the reason it survived four releases is that the failure was never
+reproduced, only re-run.
+
 ## [0.3.46] — 2026-11-01 · a new spelling of a field, and five readers that never heard
 
 The report is one paragraph and one line of traceback, and it is right: 0.3.45
