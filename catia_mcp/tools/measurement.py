@@ -137,6 +137,29 @@ _PART_COST_NOTE = (
     "the density arithmetic. 'tensor_ms' is the field that explains a slow part: a "
     "tensor that cannot be read still pays for the activation attempt")
 
+def _cost_remainder(parts_ms: float, *terms: float) -> tuple[float, str | None]:
+    """The last bucket of a cost breakdown: whatever the other terms did not take.
+
+    Rounded, and deliberately NOT clamped at zero. `parts_ms`, `measure_ms` and
+    `tensor_ms` are three separate clock readings each rounded to 0.1 ms; the two
+    windows are inside the total, but their ROUNDED values can exceed a total that
+    rounded the other way. Clamping the remainder to 0 then breaks the one promise
+    the note makes - "three terms that add up exactly" - by up to 0.15 ms.
+
+    A negative remainder is not negative time. It is that rounding, and naming it
+    is cheaper than a number that does not close: the three fields then add up to
+    `parts_ms` to the digit, and the sentence beside them says why one is -0.1.
+    """
+    remainder = round(parts_ms - sum(terms), 1)
+    if remainder >= 0:
+        return remainder, None
+    return remainder, (
+        f"the windows above were each rounded to 0.1 ms and round "
+        f"{-remainder:.1f} ms past this part's total, so the remainder is negative "
+        "by that much - no step took negative time, and the three fields still add "
+        "up to parts_ms exactly")
+
+
 # How many STL vertices a part's cloud may hold while an assembly is being
 # measured. The cloud is kept per PART and transformed once per INSTANCE, so the
 # memory is bounded by this and the time by the instance count. Typical parts in
@@ -1346,11 +1369,14 @@ class MeasurementTools:
         # 2026-10-29, §6.1). Same failure as the four-key breakdown this release
         # fixed, one field over, so it gets the same treatment: a name for the
         # remainder, and a closure that holds to 0.1 ms.
-        parts_other_ms = round(max(parts_ms - measure_ms - tensor_ms, 0.0), 1)
+        parts_other_ms, other_note = _cost_remainder(parts_ms, measure_ms,
+                                                     tensor_ms)
         payload["parts_ms"] = parts_ms
         payload["measure_ms"] = measure_ms
         payload["tensor_ms"] = tensor_ms
         payload["parts_other_ms"] = parts_other_ms
+        if other_note:
+            payload["parts_other_note"] = other_note
         payload["overhead_note"] = _PART_COST_NOTE
         payload.update(self._mass_property_regime(
             part, route="inertia.part_document", payload=payload,
@@ -1627,8 +1653,10 @@ class MeasurementTools:
         result["parts_ms"] = parts_ms
         result["measure_ms"] = measure_ms
         result["tensor_ms"] = tensor_ms
-        result["parts_other_ms"] = round(
-            max(parts_ms - measure_ms - tensor_ms, 0.0), 1)
+        result["parts_other_ms"], other_note = _cost_remainder(
+            parts_ms, measure_ms, tensor_ms)
+        if other_note:
+            result["parts_other_note"] = other_note
         result["overhead_note"] = _PART_COST_NOTE
         result.update(self._mass_property_regime(
             part, route="inertia.part_active", payload=result,
