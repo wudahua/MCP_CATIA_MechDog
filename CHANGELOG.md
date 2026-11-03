@@ -2,6 +2,55 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.55] — 2026-11-04 · healing stitches, it does not smooth - and 0.3.51 measured air
+
+The five-petal bottle model report asked for one thing: its five seams are "same
+source sections, geometrically continuous, only parametrically broken", so would
+AddNewHealing close them? The project had refused a healing tool since 0.3.51,
+where the measurement said Continuity 0, 1 and 2 all left a 90 degree fold at
+90.0. That measurement was taken on a feature with NO BODY REGISTERED.
+
+`HybridShapeHealing` exposes `AddBodyToHeal(iBody)`, `SetMergingDistance`,
+`SetTangencyAngle`, `SetDistanceObjective`, `SetSharpnessAngle` and
+`ReplaceToHealElement`. With an empty body list it updates cleanly and changes
+nothing - which is exactly what 0.3.51 recorded, and what this round's own first
+probe reproduced (Continuity 0, 1 and 2, byte-identical meshes) before the type
+info was read.
+
+**`catia_gsd_heal` (104th tool)** registers every element with `AddBodyToHeal`,
+sets the continuity and a merging distance. Measured on B30 2026-11-03 with every
+state isolated in its own STL export:
+
+    two lofts 0.05 mm apart        112 tris,  0 interior edges, 112 open
+    heal C1, merging 0.5           112 tris, 24 interior edges,  64 open  <- closed
+    heal C1, merging 0.001         112 tris,  0 interior edges, 112 open  <- no-op
+    two lofts sharing a section    0.52 deg before, 0.52 deg at C1 and C2
+    two walls at 90 deg            90.0 deg before and after, 4 tris either way
+
+So the operator closes gaps up to the merging distance and does not change
+continuity. Both halves are in the schema, in the reply and in README, because
+"heal" reads like "smooth" and a caller who expects the second will get a
+successful call with no change.
+
+**The answer to the report is no** - not because healing is broken but because
+its seams are already joined: a seam that is closed needs the surfaces rebuilt
+tangent, and this automation has no smoothing operator.
+
+Also measured, and worth recording: the five-petal bottle's CATParts cannot be
+opened here at all. They were written by V5-6R2022 B32 SP6; `Documents.Open` on
+this B30 fails with the generic "method Open failed". Its STL exports can be read
+(and were - they reproduce the report's 124.05 deg worst crease, on a mixed edge),
+but a solid exported at 4 degrees per facet carries 1-25 degree folds everywhere,
+so a seam cannot be isolated from it. The synthetic arrangement above is what
+answered the question.
+
+`catia_check_surface` takes `top_creases` (default 8, previously a fixed cap):
+two reports hit the cap with thousands of creases and got "the top 8", which
+cannot answer "where are they". `creases` remains the total, and
+`worst_creases_shown` says how much of the list you got.
+
+926 tests, 9 new.
+
 ## [0.3.54] — 2026-11-04 · the two skins of a wall, and the refusals that were not written down
 
 The 0.3.53 acceptance came back clean and then found one thing: the fillet and

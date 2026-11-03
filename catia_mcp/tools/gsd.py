@@ -354,6 +354,71 @@ class GSDTools:
                 },
             },
             {
+                "name": "catia_gsd_heal",
+                "description": (
+                    "STITCH separate surfaces into one: closes the gaps between "
+                    "them up to 'merging_distance', and that is all it does. "
+                    "MEASURED on B30 2026-11-03 with every state isolated in its "
+                    "own STL - two lofts whose sections sit 0.05 mm apart start "
+                    "with 48 open edges at the seam; healing them at Continuity 1 "
+                    "with merging_distance 0.5 turns those into 24 interior edges "
+                    "and 0 open ones (the same 112 triangles, same extent), while "
+                    "merging_distance 0.001 leaves all 48 open. So the distance "
+                    "has to exceed the gap. "
+                    "WHAT IT DOES NOT DO: it does not change CONTINUITY. Two lofts "
+                    "sharing a section exactly - one geometry, two "
+                    "parametrisations, 0.52 deg across the seam - came out "
+                    "identical at Continuity 1 and 2: same 112 triangles, same 24 "
+                    "interior edges, same 0.52 deg. And an honest G0 fold stays: "
+                    "two walls at 90 deg read 90.0 before and after, 4 triangles "
+                    "either way. If a seam is already joined and you want it "
+                    "smooth, the surfaces have to be rebuilt tangent "
+                    "(catia_gsd_blend, or sections that meet properly) - there is "
+                    "no smoothing operator in this automation. "
+                    "WHY THAT IS WORTH SAYING TWICE: HybridShapeHealing exposes "
+                    "AddBodyToHeal, SetMergingDistance, SetTangencyAngle and more, "
+                    "and with NO body registered it is a pass-through that reports "
+                    "success. 0.3.51 concluded 'healing does nothing' from exactly "
+                    "that pass-through; this tool registers every element you name."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "elements": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "description": (
+                                "Surfaces (or curves) to stitch, by tree name. "
+                                "Two or more for a seam; one is accepted and "
+                                "heals that element's own gaps."),
+                        },
+                        "continuity": {
+                            "type": "integer",
+                            "enum": [0, 1, 2],
+                            "default": 1,
+                            "description": (
+                                "0 = threshold (no curvature change), 1 = tangent, "
+                                "2 = curvature. Measured: the value changes nothing "
+                                "about an already closed seam, so 1 is the honest "
+                                "default."),
+                        },
+                        "merging_distance": {
+                            "type": "number",
+                            "default": 0.1,
+                            "description": (
+                                "Gaps up to this size are closed, in mm. Measured: "
+                                "0.001 left a 0.05 mm gap open, 0.5 closed it. Read "
+                                "the gap with catia_measure_distance first; too "
+                                "large a value merges things you meant to keep "
+                                "apart."),
+                        },
+                        "name": {"type": "string", "description": "Optional name for the result"},
+                    },
+                    "required": ["elements"],
+                },
+            },
+            {
                 "name": "catia_gsd_boundary",
                 "description": (
                     "Extract the BOUNDARY CURVE of a surface into the active "
@@ -943,6 +1008,8 @@ class GSDTools:
                 return self._intersection(arguments)
             case "catia_gsd_boundary":
                 return self._boundary(arguments)
+            case "catia_gsd_heal":
+                return self._heal(arguments)
             case "catia_gsd_multi_section_surface":
                 return self._multi_section_surface(arguments)
             case "catia_gsd_sweep":
@@ -1796,6 +1863,75 @@ class GSDTools:
             extract, args.get("name"),
             f"Extract of '{args['element']}' (propagation {propagation}) created.",
         )
+
+    def _heal(self, args: dict[str, Any]) -> str:
+        """Stitch surfaces: AddNewHealing + AddBodyToHeal per element + merge distance.
+
+        Measured on B30 2026-11-04, every state isolated in its own STL export:
+
+            two lofts 0.05 mm apart, no heal          48 open seam edges, 0 interior
+            heal C1, merging 0.5                      0 open, 24 interior, 112 tris
+            heal C1, merging 0.001                    48 open (nothing merged)
+            two lofts sharing a section, 0.52 deg     C1 and C2 identical to the join
+            two walls at 90 deg                       C1 and C2 identical, 90.0 stays
+
+        So this closes gaps and changes nothing about continuity. The reason the
+        0.3.51 note said "healing does nothing" is that the feature had NO body
+        registered: HybridShapeHealing with an empty body list is a pass-through
+        that reports success, which is why the numbers never moved. Registering
+        every element is therefore the whole job of this wrapper.
+        """
+        self.conn.ensure_connected()
+        elements = args.get("elements") or args.get("surfaces")
+        if not elements:
+            raise ArgumentRejected(
+                "catia_gsd_heal needs 'elements': the list of surfaces to stitch, "
+                "e.g. {\"elements\": [\"A\", \"B\"]}.")
+        if isinstance(elements, str):
+            elements = [elements]
+        continuity = int(args.get("continuity", 1))
+        if continuity not in (0, 1, 2):
+            raise ArgumentOutOfRange(
+                f"continuity must be 0 (threshold), 1 (tangent) or 2 (curvature); "
+                f"got {continuity}.")
+        distance = float(args.get("merging_distance", 0.1))
+        if distance <= 0:
+            raise ArgumentOutOfRange(
+                f"merging_distance must be positive; got {distance}. A gap of "
+                f"0.05 mm needed more than 0.001 to close (measured).")
+
+        part = self.conn.get_active_part()
+        refs = [self._ref(name) for name in elements]
+        healed = self._factory().AddNewHealing(refs[0])
+        healed.Continuity = continuity
+        for ref in refs:
+            # THE load-bearing call: without it the feature heals nothing and
+            # still updates cleanly.
+            healed.AddBodyToHeal(ref)
+        try:
+            healed.SetMergingDistance(distance)
+        except Exception as error:  # noqa: BLE001 - the default may still work
+            raise RuntimeError(
+                f"CATIA refused merging_distance {distance}: "
+                f"{str(error).splitlines()[0]}") from error
+
+        registered = None
+        try:
+            registered = int(healed.NoOfBodiesToHeal)
+        except Exception:  # noqa: BLE001 - advisory only
+            pass
+        reply = self._finish(
+            healed, args.get("name"),
+            f"Heal of {len(elements)} element(s) at Continuity {continuity}, "
+            f"merging distance {distance} mm"
+            + (f" ({registered} body/bodies registered with CATIA)" if registered
+               else "")
+            + ". This closes gaps up to that distance. It does NOT change "
+              "continuity: measured on B30 2026-11-03, a 0.52 deg seam stayed "
+              "0.52 deg at Continuity 1 and 2, and a 90 deg fold stayed 90.0. "
+              "Check the result with catia_check_surface.",
+        )
+        return reply
 
     def _boundary(self, args: dict[str, Any]) -> str:
         """The boundary curve of a surface: ``AddNewBoundaryOfSurface(Surface)``.

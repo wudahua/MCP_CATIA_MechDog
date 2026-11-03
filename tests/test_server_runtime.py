@@ -19,7 +19,7 @@ def test_registered_tools_and_schemas_are_unchanged():
     # (run_plan, measure_topology, get/set_component_transform,
     # rename_component, new_body, list_bodies, boolean, extract) = 91,
     # plus 0.3.51 check_surface and 0.3.53 boundary = 103.
-    assert len(server._tool_router) == 103
+    assert len(server._tool_router) == 104
     assert not any(name.startswith("catia_caa") for name in server._tool_router)
     for schema in server._schemas.values():
         Draft202012Validator.check_schema(schema)

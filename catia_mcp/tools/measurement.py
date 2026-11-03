@@ -109,8 +109,8 @@ def _region_bounds(region: Any) -> dict[str, tuple[float, float]] | None:
 
 
 def _fold_stats(path: str, crease_deg: float, cap: int,
-                region: dict[str, tuple[float, float]] | None = None
-                ) -> dict[str, Any]:
+                region: dict[str, tuple[float, float]] | None = None,
+                top: int = 8) -> dict[str, Any]:
     """Dihedral angle across every interior edge of a mesh.
 
     This is the answer to "is the surface smooth" without zebra stripes, which
@@ -286,7 +286,10 @@ def _fold_stats(path: str, crease_deg: float, cap: int,
             "there, because the wall's END faces meet both skins at a right "
             "angle (measured on B30 2026-11-04)"),
         "creases": len(creases),
-        "worst_creases": creases[:8],
+        # 8 was a fixed cap, and two reports hit it: a five-petal base had 4586
+        # creases and got the top 8, which cannot answer "where are they".
+        "worst_creases": creases[:max(1, top)],
+        "worst_creases_shown": min(len(creases), max(1, top)),
         "crease_threshold_deg": crease_deg,
     }
     if region is not None:
@@ -1328,6 +1331,15 @@ class MeasurementTools:
                                 "Document name, if it is not the active one. The "
                                 "active document is used otherwise."),
                         },
+                        "top_creases": {
+                            "type": "integer",
+                            "description": (
+                                "How many of the worst creases to list (default "
+                                "8). Raise it when the count is in the thousands "
+                                "and you need all of them - 'creases' already "
+                                "reports the total, this only limits the list."),
+                            "default": 8,
+                        },
                         "region": {
                             "type": "object",
                             "description": (
@@ -1392,7 +1404,8 @@ class MeasurementTools:
                     float(arguments.get("crease_deg", 25.0)),
                     int(arguments.get("cap", 600000)),
                     arguments.get("document") or arguments.get("document_name"),
-                    arguments.get("region"))
+                    arguments.get("region"),
+                    int(arguments.get("top_creases", 8)))
             case _:
                 raise ValueError(f"Unknown measurement tool: {tool_name}")
 
@@ -3986,7 +3999,7 @@ class MeasurementTools:
 
     def _check_surface(self, crease_deg: float = 25.0, cap: int = 600000,
                        document: str | None = None,
-                       region: Any = None) -> str:
+                       region: Any = None, top: int = 8) -> str:
         """Dihedral-angle report of the active part's mesh: the zebra substitute.
 
         CATIA V5 exposes no zebra, curvature-comb or environment-mapping object
@@ -4020,7 +4033,7 @@ class MeasurementTools:
         def grab(path: str) -> None:
             # Runs INSIDE _mesh_export, before its finally removes the temporary
             # directory - the file is gone by the time the call returns.
-            captured["stats"] = _fold_stats(path, crease_deg, cap, bounds)
+            captured["stats"] = _fold_stats(path, crease_deg, cap, bounds, top)
 
         self._mesh_export(part, None, grab)
         stats = captured.get("stats")
