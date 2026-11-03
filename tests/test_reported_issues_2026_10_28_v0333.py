@@ -72,10 +72,12 @@ def test_the_sketch_listings_the_messages_name_are_real():
 
     for source in (inspect_source(GSDTools._outline_points),
                    inspect_source(PartDesignTools._section_reference),
-                   inspect_source(PartDesignTools._delete_feature)):
+                   inspect_source(PartDesignTools._delete_one)):
         assert "catia_list_sketches" not in source
     assert "catia_list_features" in inspect_source(GSDTools._outline_points)
-    assert "catia_list_features" in inspect_source(PartDesignTools._delete_feature)
+    # 0.3.50 split the one-target body out of _delete_feature into _delete_one,
+    # so the batch form could call it per name; the message lives there now.
+    assert "catia_list_features" in inspect_source(PartDesignTools._delete_one)
 
 
 def inspect_source(function) -> str:

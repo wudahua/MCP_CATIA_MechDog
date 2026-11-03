@@ -3377,6 +3377,19 @@ class MeasurementTools:
             hybrid_count = int(part.HybridBodies.Count)
         except Exception:  # noqa: BLE001 - an unreadable count is not a defect
             hybrid_count = 0
+        visible_sets, _total = (self._visible_hybrid_sets(part)
+                                if hybrid_count else (0, 0))
+        if not hybrid_count:
+            scope = "the solid (this part has no geometrical sets)"
+        elif visible_sets == 0:
+            scope = ("the solid (every geometrical set is hidden, so the export "
+                     "cannot include any of them)")
+        elif visible_sets is None:
+            scope = ("the whole document as exported: the solid plus whatever "
+                     "surfaces/wireframe are VISIBLE (their state could not be read)")
+        else:
+            scope = ("the whole document as exported: the solid plus every VISIBLE "
+                     "wireframe/surface element in its geometrical sets")
         reply = self._bbox_json(
             corners,
             f"STL mesh sweep of '{part.Parent.Name}' over {triangles} triangle "
@@ -3392,11 +3405,7 @@ class MeasurementTools:
             extra={"points_route": "mesh", "mesh_vertices": triangles,
                    # What these numbers describe. "the solid" was never true on
                    # this route, and on a 10 mm pad the difference was 25 mm.
-                   "box_scope": (
-                       "the whole document as exported: the solid plus every "
-                       "VISIBLE wireframe/surface element in its geometrical sets"
-                       if hybrid_count else
-                       "the solid (this part has no geometrical sets)"),
+                   "box_scope": scope,
                    "geometrical_sets": hybrid_count,
                    **regime_fields(MESH_EXPORT)},
         )
@@ -3412,11 +3421,13 @@ class MeasurementTools:
                 "export it in context - edits made since the last save are NOT in "
                 "these numbers (catia_save_document, then measure again)"
             )
-        if hybrid_count:
+        if hybrid_count and (visible_sets is None or visible_sets > 0):
+            shown = ("their visibility could not be read" if visible_sets is None
+                     else f"{visible_sets} of them are shown")
             warnings.append(
-                f"this part holds {hybrid_count} geometrical set(s), and the STL "
-                "export includes every VISIBLE element inside them, so the box is "
-                "the envelope of what is on screen rather than of the solid. "
+                f"this part holds {hybrid_count} geometrical set(s) and {shown}, and "
+                "the STL export includes every VISIBLE element inside them, so the "
+                "box is the envelope of what is on screen rather than of the solid. "
                 "Measured on B30 2026-11-03: a 10 mm pad plus a surface at z 30..35 "
                 "read z max 35 with the set shown and 10 once it was hidden. Hide "
                 "the sets (catia_set_visibility, name='<set>', show=false) and "
@@ -3428,6 +3439,53 @@ class MeasurementTools:
             payload["warnings"] = warnings
             reply = json.dumps(payload, indent=2)
         return reply
+
+    def _visible_hybrid_sets(self, part: Any) -> tuple[int | None, int]:
+        """``(visible_sets, total_sets)`` - or ``(None, n)`` when unreadable.
+
+        The mesh box includes every VISIBLE element, so whether the sets are
+        shown decides whether the warning applies at all. 0.3.49 warned on
+        ``HybridBodies.Count`` alone, which fired for a part whose sets were all
+        hidden - a correct box with a false alarm on it, and alarms like that get
+        ignored exactly when they matter (reported 2026-11-03, 5.3).
+
+        Read from the selection's VisProperties: measured on B30 2026-11-03,
+        ``GetShow()`` answers ``(0, 0)`` for a shown set and ``(0, 1)`` for a
+        hidden one - the same 0/1 the tool's SetShow writes. This is the set's own
+        flag; a set that is shown while each element inside it was hidden reads as
+        visible, which errs towards warning rather than towards silence.
+        """
+        total = 0
+        visible = 0
+        try:
+            sets = part.HybridBodies
+            total = int(sets.Count)
+        except Exception:  # noqa: BLE001 - no sets, or unreadable
+            return 0, 0
+        if not total:
+            return 0, 0
+        selection = getattr(self.conn, "hso", None)
+        if selection is None:
+            return None, total
+        try:
+            for index in range(1, total + 1):
+                node = sets.Item(index)
+                try:
+                    selection.Clear()
+                    selection.Add(node)
+                    state = selection.VisProperties.GetShow()
+                finally:
+                    try:
+                        selection.Clear()
+                    except Exception:  # noqa: BLE001
+                        pass
+                if isinstance(state, (tuple, list)):
+                    state = state[-1] if state else 0
+                if int(state) == 0:
+                    visible += 1
+        except Exception:  # noqa: BLE001 - a selection that will not take the set
+            return None, total
+        return visible, total
 
     @staticmethod
     def _stamp_elapsed(reply: str, started: float) -> str:

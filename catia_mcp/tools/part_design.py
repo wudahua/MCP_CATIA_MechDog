@@ -935,7 +935,16 @@ class PartDesignTools:
                     "index, pass last=true. A bare no-argument call is refused and "
                     "names what it would have deleted, because on a long tree the "
                     "last created feature is usually the fillet you just added, not "
-                    "the test sketch you meant (reported 2026-10-25)."
+                    "the test sketch you meant (reported 2026-10-25). "
+                    "CASCADE: a feature built from COORDINATES owns the points it "
+                    "turned them into, and CATIA does not delete those with it - a "
+                    "six-point spline left six Point features behind when it was "
+                    "deleted (measured 2026-11-03, and a real session grew from 666 "
+                    "to 801 elements that way). cascade=true removes them too. Only "
+                    "points created in THIS session are recorded, so the reply says "
+                    "how many it can account for. BATCH: pass 'names' with a list "
+                    "to delete several elements in one call - cleaning up after a "
+                    "rebuild cost 15 calls of 2.0-2.4 s each in that same session."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -943,6 +952,23 @@ class PartDesignTools:
                         "feature_name": {
                             "type": "string",
                             "description": "Feature to delete (see catia_list_features)",
+                        },
+                        "names": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Delete several features/GSD elements by name in one "
+                                "call. Cannot be combined with feature_name, index or "
+                                "last; failures are reported per name."
+                            ),
+                        },
+                        "cascade": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Also delete the construction points this feature "
+                                "created (recorded from this session only)."
+                            ),
                         },
                         "index": {
                             "type": "integer",
@@ -4137,9 +4163,38 @@ class PartDesignTools:
         return f"Thickness added: {offset} mm on {face_name}. Feature: '{thickness.Name}'"
 
     def _delete_feature(self, args: dict[str, Any]) -> str:
+        """Delete one feature, or several when 'names' is given.
+
+        The batch form exists because cleaning up after a rebuild took fifteen
+        calls of 2.0-2.4 s each in the 2026-11-03 acceptance session - about 30 s
+        of waiting for a job that is one request.
+        """
+        self.conn.ensure_connected()
+        many = args.get("names")
+        if isinstance(many, list) and many:
+            if args.get("feature_name") or args.get("index") is not None or args.get("last"):
+                raise ArgumentRejected(
+                    "'names' deletes several elements at once; do not also pass "
+                    "'feature_name', 'index' or 'last'. Pass the list alone, e.g. "
+                    '{"names": ["ZZ_sp90", "ZZ_pts"], "cascade": true}.'
+                )
+            done: list[str] = []
+            failed: list[str] = []
+            for name in [str(item) for item in many]:
+                try:
+                    done.append(self._delete_one(args, name))
+                except Exception as error:  # noqa: BLE001 - reported per name
+                    failed.append(f"'{name}' ({str(error).splitlines()[0][:120]})")
+            summary = f"Deleted {len(done)} of {len(many)} named element(s)."
+            if failed:
+                summary += f" Failed ({len(failed)}): " + "; ".join(failed) + "."
+            return summary + " " + " ".join(done)
+        return self._delete_one(args, None)
+
+    def _delete_one(self, args: dict[str, Any], forced: str | None) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
-        target = args.get("feature_name")
+        target = forced or args.get("feature_name")
         if not target and args.get("index") is None:
             # "Delete the last feature" is a convenience that turned into an
             # accident: on a long tree, the last feature is whatever was created
@@ -4244,7 +4299,71 @@ class PartDesignTools:
             message += (f" CATIA also removed {len(lost)} sketch(es) that belonged "
                         f"to it: {', '.join(lost)}. Re-create the profile before "
                         "cutting with it again.")
+        # Construction elements this feature created - the datum points behind a
+        # coordinate spline, above all. CATIA does NOT delete them with it: six
+        # points stayed in the geometrical set after their spline was deleted
+        # (measured on B30 2026-11-03, and a real session grew from 666 to 801
+        # elements that way). Only what THIS session created can be named, which
+        # is why the reply says so rather than claiming the tree is clean.
+        owned = []
+        try:
+            owned = self.conn.owned_by(target)
+        except Exception:  # noqa: BLE001 - bookkeeping only
+            owned = []
+        if owned and not args.get("cascade"):
+            message += (f" It created {len(owned)} construction element(s) - "
+                        f"{', '.join(owned[:6])}{', ...' if len(owned) > 6 else ''} - "
+                        "which are still in the tree; pass cascade=true to remove "
+                        "them too.")
+        elif owned:
+            removed, kept = self._delete_owned(owned)
+            message += (f" Also removed {len(removed)} construction element(s) it "
+                        "had created")
+            if kept:
+                message += (f"; {len(kept)} could not be removed: "
+                            f"{', '.join(kept[:6])}{', ...' if len(kept) > 6 else ''}")
+            message += "."
+            try:
+                self.conn.forget_owned(target)
+            except Exception:  # noqa: BLE001 - bookkeeping only
+                pass
         return message
+
+    def _delete_owned(self, names: list[str]) -> tuple[list[str], list[str]]:
+        """Delete the construction elements a feature created.
+
+        Returns ``(removed, kept)``. A point that something else still uses cannot
+        be deleted and is reported rather than silently skipped.
+        """
+        part = self.conn.get_active_part()
+        sel = self.conn.hso
+        removed: list[str] = []
+        kept: list[str] = []
+        for name in names:
+            found, _kind = self._find_in_geometrical_sets(part, name)
+            if found is None:
+                # Already gone (a sketch delete upstream, or a cascade), which is
+                # the outcome that was asked for.
+                removed.append(name)
+                continue
+            try:
+                sel.Clear()
+                sel.Add(found)
+                sel.Delete()
+                removed.append(name)
+            except Exception:  # noqa: BLE001 - reported, not fatal
+                kept.append(name)
+            finally:
+                try:
+                    sel.Clear()
+                except Exception:  # noqa: BLE001
+                    pass
+        try:
+            part.Update()
+        except Exception:  # noqa: BLE001 - the elements are gone either way
+            pass
+        self.conn.refresh_display()
+        return removed, kept
 
     @staticmethod
     def _find_in_geometrical_sets(part: Any, target: str) -> tuple[Any, str]:

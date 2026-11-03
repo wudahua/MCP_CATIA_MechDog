@@ -132,6 +132,10 @@ class DiagnosticsTools:
         # 2026-10-27). Same reader, so the two can never disagree.
         report["session"] = self._session_info()
         report["workbenches"] = self._workbench_probe()
+        # Sheet metal is the one capability the server does not have at all, and
+        # the 2026-11-03 report had to find that out by modelling a bracket the
+        # hard way. This probe answers what can be answered from here.
+        report["sheetmetal"] = self._sheetmetal_probe(app)
         report["factories"] = self._factory_probe()
         report["notes"] = self._notes(report)
 
@@ -218,6 +222,54 @@ class DiagnosticsTools:
         except Exception:
             pass
         return info
+
+    # The DLLs Generative Sheetmetal Design ships as, beside CNEXT.exe.
+    _SHEETMETAL_DLLS = (
+        "CATSmdDesignWorkbench.dll",
+        "CATSheetMetal.dll",
+        "CATSheetmetalDxfExport.dll",
+    )
+
+    def _sheetmetal_probe(self, app: Any) -> dict[str, Any]:
+        """Is sheet metal usable here? As far as this machine can tell.
+
+        NOT via GetWorkbench: on B32 SP6 it answers 'SPAWorkbench' and nothing
+        else - 'Drafting' and 'PartDesign', workbenches nobody doubts, fail the
+        same way (measured 2026-11-03). A probe built on it would report "no
+        sheet metal" for every machine, which is worse than no answer.
+
+        What is left is honest and useful: the workbench's DLLs ship beside the
+        running EXE (installed or not - a fact about the disk, not a licence),
+        and the automation objects this server drives have no sheet-metal
+        feature at all. Both halves are stated, so nobody reads "installed" as
+        "this server can bend metal".
+        """
+        result: dict[str, Any] = {
+            "server_tools": (
+                "none - the server has no wall / flange / bend / unfold / "
+                "flat-pattern tool; sheet-metal parts are modelled as "
+                "extrude + cut, which cannot reach the source part's face count"
+            ),
+        }
+        try:
+            exe = str(app.FullName)
+            folder = os.path.dirname(exe)
+            result["workbench_folder"] = folder
+            present = {}
+            for dll in self._SHEETMETAL_DLLS:
+                present[dll] = "present" if os.path.exists(
+                    os.path.join(folder, dll)) else "absent"
+            result["files"] = present
+            result["installed"] = (
+                "yes - Generative Sheetmetal Design is installed beside this "
+                "CATIA" if all(v == "present" for v in present.values())
+                else "partly - some of the workbench's DLLs are missing")
+        except Exception as error:  # noqa: BLE001 - a diagnosis never fails
+            result["files"] = f"unreadable: {str(error).splitlines()[0][:80]}"
+        result["licence"] = (
+            "not readable from disk (DSLS/nodelock). Open Start > Mechanical "
+            "Design > Generative Sheetmetal Design once in the UI to find out.")
+        return result
 
     def _workbench_probe(self) -> dict[str, str]:
         # GetWorkbench is a Document method in the V5 automation model, so

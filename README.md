@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.49** · [what changed](CHANGELOG.md) ·
+**0.3.50** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1127,6 +1127,17 @@ Place the result with `catia_get_component_transform`.
 
 ## Known limits
 
+* **No sheet metal (Generative Sheetmetal Design).** This server covers Part
+  Design, GSD, Assembly, Sketcher, Measurement and export — there is no wall,
+  flange, bend, unfold or flat-pattern tool, and no K-factor/bend-radius
+  parameter. A sheet-metal part has to be modelled as extrude + cut with the
+  bend geometry worked out by hand, which is why a bracket that is 57 faces in
+  SolidWorks comes out 76 here (+19 faces, +0.49 % volume — measured
+  2026-11-03 on a 2 mm bracket with two bends): the extra faces are the prismatic
+  substitutes for the bends. `catia_diagnose` reports whether the workbench's
+  DLLs are installed beside the running CATIA, but no probe can read the
+  licence, and the automation objects this server drives expose no sheet-metal
+  feature either way.
 * **A loft section cannot be a point or a vertex** — measured 2026-11-03: a datum
   point is accepted by `AddSectionToLoft` and then fails the update, and a solid
   `Vertex.N` is refused by the same call with "invalid number of arguments",
@@ -1145,7 +1156,8 @@ Place the result with `catia_get_component_transform`.
   the solid: the STL export includes every shown surface and wireframe element,
   and neither `Part` nor `Body` exposes `ExportData`, so the export cannot be
   narrowed. A 10 mm pad with a construction surface at z 30..35 measured z max 35
-  with the set shown and 10 hidden. The reply carries `box_scope` and a warning;
+  with the set shown and 10 hidden. Since 0.3.50 the reply carries `box_scope`
+  (no sets / all hidden / some shown) and warns only when a set is actually shown;
   hide the sets (or use `method='vertices'`) before trusting the numbers.
 * **`rect_pattern`'s axis arguments are unreliable** — measured 2026-11-02:
   `dir1_axis="x"` with 3 copies at 20 mm puts them along -Y, and `dir2_axis="y"`

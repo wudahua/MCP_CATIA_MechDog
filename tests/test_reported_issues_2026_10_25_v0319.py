@@ -284,7 +284,9 @@ def test_list_components_labels_the_rotation_convention():
 def test_delete_feature_without_a_target_is_refused():
     from catia_mcp.tools.part_design import PartDesignTools
 
-    source = inspect.getsource(PartDesignTools._delete_feature)
+    # 0.3.50: the single-target body moved into _delete_one so the batch form
+    # could reuse it; the refusal-without-a-target rule went with it.
+    source = inspect.getsource(PartDesignTools._delete_one)
     assert "args.get(\"last\")" in source
     assert "LAST CREATED feature" in source
 

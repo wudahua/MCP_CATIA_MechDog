@@ -58,6 +58,16 @@ class CATIAConnection:
         # ``catia_sketch_get_geometry`` answered "No sketch named '草图.2'" for
         # the same live sketch (reported 2026-10-27).
         self.sketch_aliases: dict[str, str] = {}
+        # Which tree elements a feature CREATED as construction, per document:
+        # {"<document>::<owner>": ["点.1", ...]}. catia_gsd_spline with coordinates
+        # leaves one Point feature per point behind, and deleting the spline does
+        # not take them with it - six points stayed in the set after the spline
+        # was deleted (measured on B30 2026-11-03, reported as a geometrical set
+        # growing from 666 to 801 elements over one session). CATIA exposes no
+        # reverse dependency query, so the creator is the only one who can record
+        # it. Session-scoped: points created before this process started are not
+        # in the table and are reported as such.
+        self.owned_points: dict[str, list[str]] = {}
 
     @property
     def is_connected(self) -> bool:
@@ -185,6 +195,26 @@ class CATIAConnection:
             return str(self.active_document.Name)
         except Exception:  # noqa: BLE001 - record it anyway, under a catch-all
             return "?"
+
+    # ── Element ownership: which points a feature created ──
+
+    def note_owned(self, owner: str, names: list[str],
+                   document: str | None = None) -> None:
+        """Remember that ``owner`` created ``names`` as construction."""
+        if not names:
+            return
+        key = f"{document or self.sketch_scope()}::{owner}"
+        self.owned_points.setdefault(key, []).extend(names)
+
+    def owned_by(self, owner: str, document: str | None = None) -> list[str]:
+        """The construction elements ``owner`` created, in this session."""
+        return list(self.owned_points.get(
+            f"{document or self.sketch_scope()}::{owner}", []))
+
+    def forget_owned(self, owner: str, document: str | None = None) -> list[str]:
+        """Drop (and return) the record for ``owner`` - after deleting it."""
+        return self.owned_points.pop(
+            f"{document or self.sketch_scope()}::{owner}", [])
 
     def note_sketch_alias(self, lost: str, new: str,
                           document: str | None = None) -> None:

@@ -2,6 +2,107 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.50] — 2026-11-03 · the view table was wrong, and five smaller lies
+
+Two reports arrived: the acceptance receipt for 0.3.49 (which found the two
+remaining P0s) and a capability report asking for sheet metal. Everything below
+was measured on B30 first — including the one the 0.3.49 note had called
+"not reproduced", which was a misdiagnosis on this side.
+
+### Fixed — `catia_set_view` had front/back and top/bottom swapped
+
+The 0.3.49 acceptance report said `set_view('bottom')` produced something that
+looked like a front view, `set_view('top')` merely flipped the part 180°, and two
+screenshots taken around a view change came back with the same md5 — which it
+read as an asynchronous capture. It is not asynchronous: the direction table was
+wrong, so "a view change" often was not one.
+
+Measured on B30 with a plate 40 x 10 x 4 carrying a tower on its +Z face at +X,
+one screenshot per view:
+
+    through 0.3.49            sight          what it actually showed
+    set_view('front')        (0, 0, -1)   top-down: the plate flat, the tower a square
+    set_view('top')          (0, -1, 0)   an UPSIDE-DOWN front elevation (tower down)
+    set_view('bottom')       (0, 1, 0)    a front elevation (tower up)
+
+The camera had Z as its up axis everywhere, so every side view came out rotated
+one quarter, and the two "front/back" entries were in fact top and bottom. The
+new table, verified by looking at the pictures:
+
+    front     sight (0, 1, 0)    up (0, 0, 1)     X right, Z up
+    back      sight (0, -1, 0)   up (0, 0, 1)
+    top       sight (0, 0, -1)   up (0, 1, 0)     X right, Y up
+    bottom    sight (0, 0, 1)    up (0, -1, 0)
+    left      sight (1, 0, 0)    up (0, 0, 1)
+    right     sight (-1, 0, 0)   up (0, 0, 1)
+    isometric sight (-1, -1, -1) up (-1, -1, 2)  perpendicular to the sight
+
+The isometric up vector was `(0, 0, 1)` as well until a test pointed out that it
+is not perpendicular to a `(-1, -1, -1)` sight; `(-1, -1, 2)` is.
+
+### Fixed — `catia_screenshot` reported the size it was asked for, not the size it wrote
+
+`width`/`height` were accepted, passed down, and never used: CATIA V5 captures
+the 3D window's client area and exposes no capture-resolution setting (measured:
+900 x 900 requested, 300 x 400 written, and setting `Window.Width/Height` changed
+nothing). The reply printed the request anyway — so a caller resizing for a
+report got a picture at a resolution nobody mentioned. It now reads the pixel
+size out of the file it just wrote (JPEG SOF / BMP header, no image library) and
+says explicitly when that differs from the request. The schema calls the two
+arguments advisory, because that is what they are.
+
+### Fixed — `catia_gsd_join` failed with 167 characters of raw COM
+
+The 0.3.49 note had put "join needs a shared edge — join first, split afterwards"
+in the docstring, which the caller cannot read at the moment it matters. Measured
+on B30: two coaxial surfaces sharing an r10 circle join while untouched; split the
+lower one at z=10, join the kept piece with the upper one, and the update fails
+with nothing to go on. The failure now names what was joined, with its automation
+types (`'J_LOW_BOT' (HybridShapeSplit), 'J_HIGH' (HybridShapeExtrude)`), states
+that a join needs a shared edge, names the split as the usual cause, and lists the
+two fixes (join first then split, or `catia_gsd_trim`, which needs an
+intersection rather than a shared edge). 167 characters became 1044, all of them
+actionable.
+
+### Fixed — the mesh-box warning fired on hidden geometrical sets
+
+0.3.49 warned whenever a part held a geometrical set, so a part whose sets were
+all hidden got a correct box and a false alarm on it. The warning is now driven by
+the set's own visibility flag (`GetShow()` answers `(0, 0)` shown / `(0, 1)`
+hidden, measured on B30), and `box_scope` distinguishes the three cases: no sets,
+all hidden, some shown. Measured: surface visible → z max 35 and one warning;
+set hidden → z max 10 and none.
+
+### Added — `catia_delete_feature` takes `cascade` and `names`
+
+Deleting a coordinate spline left its points behind — six stayed after a
+six-point spline was deleted, and a real session grew from 666 to 801 elements
+that way, 28 s to hide and 2.1 MB of file for construction points nobody could
+use. CATIA has no reverse dependency query, so the creator records the pairing:
+`_point_refs` remembers the names it made, the tool that consumed them publishes
+them as owned, and `cascade=true` deletes them with the feature. Without
+`cascade` the reply says how many it left behind and by what name. Only what THIS
+session created can be named, and the reply does not pretend otherwise.
+
+`names` deletes several elements in one call — that cleanup took fifteen calls of
+2.0-2.4 s each in the acceptance session — with per-name failures reported rather
+than aborting the batch.
+
+### Added — sheet metal: the limit is stated, and `catia_diagnose` probes it
+
+The server has no sheet-metal capability at all: no wall, flange, bend, unfold or
+flat-pattern tool, no K-factor or bend radius. A 2 mm bracket with two bends came
+out 76 faces against the source part's 57 (+19, +0.49 % volume) because every
+bend has to be approximated prismatically. README now says so in Known limits.
+
+`catia_diagnose` reports what can honestly be reported: whether the workbench's
+DLLs are installed beside the running `CNEXT.exe`, and that the automation
+objects this server drives expose no sheet-metal feature either way. NOT via
+`GetWorkbench`, which was the obvious probe and does not work: on B32 SP6 it
+resolves `SPAWorkbench` and nothing else — `Drafting` and `PartDesign` fail the
+same way — so a probe built on it would answer "no sheet metal" for every machine.
+The licence is not readable from disk and the reply says that too.
+
 ## [0.3.49] — 2026-11-03 · the surface report: one cause misattributed, four replies that said nothing
 
 The 2026-11-03 report is a real modelling session — a five-petal bottle base

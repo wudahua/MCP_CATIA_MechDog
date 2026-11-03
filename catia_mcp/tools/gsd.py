@@ -64,6 +64,9 @@ class GSDTools:
         # reply so the caller can see the cost instead of discovering it when
         # catia_gsd_list_elements prints 666 names (reported 2026-11-03).
         self._coordinate_points = 0
+        # The names of those points, so the feature built from them can be
+        # deleted together with them (catia_delete_feature cascade=true).
+        self._coordinate_point_names: list[str] = []
 
     # ────────────────────────────────────────────────────────────
     # Tool definitions
@@ -1111,6 +1114,7 @@ class GSDTools:
         """``_point_ref`` for a whole list, with the part resolved once."""
         refs: list[Any] = []
         context: tuple[Any, Any, Any] | None = None
+        self._coordinate_point_names = []
         for spec in specs:
             if isinstance(spec, str):
                 refs.append(self._ref(spec))
@@ -1125,6 +1129,12 @@ class GSDTools:
             point = factory.AddNewPointCoord(spec[0], spec[1], spec[2])
             geoset.AppendHybridShape(point)
             self._coordinate_points += 1
+            try:
+                # Remember the name so the feature that uses it can be deleted
+                # together with it later (see CATIAConnection.note_owned).
+                self._coordinate_point_names.append(str(point.Name))
+            except Exception:  # noqa: BLE001 - an unnamed point is still usable
+                pass
             refs.append(part.CreateReferenceFromObject(point))
         return refs
 
@@ -1167,6 +1177,18 @@ class GSDTools:
             shape.Name = name
         part.InWorkObject = shape
         self._safe_update(shape)
+        # Whatever points this call turned coordinates into belong to this
+        # element: record the pairing so catia_delete_feature can offer to take
+        # them away too. CATIA has no reverse dependency query, and deleting a
+        # spline leaves its points behind (measured 2026-11-03: six points stayed
+        # after the spline was deleted).
+        names = getattr(self, "_coordinate_point_names", None)
+        if names:
+            try:
+                self.conn.note_owned(str(shape.Name), list(names))
+            except Exception:  # noqa: BLE001 - bookkeeping, never the feature
+                pass
+            self._coordinate_point_names = []
         self.conn.refresh_display()
         return f"{message} Element: '{shape.Name}' in geometrical set '{geoset.Name}'"
 
@@ -1980,7 +2002,40 @@ class GSDTools:
         for ref in refs[2:]:
             join.AddElement(ref)
 
-        return self._finish(join, args.get("name"), f"Join created from {len(elements)} elements.")
+        try:
+            return self._finish(join, args.get("name"),
+                                f"Join created from {len(elements)} elements.")
+        except RuntimeError as error:
+            # The 0.3.49 acceptance report was blunt about this one: the rule
+            # ("join needs a shared edge; a split takes it away") had been written
+            # into the docstring, where the caller could not read it at the moment
+            # it mattered - the failure was 167 characters of raw COM. Measured on
+            # B30 2026-11-03: two coaxial surfaces sharing the r10 circle at z=20
+            # join fine untouched; split the lower one at z=10 and join the kept
+            # piece with the upper one and the update fails exactly like this.
+            listed = []
+            for name in elements:
+                try:
+                    type_name = self._com_type_name(self._find_element(name))
+                except Exception:  # noqa: BLE001 - a name that will not resolve
+                    type_name = None
+                listed.append(f"'{name}'" + (f" ({type_name})" if type_name else ""))
+            raise RuntimeError(
+                f"{error} Joined: {', '.join(listed)}. "
+                "A join needs a SHARED EDGE between consecutive elements, and this "
+                "failure is what 'there is none' looks like - CATIA reports nothing "
+                "more specific. The usual cause, measured on B30 2026-11-03: one of "
+                "these was SPLIT away from the edge it used to share. Two coaxial "
+                "surfaces meeting on an r10 circle join while untouched; split the "
+                "lower one at z=10 and join the kept piece with the upper one, and "
+                "the update fails with this same message. Two more shapes that do "
+                "NOT join: surfaces that merely touch along circles of different "
+                "radii (r10 against r12 at the same z), and a piece whose boundary "
+                "is open on the side you expect to meet. Fix by JOINING FIRST and "
+                "SPLITTING AFTERWARDS, by re-cutting both sides on the same plane, or "
+                "by using catia_gsd_trim, which needs an intersection rather than a "
+                "shared edge."
+            ) from error
 
     def _split(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
