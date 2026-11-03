@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.48** · [what changed](CHANGELOG.md) ·
+**0.3.49** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1127,6 +1127,26 @@ Place the result with `catia_get_component_transform`.
 
 ## Known limits
 
+* **A loft section cannot be a point or a vertex** — measured 2026-11-03: a datum
+  point is accepted by `AddSectionToLoft` and then fails the update, and a solid
+  `Vertex.N` is refused by the same call with "invalid number of arguments",
+  although the CATIA UI lets you pick a vertex as an end section. Both are now
+  refused before anything is built. End the loft on a small closed section and
+  cap it with `catia_gsd_fill` instead.
+* **A smooth loft refuses to update when the section arrangement folds back** —
+  the surface interpolates through the sections and stays inside their hull, so a
+  section that sits past the turn of its neighbours forces a self-intersection.
+  Measured the same day: sections r 2.9 / 3.0 / 8 with the middle one above both
+  neighbours fail as circles, as 12-point closed splines and as 90-point closed
+  splines alike, while the same radii in a monotone stack build. Changing the
+  curve type is not the fix; keep the sections monotone, split the loft at the
+  turn, or use `ruled=true`, which covers every section in one call.
+* **The mesh bounding box is the envelope of the whole visible document**, not of
+  the solid: the STL export includes every shown surface and wireframe element,
+  and neither `Part` nor `Body` exposes `ExportData`, so the export cannot be
+  narrowed. A 10 mm pad with a construction surface at z 30..35 measured z max 35
+  with the set shown and 10 hidden. The reply carries `box_scope` and a warning;
+  hide the sets (or use `method='vertices'`) before trusting the numbers.
 * **`rect_pattern`'s axis arguments are unreliable** — measured 2026-11-02:
   `dir1_axis="x"` with 3 copies at 20 mm puts them along -Y, and `dir2_axis="y"`
   puts them along -X; the reply's "axis x+ -> dir1" is not what happens. The

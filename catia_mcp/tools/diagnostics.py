@@ -173,7 +173,22 @@ class DiagnosticsTools:
         try:
             import win32com
 
-            info["pywin32_build"] = getattr(win32com, "__build__", "unknown")
+            # "unknown" used to be the answer on every machine, because win32com
+            # has no __build__ (reported 2026-11-03, P3-1). The DLL's file
+            # version carries the same number: on this machine pywin32 answers
+            # 3.13.312.0, i.e. built for Python 3.13, build 312.
+            build = getattr(win32com, "__build__", None)
+            if build is None:
+                try:
+                    import win32api
+
+                    version = win32api.GetFileVersionInfo(win32api.__file__, "\\")
+                    major, minor = version["FileVersionMS"], version["FileVersionLS"]
+                    build = (f"{major >> 16}.{major & 0xFFFF}."
+                             f"{minor >> 16}.{minor & 0xFFFF}")
+                except Exception:  # noqa: BLE001 - a missing number is not a crash
+                    build = "unknown"
+            info["pywin32_build"] = build
             gen_path = getattr(win32com, "__gen_path__", None)
             if gen_path:
                 info["gen_py_cache"] = gen_path

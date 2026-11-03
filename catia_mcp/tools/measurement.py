@@ -3365,6 +3365,18 @@ class MeasurementTools:
                     "method='mesh'."
                 )
         corners, triangles, copy_note = self._mesh_corners(part)
+        # A Part document exports as ONE STL, and that STL contains every
+        # VISIBLE element - surfaces, wireframe, the lot - because Body and Part
+        # have no ExportData of their own (measured on B30 2026-11-03: only
+        # doc.ExportData exists, so "export the solid only" is not available).
+        # The box then describes the drawing, not the part: a 10 mm pad with a
+        # surface at z 30..35 measured z max 35 with the set shown and 10 once it
+        # was hidden (reported the same day, P2-2). Since the export cannot be
+        # narrowed, the reply has to say what it measured.
+        try:
+            hybrid_count = int(part.HybridBodies.Count)
+        except Exception:  # noqa: BLE001 - an unreadable count is not a defect
+            hybrid_count = 0
         reply = self._bbox_json(
             corners,
             f"STL mesh sweep of '{part.Parent.Name}' over {triangles} triangle "
@@ -3378,20 +3390,42 @@ class MeasurementTools:
                     "treat the figure as an order. Exact for a solid whose "
                     "diameter runs through a planar edge or a vertex"),
             extra={"points_route": "mesh", "mesh_vertices": triangles,
+                   # What these numbers describe. "the solid" was never true on
+                   # this route, and on a 10 mm pad the difference was 25 mm.
+                   "box_scope": (
+                       "the whole document as exported: the solid plus every "
+                       "VISIBLE wireframe/surface element in its geometrical sets"
+                       if hybrid_count else
+                       "the solid (this part has no geometrical sets)"),
+                   "geometrical_sets": hybrid_count,
                    **regime_fields(MESH_EXPORT)},
         )
+        warnings: list[str] = []
         if copy_note:
             # The caveat used to live only inside the prose of `method`, where a
             # caller doing `payload["dimensions"]` never sees it. "modeled but not
             # saved yet" is exactly the loop this measure-then-fix workflow runs,
             # so it gets a structured field (reported 2026-10-24).
-            payload = json.loads(reply)
-            payload["warnings"] = [
+            warnings.append(
                 "the box was measured from a COPY of the part's saved file, because "
                 "the part is loaded inside an open assembly and CATIA refuses to "
                 "export it in context - edits made since the last save are NOT in "
                 "these numbers (catia_save_document, then measure again)"
-            ]
+            )
+        if hybrid_count:
+            warnings.append(
+                f"this part holds {hybrid_count} geometrical set(s), and the STL "
+                "export includes every VISIBLE element inside them, so the box is "
+                "the envelope of what is on screen rather than of the solid. "
+                "Measured on B30 2026-11-03: a 10 mm pad plus a surface at z 30..35 "
+                "read z max 35 with the set shown and 10 once it was hidden. Hide "
+                "the sets (catia_set_visibility, name='<set>', show=false) and "
+                "measure again - or read method='vertices' when the solid has "
+                "vertices."
+            )
+        if warnings:
+            payload = json.loads(reply)
+            payload["warnings"] = warnings
             reply = json.dumps(payload, indent=2)
         return reply
 

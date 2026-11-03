@@ -58,6 +58,12 @@ class GSDTools:
         # auto-name 几何图形集.1 / Part1 in every new part, so a name alone
         # cannot tell a fresh document from the one that is gone.
         self._active_geoset_doc: str | None = None
+        # How many point features the CURRENT call turned coordinates into.
+        # Every one of them is a real tree element, which is the whole reason a
+        # 90-point spline leaves 91 elements behind; the count goes into the
+        # reply so the caller can see the cost instead of discovering it when
+        # catia_gsd_list_elements prints 666 names (reported 2026-11-03).
+        self._coordinate_points = 0
 
     # ────────────────────────────────────────────────────────────
     # Tool definitions
@@ -384,6 +390,25 @@ class GSDTools:
                     "sign of error whenever a quadrilateral section is replaced by "
                     "a spline through its corners; it is a substitution, not a "
                     "neutral conversion. "
+                    "WHEN THE LOFT REFUSES TO UPDATE ON A REAL PART, check the "
+                    "ARRANGEMENT before the curve type. This surface interpolates "
+                    "through the sections and stays inside their hull, so a section "
+                    "that sits past the turn of its neighbours makes it "
+                    "self-intersect. Measured on B30 2026-11-03: sections r 2.9 / "
+                    "3.0 / 8 with the middle one at z -17.58 above both neighbours "
+                    "(-19 and -25) fail as circles, as 12-point closed splines and "
+                    "as 90-point closed splines alike, while the same three radii in "
+                    "a monotone stack build. Changing a circle into a closed spline "
+                    "is therefore NOT a fix for that failure; keeping the sections "
+                    "monotone, splitting the loft at the turn, or 'ruled' are. "
+                    "POINT AND VERTEX SECTIONS ARE NOT SUPPORTED: the automation "
+                    "loft accepts a datum point and then fails the update, and "
+                    "refuses a solid Vertex.N outright with 'invalid number of "
+                    "arguments', even though the CATIA UI lets you pick a vertex as "
+                    "an end section (measured on B30 2026-11-03, both orders). Both "
+                    "are now refused before anything is built; end the loft on a "
+                    "small closed section where the apex would be and cap it with "
+                    "catia_gsd_fill instead. "
                     "WHEN THE SOURCE BULGES PAST ITS OWN SECTIONS: this surface "
                     "interpolates through the sections and never runs outside "
                     "them, and neither does a spline through the same corners. If "
@@ -429,7 +454,12 @@ class GSDTools:
                                 "(piecewise ruled, built from blends and joined) "
                                 "instead of one interpolated NURBS surface. Use this "
                                 "when the spec says the ends are tangent-continuous "
-                                "or the volume must match the analytic frustum."
+                                "or the volume must match the analytic frustum - and "
+                                "also when the smooth loft refuses to update because "
+                                "it would self-intersect: ruled covers all sections "
+                                "in one call (10 sections measured at 1.39 s, "
+                                "2026-11-03). Both are C0; the only difference is "
+                                "whether the tool or the caller joins the pieces."
                             ),
                         },
                         "start_tangent": {
@@ -592,7 +622,12 @@ class GSDTools:
                 "description": (
                     "Join (assemble) two or more curves or surfaces into one element. "
                     "The list argument is 'elements'; 'surfaces' is accepted as a "
-                    "synonym because every other GSD tool names it after its content."
+                    "synonym because every other GSD tool names it after its content. "
+                    "Join needs a SHARED EDGE between consecutive elements and says "
+                    "nothing when there is none - the update just fails. That is what "
+                    "a split causes: cutting away the edge two surfaces shared leaves "
+                    "the piece with nothing to join on (measured 2026-11-03). Join "
+                    "first, split afterwards."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -617,7 +652,16 @@ class GSDTools:
                 "name": "catia_gsd_split",
                 "description": (
                     "Split an element by a cutting element, keeping one side. "
-                    "Use orientation to flip which side is kept."
+                    "DEFAULT SIDE, measured on B30 2026-11-03 (cylinder r10 "
+                    "z 0..40 cut by the xy plane at z=10): the default keeps the "
+                    "side the cutter's NORMAL points to - z 10..40 above the "
+                    "plane, so splitting a 133 mm bottle at z=100 keeps the "
+                    "100..133 stub, not the bottle. reverse=true keeps the other "
+                    "side. The reply names the side it kept. Also worth knowing: "
+                    "join FIRST and split afterwards when the neighbour shares the "
+                    "edge you are cutting away - a split piece no longer has that "
+                    "edge to join on (measured the same day: join then fails with "
+                    "the generic update error)."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -900,18 +944,32 @@ class GSDTools:
         raise RuntimeError(message)
 
     def _lookup_element(self, part: Any, name: str) -> Any | None:
-        """One pass over the tree for that exact name, or None."""
+        """One pass over the tree for that exact name, or None.
+
+        Each collection is asked for its Count first: ``Item(name)`` on an EMPTY
+        collection raises, and a raise costs ~15 ms against ~1 ms for the count,
+        so asking a GSD-only part for a sketch name used to be the expensive half
+        of every lookup (measured 2026-11-03 while timing the loft's point guard:
+        236 ms for ten sections, down from 460 ms once the empty collections were
+        skipped).
+        """
         for hb in self._iter_geosets(part.HybridBodies):
             for collection in ("HybridShapes", "HybridSketches"):
                 try:
-                    return getattr(hb, collection).Item(name)
+                    items = getattr(hb, collection)
+                    if not items.Count:
+                        continue
+                    return items.Item(name)
                 except Exception:  # noqa: BLE001 - the next collection may have it
                     pass
 
         bodies = part.Bodies
         for i in range(1, bodies.Count + 1):
             try:
-                return bodies.Item(i).Sketches.Item(name)
+                sketches = bodies.Item(i).Sketches
+                if not sketches.Count:
+                    continue
+                return sketches.Item(name)
             except Exception:  # noqa: BLE001 - keep looking
                 pass
         return None
@@ -1031,19 +1089,44 @@ class GSDTools:
         return part.CreateReferenceFromObject(self._find_element(name))
 
     def _point_ref(self, spec: Any) -> Any:
-        """Resolve a point spec (element name or [x, y, z]) to a Reference.
+        """Resolve points, sharing one part/factory/geoset lookup.
 
-        Coordinates create a new point feature in the active geoset.
+        Coordinates create a point feature in the active geoset. That point is a
+        DEPENDENCY of the curve being built, so its own update is redundant - the
+        feature-level update at the end of the tool cascades into it, and the
+        curve comes out identical (188.496 mm for r=30 against 188.496 analytic).
+
+        Do not read this as a speed fix. A cold-session A/B on B30 2026-11-03,
+        one CATIA process per condition, 90 points: 3.50 s and 4.68 s WITH the
+        per-point UpdateObject, 4.08 s and 4.19 s without - the update costs
+        nothing measurable, and what a 90-point spline really spends is the 90
+        datum points themselves (~39 ms each). Measured inside one session the
+        same work ranged from 2.35 s to 13.65 s, which is why the first A/B run
+        here looked like a 5x win and was not: CATIA slows down as the session
+        fills. The count of those points is reported in the reply instead.
         """
-        if isinstance(spec, str):
-            return self._ref(spec)
-        if isinstance(spec, (list, tuple)) and len(spec) == 3:
-            part = self.conn.get_active_part()
-            point = self._factory().AddNewPointCoord(spec[0], spec[1], spec[2])
-            self._get_geoset().AppendHybridShape(point)
-            part.UpdateObject(point)
-            return part.CreateReferenceFromObject(point)
-        raise ValueError(f"Invalid point spec: {spec!r}. Use an element name or [x, y, z].")
+        return self._point_refs([spec])[0]
+
+    def _point_refs(self, specs: list[Any]) -> list[Any]:
+        """``_point_ref`` for a whole list, with the part resolved once."""
+        refs: list[Any] = []
+        context: tuple[Any, Any, Any] | None = None
+        for spec in specs:
+            if isinstance(spec, str):
+                refs.append(self._ref(spec))
+                continue
+            if not (isinstance(spec, (list, tuple)) and len(spec) == 3):
+                raise ValueError(
+                    f"Invalid point spec: {spec!r}. Use an element name or [x, y, z].")
+            if context is None:
+                context = (self.conn.get_active_part(), self._factory(),
+                           self._get_geoset())
+            part, factory, geoset = context
+            point = factory.AddNewPointCoord(spec[0], spec[1], spec[2])
+            geoset.AppendHybridShape(point)
+            self._coordinate_points += 1
+            refs.append(part.CreateReferenceFromObject(point))
+        return refs
 
     def _safe_update(self, feature: Any) -> None:
         """Update a feature; if CATIA rejects it, delete the broken feature so
@@ -1176,8 +1259,10 @@ class GSDTools:
 
     def _line(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
-        ref1 = self._point_ref(args["point1"])
-        ref2 = self._point_ref(args["point2"])
+        # One context lookup for both points, same as catia_gsd_spline: the
+        # per-point ActiveDocument round trip was 90 % of a spline's build time
+        # (measured on B30 2026-11-03).
+        ref1, ref2 = self._point_refs([args["point1"], args["point2"]])
         line = self._factory().AddNewLinePtPt(ref1, ref2)
         return self._finish(line, args.get("name"), "3D line created between two points.")
 
@@ -1195,9 +1280,8 @@ class GSDTools:
 
     def _plane_3points(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
-        ref1 = self._point_ref(args["point1"])
-        ref2 = self._point_ref(args["point2"])
-        ref3 = self._point_ref(args["point3"])
+        ref1, ref2, ref3 = self._point_refs(
+            [args["point1"], args["point2"], args["point3"]])
         plane = self._factory().AddNewPlane3Points(ref1, ref2, ref3)
         return self._finish(plane, args.get("name"), "Plane created through 3 points.")
 
@@ -1205,6 +1289,7 @@ class GSDTools:
         self.conn.ensure_connected()
         element = args.get("element")
         closed = bool(args.get("closed", False))
+        self._coordinate_points = 0
 
         if element and args.get("points"):
             raise ValueError(
@@ -1213,7 +1298,7 @@ class GSDTools:
             )
         if element:
             coords, note = self._outline_points(str(element), closed)
-            refs = [self._point_ref(p) for p in coords]
+            refs = self._point_refs(coords)
             count = len(coords)
         else:
             points = args.get("points")
@@ -1222,7 +1307,7 @@ class GSDTools:
                     "catia_gsd_spline needs 'points' (element names or [x, y, z]) "
                     "or 'element' (a sketch whose outline this server drew)."
                 )
-            refs = [self._point_ref(p) for p in points]
+            refs = self._point_refs(points)
             count = len(points)
             note = ""
 
@@ -1232,10 +1317,23 @@ class GSDTools:
         if closed:
             spline.SetClosing(1)
 
+        # A spline holds REFERENCES to points, so coordinates become real tree
+        # elements - this is the API, not a choice. Saying how many came from
+        # coordinates is the difference between "one sweep" and a geometrical
+        # set holding 666 elements that takes 28 s to hide (reported 2026-11-03,
+        # §P2-3). A sketch spline would be one element but only holds planar 2D
+        # geometry, so it cannot carry a 3D ring.
+        created = self._coordinate_points
+        points_note = (
+            f" {created} of them were coordinate lists, and each one is a separate "
+            f"Point feature in the geometrical set (the spline references it, so it "
+            f"cannot be dropped): expect {created} extra tree elements."
+            if created else ""
+        )
         return self._finish(
             spline, args.get("name"),
             f"3D spline created through {count} points"
-            f"{' (closed)' if closed else ''}.{note}",
+            f"{' (closed)' if closed else ''}.{note}{points_note}",
         )
 
     # Matching tolerance when chaining a sketch's lines back into a loop.
@@ -1483,6 +1581,127 @@ class GSDTools:
     # Surfaces
     # ────────────────────────────────────────────────────────────
 
+    # What an element is, as far as a loft section is concerned, judged by its
+    # automation type name rather than by measuring it: a circle answers Length
+    # 62.83, a surface answers its boundary length, and a point answers nothing -
+    # but every GetMeasurable round trip is expensive next to the type name, and
+    # the type name is exact ('HybridShapePointCoord' against
+    # 'HybridShapeCircleCtrRad', measured on B30 2026-11-03).
+    _SECTION_POINT = "point"
+    _SECTION_VERTEX = "vertex"
+
+    def _section_kind(self, name: str, element: Any | None = None) -> str:
+        """'vertex' / 'point' / 'curve' / 'unknown' - never raises.
+
+        ``element`` is the tree node when the caller has it already, which is how
+        the loft avoids looking every section up twice (the lookup is the cost:
+        23 ms per name against 0.3 ms for the type name).
+
+        'unknown' means nothing could be decided, and a caller must treat it as
+        "carry on": refusing a valid section would be worse than the failure this
+        tries to prevent.
+        """
+        text = str(name).strip()
+        if self._TOPO_NAME.fullmatch(text) and text.lower().startswith("vertex"):
+            return self._SECTION_VERTEX
+        if element is None:
+            try:
+                element = self._find_element(text)
+            except Exception:  # noqa: BLE001 - a missing element is _ref's problem
+                return "unknown"
+        type_name = self._com_type_name(element)
+        if type_name:
+            if "Point" in type_name and "Circle" not in type_name:
+                return self._SECTION_POINT
+            return "curve"
+        # No type information on this build: fall back to the measurement.
+        try:
+            part = self.conn.get_active_part()
+            spa = self.conn.active_document.GetWorkbench("SPAWorkbench")
+            measurable = spa.GetMeasurable(part.CreateReferenceFromObject(element))
+            length = float(measurable.Length)
+        except Exception:  # noqa: BLE001 - cannot judge, so do not judge
+            return "unknown"
+        return self._SECTION_POINT if length <= 1e-6 else "curve"
+
+    @staticmethod
+    def _com_type_name(element: Any) -> str | None:
+        """The automation type behind a tree node, or None if it will not say.
+
+        ``dir()`` on these objects raises inside GetTypeInfoCount on B30, but
+        asking the type information for its name works, and it is the only cheap
+        way to tell a datum point from a curve.
+        """
+        try:
+            info = element._oleobj_.GetTypeInfo()
+            return str(info.GetDocumentation(-1)[0])
+        except Exception:  # noqa: BLE001 - not every node exposes type information
+            return None
+
+    def _resolve_sections(self, names: list[str]) -> list[tuple[Any, Any]]:
+        """One tree lookup per section: ``(element or None, reference)``.
+
+        The loft needs the reference and the point guard needs the element's
+        automation type. Resolving each name once for both is the difference
+        between 23 ms and 46 ms per section (measured on B30 2026-11-03: a
+        ten-section loft spent 230 ms on the guard alone when it looked the tree
+        up a second time).
+
+        A ``Vertex.N`` / ``Edge.N`` spec resolves to a topology reference and no
+        tree node, so its element is None - the guard handles that by name.
+        """
+        part = self.conn.get_active_part()
+        resolved: list[tuple[Any, Any]] = []
+        for name in names:
+            topology = self._topology_reference(name)
+            if topology is not None:
+                resolved.append((None, topology))
+                continue
+            element = self._find_element(name)
+            resolved.append((element, part.CreateReferenceFromObject(element)))
+        return resolved
+
+    def _refuse_point_sections(self, sections: list[str],
+                               resolved: list[tuple[Any, Any]] | None = None) -> None:
+        """Reject a point/vertex section BEFORE the loft is built.
+
+        Both forms fail, one stage apart, and neither failure says why (measured
+        on B30 2026-11-03):
+
+            datum point   AddSectionToLoft ACCEPTS it, then UpdateObject fails
+                          with the generic "CATIA rejected the feature" text
+            Vertex.N      AddSectionToLoft fails at once with "invalid number
+                          of arguments", which reads like a wrong argument count
+
+        The CATIA UI does offer a vertex as an end section; this automation
+        object does not. Refusing here keeps the tree clean and, more to the
+        point, stops the caller from rewriting a section that was never
+        consumable (reported 2026-11-03, P1-2).
+        """
+        if resolved is None:
+            kinds = [self._section_kind(name) for name in sections]
+        else:
+            kinds = [self._section_kind(name, element)
+                     for name, (element, _ref) in zip(sections, resolved)]
+        bad = [(name, kind) for name, kind in zip(sections, kinds)
+               if kind in (self._SECTION_POINT, self._SECTION_VERTEX)]
+        if not bad:
+            return
+        listing = ", ".join(f"'{name}' ({kind})" for name, kind in bad)
+        raise ArgumentRejected(
+            f"a loft section must be a CURVE, and {listing} is not one. "
+            "A datum point is accepted by AddSectionToLoft and then fails the "
+            "update; a solid Vertex.N is refused by the same call with 'invalid "
+            "number of arguments'. The CATIA UI lets you pick a vertex as an end "
+            "section - the automation object behind catia_gsd_multi_section_surface "
+            "does not (measured on B30 2026-11-03, both orders, both kinds). "
+            "Workaround that does build: end the loft on a small closed section "
+            "(a circle or closed spline of r = 0.05-0.5 mm) where the point would "
+            "have been, then close that end with catia_gsd_fill, or run the "
+            "neighbouring cross-section out to the apex and let a ruled loft "
+            "carry it there."
+        )
+
     def _multi_section_surface(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
         sections = args["sections"]
@@ -1493,6 +1712,8 @@ class GSDTools:
                 f"'orientations' has {len(orientations)} entries but there are "
                 f"{len(sections)} sections — lengths must match."
             )
+        resolved = self._resolve_sections(sections)
+        self._refuse_point_sections(sections, resolved)
 
         if args.get("ruled"):
             if args.get("start_tangent") or args.get("end_tangent"):
@@ -1502,11 +1723,11 @@ class GSDTools:
                     "no single loft feature to carry the condition. Drop 'ruled' if "
                     "you need tangency; drop the tangency if you need straight sides."
                 )
-            return self._ruled_loft(sections, args.get("name"))
+            return self._ruled_loft(sections, args.get("name"),
+                                    [reference for _element, reference in resolved])
 
         loft = self._factory().AddNewLoft()
-        for section_name, orientation in zip(sections, orientations):
-            ref = self._ref(section_name)
+        for (_element, ref), orientation in zip(resolved, orientations):
             # (section, orientation, closing point). Nothing/None = automatic.
             try:
                 loft.AddSectionToLoft(ref, orientation, None)
@@ -1549,26 +1770,53 @@ class GSDTools:
                 f"{guides_msg}{tangent_msg}.",
             )
         except RuntimeError as e:
+            # Which call failed, in its own numbers: the report of 2026-11-03
+            # pointed out that the same six-line speech came back for every
+            # failure and never said what had been attempted.
+            kinds: dict[str, int] = {}
+            for name, (element, _ref) in zip(sections, resolved):
+                kind = self._section_kind(name, element)
+                kinds[kind] = kinds.get(kind, 0) + 1
+            context = (f"sections: {len(sections)} ("
+                       + ", ".join(f"{count} {kind}" for kind, count in sorted(kinds.items()))
+                       + f"), guides: {len(guides)}, ruled: false"
+                       + (", end tangency set" if tangency else ""))
             raise RuntimeError(
-                f"{e}{tangency_error} Common causes, in the order to check them: "
-                f"(1) a section that is not ONE curve - a polygon outline is four "
-                f"curves however you draw it (four catia_sketch_line calls, and "
-                f"catia_sketch_rectangle too), and an Extract of it is still four, "
-                f"so build the section as a closed catia_gsd_spline through the "
-                f"corners or as catia_gsd_circle; measured on B30 2026-10-25, that "
-                f"is the difference between building and failing; (2) a guide that "
-                f"does not intersect every section (check with measurements); "
-                f"(3) a section whose curve direction opposes the others (flip it "
-                f"with orientations=-1). If none applies and the sections are "
-                f"plainly lofts-able, retry once in a fresh session: one B32 SP6 "
-                f"session reported every loft failing while catia_gsd_blend "
-                f"accepted the same curve pair (2026-10-23), and two other B32 SP6 "
-                f"sessions then built both the smooth and the ruled loft and "
-                f"matched B30 to 0.02 mm3 (2026-10-24). If it still fails, build "
-                f"the transition with two blends."
+                f"{e}{tangency_error} THIS CALL: {context}. "
+                f"FIRST, and the cause of nearly every failure on a real part: AN "
+                f"ARRANGEMENT THAT MAKES THE INTERPOLATED SURFACE FOLD. This loft "
+                f"passes THROUGH the sections and stays inside their hull; if one "
+                f"section sits past the turn of its two neighbours - the radius "
+                f"goes out, back in, then out again, or a section's plane crosses "
+                f"another - the surface has to self-intersect and CATIA refuses to "
+                f"update. Measured on B30 2026-11-03, three sections r 2.9 / 3.0 / 8 "
+                f"with the middle one at z -17.58 and its neighbours at -19 and -25: "
+                f"fails as circles, as 12-point CLOSED SPLINES and as 90-point closed "
+                f"splines alike, while the SAME three radii in a monotone stack "
+                f"build, and so does the outer pair alone. So swapping the curve "
+                f"type is not a fix for this - the fix is to keep the sections "
+                f"monotone along the lofting direction, to split the loft at the "
+                f"turn and join the pieces, or to use ruled=true (which covers all "
+                f"sections in one call: 10 sections measured at 1.39 s in the same "
+                f"report). Second: a section that is not ONE curve - a polygon "
+                f"outline is four curves however you draw it (four catia_sketch_line "
+                f"calls, and catia_sketch_rectangle too), and an Extract of it is "
+                f"still four, so a polygon section has to become a closed catia_gsd_spline "
+                f"through its corners (measured on B30 2026-10-25). "
+                f"Third: a guide that does not intersect every section (check with "
+                f"measurements). Fourth: a section whose curve direction opposes the "
+                f"others - flip it with orientations=-1. A point or vertex section "
+                f"is no longer in this list: it is refused before the loft is built "
+                f"and says so. If none of the above applies, retry once in a fresh "
+                f"session - one B32 SP6 session reported every loft failing while "
+                f"catia_gsd_blend accepted the same curve pair (2026-10-23), and two "
+                f"other B32 SP6 sessions then built both the smooth and the ruled "
+                f"loft and matched B30 to 0.02 mm3 (2026-10-24) - and if it still "
+                f"fails, build the transition with two blends."
             ) from e
 
-    def _ruled_loft(self, sections: list[str], name: str | None) -> str:
+    def _ruled_loft(self, sections: list[str], name: str | None,
+                    refs: list[Any] | None = None) -> str:
         """Straight-sided loft: one blend per section pair, then joined.
 
         Measured on V5-6R2020 B30, 2026-10-24, three circles r=10/20/10 at
@@ -1587,7 +1835,8 @@ class GSDTools:
         """
         part = self.conn.get_active_part()
         factory = self._factory()
-        refs = [self._ref(section) for section in sections]
+        if refs is None:
+            refs = [self._ref(section) for section in sections]
         blends = []
         for i in range(len(refs) - 1):
             blend = factory.AddNewBlend()
@@ -1739,9 +1988,21 @@ class GSDTools:
         cutter_ref = self._ref(args["cutter"])
         orientation = -1 if args.get("reverse", False) else 1
         split = self._factory().AddNewHybridSplit(elem_ref, cutter_ref, orientation)
+        # Which side survived is the one thing a caller has to know and the one
+        # thing the old reply never said: a plain split of a 133 mm bottle at
+        # z=100 returned 742.80 mm3 instead of 9488.98 and looked like a broken
+        # model (reported 2026-11-03, P1-3). Measured on B30 the same day with a
+        # cylinder r10 z 0..40 cut at z=10: orientation +1 keeps z 10..40, i.e.
+        # the side the cutter's normal points to, and -1 keeps 0..10. The STL of
+        # the result is what answered it - Measurable.Area reads 0.0 for a
+        # surface, so it cannot.
+        side = ("the side the cutter's normal points to (orientation +1)"
+                if orientation == 1 else
+                "the side the cutter's normal points away from (orientation -1)")
         return self._finish(
             split, args.get("name"),
-            f"Split of '{args['element']}' by '{args['cutter']}' created.",
+            f"Split of '{args['element']}' by '{args['cutter']}' created, "
+            f"keeping {side}; reverse=true swaps the two.",
         )
 
     def _trim(self, args: dict[str, Any]) -> str:

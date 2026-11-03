@@ -2,6 +2,131 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.49] — 2026-11-03 · the surface report: one cause misattributed, four replies that said nothing
+
+The 2026-11-03 report is a real modelling session — a five-petal bottle base
+built from ten wavy concentric rings lofted into one NURBS face — and it lists
+seven findings. They were measured on B30 in three rounds
+(`scripts/b30_loft_surface_claims.py`, `b30_surface_probe2.py`,
+`b30_surface_probe3.py`, plus `b30_spline_bench.py`), one variable at a time.
+Six survived; one was a misattribution, and correcting it is the most useful
+thing in this release.
+
+### Corrected — the loft failure is the section ARRANGEMENT, not the curve type
+
+The report's headline conclusion was "`catia_gsd_circle` is more fragile than a
+closed spline as a loft section", and its minimal reproduction was the trio
+r 2.9 / 3.0 / 8 with the middle section at z −17.58, *above* both neighbours
+(−19 and −25). Measured on B30, that trio fails as circles, as 12-point closed
+splines **and** as 90-point closed splines — the last one is a circle to within
+0.001 mm, so the curve type cannot be what changed. The same three radii in a
+monotone stack build, and the outer pair alone builds:
+
+    r2.9@-19, r3.0@-17.58, r8@-25   circles        FAIL
+    same three, closed splines 12pt               FAIL
+    same three, closed splines 90pt               FAIL
+    r2.9@-25, r3.0@-20, r8@-17      circles        builds
+    r2.9@-19, r8@-25 (pair)         circles        builds
+
+What fails is the fold-back: the loft interpolates *through* the sections and
+stays inside their hull, so a section sitting past the turn of its neighbours
+forces a self-intersection and CATIA refuses the update. Swapping a circle for a
+spline changes nothing — the report's own "same geometry as splines → ✓" run had
+also changed the radii to 3/5/8 in a monotone stack. The tool description and
+the failure text now say this instead of recommending the substitution.
+
+### Changed — a failed loft now names the call it failed on
+
+The six-line "common causes" speech came back verbatim for every failure and
+never said what had been attempted. The reply now starts with the call's own
+numbers — `sections: 3 (3 curve), guides: 0, ruled: false` — and puts the fold
+first, with the measured numbers above, followed by the three older causes. A
+point or vertex section is no longer among them: it is refused before anything
+is built (below).
+
+### Fixed — a point or vertex section is refused before the tree is touched
+
+Both forms fail, one stage apart, and neither failure says why (measured on B30
+2026-11-03, both orders):
+
+    datum point     AddSectionToLoft ACCEPTS it; UpdateObject then fails with
+                    the generic "CATIA rejected the feature" text
+    Vertex.N        AddSectionToLoft fails at once with "invalid number of
+                    arguments", which reads like a wrong argument count
+
+The CATIA UI does let you pick a vertex as an end section; this automation
+object does not. Both are now rejected in the validate stage — nothing is
+appended, nothing is deleted — with the workaround in the message (end the loft
+on a small closed section and cap it with `catia_gsd_fill`).
+
+### Fixed — `catia_gsd_split` says which side it kept
+
+A split of a 133 mm bottle at z=100 returned 742.80 mm³ instead of 9488.98 and
+looked like a broken model. Nothing was wrong with the geometry: the default
+kept the stub **above** the plane. Measured the same day with a cylinder r10
+z 0..40 cut at z=10, the kept side read off the STL of the result (Measurable.Area
+answers 0.0 for a surface, so it cannot answer this):
+
+    reverse=false (default)   kept z 10.0 .. 40.0   the cutter's normal side
+    reverse=true              kept z  0.0 .. 10.0
+
+The reply now names the side, and the tool description carries the same table.
+
+### Fixed — the mesh bounding box says what it measured
+
+`method='mesh'` exports the document to STL, and that STL holds every **visible**
+element, surfaces included — a Part and a Body have no `ExportData` of their own,
+so "export the solid only" is not available. A 10 mm pad with a construction
+surface at z 30..35 measured z max **35**; hide the set and it reads **10**.
+The reply now carries `box_scope` and a warning with those numbers, instead of
+letting a caller read the drawing's envelope as the part's:
+
+    box_scope: the whole document as exported: the solid plus every VISIBLE
+               wireframe/surface element in its geometrical sets
+
+### Changed — a spline reports the tree elements it creates, and stops updating points twice
+
+`catia_gsd_spline` with coordinates leaves one Point feature per point in the
+tree — 90 for a 90-point ring, which is how a geometrical set reached 666
+elements and 28 s to hide. That is the API: a spline references points, so the
+points cannot be dropped. Two things changed: the reply now states the count
+("90 of them were coordinate lists … expect 90 extra tree elements"), and the
+redundant per-point `UpdateObject` is gone, along with two `ActiveDocument`
+round trips per point, because the feature-level update cascades.
+
+**This is not a speed fix, and the first measurement said it was.** Inside one
+CATIA session, the same 90-point spline measured 5.21 s and 0.97 s a few minutes
+apart. With one CATIA process per condition (cold both times) it is:
+
+    per-point UpdateObject kept     3.50 s   4.68 s
+    removed                         4.08 s   4.19 s
+
+i.e. the update costs nothing measurable, and what a 90-point spline really
+spends is the 90 datum points at ~39 ms each. Session drift inside one CATIA run
+spanned 2.35 s to 13.65 s for identical work, which is why a within-session A/B
+is worthless here.
+
+### Fixed — `catia_diagnose` reports a pywin32 build
+
+`win32com` has no `__build__`, so the field read `unknown` on every machine. The
+DLL's file version carries the same number: this machine answers `3.13.312.0`,
+i.e. built for Python 3.13, build 312.
+
+### Documented — join first, split afterwards
+
+A split piece has no shared edge left to join on, so joining it with the
+neighbour it used to touch fails with the same generic update error, and the
+message says nothing about it (measured: 167 characters, no diagnosis). The
+`catia_gsd_join` and `catia_gsd_split` descriptions now carry the workflow note.
+This is a geometric consequence, not something the tool can decide for you.
+
+### Not reproduced — screenshot after `set_view`
+
+`set_view → fit_all → screenshot` produced three distinct captures for three
+views (front / bottom / isometric), and `viewer.Update()` before the capture did
+not change the frame. Whatever produced the stale image in that session was not
+reproducible here, and no change was made for it.
+
 ## [0.3.48] — 2026-11-02 · the two array findings that could be fixed, and the one that could not
 
 The 2026-10-31 report listed three array problems and asked for them to be
