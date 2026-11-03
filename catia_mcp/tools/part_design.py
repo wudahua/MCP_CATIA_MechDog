@@ -944,7 +944,18 @@ class PartDesignTools:
                     "points created in THIS session are recorded, so the reply says "
                     "how many it can account for. BATCH: pass 'names' with a list "
                     "to delete several elements in one call - cleaning up after a "
-                    "rebuild cost 15 calls of 2.0-2.4 s each in that same session."
+                    "rebuild cost 15 calls of 2.0-2.4 s each in that same session. "
+                    "DUPLICATE NAMES: CATIA lets two elements carry one name, and "
+                    "assigning Name does not prevent it, so a tree can hold two "
+                    "'P_04_06'. Deleting one BY NAME then removes an arbitrary one "
+                    "of them and leaves the other answering to the same name, which "
+                    "is a state where 'I deleted it and rebuilt it' is true and the "
+                    "old element is still there - measured on B30 2026-11-03, and "
+                    "the reason a report spent two hours on a join that kept "
+                    "failing. Such a delete is now REFUSED with the count, and "
+                    "names=['P_04_06'] deletes every element carrying that name and "
+                    "reports how many it took. New elements no longer create "
+                    "duplicates: a taken name comes back as 'P_04_06.2' with a note."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -4197,7 +4208,14 @@ class PartDesignTools:
                     done.append(self._delete_one(args, name))
                 except Exception as error:  # noqa: BLE001 - reported per name
                     failed.append(f"'{name}' ({str(error).splitlines()[0][:120]})")
-            summary = f"Deleted {len(done)} of {len(many)} named element(s)."
+            # `deleted` counts OBJECTS, so a name that two elements carried
+            # contributes two entries: saying "1 of 1" after removing two of them
+            # would be the same kind of half-truth this batch exists to avoid.
+            duplicates = [name for name in gsd_names if len(found.get(name, [])) > 1]
+            summary = (f"Deleted {len(done)} element(s) for {len(many)} name(s) given.")
+            if duplicates:
+                summary += (" Duplicate names removed in full: " + ", ".join(
+                    f"'{name}' x{len(found[name])}" for name in duplicates) + ".")
             if failed:
                 summary += f" Failed ({len(failed)}): " + "; ".join(failed) + "."
             return summary + " " + " ".join(done)
@@ -4268,7 +4286,25 @@ class PartDesignTools:
             # extracted curve answered "No feature or sketch named ..." and stayed
             # in the tree - visible, and therefore measured by the STL envelope
             # (reported 2026-10-29, §4). Sets nest, so the walk recurses.
-            feature, kind = self._find_in_geometrical_sets(part, target)
+            feature, kind, same_named = self._find_in_geometrical_sets(part, target)
+            if len(same_named) > 1:
+                # Deleting "one of them" is not a delete the caller can reason
+                # about: which one CATIA picks is not stated anywhere, and the
+                # survivor keeps the name, so the next call by name still lands
+                # on an element the caller believes is gone (measured on B30
+                # 2026-11-03: two elements named C_P, one delete, one C_P left).
+                raise ArgumentRejected(
+                    f"{len(same_named)} elements in this part are named '{target}' "
+                    f"({', '.join(kind for _obj, kind in same_named)}), so deleting "
+                    f"'by name' would remove an arbitrary one of them and leave the "
+                    f"rest under the same name - every later call by name would "
+                    f"still find an element you believe was deleted. CATIA allows "
+                    f"duplicate names and setting Name does not prevent them. "
+                    f"THERE IS A ROUTE: catia_delete_feature with "
+                    f"names=['{target}'] deletes EVERY element carrying that name "
+                    f"and says how many it took, so use that to clear the "
+                    f"duplicates, then build again with a name that is free."
+                )
         if feature is None:
             raise ArgumentRejected(
                 f"No feature, sketch or GSD element named '{target}' in the active "
@@ -4363,7 +4399,11 @@ class PartDesignTools:
 
         removed = [name for name in wanted if name not in found]
         kept: list[str] = []
-        targets = [(name, found[name]) for name in wanted if name in found]
+        # A name can appear more than once (CATIA allows it), so this is a list
+        # of OBJECTS, not of names: a delete that took one and left the twin
+        # would keep answering to a name the caller thinks is gone.
+        targets = [(name, obj) for name in wanted
+                   for obj in found.get(name, [])]
 
         if targets:
             try:
@@ -4395,23 +4435,30 @@ class PartDesignTools:
         except Exception:  # noqa: BLE001 - the elements are gone either way
             pass
         self.conn.refresh_display()
-        return [name for name in wanted if name in set(removed)], kept
+        # Per OBJECT, not per name: two elements sharing a name are two removals.
+        return removed, kept
 
     @staticmethod
-    def _map_geometrical_sets(part: Any, wanted: set[str]) -> dict[str, Any]:
+    def _map_geometrical_sets(part: Any, wanted: set[str]) -> dict[str, list]:
         """One depth-first walk: every wanted name that is in the tree.
 
         The plural twin of ``_find_in_geometrical_sets``, for callers that have a
         whole list of names: looking each one up separately re-walked the tree per
         name, which is what made deleting 91 points take 50 s.
+
+        The value is a LIST because CATIA allows duplicates: two elements can
+        share a name, and a delete that silently picked one of them left the
+        caller with an element they believed gone (2026-11-03 - the state that
+        made a rebuild look ineffective).
         """
-        found: dict[str, Any] = {}
+        found: dict[str, list] = {}
 
         def walk(sets: Any, depth: int = 0) -> None:
             for index in range(1, sets.Count + 1):
                 hybrid_body = sets.Item(index)
-                if str(hybrid_body.Name) in wanted:
-                    found.setdefault(str(hybrid_body.Name), hybrid_body)
+                name = str(hybrid_body.Name)
+                if name in wanted:
+                    found.setdefault(name, []).append(hybrid_body)
                 for collection in ("HybridShapes", "HybridSketches"):
                     try:
                         items = getattr(hybrid_body, collection)
@@ -4421,7 +4468,7 @@ class PartDesignTools:
                         item = items.Item(item_index)
                         name = str(item.Name)
                         if name in wanted:
-                            found.setdefault(name, item)
+                            found.setdefault(name, []).append(item)
                 try:
                     nested = hybrid_body.HybridBodies
                 except Exception:  # noqa: BLE001 - a plain set has no children
@@ -4433,18 +4480,29 @@ class PartDesignTools:
         return found
 
     @staticmethod
-    def _find_in_geometrical_sets(part: Any, target: str) -> tuple[Any, str]:
+    def _find_in_geometrical_sets(part: Any, target: str
+                                  ) -> tuple[Any, str, list]:
         """Find a GSD element, a sketch inside a set, or the set itself.
 
         Depth-first, because CATIA nests geometrical sets freely and a failed
         loft often ends up one level below the set that was created for it.
-        Returns ``(None, "")`` when the name is not there.
+        Returns ``(found, kind, every_match)`` - the third element is why this
+        is a list and not a single object: CATIA lets two elements carry the SAME
+        name, and this server used to create them (setting ``Name`` on a new
+        element does not check that the name is free). A tree with two
+        ``P_04_06`` makes every later call by name ambiguous - ``FindObjectByName``
+        returns one of them, a delete removes one of them - which is exactly the
+        state that looks like "deleted and rebuilt, but the join still fails"
+        (measured on B30 2026-11-03: two elements named C_P, delete removed one,
+        the other stayed). ``(None, "", [])`` when the name is not there.
         """
-        def walk(sets: Any, depth: int = 0) -> tuple[Any, str]:
+        hits: list[tuple[Any, str]] = []
+
+        def walk(sets: Any, depth: int = 0) -> None:
             for index in range(1, sets.Count + 1):
                 hybrid_body = sets.Item(index)
                 if str(hybrid_body.Name) == target:
-                    return hybrid_body, "geometrical set"
+                    hits.append((hybrid_body, "geometrical set"))
                 for collection, label in (("HybridShapes", "GSD element"),
                                           ("HybridSketches", "sketch in a set")):
                     try:
@@ -4454,18 +4512,18 @@ class PartDesignTools:
                     for item_index in range(1, items.Count + 1):
                         item = items.Item(item_index)
                         if str(item.Name) == target:
-                            return item, label
+                            hits.append((item, label))
                 try:
                     nested = hybrid_body.HybridBodies
                 except Exception:  # noqa: BLE001 - a plain set has no children
                     continue
                 if nested is not None and nested.Count and depth < 8:
-                    found, found_kind = walk(nested, depth + 1)
-                    if found is not None:
-                        return found, found_kind
-            return None, ""
+                    walk(nested, depth + 1)
 
-        return walk(part.HybridBodies)
+        walk(part.HybridBodies)
+        if not hits:
+            return None, "", []
+        return hits[0][0], hits[0][1], hits
 
     def _sketch_names(self) -> list[str]:
         """Every sketch name in the active part, for before/after comparisons."""

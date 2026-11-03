@@ -2,6 +2,53 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.52] — 2026-11-03 · the rebuild was innocent; the duplicate name was not
+
+The fourth report on the same bottle says that deleting a loft and rebuilding it
+under the same name breaks its shared-edge topology, so join, split and thick all
+fail, and that sections sampled finer than 1° produce a loft that will not join.
+Both were reproduced on B30 before any code moved
+(`scripts/b30_v0352_reloft.py`, `b30_v0352_join.py`,
+`b30_v0352_names.py`). Neither holds. Something else does, and it explains the
+two hours the report spent.
+
+**A rebuild does not break a join.** Four orders, one document each, two lofts
+sharing a middle section, join after each step: delete one piece and rebuild it
+(join OK); delete both and rebuild both (OK); delete the shared section too and
+rebuild it (OK); two lofts taking geometrically identical but *different* curve
+objects for the shared section (OK). Join compares coincidence, not object
+identity, so a new internal id cannot break it.
+
+**Sampling density does not break a join either.** 60 / 90 / 120 / 180 / 600
+points per closed section — 6.0° down to 0.60° apart, 0.29 mm of arc at r=28 —
+two lofts sharing one section, and every combination built *and* joined. The
+report's "below 1° the border stops joining" did not appear at any density.
+
+**What is real: CATIA lets two elements carry the same name, and this server
+made them.** Assigning `Name` checks nothing, so building `P_04_06` twice left
+two elements called `P_04_06`; `FindObjectByName` returns one of them and a delete
+removes one of them. Measured: a tree with two `C_P`, one `catia_delete_feature
+{"feature_name": "C_P"}`, and one `C_P` left, still answering to that name. So
+"deleted it, rebuilt it, still fails" is a true description of a tree that never
+lost the old element — which is exactly the loop the report was in, and why the
+same sequence succeeded once it deleted twice.
+
+Three changes follow from that:
+
+* a new element never creates a duplicate — a taken name comes back as
+  `P_04_06.2` and the reply says so;
+* deleting *by* a name that two elements carry is refused with the count and the
+  way out, instead of removing an arbitrary one;
+* `names=['P_04_06']` deletes **every** element carrying that name and reports
+  `'P_04_06' x2`, so the tree can be cleared once the duplicates are known.
+  A batch now counts elements removed rather than names given.
+
+The join description also records what a shared edge is not, so the next session
+does not spend two hours proving a rebuild innocent, and Known limits carries the
+whole measurement.
+
+891 tests, 9 of them new (`tests/test_reported_issues_2026_11_03_v0352.py`).
+
 ## [0.3.51] — 2026-11-03 · the 636 points were a choice, and healing does nothing
 
 The third report on the same surface model asks for a healing tool, a zebra

@@ -659,7 +659,18 @@ class GSDTools:
                     "nothing when there is none - the update just fails. That is what "
                     "a split causes: cutting away the edge two surfaces shared leaves "
                     "the piece with nothing to join on (measured 2026-11-03). Join "
-                    "first, split afterwards."
+                    "first, split afterwards. "
+                    "WHAT A SHARED EDGE IS NOT: it does not have to be the same curve "
+                    "OBJECT. Two lofts whose facing sections are separate circles "
+                    "built from the same parameters join fine (measured on B30 "
+                    "2026-11-03), and so do two lofts rebuilt from scratch with the "
+                    "shared section also rebuilt - so a deleted-and-rebuilt piece "
+                    "does not by itself break a join, whatever the delete did to its "
+                    "internals. What DOES break the picture is a tree holding two "
+                    "elements with one name: 'elements' is resolved by name, so a "
+                    "join can silently take the stale twin of a piece you thought you "
+                    "had rebuilt. Check with catia_gsd_list_elements when a join "
+                    "fails for no geometric reason."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1219,6 +1230,26 @@ class GSDTools:
         geoset.AppendHybridShape(shape)
         return self._completed(shape, name, message, geoset)
 
+    def _free_name(self, part: Any, wanted: str) -> str:
+        """``wanted``, or ``wanted.2`` / ``wanted.3`` … if that name is taken.
+
+        Nothing in CATIA stops two elements from carrying the same name; this
+        server used to produce them by assigning ``Name`` blindly, and a report
+        then spent two hours on a join that kept failing after a rebuild it had
+        already done (2026-11-03; measured: two elements named C_P, one delete
+        removed one, the other C_P stayed and kept answering to that name).
+        """
+        candidate = wanted
+        for index in range(2, 52):
+            try:
+                existing = part.FindObjectByName(candidate)
+            except Exception:  # noqa: BLE001 - cannot tell, so take the caller's
+                return candidate
+            if existing is None:
+                return candidate
+            candidate = f"{wanted}.{index}"
+        return candidate
+
     def _completed(self, shape: Any, name: str | None, message: str,
                    geoset: Any) -> str:
         """Rename / update / refresh an element that is ALREADY in the geoset.
@@ -1230,7 +1261,20 @@ class GSDTools:
         """
         part = self.conn.get_active_part()
         if name:
-            shape.Name = name
+            wanted = str(name)
+            unique = self._free_name(part, wanted)
+            shape.Name = unique
+            if unique != wanted:
+                # CATIA lets two elements share a name, and assigning Name does
+                # not check. A tree with two "P_04_06" makes every later call by
+                # name ambiguous: FindObjectByName returns one of them and
+                # catia_delete_feature removes one of them, so a rebuild can look
+                # like it did nothing (measured on B30 2026-11-03 - two elements
+                # named C_P, one delete, one C_P left, and that is also the state
+                # a report read as "delete + rebuild breaks the loft topology").
+                message += (f" NOTE: the name '{wanted}' was already taken, so this "
+                            f"element is '{unique}' - keeping both would make every "
+                            f"call by name pick one of two elements at random.")
         part.InWorkObject = shape
         self._safe_update(shape)
         # Whatever points this call turned coordinates into belong to this

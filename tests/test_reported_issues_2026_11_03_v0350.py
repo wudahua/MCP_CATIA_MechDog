@@ -293,7 +293,9 @@ def test_batch_delete_aggregates_and_reports_each_failure():
 
     tools._delete_one = one
     reply = tools.execute("catia_delete_feature", {"names": ["a", "bad", "c"]})
-    assert "Deleted 2 of 3 named element(s)." in reply
+    # 0.3.52 counts what was removed, not what was asked for: a name that two
+    # elements carried removes two of them, and "2 of 3" would hide that.
+    assert "Deleted 2 element(s) for 3 name(s) given." in reply
     assert "bad" in reply and "No feature named" in reply
 
 

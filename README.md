@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.51** · [what changed](CHANGELOG.md) ·
+**0.3.52** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1129,6 +1129,19 @@ Place the result with `catia_get_component_transform`.
 
 ## Known limits
 
+* **CATIA allows two elements to share a name, and this server used to produce
+  them.** Assigning `Name` checks nothing, so building `P_04_06` twice left two
+  elements with that name; `FindObjectByName` returns one of them and a delete
+  removes one of them, which means "I deleted it and rebuilt it" can be true
+  while the old element is still answering to the name. Measured 2026-11-03 —
+  and it is the state a report read as "delete + rebuild breaks the loft
+  topology", where every join failed while the geometry was identical. New
+  elements now take a free name (`P_04_06.2`) and say so; deleting by a
+  duplicated name is refused with the count; `names=[…]` removes every element
+  carrying the name. **Join itself does not care**: two lofts whose facing
+  sections are separate objects built from the same parameters join fine, and
+  so do pieces rebuilt with their shared section also rebuilt (both measured the
+  same day, four rebuild orders, 60/90/120/180/600 point sections).
 * **No zebra stripes, curvature comb or Match surface.** CATIA V5 does not expose
   them to automation at all — measured 2026-11-03 on B30: the viewer answers
   `RenderingMode` and returns an unresolvable attribute for `Zebra`,
