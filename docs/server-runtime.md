@@ -30,7 +30,7 @@ Install and run the offline regressions:
 
 ```sh
 python -m pip install -e ".[dev]"
-python -m pytest tests test_server.py -q
+python -m pytest tests -q
 ```
 
 Windows CI runs this command on Python 3.10 and 3.12. Local tests use COM doubles

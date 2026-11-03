@@ -110,8 +110,10 @@ def test_a_taken_name_gets_a_suffix():
 
     part = _Part(_HybridBody("GSD_Set", [_Elem("P_04_06")]))
     tools = GSDTools(connection=None)
-    assert tools._free_name(part, "P_04_06") == "P_04_06.2"
-    assert tools._free_name(part, "P_04_07") == "P_04_07"
+    # 0.3.53 returns (name, verified): the flag is False only when the lookup
+    # itself failed, and the reply then says the name could not be checked.
+    assert tools._free_name(part, "P_04_06") == ("P_04_06.2", True)
+    assert tools._free_name(part, "P_04_07") == ("P_04_07", True)
 
 
 def test_the_suffix_keeps_climbing():
@@ -119,7 +121,7 @@ def test_the_suffix_keeps_climbing():
 
     part = _Part(_HybridBody("GSD_Set",
                              [_Elem("P"), _Elem("P.2"), _Elem("P.3")]))
-    assert GSDTools(connection=None)._free_name(part, "P") == "P.4"
+    assert GSDTools(connection=None)._free_name(part, "P") == ("P.4", True)
 
 
 def test_the_reply_says_the_name_had_to_change():

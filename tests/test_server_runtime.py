@@ -17,8 +17,9 @@ def test_registered_tools_and_schemas_are_unchanged():
     server = CATIAMCPServer()
     # Lite fork: 98 upstream tools - 11 drafting - 5 knowledgeware + 9 new
     # (run_plan, measure_topology, get/set_component_transform,
-    # rename_component, new_body, list_bodies, boolean, extract) = 91.
-    assert len(server._tool_router) == 102
+    # rename_component, new_body, list_bodies, boolean, extract) = 91,
+    # plus 0.3.51 check_surface and 0.3.53 boundary = 103.
+    assert len(server._tool_router) == 103
     assert not any(name.startswith("catia_caa") for name in server._tool_router)
     for schema in server._schemas.values():
         Draft202012Validator.check_schema(schema)

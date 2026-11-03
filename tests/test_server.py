@@ -7,6 +7,14 @@ This test does NOT require CATIA V5 — it only checks that:
 """
 
 import sys
+from pathlib import Path
+
+# This file lives in tests/ so that `pytest tests` collects it - it used to sit
+# at the repository root, which is why "pytest tests" reported 888 while
+# "pytest tests test_server.py" reported 891, and a 2026-11-03 acceptance report
+# read that 3-test gap as three tests having been dropped. One command, one
+# number. The sys.path line keeps `python tests/test_server.py` working too.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 def test_imports():

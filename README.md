@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.52** · [what changed](CHANGELOG.md) ·
+**0.3.53** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -12,7 +12,7 @@ defects that make that loop lie to you. Most of the work since 0.3.0 came from
 people rebuilding real assemblies with it: the changelog is a list of things that
 produced a plausible number, a wrong number, or no explanation at all.
 
-**102 tools** (upstream: 98 — 16 dropped, 20 added). Nothing in the COM layer was
+**103 tools** (upstream: 98 — 16 dropped, 21 added). Nothing in the COM layer was
 rewritten — the value of upstream is the field-verified knowledge in its
 comments, so this fork is strictly add / subtract / patch. The count is asserted
 by `tests/test_readme_tool_counts.py`, so it cannot drift from the code again.
@@ -58,13 +58,13 @@ by `tests/test_readme_tool_counts.py`, so it cannot drift from the code again.
 `export` (STEP/STL hand-off) and `http_transport` (remote agent) are kept: they
 are domain-neutral and cheap. See `FORK.md` §8 if you want to cut further.
 
-### Added (20 tools over upstream)
+### Added (21 tools over upstream)
 
-Five of them came with the fork, fifteen were added while building parts from
+Five of them came with the fork, sixteen were added while building parts from
 a spec (0.3.1: three, 0.3.2: four, 0.3.4: one, 0.3.5: one, 0.3.8: two, 0.3.17:
 two - `catia_delete_body`, `catia_solid_loft`; 0.3.19: one - `catia_copy_component`;
-0.3.51: one - `catia_check_surface`).
-Upstream 98 − 16 dropped + 20 added = 102. 0.3.20 added arguments instead of
+0.3.51: one - `catia_check_surface`; 0.3.53: one - `catia_gsd_boundary`).
+Upstream 98 − 16 dropped + 21 added = 103. 0.3.20 added arguments instead of
 tools: a sketch support given as `origin`/`u`/`v`, edges given as coordinates,
 arcs given as their two endpoints, and one plan per several documents.
 
@@ -76,7 +76,7 @@ arcs given as their two endpoints, and one plan per several documents.
 | `catia_get_component_transform` | The same placement in both conventions, plus where local X/Y/Z point in the assembly |
 | `catia_rename_component` | A readable assembly tree. `Part.Name` is read-only on V5-6R2020, so every part arrives as `Part1.1 / Part2.1 / …`; the instance name is writable |
 
-#### Added while building parts from a spec (15 tools)
+#### Added while building parts from a spec (16 tools)
 
 | Tool | Version | Why it exists |
 |---|---|---|
@@ -94,6 +94,7 @@ arcs given as their two endpoints, and one plan per several documents.
 | `catia_sketch_delete_element` | 0.3.8 | Removes one element (the wrong third line) and keeps the rest of the profile and the features built on it |
 | `catia_set_part_number` | 0.3.4 | Every part cloned from a template carries `Part1`, so a 24-instance assembly of 24 distinct parts reports 24 identical part numbers and CATIA fills the screen with “零件编号 Part1 已存在”. The number, not the instance name, is what the BOM reads |
 | `catia_gsd_extract` | 0.3.2 | `catia_gsd_fill` needs a boundary *curve*, and a sketch reference is rejected — without an extract there was no way to cap a lofted surface into a solid |
+| `catia_gsd_boundary` | 0.3.53 | A patch with a C0 seam has to be rebuilt from its own border, and `catia_gsd_extract` cannot do it - an extract of a face returns a surface, not the wire round it. `AddNewBoundaryOfSurface` takes one argument and updates: on a 30 mm extrusion of a r=10 circle the boundary measured 125.664 mm, exactly the two circles |
 | `catia_check_surface` | 0.3.51 | A surface task's acceptance criteria were "check with zebra stripes that the valley is smooth", and CATIA V5 gives automation no zebra, no curvature comb and no Match object (measured: the viewer answers `RenderingMode` and returns an unresolvable attribute for `Zebra` / `EnvironmentMapping` / `AnalysisMode`). The mesh can answer it anyway: the dihedral angle across every interior edge, so a G0 fold reads as degrees instead of needing a picture |
 
 ### Fixed (latent upstream bugs, reproduced on a live V5-6R2020 B30 session)
@@ -1100,7 +1101,7 @@ while a reply that only reports success cannot.
 | Document | 12 | new/open/save/close/list + `catia_save_as_copy`; `catia_save_document` retries around dialogs |
 | Sketcher | 13 | lines, rectangles, circles, constraints; reopen a closed sketch and delete one element |
 | Part Design | 25 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, solid loft, bodies (create / list / delete)… |
-| Generative Shape Design | 25 | wireframe and surfaces, extract, revolve + close surface; a GSD element or set is removed with `catia_delete_feature` |
+| Generative Shape Design | 26 | wireframe and surfaces, extract, `boundary`, revolve + close surface; a GSD element or set is removed with `catia_delete_feature` |
 | Assembly | **13** | upstream 9 + get/set component transform, rename, list constraints, copy component |
 | Measurement | 7 | inertia, distance, bounding box\*, parameters, `catia_check_surface` |
 | Export | 4 | STEP / STL / IGES hand-off |
@@ -1129,6 +1130,13 @@ Place the result with `catia_get_component_transform`.
 
 ## Known limits
 
+* **`set_view` works in the ABSOLUTE axis system, not the part's.** `front` means
+  "look along −Y with +Z up" in the document's axes whatever the model's own
+  orientation, so a part rotated in the tree (or a component placed with a
+  transform) will not line up with any of the named views. No automation call
+  reports the current view's right/up vectors the way the UI's "Normal to" does,
+  so the seven names are the whole vocabulary. Build in the axes you want to look
+  at, or take the screenshots before placing the component.
 * **CATIA allows two elements to share a name, and this server used to produce
   them.** Assigning `Name` checks nothing, so building `P_04_06` twice left two
   elements with that name; `FindObjectByName` returns one of them and a delete

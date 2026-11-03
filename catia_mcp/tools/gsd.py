@@ -335,6 +335,42 @@ class GSDTools:
                 },
             },
             {
+                "name": "catia_gsd_boundary",
+                "description": (
+                    "Extract the BOUNDARY CURVE of a surface into the active "
+                    "geometrical set. This is how a patch is rebuilt from its own "
+                    "border: take the boundary, delete the face, loft again over the "
+                    "same outline - the workflow a C0 seam between two joined "
+                    "patches needs, and the one catia_gsd_extract cannot do (an "
+                    "extract of a face gives a surface, not a wire). "
+                    "MEASURED on B30 2026-11-03: AddNewBoundaryOfSurface takes ONE "
+                    "argument and updates; on the 30 mm extrusion of a r=10 circle "
+                    "the result measured 125.664 mm, exactly the two circles. A "
+                    "closed surface gives one curve carrying both loops, so the "
+                    "length is the sum of the borders - that is not a defect, and "
+                    "splitting it further needs catia_gsd_split on the loops. "
+                    "NOT the same tool as catia_gsd_extract (which copies the "
+                    "element you name, keeping its type). "
+                    "This does NOT smooth a seam: CATIA V5 automation exposes no "
+                    "Match and AddNewHealing leaves a 90-degree fold at 90 degrees "
+                    "(measured), so a G0 seam stays G0 unless the surfaces are "
+                    "rebuilt tangent."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "surface": {
+                            "type": "string",
+                            "description": (
+                                "Surface whose border you want: a tree name, or "
+                                "'Face.N' from the active body"),
+                        },
+                        "name": {"type": "string", "description": "Optional name for the result"},
+                    },
+                    "required": ["surface"],
+                },
+            },
+            {
                 "name": "catia_gsd_intersection",
                 "description": "Create the intersection of two elements (e.g. surface ∩ plane).",
                 "inputSchema": {
@@ -433,6 +469,22 @@ class GSDTools:
                     "a monotone stack build. Changing a circle into a closed spline "
                     "is therefore NOT a fix for that failure; keeping the sections "
                     "monotone, splitting the loft at the turn, or 'ruled' are. "
+                    "WHEN ADJACENT SECTIONS HAVE THEIR ANGULAR FEATURES OUT OF "
+                    "PHASE (lobes, claws or ribs sitting at different angles), a "
+                    "report from a five-petal bottle base says the loft builds and "
+                    "catia_gsd_thick_surface then refuses 0.3 mm, because the "
+                    "interpolation between the two rings makes an S-twist whose "
+                    "curvature is too tight. Measured on B30 2026-11-03 on an "
+                    "isolated three-ring lobed loft (r = R + 2*cos(5t + phase), "
+                    "phases 0/30/0 degrees - a far bigger shift than the 10-12 "
+                    "degrees in that model): the loft built AND thickened 0.3 mm, "
+                    "at 40 and at 90 points per section, as did 0/15/0 and 0/0/0. "
+                    "So a phase shift on its own is not enough to reproduce it. In "
+                    "the model that reported it, the failing span also crossed "
+                    "joins between six patches and a split, so before re-cutting "
+                    "the sections find out whether the refusal is at a JOINED SEAM: "
+                    "run catia_check_surface with region={'z': [...]} (or r) over "
+                    "the span and see whether the tight edges cluster at one seam."
                     "POINT AND VERTEX SECTIONS ARE NOT SUPPORTED: the automation "
                     "loft accepts a datum point and then fails the update, and "
                     "refuses a solid Vertex.N outright with 'invalid number of "
@@ -799,7 +851,13 @@ class GSDTools:
                     "split the loft into 2-3 section pieces and catia_gsd_join "
                     "them rather than trusting a 6-10 section span because it "
                     "built. The same rule applies to any patch: check "
-                    "catia_check_surface after building and before offsetting."
+                    "catia_check_surface after building and before offsetting. "
+                    "SECTIONS WHOSE ANGULAR FEATURES ARE OUT OF PHASE are the "
+                    "other candidate - reported from the same bottle model - but "
+                    "measured on B30 2026-11-03 an isolated three-ring lobed loft "
+                    "with a 30 degree lobe shift still thickened 0.3 mm, so check "
+                    "the joined seams with catia_check_surface region={} before "
+                    "re-cutting the sections."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -864,6 +922,8 @@ class GSDTools:
                 return self._extract(arguments)
             case "catia_gsd_intersection":
                 return self._intersection(arguments)
+            case "catia_gsd_boundary":
+                return self._boundary(arguments)
             case "catia_gsd_multi_section_surface":
                 return self._multi_section_surface(arguments)
             case "catia_gsd_sweep":
@@ -1230,25 +1290,31 @@ class GSDTools:
         geoset.AppendHybridShape(shape)
         return self._completed(shape, name, message, geoset)
 
-    def _free_name(self, part: Any, wanted: str) -> str:
-        """``wanted``, or ``wanted.2`` / ``wanted.3`` … if that name is taken.
+    def _free_name(self, part: Any, wanted: str) -> tuple[str, bool]:
+        """``(name, verified)``: ``wanted``, or ``wanted.2`` / ``.3`` … if taken.
 
         Nothing in CATIA stops two elements from carrying the same name; this
         server used to produce them by assigning ``Name`` blindly, and a report
         then spent two hours on a join that kept failing after a rebuild it had
         already done (2026-11-03; measured: two elements named C_P, one delete
         removed one, the other C_P stayed and kept answering to that name).
+
+        ``verified`` is False when ``FindObjectByName`` itself failed, in which
+        case the caller has to say so: falling back to the requested name is the
+        only thing that can be done, but it is also exactly the pre-0.3.52
+        behaviour, so a silent fallback could recreate the duplicate this exists
+        to prevent (raised by the 0.3.52 acceptance report, 2026-11-03).
         """
         candidate = wanted
         for index in range(2, 52):
             try:
                 existing = part.FindObjectByName(candidate)
             except Exception:  # noqa: BLE001 - cannot tell, so take the caller's
-                return candidate
+                return candidate, False
             if existing is None:
-                return candidate
+                return candidate, True
             candidate = f"{wanted}.{index}"
-        return candidate
+        return candidate, True
 
     def _completed(self, shape: Any, name: str | None, message: str,
                    geoset: Any) -> str:
@@ -1262,9 +1328,15 @@ class GSDTools:
         part = self.conn.get_active_part()
         if name:
             wanted = str(name)
-            unique = self._free_name(part, wanted)
+            unique, verified = self._free_name(part, wanted)
             shape.Name = unique
-            if unique != wanted:
+            if not verified:
+                message += (
+                    f" NOTE: the name could not be checked against the existing "
+                    f"tree ({wanted} kept as given), so if another element already "
+                    f"carries it the part now holds two with that name - CATIA "
+                    f"allows it, and later calls by name are then ambiguous.")
+            elif unique != wanted:
                 # CATIA lets two elements share a name, and assigning Name does
                 # not check. A tree with two "P_04_06" makes every later call by
                 # name ambiguous: FindObjectByName returns one of them and
@@ -1272,9 +1344,14 @@ class GSDTools:
                 # like it did nothing (measured on B30 2026-11-03 - two elements
                 # named C_P, one delete, one C_P left, and that is also the state
                 # a report read as "delete + rebuild breaks the loft topology").
+                # The acceptance report of the same day measured which one wins:
+                # the OLD element keeps answering to the old name, deterministically
+                # rather than at random, which is worth saying because a caller who
+                # rebuilds and keeps the old name will keep getting the old element.
                 message += (f" NOTE: the name '{wanted}' was already taken, so this "
-                            f"element is '{unique}' - keeping both would make every "
-                            f"call by name pick one of two elements at random.")
+                            f"element is '{unique}'. The element already holding "
+                            f"'{wanted}' keeps that name and keeps answering to it, "
+                            f"so a call by '{wanted}' still reaches the OLD element.")
         part.InWorkObject = shape
         self._safe_update(shape)
         # Whatever points this call turned coordinates into belong to this
@@ -1699,6 +1776,31 @@ class GSDTools:
         return self._finish(
             extract, args.get("name"),
             f"Extract of '{args['element']}' (propagation {propagation}) created.",
+        )
+
+    def _boundary(self, args: dict[str, Any]) -> str:
+        """The boundary curve of a surface: ``AddNewBoundaryOfSurface(Surface)``.
+
+        Measured on B30 2026-11-03: the typelib declares it with ONE parameter,
+        and it updates - on a 30 mm extrusion of a r=10 circle the boundary
+        measured 125.664 mm, i.e. exactly the two circles (2 x 2*pi*10). That
+        makes it the cheap way to rebuild a patch from its border, which is what
+        "delete this face, keep its outline" needs.
+
+        No propagation argument: unlike Extract, the boundary of a surface is one
+        curve and there is nothing to propagate along. The two-argument overload
+        some documentation mentions is not reachable here (measured: passing two
+        arguments raises "takes from 1 to 2 positional arguments but 3 were
+        given" from the wrapper).
+        """
+        self.conn.ensure_connected()
+        element = args["surface"]
+        boundary = self._factory().AddNewBoundaryOfSurface(self._ref(element))
+        return self._finish(
+            boundary, args.get("name"),
+            f"Boundary of '{element}' created (a closed surface gives one curve "
+            f"with both loops; measure it with catia_measure_distance if its "
+            f"length matters).",
         )
 
     def _intersection(self, args: dict[str, Any]) -> str:

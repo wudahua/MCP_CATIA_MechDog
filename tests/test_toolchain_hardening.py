@@ -103,10 +103,17 @@ def test_single_fillet_still_takes_the_plain_edge_name():
 def test_element_aliases_resolve_and_the_error_names_them_all():
     assert _pick({"elem1_name": "Edge.3"}, "element1", "elem1_name") == "Edge.3"
     assert _pick({"element1_name": "Edge.4"}, "element1", "element1_name") == "Edge.4"
-    with pytest.raises(ValueError) as caught:
+    # ArgumentRejected since 0.3.53, not ValueError: a bare ValueError carries no
+    # code and no stage, so this refusal reached the caller as COM_ERROR /
+    # failure_stage "execute" - a communication failure for a call that never
+    # touched CATIA. Reported 2026-10-31 and left open for seven releases.
+    from catia_mcp.results import ArgumentRejected
+
+    with pytest.raises(ArgumentRejected) as caught:
         _pick({"nope": 1}, "element1", "elem1_name", "element1_name")
     assert "element1" in str(caught.value)
     assert "elem1_name" in str(caught.value)
+    assert getattr(caught.value, "stage", None) == "validate"
 
 
 # ─────────────────────────────────────────── failure messages carry state

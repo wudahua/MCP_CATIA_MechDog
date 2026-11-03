@@ -18,6 +18,7 @@ counts and the centre of gravity catch those.
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any
 
@@ -622,7 +623,7 @@ class PlannerTools:
                 {"index": entry["index"], "tool": entry["tool"],
                  "message": self._trim(str(entry.get("result") or ""))}
                 for entry in report
-                if entry["ok"] and "WARNING" in str(entry.get("result") or "").upper()
+                if entry["ok"] and self._step_has_warning(entry.get("result"))
             ]
             if warned:
                 data["step_warnings"] = warned
@@ -740,6 +741,38 @@ class PlannerTools:
         if len(text) <= MAX_RESULT_CHARS:
             return text
         return text[:MAX_RESULT_CHARS] + f"... ({len(text)} chars)"
+
+    @staticmethod
+    def _step_has_warning(result: Any) -> bool:
+        """Did this step's reply carry a warning, in text or in a field?
+
+        The test used to be ``"WARNING" in result.upper()``, which answers yes
+        for a reply whose only warning-shaped thing is the KEY of an empty list:
+        ``"warnings": []`` contains the word, so any tool that always emits that
+        key would put every one of its steps into step_warnings and drown the
+        real one. Measured 2026-11-03 against a step that succeeded with no
+        warning: the text matched on the key alone.
+
+        The paragraph form matters too - tools write " WARNING: nothing was
+        removed" in the MIDDLE of a reply, so a line-start match would miss
+        them; the substring test stays, with empty structured lists removed
+        first. A non-empty ``warnings`` field counts even when no tool spelled
+        the word out.
+        """
+        text = result if isinstance(result, str) else str(result or "")
+        upper = text.upper()
+        if "WARNING" not in upper:
+            return False
+        try:
+            payload = json.loads(text)
+        except Exception:  # noqa: BLE001 - a plain-text reply is the common case
+            payload = None
+        if isinstance(payload, dict) and payload.get("warnings"):
+            return True
+        # Strip empty structured lists before believing the substring: they are
+        # the shape that made this test lie.
+        stripped = re.sub(r'"WARNINGS"\s*:\s*\[\s*\]', "", upper)
+        return "WARNING" in stripped
 
     # ---- measurement --------------------------------------------------------
     def _is_wireframe(self, selection_item: Any) -> bool:

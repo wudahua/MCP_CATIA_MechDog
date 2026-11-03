@@ -25,7 +25,7 @@ PRs may be written in English or Chinese (欢迎使用中文).
 3. **Run the offline test suite** before pushing:
    ```bash
    pip install -e ".[dev]"
-   python -m pytest tests test_server.py -q
+   python -m pytest tests -q
    ```
    It validates imports, tool schemas, name uniqueness and routing without
    needing CATIA. CI runs the same suite on Windows.

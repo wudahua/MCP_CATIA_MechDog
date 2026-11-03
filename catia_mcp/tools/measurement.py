@@ -71,7 +71,46 @@ def _stl_triangles(path: str, cap: int) -> list[tuple[tuple[float, float, float]
     return out
 
 
-def _fold_stats(path: str, crease_deg: float, cap: int) -> dict[str, Any]:
+def _region_bounds(region: Any) -> dict[str, tuple[float, float]] | None:
+    """Validate a ``region`` filter: ``{'r': [lo, hi], 'z': [...], 'theta_deg': [...]}``.
+
+    Returns the ranges in a normal form or None. Ranges are closed and either
+    bound may be missing (``[12, None]`` = "12 and out"). ``theta_deg`` wraps
+    when lo > hi, so ``[350, 10]`` is the 20-degree wedge across +X.
+    """
+    if not region:
+        return None
+    if not isinstance(region, dict):
+        raise ArgumentRejected(
+            "'region' must be an object with any of 'r', 'theta_deg', 'z' as "
+            "[lo, hi] pairs - for example {\"r\": [25, 29]}.")
+    bounds: dict[str, tuple[float, float]] = {}
+    for key in ("r", "theta_deg", "z"):
+        if key not in region or region[key] is None:
+            continue
+        pair = region[key]
+        if not isinstance(pair, (list, tuple)) or not 1 <= len(pair) <= 2:
+            raise ArgumentRejected(
+                f"'region.{key}' must be a [lo, hi] pair, not {pair!r}.")
+        lo = -math.inf if len(pair) < 1 or pair[0] is None else float(pair[0])
+        hi = math.inf if len(pair) < 2 or pair[1] is None else float(pair[1])
+        if lo > hi:
+            if key == "theta_deg":
+                # an angle range may legitimately cross 0
+                bounds[key] = (lo, hi)
+                continue
+            raise ArgumentRejected(
+                f"'region.{key}' has lo {lo:g} above hi {hi:g}; only "
+                f"'theta_deg' may wrap.")
+        bounds[key] = (lo, hi)
+    if not bounds:
+        return None
+    return bounds
+
+
+def _fold_stats(path: str, crease_deg: float, cap: int,
+                region: dict[str, tuple[float, float]] | None = None
+                ) -> dict[str, Any]:
     """Dihedral angle across every interior edge of a mesh.
 
     This is the answer to "is the surface smooth" without zebra stripes, which
@@ -86,6 +125,13 @@ def _fold_stats(path: str, crease_deg: float, cap: int) -> dict[str, Any]:
     STL chords every curved face, so even a perfect cylinder has a fold across
     its facet edges. ``median`` is that background level and ``max`` is what the
     caller is looking for.
+
+    ``region`` restricts the fold statistics to edges whose MIDPOINT falls in a
+    cylindrical window (r, theta from +X in the XY plane, z). A whole-part median
+    mixes a tight transition band with a smooth wall and hides the band; asking
+    for r 24..28 is how "which ring is too tight" gets answered instead of argued
+    (requested 2026-11-03). Boundary and non-manifold counts stay whole-mesh -
+    they describe the topology, not a place.
     """
     faces = _stl_triangles(path, cap)
 
@@ -111,6 +157,28 @@ def _fold_stats(path: str, crease_deg: float, cap: int) -> dict[str, Any]:
     multi = 0
     worst = (0.0, None)
     creases: list[dict[str, Any]] = []
+    outside = 0
+
+    def inside(mid: tuple[float, float, float]) -> bool:
+        if region is None:
+            return True
+        x, y, z = mid
+        radius = math.hypot(x, y)
+        theta = math.degrees(math.atan2(y, x)) % 360.0
+        for key, value in (("r", radius), ("z", z), ("theta_deg", theta)):
+            span = region.get(key)
+            if span is None:
+                continue
+            lo, hi = span
+            if key == "theta_deg" and lo > hi:
+                # a wedge across +X: 350..10 means 350..360 plus 0..10
+                if not (value >= lo or value <= hi):
+                    return False
+                continue
+            if not lo <= value <= hi:
+                return False
+        return True
+
     for edge, normals in edges.items():
         if len(normals) == 1:
             boundary += 1
@@ -118,6 +186,11 @@ def _fold_stats(path: str, crease_deg: float, cap: int) -> dict[str, Any]:
         if len(normals) > 2:
             multi += 1
             continue
+        if region is not None:
+            mid = tuple((edge[0][axis] + edge[1][axis]) / 2.0 for axis in range(3))
+            if not inside(mid):  # type: ignore[arg-type]
+                outside += 1
+                continue
         fold = angle(normals[0], normals[1])
         folds.append(fold)
         if fold > worst[0]:
@@ -133,7 +206,7 @@ def _fold_stats(path: str, crease_deg: float, cap: int) -> dict[str, Any]:
         return round(folds[min(len(folds) - 1, int(quantile * len(folds)))], 2)
 
     creases.sort(key=lambda item: -item["fold_deg"])
-    return {
+    stats: dict[str, Any] = {
         "triangles": len(faces),
         "interior_edges": len(folds),
         "boundary_edges": boundary,
@@ -144,6 +217,20 @@ def _fold_stats(path: str, crease_deg: float, cap: int) -> dict[str, Any]:
         "worst_creases": creases[:8],
         "crease_threshold_deg": crease_deg,
     }
+    if region is not None:
+        # Say what was left out, or "median 3.1 deg" reads as a whole-part fact.
+        stats["interior_edges_total"] = len(folds) + outside
+        stats["interior_edges_outside_region"] = outside
+        stats["region"] = {
+            key: [None if math.isinf(bound) else bound for bound in span]
+            for key, span in region.items()
+        }
+        stats["region_note"] = (
+            f"fold figures cover the {len(folds)} interior edge(s) whose midpoint "
+            f"falls inside the region; {outside} edge(s) outside it were not "
+            f"counted. boundary_edges and non_manifold_edges are still whole-mesh."
+        )
+    return stats
 
 
 def _stl_scan(path: str, limit: int | None = None
@@ -763,9 +850,15 @@ def _pick(arguments: dict[str, Any], *names: str) -> str:
     for name in names:
         if arguments.get(name) is not None:
             return arguments[name]
-    raise ValueError(
-        "missing element argument: pass %s (aliases: %s)."
-        % (names[0], ", ".join(names[1:]))
+    # ArgumentRejected, not ValueError: a plain ValueError carries no code and no
+    # stage, so the server fell back to COM_ERROR with failure_stage "execute" -
+    # a communication failure reported for a call that never reached CATIA, with
+    # the "check in_work_object" paragraph attached. Reported 2026-10-31 and left
+    # open for seven releases because the fix looked like it needed schema-level
+    # `required`, which the aliases make impossible; the tool can say it itself.
+    raise ArgumentRejected(
+        "missing element argument: pass '%s' (accepted spellings: %s)."
+        % (names[0], ", ".join(names))
     )
 
 
@@ -1163,6 +1256,29 @@ class MeasurementTools:
                                 "Document name, if it is not the active one. The "
                                 "active document is used otherwise."),
                         },
+                        "region": {
+                            "type": "object",
+                            "description": (
+                                "Restrict the fold statistics to one place in the "
+                                "model, so a tight transition band is not averaged "
+                                "away by a smooth wall. Any of the three keys, each "
+                                "a [lo, hi] pair (either end may be null): 'r' = "
+                                "distance from the Z axis, 'z' = height, "
+                                "'theta_deg' = angle from +X in the XY plane, "
+                                "0..360, and it WRAPS when lo > hi ([350, 10] is "
+                                "the 20-degree wedge across +X). An edge counts "
+                                "when its MIDPOINT is inside. Example, the ring a "
+                                "report called 'too tight': {\"r\": [24, 28]}. "
+                                "boundary_edges and non_manifold_edges stay "
+                                "whole-mesh; the reply reports how many edges the "
+                                "region excluded."),
+                            "properties": {
+                                "r": {"type": "array", "items": {"type": "number"}},
+                                "z": {"type": "array", "items": {"type": "number"}},
+                                "theta_deg": {"type": "array",
+                                              "items": {"type": "number"}},
+                            },
+                        },
                     },
                     "required": [],
                 },
@@ -1203,7 +1319,8 @@ class MeasurementTools:
                 return self._check_surface(
                     float(arguments.get("crease_deg", 25.0)),
                     int(arguments.get("cap", 600000)),
-                    arguments.get("document") or arguments.get("document_name"))
+                    arguments.get("document") or arguments.get("document_name"),
+                    arguments.get("region"))
             case _:
                 raise ValueError(f"Unknown measurement tool: {tool_name}")
 
@@ -3796,7 +3913,8 @@ class MeasurementTools:
         return json.dumps(report, indent=2)
 
     def _check_surface(self, crease_deg: float = 25.0, cap: int = 600000,
-                       document: str | None = None) -> str:
+                       document: str | None = None,
+                       region: Any = None) -> str:
         """Dihedral-angle report of the active part's mesh: the zebra substitute.
 
         CATIA V5 exposes no zebra, curvature-comb or environment-mapping object
@@ -3814,6 +3932,7 @@ class MeasurementTools:
         that background is the median. A crease is an edge far above it.
         """
         self.conn.ensure_connected()
+        bounds = _region_bounds(region)
         part = self.conn.get_active_part()
         if document:
             doc = self._resolve_open_document(document)
@@ -3829,7 +3948,7 @@ class MeasurementTools:
         def grab(path: str) -> None:
             # Runs INSIDE _mesh_export, before its finally removes the temporary
             # directory - the file is gone by the time the call returns.
-            captured["stats"] = _fold_stats(path, crease_deg, cap)
+            captured["stats"] = _fold_stats(path, crease_deg, cap, bounds)
 
         self._mesh_export(part, None, grab)
         stats = captured.get("stats")
@@ -3865,7 +3984,9 @@ class MeasurementTools:
             "scope": scope,
             "geometrical_sets": sets_total,
             "how_to_read": (
-                f"median {median} deg is the mesh's own chording of curved faces, "
+                ("" if bounds is None else
+                 f"these figures cover the region only ({stats['region_note']}); ")
+                + f"median {median} deg is the mesh's own chording of curved faces, "
                 f"not a defect; the question is whether any edge sits far above "
                 f"it. {stats['creases']} edge(s) are at or above the "
                 f"{crease_deg:g} deg threshold. A G0 fold between two joined "

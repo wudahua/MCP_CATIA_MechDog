@@ -2,6 +2,72 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.53] — 2026-11-03 · one number for the test count, one argument for boundary
+
+Three reports arrived together: the 0.3.52 acceptance, a "what is still missing
+for 100 %" gap list, and a curvature-deadlock post-mortem. Measurements first
+(scripts/b30_v0353_probe.py, _signatures.py, _fillet.py, _corner.py), code after.
+
+**The test count had two answers, and the report was right.** `pytest tests`
+collected 888 while 0.3.51 and 0.3.52 both reported 891, because three tests
+lived in a root-level `test_server.py` that only the CI command named. The file
+now sits in `tests/`, so `pytest tests -q` is the one command and one number
+(909 here), and CI, CONTRIBUTING and docs/server-runtime.md all say it.
+
+**`catia_measure_distance {}` no longer answers COM_ERROR.** The empty call was
+reported on 2026-10-31 and stayed open for seven versions: `_pick` raised a bare
+ValueError, which carries no code and no stage, so the server fell back to
+`COM_ERROR` / `failure_stage: execute` and attached the "check in_work_object"
+paragraph to a call that never reached CATIA. It raises `ArgumentRejected` now,
+names every accepted spelling, and the envelope says `validate`.
+
+**`step_warnings` stops firing on `"warnings": []`.** Same report date, same
+seven versions. Every envelope carries that key, and the substring test
+`"WARNING" in result.upper()` matched the KEY, so a tool that always emits it put
+every step into the warnings list. Empty arrays are stripped first; a non-empty
+`warnings` field or a " WARNING:" anywhere in a paragraph still counts.
+
+**`catia_gsd_boundary`** (103rd tool): the border curve of a surface. Measured on
+B30 - `AddNewBoundaryOfSurface` takes ONE argument and updates, and on the 30 mm
+extrusion of a r=10 circle the boundary measured 125.664 mm, exactly the two
+circles. It is what "keep the outline, delete the face, build it again" needs;
+`catia_gsd_extract` cannot do it, because an extract of a face returns a surface.
+
+**`catia_check_surface` takes a `region`**: `{"r": [24, 28]}` or `z` or
+`theta_deg` (wrapping when lo > hi) restricts the fold statistics to edges whose
+midpoint falls inside, and the reply reports how many edges that excluded. The
+whole-part median mixes a tight transition band with a smooth wall and hides the
+band, which is the question the report could not answer. Boundary and
+non-manifold counts stay whole-mesh and say so.
+
+**The "angular features out of phase" failure mode is documented as a report,
+not as a fact.** Measured on B30 on an isolated three-ring lobed loft
+(r = R + 2·cos(5t + phase)) with a 30° lobe shift - far more than the 10-12° in
+the model that reported it - the loft BUILT and THICKENED 0.3 mm, at 40 and at 90
+points per section, as did 0/15/0 and 0/0/0. The loft and thick_surface
+descriptions now say that and point at the joined seams (`region={}`, six patches
+and a split in that model) instead of repeating a mechanism that did not
+reproduce.
+
+**Boundary could be shipped; the fillet and the spine could not.** The gap list
+calls all three P0 and says the factory "already declares" them. `ITypeInfo`
+gives the real signatures: `AddNewFilletBiTangent(el1, el2, radius, o1, o2,
+trimMode, relimitation)` and `AddNewSpine()` with no arguments at all. The fillet
+updates for exactly one orientation pair out of four on a 90° corner (o1 = −1,
+o2 = +1) and fails at update for all nine combinations between two disjoint
+parallel cylinders; the spine cannot be given sections, which the typelib does
+not name. Neither ships until the geometry is verified - the same rule that
+refused `catia_gsd_healing` in 0.3.51.
+
+Also: the reply for a taken name said later calls would "pick one of two
+elements at random"; measured, the OLD element keeps the name and keeps answering
+to it, so it says that now. `_free_name` returns whether the lookup worked and
+the reply admits it when it did not - the silent fallback was the one path that
+could recreate the duplicate 0.3.52 removed. And `.sha256` is uploaded with the
+zip again (it had been missing from three releases).
+
+909 tests, 18 of them new. All measured on B30 before and after.
+
 ## [0.3.52] — 2026-11-03 · the rebuild was innocent; the duplicate name was not
 
 The fourth report on the same bottle says that deleting a loft and rebuilding it
