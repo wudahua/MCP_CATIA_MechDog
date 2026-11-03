@@ -2,6 +2,59 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.56] — 2026-11-04 · the fillet and the spine were never unusable
+
+Two sentences from 0.3.53 came off the "Known limits" list. Both were wrong, and
+wrong the same way: a declared call was tried once, in one arrangement, and its
+failure was read as a property of the object.
+
+**The surface fillet builds a true rolling-ball fillet.** 0.3.53 wrote "what it
+builds is unverified". It is verified now, with the walls hidden so the STL
+carried the fillet alone - the isolation 0.3.55 had to learn for healing, where
+three features exported together read as their union:
+
+    90 deg wedge, r=5, 40 mm edge   every vertex 5.0000 mm from the rolling-ball
+                                    axis (min = max), area 314.159 mm2 = (pi/2)rL
+    60 deg / 120 deg, r=5           radius min = max = 5.0000, areas 418.879 and
+                                    209.440 mm2 = (pi - theta) r L
+    floor z=0 + wall x=0, r=5       radius min = max = 5.0000, area 471.239 exact
+
+The working pair was (o1 = -1, o2 = +1) in all four cases, including the
+floor-and-wall corner built in a completely different direction, so it is a
+property of the call and not of the build order. What 0.3.53 could not see is
+why only one pair works - and what it never tried: the same call between a disc
+and a cylinder standing on it builds TWO surfaces, (+1,+1) 573.4 mm2 and (+1,-1)
+391.3 mm2. So `catia_gsd_fillet_surface` searches the four pairs, keeps the
+survivor, and refuses in both other cases: none (two disjoint parallel
+cylinders, the arrangement 0.3.53 mistook for a verdict) and more than one
+(because two survivors are two different surfaces, and choosing one would be a
+guess dressed as a result). Failed attempts are deleted immediately - a fillet
+left in ERROR makes every later `part.Update()` fail, which is why the first
+probe had to split its matrix and its geometry check across two documents.
+
+**The spine has always had `AddSection`.** 0.3.53 wrote "the typelib names no way
+to give it sections". The typelib declares 40 members on `HybridShapeSpine`,
+`AddSection(iSection)` and `AddGuide(iGuide)` among them; the probe behind that
+sentence listed `dir(spine)` filtered for "Add" and found nothing, which for a
+late-bound COM object proves nothing. Measured: sections register, the count
+moves, and `UpdateObject` succeeds with two or more (the 0.3.53 failure was on an
+EMPTY spine - a different statement). The curve is the spine and not a line
+through the centres: three parallel rings 40 mm apart gave 40.0000 mm along their
+common axis and did not bend for a 30 mm sideways offset, because a spine follows
+the sections' NORMALS; a second ring tilted 45 deg made it a 37.9224 mm curve
+that leaves that axis by 7.05 mm at z=10.
+
+**One measurement corrected on the way.** `Measurable.Area` is not always 0.0 for
+a surface after all: the r=5 band read 0.000314, i.e. 314.159 mm2 in the MKS
+units the SPA workbench uses, on every healthy document. In a document that
+already carried six broken fillets the same kind of element read 0.0 and 0.005 -
+so a zero area is evidence that the part is in error, not that a surface has no
+area. The tools do not publish an area for this reason; they report the
+orientation and point at `catia_check_surface`.
+
+940 tests, 14 new. Measured on B30 before and after, with the geometry read from
+the STL the same way the tool's own numbers are.
+
 ## [0.3.55] — 2026-11-04 · healing stitches, it does not smooth - and 0.3.51 measured air
 
 The five-petal bottle model report asked for one thing: its five seams are "same

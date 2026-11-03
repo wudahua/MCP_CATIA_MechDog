@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.55** · [what changed](CHANGELOG.md) ·
+**0.3.56** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -12,7 +12,7 @@ defects that make that loop lie to you. Most of the work since 0.3.0 came from
 people rebuilding real assemblies with it: the changelog is a list of things that
 produced a plausible number, a wrong number, or no explanation at all.
 
-**104 tools** (upstream: 98 — 16 dropped, 22 added). Nothing in the COM layer was
+**106 tools** (upstream: 98 — 16 dropped, 24 added). Nothing in the COM layer was
 rewritten — the value of upstream is the field-verified knowledge in its
 comments, so this fork is strictly add / subtract / patch. The count is asserted
 by `tests/test_readme_tool_counts.py`, so it cannot drift from the code again.
@@ -58,13 +58,14 @@ by `tests/test_readme_tool_counts.py`, so it cannot drift from the code again.
 `export` (STEP/STL hand-off) and `http_transport` (remote agent) are kept: they
 are domain-neutral and cheap. See `FORK.md` §8 if you want to cut further.
 
-### Added (22 tools over upstream)
+### Added (24 tools over upstream)
 
-Five of them came with the fork, seventeen were added while building parts from
+Five of them came with the fork, nineteen were added while building parts from
 a spec (0.3.1: three, 0.3.2: four, 0.3.4: one, 0.3.5: one, 0.3.8: two, 0.3.17:
 two - `catia_delete_body`, `catia_solid_loft`; 0.3.19: one - `catia_copy_component`;
-0.3.51: one - `catia_check_surface`; 0.3.53: one - `catia_gsd_boundary`; 0.3.55: one - `catia_gsd_heal`).
-Upstream 98 − 16 dropped + 22 added = 104. 0.3.20 added arguments instead of
+0.3.51: one - `catia_check_surface`; 0.3.53: one - `catia_gsd_boundary`; 0.3.55: one - `catia_gsd_heal`; 0.3.56: two -
+`catia_gsd_fillet_surface`, `catia_gsd_spine`).
+Upstream 98 − 16 dropped + 24 added = 106. 0.3.20 added arguments instead of
 tools: a sketch support given as `origin`/`u`/`v`, edges given as coordinates,
 arcs given as their two endpoints, and one plan per several documents.
 
@@ -76,7 +77,7 @@ arcs given as their two endpoints, and one plan per several documents.
 | `catia_get_component_transform` | The same placement in both conventions, plus where local X/Y/Z point in the assembly |
 | `catia_rename_component` | A readable assembly tree. `Part.Name` is read-only on V5-6R2020, so every part arrives as `Part1.1 / Part2.1 / …`; the instance name is writable |
 
-#### Added while building parts from a spec (17 tools)
+#### Added while building parts from a spec (19 tools)
 
 | Tool | Version | Why it exists |
 |---|---|---|
@@ -94,9 +95,10 @@ arcs given as their two endpoints, and one plan per several documents.
 | `catia_sketch_delete_element` | 0.3.8 | Removes one element (the wrong third line) and keeps the rest of the profile and the features built on it |
 | `catia_set_part_number` | 0.3.4 | Every part cloned from a template carries `Part1`, so a 24-instance assembly of 24 distinct parts reports 24 identical part numbers and CATIA fills the screen with “零件编号 Part1 已存在”. The number, not the instance name, is what the BOM reads |
 | `catia_gsd_extract` | 0.3.2 | `catia_gsd_fill` needs a boundary *curve*, and a sketch reference is rejected — without an extract there was no way to cap a lofted surface into a solid |
-| `catia_gsd_boundary` | 0.3.53 |
+| `catia_gsd_boundary` | 0.3.53 | A patch with a C0 seam has to be rebuilt from its own border, and `catia_gsd_extract` cannot do it - an extract of a face returns a surface, not the wire round it. `AddNewBoundaryOfSurface` takes one argument and updates: on a 30 mm extrusion of a r=10 circle the boundary measured 125.664 mm, exactly the two circles |
 | `catia_gsd_heal` | 0.3.55 | Two surfaces that do not quite meet cannot be joined (a join wants a shared edge) and cannot be lofted together. `AddNewHealing` stitches them: measured on B30 2026-11-03, two lofts 0.05 mm apart went from 48 open seam edges to 0 with merging distance 0.5, while 0.001 changed nothing. It does NOT change continuity - a 0.52 deg seam stayed 0.52 deg - and the same operator had been written off in 0.3.51 because the test never registered a body with `AddBodyToHeal` |
- A patch with a C0 seam has to be rebuilt from its own border, and `catia_gsd_extract` cannot do it - an extract of a face returns a surface, not the wire round it. `AddNewBoundaryOfSurface` takes one argument and updates: on a 30 mm extrusion of a r=10 circle the boundary measured 125.664 mm, exactly the two circles |
+| `catia_gsd_fillet_surface` | 0.3.56 | 0.3.53 called this object unverified and shipped nothing. Verified on B30 2026-11-03: the one orientation pair CATIA accepts on a straight corner, `(-1,+1)`, builds a true rolling-ball fillet - on 60/90/120 deg wedges every mesh vertex sat at exactly 5.0000 mm from the axis for r=5 (min = max) and the area was 314.159 / 418.879 / 209.440 mm² = `(π − θ)·r·L`, and a floor-and-wall corner built in another direction behaved identically. The tool tries the four pairs and keeps the survivor, refuses when none survives (two disjoint cylinders: 0 of 9) and refuses when more than one does (disc + standing cylinder built two different surfaces, 573.4 and 391.3 mm²) instead of choosing for the caller |
+| `catia_gsd_spine` | 0.3.56 | 0.3.53 said the typelib "names no way to give it sections". It does: `HybridShapeSpine` declares 40 members including `AddSection`, `AddGuide`, `GetNumberOfSections` and `ModifySectionCurve`, and the old probe had only looked at `dir(spine)`. Measured: sections register, `UpdateObject` succeeds with two or more (one fails), and the curve is the spine - normal to the sections, not through their centres (three parallel rings gave 40.0000 mm and did not bend for a 30 mm sideways offset; a 45° tilted ring made it a 37.9224 mm curve that leaves that axis by 7.05 mm) |
 | `catia_check_surface` | 0.3.51 | A surface task's acceptance criteria were "check with zebra stripes that the valley is smooth", and CATIA V5 gives automation no zebra, no curvature comb and no Match object (measured: the viewer answers `RenderingMode` and returns an unresolvable attribute for `Zebra` / `EnvironmentMapping` / `AnalysisMode`). The mesh can answer it anyway: the dihedral angle across every interior edge, so a G0 fold reads as degrees instead of needing a picture |
 
 ### Fixed (latent upstream bugs, reproduced on a live V5-6R2020 B30 session)
@@ -1103,7 +1105,7 @@ while a reply that only reports success cannot.
 | Document | 12 | new/open/save/close/list + `catia_save_as_copy`; `catia_save_document` retries around dialogs |
 | Sketcher | 13 | lines, rectangles, circles, constraints; reopen a closed sketch and delete one element |
 | Part Design | 25 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, solid loft, bodies (create / list / delete)… |
-| Generative Shape Design | 27 | wireframe and surfaces, extract, `boundary`, `heal`, revolve + close surface; a GSD element or set is removed with `catia_delete_feature` |
+| Generative Shape Design | 29 | wireframe and surfaces, extract, `boundary`, `heal`, `fillet_surface`, `spine`, revolve + close surface; a GSD element or set is removed with `catia_delete_feature` |
 | Assembly | **13** | upstream 9 + get/set component transform, rename, list constraints, copy component |
 | Measurement | 7 | inertia, distance, bounding box\*, parameters, `catia_check_surface` |
 | Export | 4 | STEP / STL / IGES hand-off |
@@ -1132,20 +1134,30 @@ Place the result with `catia_get_component_transform`.
 
 ## Known limits
 
-* **No surface-to-surface fillet, and no spine.** Both exist in the typelib and
-  neither is exposed, for the same reason `AddNewHealing` is not: measured on B30
-  2026-11-03, `AddNewFilletBiTangent(surface1, surface2, radius, o1, o2,
-  trimMode, relimitation)` updates for exactly one orientation pair out of four on
-  a 90° corner (o1 = −1, o2 = +1) and fails the update for all nine combinations
-  between two disjoint parallel cylinders, so what it builds is unverified - the
-  UI's Edge Fillet and this automation object are not the same thing.
-  `AddNewSpine()` takes no parameters at all and the typelib names no way to give
-  it sections, so it cannot be driven. Round the edge in the geometry you build
-  (an arc in the profile, as the five-petal bottle base ended up doing with its
-  R3), or fillet a SOLID edge with `catia_fillet` if the wall is thick enough for
-  the radius. **Read `typeinfo` as "declared", never as "usable"** - that is how
-  `AddNewHealing` cost a release (declared with one argument, and unusable until
-  `AddBodyToHeal` was called; see the healing bullet below).
+* **A surface fillet only where the two surfaces form a plain corner, and a
+  spine only from two or more sections.** 0.3.53 wrote that neither could be
+  driven; 0.3.56 measured both and that was wrong twice over, in the same way -
+  a declared call was tried in one arrangement and its failure read as a
+  property of the object. `catia_gsd_fillet_surface` drives
+  `AddNewFilletBiTangent` across the four orientation pairs and keeps the
+  survivor - always (o1 = −1, o2 = +1) on the corners measured, whichever
+  direction the supports were built in. That pair builds a true
+  rolling-ball fillet (every mesh vertex at exactly r from the axis, area
+  `(π − θ)·r·L` to 0.001 % on 60/90/120° corners), but it refuses when
+  none survives - two surfaces that do not share an edge, which is what the two
+  disjoint cylinders were - and it refuses when more than one does, because those
+  are different surfaces (a disc with a cylinder standing on it gave 573.4 and
+  391.3 mm²). `catia_gsd_spine` drives `AddNewSpine` with
+  `AddSection`/`AddGuide`, which the typelib has always declared: 40 members, and the 0.3.53 probe had only looked
+  at `dir(spine)`. It still needs two sections (`UpdateObject` fails on one) and
+  its curve follows the sections' NORMALS, not their centres. Where neither
+  applies, round the edge in the geometry you build (an arc in the profile, as
+  the five-petal bottle base ended up doing with its R3), or fillet a SOLID edge
+  with `catia_fillet` if the wall is thick enough for the radius. **Read
+  `typeinfo` as "declared", never as "usable"** - that is how `AddNewHealing`
+  cost a release (declared with one argument, and unusable until `AddBodyToHeal`
+  was called) - **but read it properly before calling something unusable**: a
+  40-member interface is not absent because `dir()` showed nothing.
 * **`set_view` works in the ABSOLUTE axis system, not the part's.** `front` means
   "look along −Y with +Z up" in the document's axes whatever the model's own
   orientation, so a part rotated in the tree (or a component placed with a

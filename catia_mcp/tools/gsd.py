@@ -419,6 +419,109 @@ class GSDTools:
                 },
             },
             {
+                "name": "catia_gsd_fillet_surface",
+                "description": (
+                    "Round the edge where TWO SURFACES meet: a rolling-ball fillet "
+                    "of the given radius, as a GSD surface. "
+                    "MEASURED on B30 2026-11-03, and the reason this tool exists: "
+                    "AddNewFilletBiTangent(el1, el2, r, o1, o2, trim, relim) "
+                    "updates for exactly ONE of the four orientation pairs on a "
+                    "straight corner, (-1, +1), and what it builds is a real "
+                    "fillet - on 60/90/120 deg wedges every mesh vertex sat at "
+                    "exactly r from the rolling-ball axis (min = max = r, area "
+                    "314.159 mm2 for r=5 on a 40 mm 90 deg edge, i.e. "
+                    "(pi - theta) * r * L to 0.001 %), and the same held for a "
+                    "floor-and-wall corner built in a different direction - so "
+                    "(-1,+1) is a property of the call, not of the build order. "
+                    "This tool tries all four and keeps what CATIA accepts, but "
+                    "ONLY when exactly one survives. None surviving means the two "
+                    "surfaces do not form a corner (measured: two disjoint "
+                    "parallel cylinders, 0 of 9 combinations, which is the "
+                    "arrangement 0.3.53 mistook for a verdict). MORE THAN ONE "
+                    "surviving means the pair is not a plain corner: a disc with a "
+                    "cylinder standing on it built both (+1,+1) and (+1,-1), "
+                    "573.4 and 391.3 mm2, two different surfaces - and then this "
+                    "tool refuses rather than picking one for the caller. "
+                    "Trim is fixed at 0 on purpose: trim=1 also trims the SUPPORT "
+                    "surfaces, so the result covers the walls as well (measured: "
+                    "the same 90 deg case jumped from 314.159 to 4714.159 mm2). "
+                    "Round a SOLID edge with catia_fillet when the wall is thick "
+                    "enough for the radius; catia_gsd_blend joins two curves, it "
+                    "does not round an edge."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "surface1": {
+                            "type": "string",
+                            "description": "First surface, by tree name",
+                        },
+                        "surface2": {
+                            "type": "string",
+                            "description": (
+                                "Second surface, by tree name. It has to share an "
+                                "edge with the first: two surfaces that meet at a "
+                                "corner, not two that merely exist."),
+                        },
+                        "radius": {
+                            "type": "number",
+                            "exclusiveMinimum": 0,
+                            "description": "Fillet radius in mm",
+                        },
+                        "name": {"type": "string", "description": "Optional name"},
+                    },
+                    "required": ["surface1", "surface2", "radius"],
+                },
+            },
+            {
+                "name": "catia_gsd_spine",
+                "description": (
+                    "Create a SPINE: the curve normal to a series of section "
+                    "curves - reference geometry for carrying sweep sections "
+                    "along. Feed the result to catia_gsd_sweep as its 'guide'. "
+                    "CORRECTION to what 0.3.53 wrote: 'the typelib names no way to "
+                    "give it sections' was wrong. HybridShapeSpine declares 40 "
+                    "members, among them AddSection(iSection), AddGuide(iGuide), "
+                    "GetNumberOfSections(), GetSection and ModifySectionCurve; the "
+                    "0.3.53 probe listed dir(spine) filtered for 'Add' and found "
+                    "nothing, which for a late-bound COM object proves nothing at "
+                    "all. "
+                    "MEASURED on B30 2026-11-03: AddSection takes a circle, "
+                    "GetNumberOfSections counts it, and UpdateObject SUCCEEDS - "
+                    "the failure 0.3.53 measured was on an EMPTY spine, which is a "
+                    "different statement. One section is not enough (update "
+                    "fails). And it is a spine, not a line through the centres: "
+                    "three parallel rings 40 mm apart gave 40.0000 mm along their "
+                    "common axis and stayed there when a centre was offset 30 mm "
+                    "sideways, because a spine follows the sections' NORMALS; a "
+                    "second ring tilted 45 deg turned it into a 37.9224 mm curve "
+                    "that leaves that axis by 7.05 mm at z=10. "
+                    "Guides are accepted too (AddGuide moved the guide count to 1 "
+                    "and the update stayed clean)."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "sections": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "description": (
+                                "Section curves by tree name, at least two. Their "
+                                "orientation decides the spine's direction, so "
+                                "tilted sections make it curve."),
+                        },
+                        "guides": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional guide curves",
+                        },
+                        "name": {"type": "string", "description": "Optional name"},
+                    },
+                    "required": ["sections"],
+                },
+            },
+            {
                 "name": "catia_gsd_boundary",
                 "description": (
                     "Extract the BOUNDARY CURVE of a surface into the active "
@@ -1010,6 +1113,10 @@ class GSDTools:
                 return self._boundary(arguments)
             case "catia_gsd_heal":
                 return self._heal(arguments)
+            case "catia_gsd_fillet_surface":
+                return self._fillet_surface(arguments)
+            case "catia_gsd_spine":
+                return self._spine(arguments)
             case "catia_gsd_multi_section_surface":
                 return self._multi_section_surface(arguments)
             case "catia_gsd_sweep":
@@ -1931,6 +2038,217 @@ class GSDTools:
               "0.52 deg at Continuity 1 and 2, and a 90 deg fold stayed 90.0. "
               "Check the result with catia_check_surface.",
         )
+        return reply
+
+    # One pair out of four is what CATIA accepts on a straight corner, and
+    # which pair it is does not depend on how the supports were built: a 90/60/
+    # 120 deg wedge and a floor-and-wall corner built in a different direction
+    # all took (-1, +1) (measured on B30 2026-11-03). So the wrapper searches
+    # instead of exposing a pair the caller cannot predict.
+    _FILLET_ORIENTATIONS = ((1, 1), (-1, 1), (1, -1), (-1, -1))
+
+    def _drop(self, shape: Any) -> None:
+        """Delete one element by selection, immediately.
+
+        A fillet whose ``UpdateObject`` failed stays in the tree in ERROR, and
+        every later ``part.Update()`` on that document then fails too - measured
+        on B30 2026-11-03, and it is what made the first probe write its
+        orientation matrix and its geometry check into two different documents.
+        A search therefore has to remove each losing attempt before the next,
+        or it hands the caller a part that cannot be updated at all.
+        """
+        selection = self.conn.hso
+        try:
+            selection.Clear()
+            selection.Add(shape)
+            selection.Delete()
+        finally:
+            try:
+                selection.Clear()
+            except Exception:  # noqa: BLE001 - the delete already happened
+                pass
+
+    def _fillet_surface(self, args: dict[str, Any]) -> str:
+        """Rolling-ball fillet between two surfaces, by searching the orientations.
+
+        Measured on B30 2026-11-03 (scripts/b30_v0356_fillet_geom.py and
+        _fillet_scope.py), with the walls hidden so the STL carried the fillet
+        alone:
+
+        90 deg wedge, r=5, 40 mm edge   every vertex exactly 5.0000 mm from the
+                                        rolling-ball axis (min = max), area
+                                        314.159 mm2 = (pi/2)*5*40, and 0 mm from
+                                        both walls
+        60 deg / 120 deg, same radius   radius min = max = 5.0000, areas 418.879
+                                        and 209.440 mm2 = (pi - theta)*r*L
+        floor z=0 + wall x=0, r=5       same: 5.0000 mm, 465.874 mesh / 471.239
+                                        exact, 0 deg from both walls
+
+        So the surviving call is a real fillet, not merely a surface that
+        happened to update. What it is NOT: a guaranteed unique answer. The disc
+        with a cylinder standing on it built TWO different surfaces, which is
+        why more than one survivor is a refusal here instead of a pick.
+        """
+        self.conn.ensure_connected()
+        radius = float(args["radius"])
+        if radius <= 0:
+            raise ArgumentOutOfRange(
+                f"radius must be positive; got {radius} mm")
+        first = str(args["surface1"])
+        second = str(args["surface2"])
+        part = self.conn.get_active_part()
+        ref1 = self._ref(first)
+        ref2 = self._ref(second)
+        factory = self._factory()
+        geoset = self._get_geoset()
+
+        failed: list[str] = []
+        kept: list[tuple[int, int, Any]] = []
+        for o1, o2 in self._FILLET_ORIENTATIONS:
+            shape = None
+            try:
+                shape = factory.AddNewFilletBiTangent(ref1, ref2, radius,
+                                                      o1, o2, 0, 0)
+                geoset.AppendHybridShape(shape)
+                # Named before the update so a failure can be reported by name.
+                shape.Name = f"FilletTry_{o1:+d}{o2:+d}"
+                part.UpdateObject(shape)
+            except Exception as error:  # noqa: BLE001 - the search is the point
+                failed.append(f"(o1={o1:+d}, o2={o2:+d}): "
+                              f"{str(error).splitlines()[0][:90]}")
+                if shape is not None:
+                    try:
+                        self._drop(shape)
+                    except Exception:  # noqa: BLE001 - report the search, not this
+                        pass
+                continue
+            kept.append((o1, o2, shape))
+
+        if not kept:
+            raise RuntimeError(
+                f"CATIA refused a {radius} mm fillet between '{first}' and "
+                f"'{second}' in all four orientations, so nothing was created:\n  "
+                + "\n  ".join(failed)
+                + "\nA rolling ball needs the two surfaces to form a CORNER - "
+                  "sharing an edge, with the ball fitting between them. Two "
+                  "surfaces that merely exist fail every orientation (measured: "
+                  "two disjoint parallel cylinders, 0 of 9 combinations). Check "
+                  "that they meet with catia_measure_distance; if the wall is "
+                  "thick enough, catia_fillet rounds a solid edge."
+            )
+
+        if len(kept) > 1:
+            # Different survivors are different surfaces, not variants of one:
+            # measured on a disc with a cylinder standing on it, (+1,+1) gave
+            # 573.4 mm2 and (+1,-1) gave 391.3 mm2. Picking one would be a guess
+            # dressed as a result, so all of them go.
+            built = ", ".join(f"(o1={o1:+d}, o2={o2:+d})" for o1, o2, _s in kept)
+            for _o1, _o2, shape in kept:
+                try:
+                    self._drop(shape)
+                except Exception:  # noqa: BLE001 - the refusal is the message
+                    pass
+            raise ArgumentRejected(
+                f"{len(kept)} orientations built a fillet between '{first}' and "
+                f"'{second}': {built}. When more than one survives they are "
+                "DIFFERENT surfaces, not one surface found twice - measured on a "
+                "disc with a cylinder standing on it, (+1,+1) produced 573.4 mm2 "
+                "and (+1,-1) 391.3 mm2. This tool will not choose for you, and "
+                "has removed all of them, so the part is unchanged. Build the "
+                "fillet into the geometry instead (an arc in the profile), or "
+                "round a solid edge with catia_fillet."
+            )
+
+        o1, o2, shape = kept[0]
+        return self._completed(
+            shape, args.get("name"),
+            f"Fillet of radius {radius} mm between '{first}' and '{second}', "
+            f"built with orientation (o1={o1:+d}, o2={o2:+d}) - the only pair "
+            f"CATIA accepted out of four. Supports are NOT trimmed (trimMode 0), "
+            f"so '{first}' and '{second}' are unchanged; check the result with "
+            f"catia_check_surface or catia_get_bounding_box.",
+            geoset,
+        )
+
+    def _spine(self, args: dict[str, Any]) -> str:
+        """The curve normal to a set of section curves: ``AddSection`` per section.
+
+        0.3.53 wrote that the typelib names no way to add sections. It does:
+        HybridShapeSpine declares 40 members including AddSection(iSection),
+        AddGuide(iGuide), GetNumberOfSections() and ModifySectionCurve. The old
+        probe looked at ``dir(spine)`` filtered for "Add"/"ection", which for a
+        late-bound COM object returns almost nothing - declared was read as
+        absent.
+
+        Measured on B30 2026-11-03 (scripts/b30_v0356_spine.py, _spine2.py,
+        _spine3.py): AddSection moves GetNumberOfSections, UpdateObject succeeds
+        with two or more sections and fails with one, and the result really is a
+        spine - three parallel rings 40 mm apart gave 40.0000 mm along their
+        common axis and did NOT bend when one centre was offset 30 mm sideways
+        (a spine follows the normals), while a second ring tilted 45 deg turned
+        it into a 37.9224 mm curve that leaves that axis by 7.05 mm at z=10.
+        """
+        self.conn.ensure_connected()
+        sections = args.get("sections") or []
+        if isinstance(sections, str):
+            sections = [sections]
+        if len(sections) < 2:
+            raise ArgumentRejected(
+                f"catia_gsd_spine needs at least TWO sections; got {len(sections)}. "
+                "Measured on B30 2026-11-03: a spine carrying one section fails at "
+                "UpdateObject, so passing one would only leave an element in error "
+                "in the tree."
+            )
+        guides = args.get("guides") or []
+        if isinstance(guides, str):
+            guides = [guides]
+
+        part = self.conn.get_active_part()
+        geoset = self._get_geoset()
+        spine = self._factory().AddNewSpine()
+        geoset.AppendHybridShape(spine)
+        spine.Name = "Spine"
+        try:
+            for name in sections:
+                spine.AddSection(self._ref(name))
+            registered = int(spine.GetNumberOfSections())
+            # The healing lesson: a call that returns without raising can still
+            # be a no-op. Count, do not assume.
+            if registered != len(sections):
+                raise RuntimeError(
+                    f"CATIA kept {registered} of the {len(sections)} sections "
+                    f"({', '.join(sections)}). Sections have to be curves the "
+                    "spine can run normal to; a point or a surface is accepted by "
+                    "AddSection and then silently dropped.")
+            for name in guides:
+                spine.AddGuide(self._ref(name))
+            guide_count = int(spine.GetNumberOfGuides())
+            if guides and guide_count != len(guides):
+                raise RuntimeError(
+                    f"CATIA kept {guide_count} of the {len(guides)} guides "
+                    f"({', '.join(guides)}).")
+        except Exception:
+            # Same rule as the fillet search: never leave an element in error.
+            try:
+                self._drop(spine)
+            except Exception:  # noqa: BLE001 - the original error matters more
+                pass
+            raise
+
+        message = f"Spine across {registered} sections"
+        if guides:
+            message += f" with {guide_count} guide(s)"
+        message += (". The curve runs NORMAL to the sections, not through their "
+                    "centres - parallel sections give a straight spine, tilted "
+                    "ones bend it.")
+        reply = self._completed(spine, args.get("name") or "Spine", message, geoset)
+        try:
+            measurable = (self.conn.active_document.GetWorkbench("SPAWorkbench")
+                          .GetMeasurable(
+                              part.CreateReferenceFromObject(spine)))
+            reply += f" Length {float(measurable.Length):.4f} mm."
+        except Exception:  # noqa: BLE001 - the spine exists either way
+            pass
         return reply
 
     def _boundary(self, args: dict[str, Any]) -> str:
