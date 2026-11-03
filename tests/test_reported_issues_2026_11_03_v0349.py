@@ -104,24 +104,48 @@ def test_coordinate_points_are_not_updated_one_by_one():
 
     Not a speed claim: see the module docstring for the cold-session numbers,
     where the update cost nothing measurable.
+
+    As of 0.3.51 the points are also not appended to the geometrical set unless
+    the caller asks (create_points=true), so the tree grows by the spline only.
     """
     tools, part = _gsd()
     tools._coordinate_points = 0
-    tools._point_ref([1.0, 2.0, 3.0])
-    tools._point_ref([4.0, 5.0, 6.0])
-    assert part.updated == [], "each coordinate point was updated on its own"
-    assert len(geoset.appended) == 2, "the points must still land in the geoset"
-    assert tools._coordinate_points == 2
-
-
-def test_spline_reply_counts_the_tree_elements_it_created():
-    tools, part = _gsd()
     geoset.appended.clear()
+    tools._point_ref([1.0, 2.0, 3.0])
+    # _point_ref on its own still builds the point in the tree: line and
+    # plane_3points take one or three of them, so there is no clutter to avoid
+    # and callers may want to reference them by name afterwards.
+    assert len(geoset.appended) == 1, "a lone coordinate point is still a feature"
+    assert part.updated == [], "the point was updated on its own"
+    assert tools._coordinate_points == 1
+
+    geoset.appended.clear()
+    tools._point_refs([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], in_tree=False)
+    assert geoset.appended == [], "points became tree features without being asked"
+
+    geoset.appended.clear()
+    tools._point_refs([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], in_tree=True)
+    assert len(geoset.appended) == 2, "create_points=true must still build the points"
+
+
+def test_spline_reply_says_the_points_are_not_tree_elements():
+    tools, part = _gsd()
     replies = []
     tools._finish = lambda shape, name, message: replies.append(message) or message
     tools.execute("catia_gsd_spline",
                   {"points": [[0, 0, 0], [1, 0, 0], [1, 1, 0]], "closed": True})
     assert "3 of them were coordinate lists" in replies[0]
+    assert "did NOT become tree elements" in replies[0]
+    assert "create_points=true" in replies[0]
+
+
+def test_spline_reply_counts_the_tree_elements_when_asked_for_them():
+    tools, part = _gsd()
+    replies = []
+    tools._finish = lambda shape, name, message: replies.append(message) or message
+    tools.execute("catia_gsd_spline",
+                  {"points": [[0, 0, 0], [1, 0, 0], [1, 1, 0]], "closed": True,
+                   "create_points": True})
     assert "3 extra tree elements" in replies[0]
 
 

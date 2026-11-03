@@ -2,6 +2,67 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.51] — 2026-11-03 · the 636 points were a choice, and healing does nothing
+
+The third report on the same surface model asks for a healing tool, a zebra
+check and a curvature comb, and says two items from 0.3.49 are still open.
+Measured on B30 first (`scripts/b30_v0351_probe.py`, `b30_v0351_probe2.py`,
+`b30_v0351_healing.py`, `b30_v0351_healing2.py`), which changed three of the four
+answers.
+
+**Two of the items were closed in 0.3.50, not open.** `catia_delete_feature`
+gained `cascade` and `names[]` and `catia_gsd_join` gained the shared-edge
+diagnosis in that release; the report's own §3.4 says the join failure was not
+retriggered this round, and §3.3 describes a per-name delete that no longer
+exists. Nothing was changed for them here beyond making the batch fast (below).
+
+**Coordinate points need not be tree elements.** Measured before touching code:
+90 points created with `AddNewPointCoord` and never appended, a spline built on
+their references, saved, closed and reopened — the tree holds ONE element (the
+spline) and the curve still measures 188.496 mm for r=30, the analytic answer,
+before and after a `part.Update()`. So the 636 Point features the report counted
+were the old code's choice, not the API's. `catia_gsd_spline` takes
+`create_points` (default **false**) and says which route it took. Cost, one CATIA
+process per condition, two runs each: 2.49 s with the points in the tree against
+1.80 / 1.81 s without — a 1.4× difference, not an order of magnitude, because
+building the points is the work; what changes is everything that walks the tree
+afterwards.
+
+**Deleting them is 25× faster.** A `names[]` batch used to call the single-name
+path per element, and each name re-walked the whole tree and updated the part:
+91 elements took 49.9 s. The GSD names now go into one selection after one tree
+walk — **1.9 s** for the same 91. Part Design features still take the per-name
+path, which is where body and index handling lives.
+
+**`AddNewHealing` exists and does not do what the report expects.** It takes one
+reference and exposes a writable `Continuity` — and a 90° join stayed at 90.0°
+at Continuity 0, 1 and 2, with 4 triangles before and 4 after. It heals
+discontinuities within a surface; it does not turn a G0 fold into a G1 blend. So
+there is no `catia_gsd_healing` tool here: it would report success and change
+nothing. `README` says so under Known limits, together with what to use instead
+(`catia_gsd_blend`, `catia_gsd_connect`).
+
+**Zebra, curvature comb and Match are unreachable, so quality is measured
+instead.** New tool `catia_check_surface`: the dihedral angle between the two
+triangle normals across every interior edge of the exported mesh, with the
+distribution, the crease list and the endpoints of the worst edges, plus boundary
+and non-manifold edge counts. Measured on B30: a smooth 20 mm cylinder reports
+median 15.0° / max 15.0° / 0 creases (that is the mesh chord, not a defect), while
+a 90° join reports median 0.0° / max 90.0° / 1 crease at exactly the shared edge.
+The reply states its scope — the STL contains every visible element — and says
+outright that CATIA offers no zebra here, so the tool is not mistaken for one.
+
+**A loft that builds is not a loft that can be thickened.** The report's §3.1 is
+right and was missing from the docs: a smooth loft interpolates through its
+sections, so a rapid size change tightens the curvature between two of them, and
+that region is what refuses a thin-wall offset later. Six of ten sections built
+and then refused 0.3 mm where every 2–3 section span thickened. Both
+`catia_gsd_multi_section_surface` and `catia_gsd_thick_surface` now say it, with
+that case.
+
+882 tests, 11 of them new (`tests/test_reported_issues_2026_11_03_v0351.py`).
+Adds one tool: 102.
+
 ## [0.3.50] — 2026-11-03 · the view table was wrong, and five smaller lies
 
 Two reports arrived: the acceptance receipt for 0.3.49 (which found the two

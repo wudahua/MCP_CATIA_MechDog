@@ -6,6 +6,7 @@ Distance, angle, inertia, bounding box, and part property queries.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import struct
@@ -31,6 +32,118 @@ from catia_mcp.arguments import (
 from catia_mcp.results import CodedError
 from catia_mcp.results import ArgumentOutOfRange, ArgumentRejected
 from catia_mcp.topo_search import is_construction, nls_of, search_topology
+
+
+def _stl_triangles(path: str, cap: int) -> list[tuple[tuple[float, float, float], list]]:
+    """Every triangle in an STL, as ``(normal, [v0, v1, v2])``; capped at ``cap``.
+
+    CATIA writes binary STL by default but ASCII when the export options say so,
+    and an ASCII file read as binary yields a triangle count nobody can satisfy
+    (slicing 48 bytes out of a 900-byte header raised "unpack requires a buffer
+    of 48 bytes" the first time this was written, 2026-11-03). Both are handled.
+    """
+    blob = open(path, "rb").read()
+    if len(blob) >= 84:
+        count = struct.unpack("<I", blob[80:84])[0]
+        if count and len(blob) == 84 + 50 * count:
+            out = []
+            for index in range(min(count, cap)):
+                values = struct.unpack("<12f", blob[84 + 50 * index:84 + 50 * index + 48])
+                out.append(((values[0], values[1], values[2]),
+                            [tuple(values[3 + 3 * k:6 + 3 * k]) for k in range(3)]))
+            return out
+    out = []
+    normal: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    verts: list[Any] = []
+    for raw in blob.decode("ascii", "replace").splitlines():
+        parts = raw.split()
+        if not parts:
+            continue
+        if parts[0] == "facet":
+            normal = (float(parts[2]), float(parts[3]), float(parts[4]))
+            verts = []
+        elif parts[0] == "vertex":
+            verts.append((float(parts[1]), float(parts[2]), float(parts[3])))
+        elif parts[0] == "endfacet" and len(verts) == 3:
+            out.append((normal, verts))
+            if len(out) >= cap:
+                break
+    return out
+
+
+def _fold_stats(path: str, crease_deg: float, cap: int) -> dict[str, Any]:
+    """Dihedral angle across every interior edge of a mesh.
+
+    This is the answer to "is the surface smooth" without zebra stripes, which
+    CATIA V5 does not expose to automation at all (measured 2026-11-03: the
+    viewer answers ``RenderingMode`` and nothing for ``Zebra``,
+    ``EnvironmentMapping`` or ``AnalysisMode``; HybridShapeFactory has no
+    ``AddNewMatch`` either). The mesh is what is left: a G0 fold shows up as an
+    edge whose two triangles disagree by tens of degrees, and a smooth blend
+    shows up as a much smaller number.
+
+    The absolute figure has to be read against the mesh, not against zero: an
+    STL chords every curved face, so even a perfect cylinder has a fold across
+    its facet edges. ``median`` is that background level and ``max`` is what the
+    caller is looking for.
+    """
+    faces = _stl_triangles(path, cap)
+
+    def key(point: Any) -> tuple[float, float, float]:
+        # 1e-3 mm buckets: two triangles that share a vertex in the mesh round to
+        # the same key, while distinct vertices 1 um apart stay distinct.
+        return (round(point[0], 3), round(point[1], 3), round(point[2], 3))
+
+    edges: dict[Any, list[Any]] = {}
+    for normal, verts in faces:
+        for a, b in ((0, 1), (1, 2), (2, 0)):
+            ka, kb = key(verts[a]), key(verts[b])
+            edges.setdefault((min(ka, kb), max(ka, kb)), []).append(normal)
+
+    def angle(n1: Any, n2: Any) -> float:
+        dot = sum(x * y for x, y in zip(n1, n2))
+        na = sum(x * x for x in n1) ** 0.5 or 1.0
+        nb = sum(x * x for x in n2) ** 0.5 or 1.0
+        return math.degrees(math.acos(max(-1.0, min(1.0, dot / (na * nb)))))
+
+    folds: list[float] = []
+    boundary = 0
+    multi = 0
+    worst = (0.0, None)
+    creases: list[dict[str, Any]] = []
+    for edge, normals in edges.items():
+        if len(normals) == 1:
+            boundary += 1
+            continue
+        if len(normals) > 2:
+            multi += 1
+            continue
+        fold = angle(normals[0], normals[1])
+        folds.append(fold)
+        if fold > worst[0]:
+            worst = (fold, edge)
+        if fold >= crease_deg:
+            creases.append({"fold_deg": round(fold, 2),
+                            "at": [list(edge[0]), list(edge[1])]})
+    folds.sort()
+
+    def at(quantile: float) -> float | None:
+        if not folds:
+            return None
+        return round(folds[min(len(folds) - 1, int(quantile * len(folds)))], 2)
+
+    creases.sort(key=lambda item: -item["fold_deg"])
+    return {
+        "triangles": len(faces),
+        "interior_edges": len(folds),
+        "boundary_edges": boundary,
+        "non_manifold_edges": multi,
+        "fold_deg": {"median": at(0.5), "p90": at(0.9), "p99": at(0.99),
+                     "max": round(worst[0], 2)},
+        "creases": len(creases),
+        "worst_creases": creases[:8],
+        "crease_threshold_deg": crease_deg,
+    }
 
 
 def _stl_scan(path: str, limit: int | None = None
@@ -994,6 +1107,66 @@ class MeasurementTools:
                     "properties": {},
                 },
             },
+            {
+                "name": "catia_check_surface",
+                "description": (
+                    "Measure how smooth the active part's mesh is: the dihedral "
+                    "angle between the two triangle normals across every interior "
+                    "edge, so a G0 fold or a bad seam shows up as a number instead "
+                    "of needing a zebra stripe picture. "
+                    "THE ZEBRA CHECK ITSELF DOES NOT EXIST HERE: CATIA V5 exposes "
+                    "no zebra, curvature comb, environment mapping or Match object "
+                    "to automation - measured on B30 2026-11-03, the viewer answers "
+                    "RenderingMode and returns an unresolvable attribute for Zebra, "
+                    "EnvironmentMapping and AnalysisMode, and HybridShapeFactory "
+                    "has AddNewHealing / AddNewBlend / AddNewConnect / "
+                    "AddNewCurveSmooth / AddNewFill but no AddNewMatch. This tool "
+                    "answers the same question from geometry. "
+                    "HOW TO READ IT: fold_deg.median is the mesh's own chording of "
+                    "curved faces and is NOT a defect - on a smooth cylinder every "
+                    "facet edge carries a few degrees. What matters is whether any "
+                    "edge sits far above that: fold_deg.max with worst_creases "
+                    "gives the angle and the two endpoints of the worst edges. A "
+                    "fold between surfaces meeting at a right angle reads ~90 and "
+                    "does not improve by healing (measured: AddNewHealing at "
+                    "Continuity 0, 1 and 2 all left it at 90.0). "
+                    "boundary_edges counts edges used by one triangle only: normal "
+                    "on the open border of a surface patch, a real gap when two "
+                    "elements should have been joined. "
+                    "SCOPE: the STL export contains every VISIBLE element of the "
+                    "document, so hide construction geometry before checking a "
+                    "solid. The report says which case it read."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "crease_deg": {
+                            "type": "number",
+                            "description": (
+                                "Edges whose two triangles disagree by at least "
+                                "this much are listed as creases (default 25). "
+                                "Lower it to see gentle seams, raise it to see only "
+                                "hard folds."),
+                            "default": 25.0,
+                        },
+                        "cap": {
+                            "type": "integer",
+                            "description": (
+                                "Read at most this many triangles (default "
+                                "600000). A larger mesh is truncated and the reply "
+                                "says so."),
+                            "default": 600000,
+                        },
+                        "document": {
+                            "type": "string",
+                            "description": (
+                                "Document name, if it is not the active one. The "
+                                "active document is used otherwise."),
+                        },
+                    },
+                    "required": [],
+                },
+            },
         ]
 
 
@@ -1026,6 +1199,11 @@ class MeasurementTools:
                 return self._set_parameter(arguments["name"], arguments["value"])
             case "catia_update_part":
                 return self._update_part()
+            case "catia_check_surface":
+                return self._check_surface(
+                    float(arguments.get("crease_deg", 25.0)),
+                    int(arguments.get("cap", 600000)),
+                    arguments.get("document") or arguments.get("document_name"))
             case _:
                 raise ValueError(f"Unknown measurement tool: {tool_name}")
 
@@ -3617,6 +3795,104 @@ class MeasurementTools:
             "file-keyed cache would answer for the part as it was on disk")
         return json.dumps(report, indent=2)
 
+    def _check_surface(self, crease_deg: float = 25.0, cap: int = 600000,
+                       document: str | None = None) -> str:
+        """Dihedral-angle report of the active part's mesh: the zebra substitute.
+
+        CATIA V5 exposes no zebra, curvature-comb or environment-mapping object
+        to automation (measured 2026-11-03 against a live B30: the viewer answers
+        ``RenderingMode`` and returns an unresolvable attribute for ``Zebra``,
+        ``EnvironmentMapping`` and ``AnalysisMode``; HybridShapeFactory answers
+        AddNewHealing, AddNewBlend, AddNewConnect, AddNewCurveSmooth, AddNewFill
+        and no ``AddNewMatch``). So "is this surface smooth at the seam" has to be
+        answered from geometry, and the mesh carries it: across every interior
+        edge take the angle between the two triangle normals. A G0 fold survives
+        as tens of degrees; a G1 blend collapses it.
+
+        Read ``fold_deg.median`` first, not ``max``: the STL chords every curved
+        face, so a cylinder has a nonzero fold across all of its facet edges and
+        that background is the median. A crease is an edge far above it.
+        """
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        if document:
+            doc = self._resolve_open_document(document)
+            try:
+                part = self.conn.part_of(doc)
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    f"'{document}' is not a Part document ({exc}); the mesh check "
+                    f"reads the geometry of one part."
+                ) from exc
+        captured: dict[str, Any] = {}
+
+        def grab(path: str) -> None:
+            # Runs INSIDE _mesh_export, before its finally removes the temporary
+            # directory - the file is gone by the time the call returns.
+            captured["stats"] = _fold_stats(path, crease_deg, cap)
+
+        self._mesh_export(part, None, grab)
+        stats = captured.get("stats")
+        if stats is None:
+            raise RuntimeError(
+                "no STL was produced, so the mesh cannot be inspected; the part "
+                "has to be measurable the same way catia_get_bounding_box "
+                "measures it (open it as its own document if it is a component "
+                "of an assembly)")
+        fold = stats["fold_deg"]
+        median = fold["median"]
+        shown, sets_total = self._visible_hybrid_sets(part)
+        if not sets_total:
+            scope = "the solid (this part has no geometrical sets)"
+        elif shown is None:
+            scope = (f"the solid plus whatever is visible in {sets_total} "
+                     f"geometrical set(s) - their visibility could not be read")
+        elif shown == 0:
+            scope = (f"the solid only ({sets_total} geometrical set(s), all hidden)"
+                     if sets_total > 1 else
+                     "the solid only (1 geometrical set, hidden)")
+        else:
+            scope = (f"the solid plus the visible elements of {shown} of "
+                     f"{sets_total} geometrical set(s)")
+        report: dict[str, Any] = {
+            "document": str(getattr(part.Parent, "Name", "<part>")),
+            "method": ("STL mesh: the angle between the two triangle normals "
+                       "across every interior edge. This is what a zebra check "
+                       "asks, answered as a number - CATIA V5 exposes no zebra, "
+                       "curvature-comb or environment-mapping object to "
+                       "automation (measured on B30 2026-11-03)."),
+            **stats,
+            "scope": scope,
+            "geometrical_sets": sets_total,
+            "how_to_read": (
+                f"median {median} deg is the mesh's own chording of curved faces, "
+                f"not a defect; the question is whether any edge sits far above "
+                f"it. {stats['creases']} edge(s) are at or above the "
+                f"{crease_deg:g} deg threshold. A G0 fold between two joined "
+                f"surfaces reads 90 or more when the surfaces meet at a right "
+                f"angle and stays put however the join is healed: measured "
+                f"2026-11-03, AddNewHealing with Continuity 0, 1 and 2 left a "
+                f"90 deg fold at exactly 90 deg, with the same triangle count."
+            ),
+        }
+        if stats["boundary_edges"]:
+            report["boundary_note"] = (
+                f"{stats['boundary_edges']} edge(s) belong to one triangle only: "
+                "either the open border of a surface (normal for a patch that is "
+                "not closed into a solid) or a genuine gap between two elements "
+                "that were never joined.")
+        if stats["non_manifold_edges"]:
+            report["non_manifold_note"] = (
+                f"{stats['non_manifold_edges']} edge(s) are shared by more than "
+                "two triangles, which in an exported mesh usually means two "
+                "overlapping pieces of geometry rather than a modelling fault.")
+        if stats["triangles"] >= cap:
+            report["warnings"] = [
+                f"the mesh was larger than the {cap} triangle cap and only the "
+                f"first {cap} were read, so these figures describe part of the "
+                f"model; raise 'cap' to inspect all of it"]
+        return json.dumps(report, indent=2)
+
     def _get_bounding_box(self, method: str = "auto",
                           component: str | None = None,
                           document: str | None = None,
@@ -3816,7 +4092,8 @@ class MeasurementTools:
             kept.append(point)
         return kept, dropped
 
-    def _mesh_export(self, part: Any, limit: int | None = None
+    def _mesh_export(self, part: Any, limit: int | None = None,
+                     visit: Any = None
                     ) -> tuple[list[float], list[float], list[float] | None, int, str]:
         """Bounding corners from an STL export of that part's document.
 
@@ -3882,6 +4159,8 @@ class MeasurementTools:
                     export_error = exc
                 if (os.path.getsize(path) if os.path.exists(path) else 0) >= 128:
                     lo, hi, cloud, seen = _stl_scan(path, limit)
+                    if visit is not None:
+                        visit(path)
                     return lo, hi, cloud, seen, ""
             # In context the export is REFUSED with a modal dialog that nobody
             # can answer, and on one B32 session it still wrote a valid STL - so
@@ -3890,6 +4169,8 @@ class MeasurementTools:
             # 6 clicks). Detect the state first and never attempt the in-place
             # export there.
             lo, hi, cloud, seen = self._mesh_from_copy(doc, path, limit)
+            if visit is not None:
+                visit(path)
             cached = (self._mesh_last_cache == "hit")
             return lo, hi, cloud, seen, (
                 "; measured from a temporary copy of the saved file, because the "

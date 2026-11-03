@@ -4178,9 +4178,21 @@ class PartDesignTools:
                     "'feature_name', 'index' or 'last'. Pass the list alone, e.g. "
                     '{"names": ["ZZ_sp90", "ZZ_pts"], "cascade": true}.'
                 )
-            done: list[str] = []
-            failed: list[str] = []
-            for name in [str(item) for item in many]:
+            many = [str(item) for item in many]
+            part = self.conn.get_active_part()
+            # GSD elements go in ONE selection: on a 636-point clean-up the
+            # per-name route took 49.9 s for 91 elements (0.3.50, measured on
+            # B30 2026-11-03), because each name re-walked the whole tree and
+            # then updated the part. Whatever is not in a geometrical set is a
+            # Part Design feature and still goes through _delete_one, which
+            # knows about bodies and indexes.
+            found = self._map_geometrical_sets(part, set(many))
+            gsd_names = [name for name in many if name in found]
+            others = [name for name in many if name not in found]
+            deleted, kept = self._delete_owned(gsd_names) if gsd_names else ([], [])
+            done: list[str] = list(deleted)
+            failed: list[str] = [f"'{name}' (could not be deleted)" for name in kept]
+            for name in others:
                 try:
                     done.append(self._delete_one(args, name))
                 except Exception as error:  # noqa: BLE001 - reported per name
@@ -4330,29 +4342,49 @@ class PartDesignTools:
         return message
 
     def _delete_owned(self, names: list[str]) -> tuple[list[str], list[str]]:
-        """Delete the construction elements a feature created.
+        """Delete the construction elements a feature created, in ONE selection.
 
-        Returns ``(removed, kept)``. A point that something else still uses cannot
-        be deleted and is reported rather than silently skipped.
+        Measured on B30 2026-11-03: 91 orphan points took **49.9 s** the old way,
+        because each name meant a full depth-first walk of the tree to find it and
+        then three COM round trips to select and delete it - and the tree walk got
+        slower as the list shrank past hundreds of items. The names are all known
+        before the first delete, so the tree is walked once into a name -> object
+        map and the objects go into a single selection. Elements that are already
+        gone count as removed: that is the outcome that was asked for.
+
+        Returns ``(removed, kept)``. An object that something else still uses
+        cannot be deleted and is reported rather than silently skipped, so a
+        batch that half-succeeds still tells the truth.
         """
         part = self.conn.get_active_part()
         sel = self.conn.hso
-        removed: list[str] = []
+        wanted = [name for name in dict.fromkeys(names)]
+        found = self._map_geometrical_sets(part, set(wanted))
+
+        removed = [name for name in wanted if name not in found]
         kept: list[str] = []
-        for name in names:
-            found, _kind = self._find_in_geometrical_sets(part, name)
-            if found is None:
-                # Already gone (a sketch delete upstream, or a cascade), which is
-                # the outcome that was asked for.
-                removed.append(name)
-                continue
+        targets = [(name, found[name]) for name in wanted if name in found]
+
+        if targets:
             try:
                 sel.Clear()
-                sel.Add(found)
+                for _name, obj in targets:
+                    sel.Add(obj)
                 sel.Delete()
-                removed.append(name)
-            except Exception:  # noqa: BLE001 - reported, not fatal
-                kept.append(name)
+                removed.extend(name for name, _obj in targets)
+            except Exception:  # noqa: BLE001 - fall back to one at a time
+                try:
+                    sel.Clear()
+                except Exception:  # noqa: BLE001
+                    pass
+                for name, obj in targets:
+                    try:
+                        sel.Clear()
+                        sel.Add(obj)
+                        sel.Delete()
+                        removed.append(name)
+                    except Exception:  # noqa: BLE001 - reported, not fatal
+                        kept.append(name)
             finally:
                 try:
                     sel.Clear()
@@ -4363,7 +4395,42 @@ class PartDesignTools:
         except Exception:  # noqa: BLE001 - the elements are gone either way
             pass
         self.conn.refresh_display()
-        return removed, kept
+        return [name for name in wanted if name in set(removed)], kept
+
+    @staticmethod
+    def _map_geometrical_sets(part: Any, wanted: set[str]) -> dict[str, Any]:
+        """One depth-first walk: every wanted name that is in the tree.
+
+        The plural twin of ``_find_in_geometrical_sets``, for callers that have a
+        whole list of names: looking each one up separately re-walked the tree per
+        name, which is what made deleting 91 points take 50 s.
+        """
+        found: dict[str, Any] = {}
+
+        def walk(sets: Any, depth: int = 0) -> None:
+            for index in range(1, sets.Count + 1):
+                hybrid_body = sets.Item(index)
+                if str(hybrid_body.Name) in wanted:
+                    found.setdefault(str(hybrid_body.Name), hybrid_body)
+                for collection in ("HybridShapes", "HybridSketches"):
+                    try:
+                        items = getattr(hybrid_body, collection)
+                    except Exception:  # noqa: BLE001 - not every set has both
+                        continue
+                    for item_index in range(1, items.Count + 1):
+                        item = items.Item(item_index)
+                        name = str(item.Name)
+                        if name in wanted:
+                            found.setdefault(name, item)
+                try:
+                    nested = hybrid_body.HybridBodies
+                except Exception:  # noqa: BLE001 - a plain set has no children
+                    continue
+                if nested is not None and nested.Count and depth < 8:
+                    walk(nested, depth + 1)
+
+        walk(part.HybridBodies)
+        return found
 
     @staticmethod
     def _find_in_geometrical_sets(part: Any, target: str) -> tuple[Any, str]:

@@ -241,6 +241,21 @@ class GSDTools:
                             "description": "Close the spline into a loop",
                             "default": False,
                         },
+                        "create_points": {
+                            "type": "boolean",
+                            "description": (
+                                "Put the coordinate points in the tree as Point "
+                                "features. Default false: the points are still "
+                                "created, still referenced by the spline and still "
+                                "saved with the part (measured 2026-11-03: save + "
+                                "reopen keeps the curve at its exact length), they "
+                                "are just not listed - which keeps a hundred-point "
+                                "ring at one tree element instead of a hundred and "
+                                "one. Set true only when you want to select, "
+                                "measure or move the individual points."
+                            ),
+                            "default": False,
+                        },
                         "name": {"type": "string", "description": "Optional name for the spline"},
                     },
                     "required": [],
@@ -393,6 +408,20 @@ class GSDTools:
                     "sign of error whenever a quadrilateral section is replaced by "
                     "a spline through its corners; it is a substitution, not a "
                     "neutral conversion. "
+                    "SPAN LIMIT, and it is about the OFFSET, not this tool: a "
+                    "smooth loft that builds is not a loft that can be thickened. "
+                    "Because it interpolates through the sections, a rapid change "
+                    "of section size tightens the curvature BETWEEN two sections, "
+                    "and that tightened region is what refuses a thin-wall offset "
+                    "later. Reported 2026-11-03 from a five-petal bottle base: "
+                    "the six-section span [02..07] of ten built a surface and then "
+                    "catia_gsd_thick_surface refused 0.3 mm, where every 2-3 "
+                    "section span of the same sections thickened; the 7 and 10 "
+                    "section spans did not build at all for that model. So a 6-10 "
+                    "section span building is not permission to offset it - when "
+                    "the part needs a thin wall, build 2-3 section pieces and "
+                    "catia_gsd_join them, and read catia_check_surface before "
+                    "offsetting. "
                     "WHEN THE LOFT REFUSES TO UPDATE ON A REAL PART, check the "
                     "ARRANGEMENT before the curve type. This surface interpolates "
                     "through the sections and stays inside their hull, so a section "
@@ -745,7 +774,21 @@ class GSDTools:
                     "same shape as a solid in one feature with no thickness to add "
                     "and therefore no limit to hit (measured: a 2.30 mm lens "
                     "section that refuses every offset here lofts to a 720.5 mm3 "
-                    "solid there)."
+                    "solid there). "
+                    "A SMOOTH LOFT THAT BUILT IS NOT A LOFT THAT CAN BE "
+                    "THICKENED. A multi-section surface interpolates through its "
+                    "sections, so where the sections change size quickly the "
+                    "surface's curvature tightens between them - the very thing "
+                    "that makes the loft build is the thing that limits the "
+                    "offset. Reported 2026-11-03 from a five-petal bottle base: "
+                    "the six-section span [02..07] built a surface and then "
+                    "refused 0.3 mm, while every 2-3 section span of the same ten "
+                    "sections thickened; the failure reads \"surface thinner than "
+                    "offset\" and names nothing about the loft. So for thin walls, "
+                    "split the loft into 2-3 section pieces and catia_gsd_join "
+                    "them rather than trusting a 6-10 section span because it "
+                    "built. The same rule applies to any patch: check "
+                    "catia_check_surface after building and before offsetting."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1110,8 +1153,19 @@ class GSDTools:
         """
         return self._point_refs([spec])[0]
 
-    def _point_refs(self, specs: list[Any]) -> list[Any]:
-        """``_point_ref`` for a whole list, with the part resolved once."""
+    def _point_refs(self, specs: list[Any], in_tree: bool = True) -> list[Any]:
+        """``_point_ref`` for a whole list, with the part resolved once.
+
+        ``in_tree`` decides whether coordinates become Point FEATURES in the
+        geometrical set. Leaving them out is not a shortcut that loses data: a
+        point that is referenced by the spline is saved with the part even when
+        it is not in the tree - measured on B30 2026-11-03, a 90-point spline
+        built this way, saved, closed and reopened with its tree holding exactly
+        one element (the spline) and its length still 188.496 mm for r=30, the
+        analytic answer. What it changes is the tree: ten loft sections of
+        coordinate splines used to leave 636 Point features behind (reported
+        2026-11-03), which then took 28 s just to hide.
+        """
         refs: list[Any] = []
         context: tuple[Any, Any, Any] | None = None
         self._coordinate_point_names = []
@@ -1127,14 +1181,16 @@ class GSDTools:
                            self._get_geoset())
             part, factory, geoset = context
             point = factory.AddNewPointCoord(spec[0], spec[1], spec[2])
-            geoset.AppendHybridShape(point)
+            if in_tree:
+                geoset.AppendHybridShape(point)
             self._coordinate_points += 1
-            try:
-                # Remember the name so the feature that uses it can be deleted
-                # together with it later (see CATIAConnection.note_owned).
-                self._coordinate_point_names.append(str(point.Name))
-            except Exception:  # noqa: BLE001 - an unnamed point is still usable
-                pass
+            if in_tree:
+                try:
+                    # Remember the name so the feature that uses it can be deleted
+                    # together with it later (see CATIAConnection.note_owned).
+                    self._coordinate_point_names.append(str(point.Name))
+                except Exception:  # noqa: BLE001 - an unnamed point is still usable
+                    pass
             refs.append(part.CreateReferenceFromObject(point))
         return refs
 
@@ -1311,6 +1367,10 @@ class GSDTools:
         self.conn.ensure_connected()
         element = args.get("element")
         closed = bool(args.get("closed", False))
+        # Coordinates become Point FEATURES by default when the caller asks for
+        # it, and tree-less otherwise. See _point_refs for the save/reopen
+        # measurement that makes the default safe.
+        in_tree = bool(args.get("create_points", False))
         self._coordinate_points = 0
 
         if element and args.get("points"):
@@ -1320,7 +1380,7 @@ class GSDTools:
             )
         if element:
             coords, note = self._outline_points(str(element), closed)
-            refs = self._point_refs(coords)
+            refs = self._point_refs(coords, in_tree)
             count = len(coords)
         else:
             points = args.get("points")
@@ -1329,7 +1389,7 @@ class GSDTools:
                     "catia_gsd_spline needs 'points' (element names or [x, y, z]) "
                     "or 'element' (a sketch whose outline this server drew)."
                 )
-            refs = self._point_refs(points)
+            refs = self._point_refs(points, in_tree)
             count = len(points)
             note = ""
 
@@ -1339,19 +1399,27 @@ class GSDTools:
         if closed:
             spline.SetClosing(1)
 
-        # A spline holds REFERENCES to points, so coordinates become real tree
-        # elements - this is the API, not a choice. Saying how many came from
-        # coordinates is the difference between "one sweep" and a geometrical
-        # set holding 666 elements that takes 28 s to hide (reported 2026-11-03,
-        # §P2-3). A sketch spline would be one element but only holds planar 2D
-        # geometry, so it cannot carry a 3D ring.
+        # A spline holds REFERENCES to points. With create_points=false those
+        # points are objects the part saves but does not list, which is the
+        # difference between "one sweep" and a geometrical set holding 636
+        # elements that takes 21+ minutes to delete one by one (reported
+        # 2026-11-03 across two rounds, with 636 points for ten sections).
         created = self._coordinate_points
-        points_note = (
-            f" {created} of them were coordinate lists, and each one is a separate "
-            f"Point feature in the geometrical set (the spline references it, so it "
-            f"cannot be dropped): expect {created} extra tree elements."
-            if created else ""
-        )
+        if created and in_tree:
+            points_note = (
+                f" {created} of them were coordinate lists, and each one is a separate "
+                f"Point feature in the geometrical set (create_points=true): expect "
+                f"{created} extra tree elements."
+            )
+        elif created:
+            points_note = (
+                f" {created} of them were coordinate lists and did NOT become tree "
+                f"elements: the spline references them and the part saves them, but "
+                f"the geometrical set lists one element (this spline). Pass "
+                f"create_points=true if you want the Point features visible."
+            )
+        else:
+            points_note = ""
         return self._finish(
             spline, args.get("name"),
             f"3D spline created through {count} points"

@@ -268,8 +268,18 @@ def test_owned_points_are_remembered_per_document_and_owner():
 def _part_design():
     from catia_mcp.tools.part_design import PartDesignTools
 
+    # A part with no geometrical sets, so a batch of names has nothing to
+    # delete in one selection and every name falls through to _delete_one -
+    # which is what this 0.3.50 test is about (0.3.51 added the batched GSD
+    # route in front of it; that one is covered in the v0351 file).
+    empty_sets = type("S", (), {"Count": 0})()
+    part = type("P", (), {"HybridBodies": empty_sets})()
+
     tools = PartDesignTools(connection=None)
-    tools.conn = type("C", (), {"ensure_connected": staticmethod(lambda: None)})()
+    tools.conn = type("C", (), {
+        "ensure_connected": staticmethod(lambda: None),
+        "get_active_part": staticmethod(lambda: part),
+    })()
     return tools
 
 
