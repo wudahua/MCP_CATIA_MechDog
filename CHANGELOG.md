@@ -2,6 +2,58 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.54] — 2026-11-04 · the two skins of a wall, and the refusals that were not written down
+
+The 0.3.53 acceptance came back clean and then found one thing: the fillet and
+spine refusals existed only in a release note and a test header, so the next
+caller asking for a surface fillet would find nothing. That is fixed, together
+with the thin-wall reading the model report asked for - measured first, and the
+measurement changed what got written.
+
+**`catia_check_surface` reports the two skins apart.** Every triangle is sorted
+by the radial component of its outward normal (>= +0.5 outer, <= -0.5 inner,
+otherwise axial) and every interior edge lands in `outer` / `inner` / `axial` /
+`mixed`, each with its own edge count, median, p90 and max. Each `worst_creases`
+entry now carries `r`, `theta_deg`, `z` and `side`, so the region keys and the
+crease list speak the same language.
+
+**But the mechanism the report proposed is not what the measurement showed.**
+It reported 28.53 deg on the outer face of a 0.3 mm wall against 124.05 deg on
+the inner one, and attributed it to the inner skin being the outer offset inwards
+(R3 -> R2.7), where the mesh must chord harder. Two solids whose skins are known,
+measured on B30 2026-11-04 (scripts/b30_v0354_wall.py):
+
+    tube R10, wall 0.3             outer 32 edges, median/max 22.50  |  inner 32, 22.50
+    shell 0.3 around an R3 fillet  outer 208 edges, median 13.38, max 29.89  |  inner 208, 13.38, 29.89
+
+Identical on both skins, twice. And where the honest 90 degree folds are, is the
+"mixed" bucket: on the tube all 64 rim edges score 90.0 there, because a wall's
+END faces meet both skins at a right angle. So a 124 degree reading on an inner
+face is a sliver along a seam, not a property of thin walls - and the reply says
+that, with both measurements, instead of repeating the offset-radius story. The
+`side_rule` field also says outright that the split means something only for a
+part that wraps around the Z axis.
+
+**The spline description now carries the technique that replaced the "deadlock".**
+The same report retracted its own claim and handed back the way through: do not
+put a plateau and a narrow transition band side by side in one closed section
+(the band falls between two samples at 4 deg, and sampling it drives the spacing
+under 0.1 mm), change the SHAPE of one continuous function instead -
+`z = z_valley + (z_foot - z_valley) * smoothstep((psi/11)**n)` with
+`n = ln(0.5)/ln(W_half/11)` setting the half-height width directly. Attributed as
+reported, with the arithmetic in the text, because the caller does that work.
+
+**README Known limits now says why there is no surface fillet and no spine.**
+`AddNewFilletBiTangent(surface1, surface2, radius, o1, o2, trimMode,
+relimitation)` updates for one orientation pair out of four on a 90° corner
+(o1 = -1, o2 = +1) and fails at update for all nine combinations between two
+disjoint parallel cylinders; `AddNewSpine()` takes no parameters and the typelib
+names no way to add sections. Same rule as `AddNewHealing` in 0.3.51: declared is
+not usable.
+
+917 tests, 8 new. Measured on B30 before and after; the tool's numbers match an
+independent reading of the same STL to the edge.
+
 ## [0.3.53] — 2026-11-03 · one number for the test count, one argument for boundary
 
 Three reports arrived together: the 0.3.52 acceptance, a "what is still missing

@@ -140,11 +140,43 @@ def _fold_stats(path: str, crease_deg: float, cap: int,
         # the same key, while distinct vertices 1 um apart stay distinct.
         return (round(point[0], 3), round(point[1], 3), round(point[2], 3))
 
+    def side_of(normal: Any, verts: Any) -> str:
+        """Does this triangle face away from the Z axis, towards it, or neither?
+
+        A thin wall has two skins: the outer one faces away from the axis, the
+        inner one towards it, because the inner is the outer offset inwards. The
+        radial component of the triangle's OUTWARD normal therefore says which
+        skin it is, and that is the cheapest reliable split (one dot product).
+
+        Threshold 0.5 rather than >0: near the top and bottom of a wall the
+        normal is axial and the radial component is noise, so a small value would
+        sort floor and ceiling triangles by accident. Those become "axial", and
+        an edge whose two triangles disagree becomes "mixed" - which is where the
+        real 90 degree folds of a wall's END faces live (measured on B30
+        2026-11-04: a 0.3 mm tube's 64 rim edges are all 90.0 deg and all mixed).
+
+        This assumes the part wraps around the Z axis, which is what a bottle
+        base, a shell of revolution or a turned part does. It is a hint, not a
+        fact, and the reply says so.
+        """
+        centroid = [(verts[0][axis] + verts[1][axis] + verts[2][axis]) / 3.0
+                    for axis in range(3)]
+        radius = math.hypot(centroid[0], centroid[1])
+        if radius < 1e-9:
+            return "axial"
+        n_r = (normal[0] * centroid[0] + normal[1] * centroid[1]) / radius
+        if n_r >= 0.5:
+            return "outer"
+        if n_r <= -0.5:
+            return "inner"
+        return "axial"
+
     edges: dict[Any, list[Any]] = {}
     for normal, verts in faces:
+        side = side_of(normal, verts)
         for a, b in ((0, 1), (1, 2), (2, 0)):
             ka, kb = key(verts[a]), key(verts[b])
-            edges.setdefault((min(ka, kb), max(ka, kb)), []).append(normal)
+            edges.setdefault((min(ka, kb), max(ka, kb)), []).append((normal, side))
 
     def angle(n1: Any, n2: Any) -> float:
         dot = sum(x * y for x, y in zip(n1, n2))
@@ -158,6 +190,8 @@ def _fold_stats(path: str, crease_deg: float, cap: int,
     worst = (0.0, None)
     creases: list[dict[str, Any]] = []
     outside = 0
+    by_side: dict[str, list[float]] = {"outer": [], "inner": [], "axial": [],
+                                       "mixed": []}
 
     def inside(mid: tuple[float, float, float]) -> bool:
         if region is None:
@@ -179,25 +213,37 @@ def _fold_stats(path: str, crease_deg: float, cap: int,
                 return False
         return True
 
-    for edge, normals in edges.items():
-        if len(normals) == 1:
+    for edge, entries in edges.items():
+        if len(entries) == 1:
             boundary += 1
             continue
-        if len(normals) > 2:
+        if len(entries) > 2:
             multi += 1
             continue
-        if region is not None:
-            mid = tuple((edge[0][axis] + edge[1][axis]) / 2.0 for axis in range(3))
-            if not inside(mid):  # type: ignore[arg-type]
-                outside += 1
-                continue
-        fold = angle(normals[0], normals[1])
+        mid = tuple((edge[0][axis] + edge[1][axis]) / 2.0 for axis in range(3))
+        if region is not None and not inside(mid):  # type: ignore[arg-type]
+            outside += 1
+            continue
+        fold = angle(entries[0][0], entries[1][0])
+        sides = {entries[0][1], entries[1][1]}
+        side = sides.pop() if len(sides) == 1 else "mixed"
+        by_side[side].append(fold)
         folds.append(fold)
         if fold > worst[0]:
             worst = (fold, edge)
         if fold >= crease_deg:
-            creases.append({"fold_deg": round(fold, 2),
-                            "at": [list(edge[0]), list(edge[1])]})
+            radius = math.hypot(mid[0], mid[1])
+            creases.append({
+                "fold_deg": round(fold, 2),
+                "at": [list(edge[0]), list(edge[1])],
+                # The region keys are r/z/theta, so a caller reading a crease
+                # should not have to recompute them (requested 2026-11-04).
+                "r": round(radius, 3),
+                "theta_deg": round(math.degrees(math.atan2(mid[1], mid[0]))
+                                   % 360.0, 2),
+                "z": round(mid[2], 3),
+                "side": side,
+            })
     folds.sort()
 
     def at(quantile: float) -> float | None:
@@ -206,6 +252,20 @@ def _fold_stats(path: str, crease_deg: float, cap: int,
         return round(folds[min(len(folds) - 1, int(quantile * len(folds)))], 2)
 
     creases.sort(key=lambda item: -item["fold_deg"])
+
+    def stats_of(values: list[float]) -> dict[str, Any]:
+        ordered = sorted(values)
+
+        def at_side(quantile: float) -> float | None:
+            if not ordered:
+                return None
+            return round(ordered[min(len(ordered) - 1,
+                                     int(quantile * len(ordered)))], 2)
+
+        return {"edges": len(ordered), "median": at_side(0.5),
+                "p90": at_side(0.9),
+                "max": round(ordered[-1], 2) if ordered else None}
+
     stats: dict[str, Any] = {
         "triangles": len(faces),
         "interior_edges": len(folds),
@@ -213,6 +273,18 @@ def _fold_stats(path: str, crease_deg: float, cap: int,
         "non_manifold_edges": multi,
         "fold_deg": {"median": at(0.5), "p90": at(0.9), "p99": at(0.99),
                      "max": round(worst[0], 2)},
+        "fold_deg_by_side": {side: stats_of(values)
+                             for side, values in by_side.items()},
+        "side_rule": (
+            "outer / inner / axial come from the OUTWARD normal's radial "
+            "component at each triangle's centroid (>= +0.5 outer, <= -0.5 "
+            "inner, otherwise axial), and an edge whose two triangles disagree "
+            "is 'mixed'. That reads a wall's two skins apart only for a part "
+            "that wraps around the Z axis (bottle base, shell of revolution, "
+            "turned part); on a prismatic part the split means little. 'mixed' "
+            "is not an error: on a 0.3 mm tube all 64 rim edges score 90.0 deg "
+            "there, because the wall's END faces meet both skins at a right "
+            "angle (measured on B30 2026-11-04)"),
         "creases": len(creases),
         "worst_creases": creases[:8],
         "crease_threshold_deg": crease_deg,
@@ -3993,7 +4065,18 @@ class MeasurementTools:
                 f"surfaces reads 90 or more when the surfaces meet at a right "
                 f"angle and stays put however the join is healed: measured "
                 f"2026-11-03, AddNewHealing with Continuity 0, 1 and 2 left a "
-                f"90 deg fold at exactly 90 deg, with the same triangle count."
+                f"90 deg fold at exactly 90 deg, with the same triangle count. "
+                f"ON A THIN-WALLED SOLID, read fold_deg_by_side before believing a "
+                f"large max: the inner skin is the outer one offset inwards, so "
+                f"the same corner is a smaller radius there and the mesh chords it "
+                f"harder. Check each worst_creases entry's r, z and side - if two "
+                f"creases share an r and their z differ by the wall thickness, the "
+                f"pair is the two skins of one feature, not two defects. Measured "
+                f"on B30 2026-11-04: a 0.3 mm tube and a 0.3 mm shell around an R3 "
+                f"fillet both read IDENTICAL statistics on the two skins (22.50 / "
+                f"22.50 and 13.38 / 13.38, max 29.89 on both), so an inner-face "
+                f"reading several times the outer one is a sliver along a seam "
+                f"rather than a property of thin walls."
             ),
         }
         if stats["boundary_edges"]:

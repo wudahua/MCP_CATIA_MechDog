@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.53** · [what changed](CHANGELOG.md) ·
+**0.3.54** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1130,6 +1130,19 @@ Place the result with `catia_get_component_transform`.
 
 ## Known limits
 
+* **No surface-to-surface fillet, and no spine.** Both exist in the typelib and
+  neither is exposed, for the same reason `AddNewHealing` is not: measured on B30
+  2026-11-03, `AddNewFilletBiTangent(surface1, surface2, radius, o1, o2,
+  trimMode, relimitation)` updates for exactly one orientation pair out of four on
+  a 90° corner (o1 = −1, o2 = +1) and fails the update for all nine combinations
+  between two disjoint parallel cylinders, so what it builds is unverified - the
+  UI's Edge Fillet and this automation object are not the same thing.
+  `AddNewSpine()` takes no parameters at all and the typelib names no way to give
+  it sections, so it cannot be driven. Round the edge in the geometry you build
+  (an arc in the profile, as the five-petal bottle base ended up doing with its
+  R3), or fillet a SOLID edge with `catia_fillet` if the wall is thick enough for
+  the radius. **Read `typeinfo` as "declared", never as "usable"** - that is how
+  `AddNewHealing` cost a release.
 * **`set_view` works in the ABSOLUTE axis system, not the part's.** `front` means
   "look along −Y with +Z up" in the document's axes whatever the model's own
   orientation, so a part rotated in the tree (or a component placed with a
