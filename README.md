@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.61** · [what changed](CHANGELOG.md) ·
+**0.3.62** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -115,6 +115,9 @@ arcs given as their two endpoints, and one plan per several documents.
 | `catia_shaft` / `catia_groove` called `AddNewShaft(sketch)` and assigned `FirstAngle = angle` | The feature could never be updated (E_FAIL), so **no turned part could be built at all** — piston, cylinder-head cover and front cover had no other route |
 | `catia_hole` with a finite depth reported success while cutting nothing | The depth is stored on `BottomLimit` but not applied on B30; the tree carried a dead feature that poisoned every later measurement |
 | `catia_hole` ignored where the profile was drawn | `AddNewHoleFromSketch` takes the bore's axis from a **point** in the sketch, so a sketch holding one circle was drilled at the sketch origin: circles at (0, 0) and (10, 0) produced bit-identical parts, and a circle outside the material drilled through its middle. The removed volume stayed exactly `pi*r^2*h`, so nothing could see it |
+
+| `catia_hole` with `threaded` set wrote `ThreadingMode = 1`, commented `# catThreaded` | `CatHoleThreadingMode` is **0 = threaded, 1 = smooth**, and 1 is also what a hole in a fresh part already carries - so the write was a no-op on a property nothing read back, and **every hole asked for as threaded since 0.3.0 was smooth** while the reply said it was created. Feature names do not differ (both `孔.1`), so nothing downstream could see it. A hole also **inherits the mode of the hole before it**, so `threaded: false` has to be written as well |
+| `catia_sketch_constraint` passed `geometry_index_1` straight to `CreateReferenceFromObject` | `GeometricElements` item 1 is the sketch's **absolute axis**, not the first thing the caller drew (`绝对轴` at 1, `直线.1` at 2). So "my first line" = 1 landed on the axis and CATIA answered a bare `方法 AddMonoEltCst 失败`, a message that names neither. The delete path had refused index 1 for releases; the constraint path had not |
 
 The fixes: reads go through `SystemService.Evaluate` (the same route that fixed
 `GetCOG` upstream in 0.2.2); `connection.part_of()` retries via

@@ -2,6 +2,61 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.62] — 2026-11-05 · two numbers that came from comments, not from CATIA
+
+Checked the two real upstream commits (`f9751a1`, `b59a95b` — both field-verified
+on V5-6R2020 by @Hemir95) against this fork. Six of their eight claims were
+already covered here, sometimes more thoroughly; one was a live defect of ours,
+and one turned into a second defect while being fixed.
+
+**Every "threaded" hole since 0.3.0 was smooth.** `catia_hole` wrote
+`hole.ThreadingMode = 1  # catThreaded`. The comment was the source; CATIA's own
+type library, read out of the Hole interface on B30, says otherwise:
+
+```
+ENUM CatHoleThreadingMode
+  catThreadedHoleThreading = 0
+  catSmoothHoleThreading   = 1
+```
+
+Nothing caught it because **1 is also what a hole in a fresh part already
+carries** — the write was a no-op on a property nothing read back, and both values
+update without complaint. Feature names do not differ either (both are `孔.1`).
+
+Measured while fixing it, a second trap upstream does not mention: **a hole
+inherits the threading mode of the hole before it in the same part.** Three holes
+built in a row read 0 / 0 / 0 after the first was threaded, and the two plain ones
+had never been touched. So `threaded: false` has to be written too — "leave it
+alone" keeps the previous bore's thread. Both holes are now explicit, the mode is
+set **after** the first update (threading a hole that has not materialized breaks
+the rebuild), and the reply says THREADED when it took.
+
+**`geometry_index_1: 1` was the sketch's absolute axis.** `GeometricElements`
+reads item 1 = `绝对轴`, item 2 = the first line drawn. The constraint path passed
+the index straight through, so the natural reading of "my first line" produced
+CATIA's bare `方法 AddMonoEltCst 失败` — naming neither the axis nor the index. The
+delete path had refused index 1 for releases; the constraint path had not. Now the
+listing marks `absolute_axis: true` on that entry, and both slots refuse it with
+the index that would have worked.
+
+**Checked and NOT adopted**, because the measurement did not support the claim on
+this build:
+
+- SPA `Measurable` scalars re-wrapped in `win32com.client.Dispatch` "so Volume and
+  Area read correctly": on a 20 mm cube whose values are exact, raw and re-wrapped
+  both read **8000.0000 mm³ and 2400.0000 mm²**. Adding the wrap to make two code
+  paths look alike would risk an object that already works.
+- `fix` constraints forced to `ReferenceType = 1`: a fresh fix reads 0, setting 1
+  and back both read back fine, and there is no `CatConstraintReferenceType` enum
+  in that library to say what either value means. Nothing written.
+- `Mode = 0` before assigning `Dimension.Value`: a new constraint already reads 0,
+  and `CatConstraintMode` is 0 = driving, 1 = driven. Nothing written.
+
+Also confirmed by reading the enum, not by trusting the comment block: this
+project's `_CST_*` constants are right throughout (Reference 0, Distance 1,
+Length 5, Angle 6, Horizontality 10, Perpendicularity 11, Verticality 13,
+Radius 14).
+
 ## [0.3.61] — 2026-11-04 · a verdict that contradicted the model it measured
 
 Two reports on 0.3.60, both about one failure mode from different ends: a number

@@ -1550,8 +1550,28 @@ class SketcherTools:
 
         # AddMonoEltCst/AddBiEltCst take Reference arguments; passing raw
         # geometry elements raises DISP_E_TYPEMISMATCH (field-verified).
-        def _ref(index: int) -> Any:
-            return part.CreateReferenceFromObject(geom.Item(index))
+        def _ref(index: int, label: str) -> Any:
+            if index < 1 or index > geom.Count:
+                raise ArgumentOutOfRange(
+                    f"{label} is {index}, but this sketch has {geom.Count} "
+                    "element(s). Use catia_sketch_get_geometry - it lists the real "
+                    "indices."
+                )
+            element = geom.Item(index)
+            if self._is_absolute_axis(element, index):
+                # Constraining the absolute axis fails with CATIA's bare
+                # "AddMonoEltCst failed" - a message that names neither the axis
+                # nor the index. The delete path has refused index 1 for a while;
+                # this one did not, so "my first line" (which is index 2) looked
+                # broken (measured on B30 2026-11-05: '绝对轴' at 1, '直线.1' at 2).
+                raise RuntimeError(
+                    f"{label} is {index}, which is the sketch's ABSOLUTE AXIS "
+                    f"('{element.Name}'), not geometry you drew. The first element "
+                    "you draw is index 2. Use the index from "
+                    "catia_sketch_get_geometry, where that entry is marked "
+                    "absolute_axis: true."
+                )
+            return part.CreateReferenceFromObject(element)
 
         # Dimensional constraints (need a geometry reference + value)
         if constraint_type in ("distance", "radius", "angle"):
@@ -1561,16 +1581,24 @@ class SketcherTools:
                 raise ValueError(f"Constraint type '{constraint_type}' requires 'geometry_index_1'.")
 
             if constraint_type == "distance" and idx2 is not None:
-                cst = constraints.AddBiEltCst(self._CST_DISTANCE, _ref(idx1), _ref(idx2))
+                cst = constraints.AddBiEltCst(
+                    self._CST_DISTANCE,
+                    _ref(idx1, "geometry_index_1"),
+                    _ref(idx2, "geometry_index_2"))
             elif constraint_type == "distance":
                 # A single-element distance is a length dimension in CATIA.
-                cst = constraints.AddMonoEltCst(self._CST_LENGTH, _ref(idx1))
+                cst = constraints.AddMonoEltCst(
+                    self._CST_LENGTH, _ref(idx1, "geometry_index_1"))
             elif constraint_type == "radius":
-                cst = constraints.AddMonoEltCst(self._CST_RADIUS, _ref(idx1))
+                cst = constraints.AddMonoEltCst(
+                    self._CST_RADIUS, _ref(idx1, "geometry_index_1"))
             else:  # angle
                 if idx2 is None:
                     raise ValueError("Angle constraint requires 'geometry_index_2'.")
-                cst = constraints.AddBiEltCst(self._CST_ANGLE, _ref(idx1), _ref(idx2))
+                cst = constraints.AddBiEltCst(
+                    self._CST_ANGLE,
+                    _ref(idx1, "geometry_index_1"),
+                    _ref(idx2, "geometry_index_2"))
             cst.Dimension.Value = value
 
             unit = "deg" if constraint_type == "angle" else "mm"
@@ -1594,13 +1622,17 @@ class SketcherTools:
         if constraint_type in ("horizontal", "vertical", "fix"):
             if idx1 is None:
                 raise ValueError(f"Constraint '{constraint_type}' requires 'geometry_index_1'.")
-            cst = constraints.AddMonoEltCst(cst_code, _ref(idx1))
+            cst = constraints.AddMonoEltCst(
+                cst_code, _ref(idx1, "geometry_index_1"))
         else:
             if idx1 is None or idx2 is None:
                 raise ValueError(
                     f"Constraint '{constraint_type}' requires both 'geometry_index_1' and 'geometry_index_2'."
                 )
-            cst = constraints.AddBiEltCst(cst_code, _ref(idx1), _ref(idx2))
+            cst = constraints.AddBiEltCst(
+                cst_code,
+                _ref(idx1, "geometry_index_1"),
+                _ref(idx2, "geometry_index_2"))
 
         return f"{constraint_type.capitalize()} constraint '{cst.Name}' added"
 
@@ -1680,6 +1712,22 @@ class SketcherTools:
         except Exception:  # noqa: BLE001 - a listing must not mask the error
             return ""
 
+    @staticmethod
+    def _is_absolute_axis(element: Any, index: int) -> bool:
+        """True for the sketch's absolute axis, which sits at item 1.
+
+        Measured on B30 2026-11-05: ``GeometricElements`` reads item 1 =
+        '绝对轴', item 2 = the first line drawn, item 3 = the second. It is the
+        sketch's reference frame, not profile geometry - constraining it fails
+        and deleting it breaks the sketch - so every caller-facing index has to
+        make that visible. Both the name and the position are checked; either
+        alone is an assumption about the build's language or its ordering.
+        """
+        name = str(getattr(element, "Name", ""))
+        if "绝对轴" in name or "AbsoluteAxis" in name:
+            return True
+        return index == 1
+
     def _get_geometry(self, sketch_name: str | None = None,
                       hide_construction: bool = True) -> str:
         """List a sketch's elements, open or closed.
@@ -1696,7 +1744,11 @@ class SketcherTools:
         construction_count = 0
         for i in range(1, geom.Count + 1):
             elem = geom.Item(i)
-            info: dict[str, Any] = {"index": i, "name": str(elem.Name)}
+            info: dict[str, Any] = {
+                "index": i,
+                "name": str(elem.Name),
+                "absolute_axis": self._is_absolute_axis(elem, i),
+            }
             try:
                 info["type"] = str(elem.GeometricType)
             except Exception:
@@ -1730,7 +1782,10 @@ class SketcherTools:
                 "Coordinates cannot be read back from a closed sketch: CATIA's "
                 "Point2D exposes no readable X/Y through automation on this build. "
                 "Use catia_sketch_edit to reopen it and append, or "
-                "catia_sketch_delete_element to remove one element."
+                "catia_sketch_delete_element to remove one element. "
+                "absolute_axis: true marks the sketch's own reference frame at "
+                "index 1 - it is not geometry you drew, and the first element you "
+                "draw is index 2; constraints and deletes refuse that index."
             ),
         }
         drawn = self._drawn.get(self._sketch_key(str(sketch.Name)))
@@ -1790,13 +1845,14 @@ class SketcherTools:
                     f"Element index {index} is out of range: sketch '{name}' has "
                     f"{geom.Count} element(s). Use catia_sketch_get_geometry."
                 )
-            if index == 1:
+            axis_element = geom.Item(index)
+            if self._is_absolute_axis(axis_element, index):
                 raise RuntimeError(
                     "Element 1 is the sketch's absolute axis, not a profile "
                     "element - deleting it would break the sketch. Pick another "
                     "index from catia_sketch_get_geometry."
                 )
-            element_name = str(geom.Item(index).Name)
+            element_name = str(axis_element.Name)
             sel = self.conn.hso
             try:
                 sel.Clear()

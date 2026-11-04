@@ -578,7 +578,23 @@ class PartDesignTools:
                         },
                         "threaded": {
                             "type": "boolean",
-                            "description": "Whether to add threading (default: false)",
+                            "description": (
+                                "Add a thread to the bore (default: false). "
+                                "CatHoleThreadingMode on B30 is 0 = threaded, "
+                                "1 = smooth. Two measured facts shape this flag: "
+                                "a new hole carries 1, so the thread is applied "
+                                "AFTER the hole has materialized and the reply says "
+                                "THREADED when it took; and a hole INHERITS the mode "
+                                "of the hole before it in the same part, so this "
+                                "flag is always written - leaving it at false still "
+                                "resets the bore to smooth instead of inheriting the "
+                                "previous thread. Pitch and thread standard are the "
+                                "hole's own parameters and are NOT set here: the "
+                                "thread is whatever CATIA defaults to for this "
+                                "diameter, so a drawing that calls out a specific "
+                                "pitch still needs the thread definition edited in "
+                                "CATIA."
+                            ),
                             "default": False,
                         },
                         "sketch_name": {
@@ -3163,10 +3179,15 @@ class PartDesignTools:
             except Exception:
                 type_note = f" Type '{hole_type}' not applied (API rejected it); simple hole created."
 
-        if args.get("threaded", False):
-            hole.ThreadingMode = 1  # catThreaded
+        threaded = bool(args.get("threaded", False))
 
+        # The hole has to MATERIALIZE before its mode can be trusted to stick:
+        # threading before the first update breaks the rebuild (upstream f9751a1,
+        # field-verified on B30). So this update happens first, and the threading
+        # is applied to a hole that already exists.
         update_error = self._try_update(part, hole)
+        thread_note = self._apply_threading(part, hole, threaded)
+
         self.conn.refresh_display()
 
         after, cog_after, _after_note = self._mass_probe(part, body)
@@ -3225,20 +3246,20 @@ class PartDesignTools:
                 note = (" (CATIA raised during the update, but the bore is in the "
                         "geometry - kept)")
             length_note = self._bore_length_note(
-                removed, diameter, depth, through_all, hole_type,
-                args.get("threaded"))
+                removed, diameter, depth, through_all, hole_type, threaded)
             position_note = self._bore_position_note(
                 before, cog_before, after, cog_after, target, placement, diameter)
             return (
                 f"Hole created: D{diameter} mm, {extent}. Removed {removed:.1f} mm3 "
                 f"({before:.1f} -> {after:.1f}). Feature: '{hole.Name}'."
-                f"{length_note}{position_note}{axis_note}{type_note}{note}"
+                f"{length_note}{position_note}{axis_note}{type_note}"
+                f"{thread_note}{note}"
             )
         why = f" ({volume_note})" if volume_note else ""
         return (
             f"UNVERIFIED: hole '{hole.Name}' created: D{diameter} mm, {extent}, "
             f"but the bore was not checked against the body volume{why}."
-            f"{axis_note}{type_note}"
+            f"{axis_note}{type_note}{thread_note}"
         )
 
     def _mass_probe(self, part: Any, body: Any
@@ -3451,6 +3472,79 @@ class PartDesignTools:
         return (" Bore checked against the material removed: centred on "
                 "(%.3f, %.3f, %.3f), %.3f mm from the profile's circle."
                 % (point[0], point[1], point[2], off))
+
+    def _apply_threading(self, part: Any, hole: Any, threaded: bool) -> str:
+        """Put the hole in the threading mode asked for, and say what happened.
+
+        Two facts measured on B30, 2026-11-05, decide the shape of this method:
+
+        * ``CatHoleThreadingMode`` is 0 = catThreadedHoleThreading and 1 =
+          catSmoothHoleThreading, read out of the Hole interface's OWN type
+          library. This file wrote 1 with ``# catThreaded`` beside it from 0.3.0
+          through 0.3.61, so every hole asked for as threaded came out SMOOTH and
+          was reported as created. Nothing caught it because 1 is also what a hole
+          in a fresh part already carries: the write was a no-op on a property
+          that was never read back.
+        * A hole INHERITS the mode of the hole before it in the same part. Three
+          holes built in a row read 0 / 0 / 0 after the first was threaded, and
+          the two plain ones had never been touched. So ``threaded: false`` has to
+          be WRITTEN too - doing nothing leaves the previous bore's thread on this
+          one.
+
+        The caller must have updated the hole once already; threading a hole that
+        has not materialized breaks the rebuild.
+        """
+        wanted_mode = 0 if threaded else 1
+        try:
+            current_mode = hole.ThreadingMode
+        except Exception:  # noqa: BLE001 - unreadable means "cannot tell, write it"
+            current_mode = None
+
+        note = ""
+        if current_mode != wanted_mode:
+            try:
+                hole.ThreadingMode = wanted_mode
+            except Exception as error:  # noqa: BLE001
+                if threaded:
+                    raise RuntimeError(
+                        f"Hole '{hole.Name}' was created but CATIA refused its "
+                        f"threading mode ({str(error).splitlines()[0][:110]}), so the "
+                        "bore is SMOOTH. Delete it with catia_delete_feature before "
+                        "retrying, or keep it if a plain bore is what you wanted."
+                    ) from error
+                # A plain hole that keeps the previous bore's thread is worse than
+                # a plain hole, but it is still a hole: say so rather than throw.
+                note = (
+                    " WARNING: this bore is SMOOTH as asked, but CATIA refused the "
+                    "write that would have made it so and the hole it copied may "
+                    "have carried a thread - check the feature in CATIA."
+                )
+            else:
+                try:
+                    part.Update()
+                except Exception as error:  # noqa: BLE001
+                    if threaded:
+                        raise RuntimeError(
+                            f"Hole '{hole.Name}' had its threading mode set but the "
+                            f"part update after it failed "
+                            f"({str(error).splitlines()[0][:110]}). The thread may "
+                            "not be in the geometry - open the part and look before "
+                            "relying on it."
+                        ) from error
+                    note = (
+                        " The threading mode was reset to smooth but the part update "
+                        "after it raised; verify the bore in CATIA."
+                    )
+
+        if threaded:
+            note = (
+                " THREADED: CATIA reports threading mode 0, which is "
+                "catThreadedHoleThreading. Pitch and standard are the hole's own "
+                "parameters and this tool sets neither - they are whatever CATIA "
+                "defaults to for this diameter. The next hole in this part inherits "
+                "this mode, so pass threaded: false explicitly for a plain bore."
+            )
+        return note
 
     def _bore_length_note(self, removed: float, diameter: float, depth: float,
                           through_all: bool, hole_type: Any,
