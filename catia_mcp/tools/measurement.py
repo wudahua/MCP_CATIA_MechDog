@@ -791,6 +791,30 @@ _MASS_NOTE = (
     "3.33e-7 = 0.008/12*(0.02^2+0.01^2))."
 )
 
+
+def _uniform_thickness(volume_mm3: float | None,
+                       area_mm2: float | None) -> float | None:
+    """2V/A: the wall thickness of an evenly thick shell, and only that.
+
+    Added because the number kept being computed by hand. A 0.3 mm thick-surface
+    bottle base answered volume 10099.5 mm3 and area 67392.8 mm2, and 2V/A =
+    0.2997 mm was the only way to say what the wall actually came out at, since
+    a thickened surface is two faces plus a rim and V/A is therefore about t/2
+    (2026-11-04).
+
+    It is NOT a thickness gauge. A solid cube reports a third of its edge, and a
+    part with one thick boss and one thin panel gets a single number that
+    describes neither. It is published because the even shell is the case where
+    the caller has no other way to check the result, and the key is named
+    "uniform" so nobody reads it as a local measurement.
+    """
+    if not volume_mm3 or not area_mm2:
+        return None
+    if volume_mm3 <= 0 or area_mm2 <= 0:
+        return None
+    return round(2.0 * volume_mm3 / area_mm2, 4)
+
+
 # The two buckets a PART measurement publishes, in the same words on both part
 # routes (the active document and `document=`). The assembly route has had them
 # since 0.3.34; on a part they answer the one question `elapsed_ms` cannot: two
@@ -2304,6 +2328,9 @@ class MeasurementTools:
         except Exception as exc:  # noqa: BLE001
             fields["center_of_gravity_mm"] = None
             fields["center_of_gravity_error"] = str(exc).splitlines()[0][:90]
+        thickness = _uniform_thickness(volume_mm3, area_mm2)
+        if thickness is not None:
+            fields["uniform_thickness_mm"] = thickness
         return fields
 
     def _tensor_for(self, part: Any) -> dict[str, Any] | None:

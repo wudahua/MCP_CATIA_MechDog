@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.59** · [what changed](CHANGELOG.md) ·
+**0.3.60** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -12,7 +12,7 @@ defects that make that loop lie to you. Most of the work since 0.3.0 came from
 people rebuilding real assemblies with it: the changelog is a list of things that
 produced a plausible number, a wrong number, or no explanation at all.
 
-**106 tools** (upstream: 98 — 16 dropped, 24 added). Nothing in the COM layer was
+**108 tools** (upstream: 98 — 16 dropped, 24 added). Nothing in the COM layer was
 rewritten — the value of upstream is the field-verified knowledge in its
 comments, so this fork is strictly add / subtract / patch. The count is asserted
 by `tests/test_readme_tool_counts.py`, so it cannot drift from the code again.
@@ -58,14 +58,15 @@ by `tests/test_readme_tool_counts.py`, so it cannot drift from the code again.
 `export` (STEP/STL hand-off) and `http_transport` (remote agent) are kept: they
 are domain-neutral and cheap. See `FORK.md` §8 if you want to cut further.
 
-### Added (24 tools over upstream)
+### Added (26 tools over upstream)
 
-Five of them came with the fork, nineteen were added while building parts from
-a spec (0.3.1: three, 0.3.2: four, 0.3.4: one, 0.3.5: one, 0.3.8: two, 0.3.17:
+Five of them came with the fork, twenty-one were added while building parts
+from a spec (0.3.1: three, 0.3.2: four, 0.3.4: one, 0.3.5: one, 0.3.8: two, 0.3.17:
 two - `catia_delete_body`, `catia_solid_loft`; 0.3.19: one - `catia_copy_component`;
 0.3.51: one - `catia_check_surface`; 0.3.53: one - `catia_gsd_boundary`; 0.3.55: one - `catia_gsd_heal`; 0.3.56: two -
-`catia_gsd_fillet_surface`, `catia_gsd_spine`).
-Upstream 98 − 16 dropped + 24 added = 106. 0.3.20 added arguments instead of
+`catia_gsd_fillet_surface`, `catia_gsd_spine`; 0.3.60: two -
+`catia_gsd_rotate`, `catia_gsd_translate`).
+Upstream 98 − 16 dropped + 26 added = 108. 0.3.20 added arguments instead of
 tools: a sketch support given as `origin`/`u`/`v`, edges given as coordinates,
 arcs given as their two endpoints, and one plan per several documents.
 
@@ -77,7 +78,7 @@ arcs given as their two endpoints, and one plan per several documents.
 | `catia_get_component_transform` | The same placement in both conventions, plus where local X/Y/Z point in the assembly |
 | `catia_rename_component` | A readable assembly tree. `Part.Name` is read-only on V5-6R2020, so every part arrives as `Part1.1 / Part2.1 / …`; the instance name is writable |
 
-#### Added while building parts from a spec (19 tools)
+#### Added while building parts from a spec (21 tools)
 
 | Tool | Version | Why it exists |
 |---|---|---|
@@ -99,6 +100,8 @@ arcs given as their two endpoints, and one plan per several documents.
 | `catia_gsd_heal` | 0.3.55 | Two surfaces that do not quite meet cannot be joined (a join wants a shared edge) and cannot be lofted together. `AddNewHealing` stitches them: measured on B30 2026-11-03, two lofts 0.05 mm apart went from 48 open seam edges to 0 with merging distance 0.5, while 0.001 changed nothing. It does NOT change continuity - a 0.52 deg seam stayed 0.52 deg - and the same operator had been written off in 0.3.51 because the test never registered a body with `AddBodyToHeal` |
 | `catia_gsd_fillet_surface` | 0.3.56 | 0.3.53 called this object unverified and shipped nothing. Verified on B30 2026-11-03: the one orientation pair CATIA accepts on a straight corner, `(-1,+1)`, builds a true rolling-ball fillet - on 60/90/120 deg wedges every mesh vertex sat at exactly 5.0000 mm from the axis for r=5 (min = max) and the area was 314.159 / 418.879 / 209.440 mm² = `(π − θ)·r·L`, and a floor-and-wall corner built in another direction behaved identically. The tool tries the four pairs and keeps the survivor, refuses when none survives (two disjoint cylinders: 0 of 9) and refuses when more than one does (disc + standing cylinder built two different surfaces, 573.4 and 391.3 mm²) instead of choosing for the caller |
 | `catia_gsd_spine` | 0.3.56 | 0.3.53 said the typelib "names no way to give it sections". It does: `HybridShapeSpine` declares 40 members including `AddSection`, `AddGuide`, `GetNumberOfSections` and `ModifySectionCurve`, and the old probe had only looked at `dir(spine)`. Measured: sections register, `UpdateObject` succeeds with two or more (one fails), and the curve is the spine - normal to the sections, not through their centres (three parallel rings gave 40.0000 mm and did not bend for a 30 mm sideways offset; a 45° tilted ring made it a 37.9224 mm curve that leaves that axis by 7.05 mm) |
+| `catia_gsd_rotate` | 0.3.60 | A five-lobe bottle base is one lobe plus four rotations of 72°, and there was no way to rotate a surface at all - `catia_circ_pattern` is a Part Design feature and wants a solid - so the lobe was REBUILT five times, once per position, which is four extra constructions of the same geometry and a shape whose positions could not be moved later. `AddNewRotate(element, axis, angle)` was in the typelib the whole time. Measured on B30 2026-11-04: a cylinder whose axis sits at (20,0) rotated +90° about z lands at (0,20), so the sign is counter-clockwise by the right-hand rule, and the original stays |
+| `catia_gsd_translate` | 0.3.60 | Same gap, same run. `AddNewTranslate(element, direction, distance)` measured on the same day: a cylinder spanning z 0..20 moved 30 mm along +z spans 30..50 and no longer meets z=0. The direction must be the Direction OBJECT, not a Reference - passing the reference raises “type mismatch, argument 2” - while `AddNewRotate` takes a Reference to an axis line, so the two members of one family disagree and neither argument kind is guessed |
 | `catia_check_surface` | 0.3.51 | A surface task's acceptance criteria were "check with zebra stripes that the valley is smooth", and CATIA V5 gives automation no zebra, no curvature comb and no Match object (measured: the viewer answers `RenderingMode` and returns an unresolvable attribute for `Zebra` / `EnvironmentMapping` / `AnalysisMode`). The mesh can answer it anyway: the dihedral angle across every interior edge, so a G0 fold reads as degrees instead of needing a picture |
 
 ### Fixed (latent upstream bugs, reproduced on a live V5-6R2020 B30 session)
@@ -1105,7 +1108,7 @@ while a reply that only reports success cannot.
 | Document | 12 | new/open/save/close/list + `catia_save_as_copy`; `catia_save_document` retries around dialogs |
 | Sketcher | 13 | lines, rectangles, circles, constraints; reopen a closed sketch and delete one element |
 | Part Design | 25 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, solid loft, bodies (create / list / delete)… |
-| Generative Shape Design | 29 | wireframe and surfaces, extract, `boundary`, `heal`, `fillet_surface`, `spine`, revolve + close surface; a GSD element or set is removed with `catia_delete_feature` |
+| Generative Shape Design | 31 | wireframe and surfaces, extract, `boundary`, `heal`, `fillet_surface`, `spine`, `rotate`, `translate`, revolve + close surface; a GSD element or set is removed with `catia_delete_feature` |
 | Assembly | **13** | upstream 9 + get/set component transform, rename, list constraints, copy component |
 | Measurement | 7 | inertia, distance, bounding box\*, parameters, `catia_check_surface` |
 | Export | 4 | STEP / STL / IGES hand-off |

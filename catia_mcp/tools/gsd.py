@@ -30,6 +30,45 @@ PLANE_MAP = {
     "xz": "PlaneZX",  # alias
 }
 
+# The same idea under a different key, tool by tool: "the plane this sits on" is
+# support_plane in catia_gsd_circle, support in catia_gsd_project and base_plane
+# in catia_gsd_plane_offset. A wrong spelling does not fail loudly - it lands in
+# **args, the tool asks for its own key, and the caller gets
+# "KeyError: 'support_plane'", which reads like a server bug rather than a typo
+# (cost on 2026-11-04: one debugging round, writing a probe by hand).
+#
+# catia_gsd_intersection is here for the opposite reason and it matters more:
+# its second element is `element2`, so a caller who wrote `cutter` - the name
+# catia_gsd_split uses for the same job - got a KeyError that sat inside a
+# try/except and was reported as "the surfaces do not intersect". A wrong
+# ANSWER, not an error, which is the worst of the three outcomes.
+_ARGUMENT_ALIASES: dict[str, dict[str, str]] = {
+    "catia_gsd_circle": {"support": "support_plane", "plane": "support_plane"},
+    "catia_gsd_project": {"support_plane": "support", "plane": "support"},
+    "catia_gsd_plane_offset": {"support": "base_plane", "plane": "base_plane"},
+    "catia_gsd_intersection": {"cutter": "element2", "element": "element1"},
+    "catia_gsd_split": {"element2": "cutter"},
+    "catia_gsd_symmetry": {"mirror_plane": "plane"},
+}
+
+
+def _normalise_arguments(tool_name: str,
+                         arguments: dict[str, Any]) -> dict[str, Any]:
+    """Rename known alternate spellings to the key the tool actually reads.
+
+    Never overrides a key the caller already passed, so an alias can only fill a
+    hole and an explicit call stays exactly as explicit as it was.
+    """
+    aliases = _ARGUMENT_ALIASES.get(tool_name)
+    if not aliases or not arguments:
+        return arguments
+    renamed = dict(arguments)
+    for alias, canonical in aliases.items():
+        if alias in renamed and canonical not in renamed:
+            renamed[canonical] = renamed.pop(alias)
+    return renamed
+
+
 # Schema fragment: an element addressed by tree name, or [x, y, z] coordinates
 # (coordinates create a new 3D point on the fly).
 POINT_OR_NAME = {
@@ -814,8 +853,22 @@ class GSDTools:
             {
                 "name": "catia_gsd_revolve",
                 "description": (
-                    "Revolve a profile curve around an axis line to create a surface of "
-                    "revolution. Angles in degrees."
+                    "Revolve a profile curve around an axis line to create a "
+                    "surface of revolution. Angles in degrees. "
+                    "angle1/angle2 ARE NOT A START ANGLE AND AN END ANGLE. They are "
+                    "the typelib's iOffsetDebut / iOffsetFin: how far to sweep from "
+                    "the PROFILE PLANE toward each side, and the surface spans "
+                    "angle1 + angle2. The default angle1=360 covers the full turn; "
+                    "angle1=72 with angle2=72 gives a 144 degree sector centred on "
+                    "the profile, not a sector from 72 to 72 (measured on B30 "
+                    "2026-11-04, by STL: the sector covered 144). This matters the "
+                    "moment a sector has to land at a particular place: the angles "
+                    "only ever say HOW MUCH, so POSITION COMES FROM WHERE THE "
+                    "PROFILE IS - draw the profile along the first edge of the "
+                    "sector you want, or rotate the profile with catia_gsd_rotate "
+                    "first. Building the same sector five times by rebuilding the "
+                    "profile five times is the mistake catia_gsd_rotate exists to "
+                    "remove."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -824,12 +877,18 @@ class GSDTools:
                         "axis": {"type": "string", "description": "Axis line element name"},
                         "angle1": {
                             "type": "number",
-                            "description": "First angle limit (degrees)",
+                            "description": (
+                                "Degrees swept from the profile plane (sweep total = "
+                                "angle1 + angle2), NOT a start angle"
+                            ),
                             "default": 360,
                         },
                         "angle2": {
                             "type": "number",
-                            "description": "Second angle limit (degrees)",
+                            "description": (
+                                "Degrees swept from the profile plane toward the "
+                                "other side; 0 for a one-sided revolve"
+                            ),
                             "default": 0,
                         },
                         "name": {"type": "string", "description": "Optional name for the surface"},
@@ -1018,6 +1077,74 @@ class GSDTools:
                 },
             },
             {
+                "name": "catia_gsd_rotate",
+                "description": (
+                    "Copy an element and rotate the copy about an axis. The "
+                    "original stays where it is. 'axis' is 'x', 'y' or 'z' (the "
+                    "origin axis, built as a line on first use) or the name of an "
+                    "existing line/axis element; 'angle' is in degrees, positive "
+                    "counter-clockwise looking down the axis toward its origin "
+                    "(right-hand rule along +x/+y/+z). "
+                    "THIS IS HOW A GSD PATTERN IS MADE. There is no surface "
+                    "pattern tool - catia_circ_pattern is a Part Design feature "
+                    "and takes a solid. A five-lobe base is one lobe plus four "
+                    "rotations of 72 degrees; rebuilding the lobe at five "
+                    "positions instead costs five extra constructions of the same "
+                    "geometry and is what this tool exists to stop (2026-11-04). "
+                    "Rotating about an arbitrary axis needs a LINE, not a "
+                    "direction: pass the name of a line you built."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "element": {"type": "string", "description": "Element to copy and rotate"},
+                        "axis": {
+                            "type": "string",
+                            "description": "Rotation axis: 'x', 'y', 'z', or a line/axis element name",
+                        },
+                        "angle": {"type": "number", "description": "Angle in degrees"},
+                        "name": {"type": "string", "description": "Optional name for the result"},
+                    },
+                    "required": ["element", "axis", "angle"],
+                },
+            },
+            {
+                "name": "catia_gsd_translate",
+                "description": (
+                    "Copy an element and move the copy along a direction. "
+                    "'direction' is [x, y, z], 'x'/'y'/'z', or the name of a "
+                    "line element whose direction is used; 'distance' is in mm, "
+                    "positive along that direction. The original stays. "
+                    "Measured on B30 2026-11-04: a cylinder spanning z 0..20 "
+                    "translated 30 along +z spans 30..50, so the sign is the "
+                    "direction's, not a guess. The direction is created as a "
+                    "Direction element in the geometrical set (the translate "
+                    "keeps a dependency on it) - that is a real tree element, "
+                    "not a hidden one."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "element": {"type": "string", "description": "Element to copy and move"},
+                        "direction": {
+                            "description": "Direction vector, 'x'/'y'/'z', or a line element name",
+                            "oneOf": [
+                                {
+                                    "type": "array",
+                                    "items": {"type": "number"},
+                                    "minItems": 3,
+                                    "maxItems": 3,
+                                },
+                                {"type": "string"},
+                            ],
+                        },
+                        "distance": {"type": "number", "description": "Distance in mm"},
+                        "name": {"type": "string", "description": "Optional name for the result"},
+                    },
+                    "required": ["element", "direction", "distance"],
+                },
+            },
+            {
                 "name": "catia_gsd_thick_surface",
                 "description": (
                     "Turn a surface into a SOLID by adding thickness (Part Design "
@@ -1096,6 +1223,7 @@ class GSDTools:
     # ────────────────────────────────────────────────────────────
 
     def execute(self, tool_name: str, arguments: dict[str, Any]) -> str:
+        arguments = _normalise_arguments(tool_name, arguments)
         match tool_name:
             case "catia_gsd_create_geoset":
                 return self._create_geoset(arguments)
@@ -1151,6 +1279,10 @@ class GSDTools:
                 return self._trim(arguments)
             case "catia_gsd_symmetry":
                 return self._symmetry(arguments)
+            case "catia_gsd_rotate":
+                return self._rotate(arguments)
+            case "catia_gsd_translate":
+                return self._translate(arguments)
             case "catia_gsd_thick_surface":
                 return self._thick_surface(arguments)
             case "catia_gsd_close_surface":
@@ -1689,6 +1821,46 @@ class GSDTools:
         plane = self._factory().AddNewPlane3Points(ref1, ref2, ref3)
         return self._finish(plane, args.get("name"), "Plane created through 3 points.")
 
+    _CLOSE_EPS = 1e-6
+
+    @staticmethod
+    def _as_xyz(spec: Any) -> list[float] | None:
+        """``[x, y, z]`` as floats, or None when the point is named, not given."""
+        if not isinstance(spec, (list, tuple)) or len(spec) != 3:
+            return None
+        try:
+            return [float(value) for value in spec]
+        except (TypeError, ValueError):
+            return None
+
+    def _drop_closing_point(self, points: list[Any]) -> tuple[list[Any], str]:
+        """Remove a trailing repeat of the first point from a CLOSED spline.
+
+        Closing a ring is the intuitive thing to do and it is wrong here: the
+        spline's own ``SetClosing(1)`` already joins the last point to the
+        first, so repeating the start makes the curve pass through one point
+        twice and CATIA refuses the WHOLE spline. It does not say "duplicate
+        point" either - it raises a generic invalid-parameter error, which
+        reads like "your coordinates are bad" and sends you counting decimals
+        (reported 2026-11-04: a hand-built ten-point section, written the
+        obvious way, was rejected until the repeat came out).
+        """
+        if len(points) < 4:
+            return points, ""
+        first = self._as_xyz(points[0])
+        last = self._as_xyz(points[-1])
+        if first is None or last is None:
+            return points, ""
+        if max(abs(a - b) for a, b in zip(first, last)) > self._CLOSE_EPS:
+            return points, ""
+        kept = list(points[:-1])
+        return kept, (
+            f" The last point you gave repeats the first to within "
+            f"{self._CLOSE_EPS:g} mm and was dropped: a closed spline already "
+            f"joins back to its start, and keeping the repeat makes CATIA refuse "
+            f"the whole spline. {len(points)} points in, {len(kept)} on the curve."
+        )
+
     def _spline(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
         element = args.get("element")
@@ -1715,9 +1887,12 @@ class GSDTools:
                     "catia_gsd_spline needs 'points' (element names or [x, y, z]) "
                     "or 'element' (a sketch whose outline this server drew)."
                 )
+            closing_note = ""
+            if closed:
+                points, closing_note = self._drop_closing_point(points)
             refs = self._point_refs(points, in_tree)
             count = len(points)
-            note = ""
+            note = closing_note
 
         spline = self._factory().AddNewSpline()
         for ref in refs:
@@ -2631,9 +2806,12 @@ class GSDTools:
         angle1 = args.get("angle1", 360)
         angle2 = args.get("angle2", 0)
         revol = self._factory().AddNewRevol(profile_ref, angle1, angle2, axis_ref)
+        total = angle1 + angle2
         return self._finish(
             revol, args.get("name"),
-            f"Revolution surface created: {angle1}° around '{args['axis']}'.",
+            f"Revolution surface created: {total:g}° swept about '{args['axis']}' "
+            f"(angle1={angle1:g}° toward one side of the profile plane, "
+            f"angle2={angle2:g}° toward the other; total is their sum).",
         )
 
     def _fill(self, args: dict[str, Any]) -> str:
@@ -2786,6 +2964,114 @@ class GSDTools:
         return self._finish(
             symmetry, args.get("name"),
             f"Symmetry of '{args['element']}' about '{args['plane']}' created.",
+        )
+
+    # ────────────────────────────────────────────────────────────
+    # Transforms — the primitive a GSD pattern is built from
+    # ────────────────────────────────────────────────────────────
+
+    _ORIGIN_AXIS = {"x": (1.0, 0.0, 0.0), "y": (0.0, 1.0, 0.0),
+                    "z": (0.0, 0.0, 1.0)}
+
+    def _axis_ref(self, spec: Any, owner: str) -> tuple[Any, str]:
+        """Reference to a rotation axis, and a note if one had to be built.
+
+        ``AddNewRotate`` takes a REFERENCE to a line here — the opposite of
+        ``AddNewTranslate``'s direction argument, which takes the Direction
+        OBJECT (passing a Reference there raises "type mismatch, argument 2";
+        measured on B30 2026-11-04, both in one script). Two members of the same
+        family, two different argument kinds, so neither is guessed.
+
+        'x'/'y'/'z' become a LINE from the origin, because an axis needs a
+        position and a direction, and a direction alone cannot say where the
+        origin is. Built on demand and named after the element it rotates, so a
+        five-fold pattern leaves five readable axes rather than five "直线.37".
+        """
+        key = str(spec).strip().lower()
+        vector = self._ORIGIN_AXIS.get(key)
+        if vector is None:
+            return self._ref(str(spec)), ""
+
+        part = self.conn.get_active_part()
+        wanted = f"{owner}_axis_{key}"
+        wanted, _ = self._free_name(part, wanted)
+        origin = self._point_ref([0.0, 0.0, 0.0])
+        tip = self._point_ref(list(vector))
+        line = self._factory().AddNewLinePtPt(origin, tip)
+        self._get_geoset().AppendHybridShape(line)
+        line.Name = wanted
+        part.UpdateObject(line)
+        return (part.CreateReferenceFromObject(line),
+                f" The origin {key}-axis was built as line '{wanted}'.")
+
+    def _direction_obj(self, spec: Any, owner: str) -> tuple[Any, str]:
+        """A Direction OBJECT for ``AddNewTranslate``, plus a note when built.
+
+        The object has to be in the tree: a translate that references a
+        tree-less direction is a dependency nobody can see or select, and the
+        same 2026-11-03 lesson that made splines keep their points in the part
+        applies here.
+        """
+        factory = self._factory()
+        vector: tuple[float, float, float] | None = None
+        label = ""
+        if isinstance(spec, (list, tuple)):
+            if len(spec) != 3:
+                raise ValueError(
+                    "catia_gsd_translate's direction needs exactly 3 numbers "
+                    f"[x, y, z]; got {len(spec)}."
+                )
+            vector = (float(spec[0]), float(spec[1]), float(spec[2]))
+            label = "[" + ", ".join(f"{value:g}" for value in vector) + "]"
+        else:
+            key = str(spec).strip().lower()
+            vector = self._ORIGIN_AXIS.get(key)
+            if vector is not None:
+                label = f"the origin {key} direction"
+            else:
+                from_line = factory.AddNewDirection(self._ref(str(spec)))
+                return self._adopt_direction(from_line, owner, f"the direction of '{spec}'")
+
+        if not any(abs(value) > 1e-9 for value in vector):
+            raise ValueError(
+                "catia_gsd_translate's direction is the zero vector, so there is "
+                "no direction to move along."
+            )
+        direction = factory.AddNewDirectionByCoord(vector[0], vector[1], vector[2])
+        return self._adopt_direction(direction, owner, label)
+
+    def _adopt_direction(self, direction: Any, owner: str,
+                         label: str) -> tuple[Any, str]:
+        """Put a Direction in the geometrical set so the translate can cite it."""
+        part = self.conn.get_active_part()
+        wanted, _ = self._free_name(part, f"{owner}_dir")
+        self._get_geoset().AppendHybridShape(direction)
+        direction.Name = wanted
+        part.UpdateObject(direction)
+        return direction, f" Direction element '{wanted}' ({label}) was created for it."
+
+    def _rotate(self, args: dict[str, Any]) -> str:
+        self.conn.ensure_connected()
+        element = args["element"]
+        angle = float(args["angle"])
+        axis_ref, axis_note = self._axis_ref(args["axis"], element)
+        rotate = self._factory().AddNewRotate(self._ref(element), axis_ref, angle)
+        return self._finish(
+            rotate, args.get("name"),
+            f"'{element}' copied and rotated {angle:g}° about '{args['axis']}'."
+            f"{axis_note}",
+        )
+
+    def _translate(self, args: dict[str, Any]) -> str:
+        self.conn.ensure_connected()
+        element = args["element"]
+        distance = float(args["distance"])
+        direction, direction_note = self._direction_obj(args["direction"], element)
+        translate = self._factory().AddNewTranslate(
+            self._ref(element), direction, distance)
+        return self._finish(
+            translate, args.get("name"),
+            f"'{element}' copied and moved {distance:g} mm.{direction_note}",
         )
 
     # ────────────────────────────────────────────────────────────

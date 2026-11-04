@@ -2,6 +2,68 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.60] — 2026-11-04 · a surface that could not be moved
+
+No acceptance report this time. These five came out of building the five-petal
+bottle base, in the order they cost time, and the first one changed the shape of
+the build rather than just costing minutes.
+
+**GSD had no way to move anything.** A five-lobe base is one lobe plus four
+rotations of 72°, and the only transform in the tool set was
+`catia_gsd_symmetry` (mirror). `catia_circ_pattern` is a Part Design feature and
+wants a solid, so the lobe was rebuilt five times, once per angular position -
+four extra constructions of identical geometry, and positions that could not be
+changed afterwards without doing it again. `AddNewRotate` had been in the
+typelib the whole time. `catia_gsd_rotate` and `catia_gsd_translate` now exist.
+Measured on B30 2026-11-04: a cylinder whose axis sits at (20,0) rotated +90°
+about z lands at (0,20) — counter-clockwise by the right-hand rule, original
+kept — and a cylinder spanning z 0..20 translated 30 along +z spans 30..50 and
+no longer meets z=0. `axis` takes 'x'/'y'/'z' (built as a line on demand, named
+after the element it rotates) or a line element.
+
+The two members of that family take **different argument kinds**, which is worth
+stating because nothing about their names suggests it: `AddNewRotate` wants a
+REFERENCE to an axis line, `AddNewTranslate` wants the Direction OBJECT and
+raises "type mismatch, argument 2" if handed a reference. Both are pinned by
+tests, so a future tidy-up that makes the code look consistent will fail loudly
+instead of breaking one of them.
+
+**`catia_gsd_revolve`'s angles were documented as a start and an end.** They are
+the typelib's `iOffsetDebut` / `iOffsetFin` —
+`AddNewRevol(iObjectToExtrude, iOffsetDebut, iOffsetFin, iAxis)` — a sweep from
+the profile plane toward each side, so the surface spans their SUM. `(72, 72)`
+is a 144° sector centred on the profile, not a zero-width one, and finding that
+out cost a rebuild and an STL measurement. The angles only ever say how much, so
+position comes from where the profile is drawn; the reply now names the total,
+and the description says both of those things.
+
+**A closed spline whose last point repeats the first is refused by CATIA** — the
+whole spline, with a generic invalid-parameter error that reads like bad
+coordinates. Closing the ring by hand is the intuitive thing to do (a hand-built
+ten-point section was rejected until the repeat came out). The repeat is now
+dropped before the call and the reply says so: 5 points in, 4 on the curve.
+
+**One concept, three argument names.** "The plane this sits on" is
+`support_plane` in `catia_gsd_circle`, `support` in `catia_gsd_project` and
+`base_plane` in `catia_gsd_plane_offset`; a wrong spelling surfaces as
+`KeyError: 'support_plane'`, which reads like a server bug. All three now answer
+to all three. The one that mattered more: `catia_gsd_intersection` takes
+`element2`, so a caller who wrote `cutter` (the name `catia_gsd_split` uses for
+the same job) got a KeyError that a try/except turned into "the surfaces do not
+intersect" — a wrong answer rather than an error.
+
+**The wall thickness nobody published.** A 0.3 mm thick-surface base answered
+volume 10099.5 mm³ and area 67392.8 mm², and 2V/A = 0.2997 mm was the only way to
+say what the wall came out at. `catia_get_inertia` now returns
+`uniform_thickness_mm` when both are readable, named "uniform" because it is
+meaningless for a solid block or a part with one thick boss and one thin panel.
+
+**A mesh export with nothing to export** hung for five minutes with no output and
+had to be killed, so an empty part is refused before the call. The first draft of
+that guard also claimed a curve-only part would raise a modal dialog — measured
+the same day, a part holding one spline exported an STL fine, and the claim was
+corrected in the message rather than kept for its tidiness.
+
 ## [0.3.59] — 2026-11-04 · a duplicated sheet is not a 0.034 mm radius
 
 Two reports on 0.3.58. The technical one was right about the conclusion and its

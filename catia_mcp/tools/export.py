@@ -27,6 +27,14 @@ FORMAT_MAP = {
 }
 
 
+# Export formats that need something to TESSELLATE, guarded because an export
+# with nothing in it has no answer worth waiting for: one probe script that ran
+# it hung for five minutes with no output and had to be killed (2026-11-04, not
+# reproduced). Measured the same day: a part holding ONE SPLINE exported an STL
+# fine, so a curve-only document is not the case this guards against.
+MESH_FORMATS = {"stl", "3dxml", "wrl", "vrml", "cgr"}
+
+
 class ExportTools:
     """Tools for exporting CATIA V5 data to external formats."""
 
@@ -167,6 +175,55 @@ class ExportTools:
             case _:
                 raise ValueError(f"Unknown export tool: {tool_name}")
 
+    def _assert_has_mesh_geometry(self, doc: Any, fmt_key: str) -> None:
+        """Refuse a mesh export when the part has nothing to tessellate.
+
+        This is the one check that can be made without walking topology: whether
+        the part has ANY solid shape or ANY GSD element at all.
+
+        What is measured, and what is not: on B30 2026-11-04 an EMPTY part was
+        refused here, and a part holding exactly one spline exported an STL
+        without complaint - so a curve-only document is NOT the failure this
+        guard is about. The guard exists because one probe script exported an
+        empty part, hung for five minutes with no output and was killed, and
+        that event has not been reproduced; the guard stops the pointless call,
+        not a dialog it can prove.
+        """
+        try:
+            part = doc.Part
+        except Exception:  # noqa: BLE001 - a product or a drawing is not this case
+            return
+        solids = 0
+        try:
+            for index in range(1, part.Bodies.Count + 1):
+                try:
+                    solids += part.Bodies.Item(index).Shapes.Count
+                except Exception:  # noqa: BLE001 - one unreadable body is not zero
+                    continue
+        except Exception:  # noqa: BLE001
+            return
+        gsd = 0
+        try:
+            for index in range(1, part.HybridBodies.Count + 1):
+                try:
+                    gsd += part.HybridBodies.Item(index).HybridShapes.Count
+                except Exception:  # noqa: BLE001
+                    continue
+        except Exception:  # noqa: BLE001
+            return
+        if solids or gsd:
+            return
+        raise ValueError(
+            f"Nothing to export as {fmt_key}: this part has no solid shape and no "
+            "GSD element, so there is nothing to tessellate. Exporting it is "
+            "pointless at best - one probe script that did it hung for five "
+            "minutes with no output and had to be killed (2026-11-04, not "
+            "reproduced since), which is the only reason this guard exists. "
+            "This does NOT mean CATIA refuses such a document loudly: a part "
+            "holding a single spline exported an STL fine on the same machine "
+            "the same day, so a curve-only part is not stopped here."
+        )
+
     def _export(self, file_path: str, fmt: str | None = None) -> str:
         self.conn.ensure_connected()
         doc = self.conn.active_document
@@ -187,6 +244,9 @@ class ExportTools:
         output_dir = os.path.dirname(file_path)
         if output_dir and not os.path.exists(output_dir):
             os.makedirs(output_dir, exist_ok=True)
+
+        if fmt_key in MESH_FORMATS:
+            self._assert_has_mesh_geometry(doc, fmt_key)
 
         # CATIA V5 export via SaveAs with format specification.
         # Normalize separators: ExportData rejects forward-slash paths (E_FAIL).
