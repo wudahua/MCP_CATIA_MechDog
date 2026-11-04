@@ -28,6 +28,7 @@ MODULES: dict[str, tuple[str, str]] = {
     "Assembly": ("catia_mcp.tools.assembly", "AssemblyTools"),
     "Measurement": ("catia_mcp.tools.measurement", "MeasurementTools"),
     "Export": ("catia_mcp.tools.export", "ExportTools"),
+    "Knowledge": ("catia_mcp.tools.knowledge", "KnowledgeTools"),
     "Planner": ("catia_mcp.tools.planner", "PlannerTools"),
     "Diagnostics": ("catia_mcp.tools.diagnostics", "DiagnosticsTools"),
 }

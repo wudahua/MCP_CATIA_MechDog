@@ -2,6 +2,52 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.63] — 2026-11-05 · knowledge came back, after being measured
+
+Upstream's five Knowledgeware tools were dropped when this fork was cut. They are
+back — but not as a copy. Each attribute name was exercised on B30 first, and
+**four of them did not behave as written**. That makes 114 tools.
+
+**A design table could be created and never applied.** Upstream calls
+`ConfigurationName`, `Configurations` and `NumberOfConfigurations`. The
+DesignTable interface — 52 members, read out of its own type library — has none of
+those. What it has is:
+
+```
+Configuration    (get AND put)      ConfigurationsNb     ColumnsNb
+Activate         Deactivate         Activated            Synchronize
+```
+
+So the property upstream wanted is `Configuration`, it is writable, and writing
+`2` on a two-row sheet did move the part: LEN 20 → 30, REAL 3.5 → 4.5 (measured
+2026-11-05). `catia_apply_design_table` is the sixth tool here because without it
+a design table is a file association a human has to activate by hand.
+
+**A length cell with no unit is read in METRES.** A sheet row reading `30` set a
+20 mm parameter to **30000 mm**; `30mm` and `0.03m` both gave 30. A product family
+built from a plain Excel column would come out a thousand times too large and
+every reply would still say success. Both the create and the apply reply carry the
+rule now.
+
+**`bool("false")` is True**, so the boolean parameter type inverted every false
+that arrived as text. `_as_bool` parses true/false/1/0/yes/no/on/off and refuses
+text it does not understand instead of guessing.
+
+**A feature's own dimension is named in the build's language.** A pad's height on
+this Chinese B30 is `零件几何体\凸台.1\第一限制\长度`, not
+`PartBody\Pad.1\FirstLimit\Length` — so upstream's own docstring example is not
+findable here. The failure now lists the parameter names that end the same way,
+and the reply points at `catia_get_parameters` for the exact one.
+
+**A parameter a design table is associated with can no longer be re-valued** —
+`ValuateFromString` fails with a bare COM error. The tool says which table owns it
+and points at `catia_apply_design_table`.
+
+What upstream got right, and is kept: a relation's `Value` **is** its expression
+(CATIA rewrites it to full parameter paths — measured), `AddAssociation(parameter,
+column)` takes them in that order, and a length has to go through
+`ValuateFromString` rather than a bare `.Value` assignment.
+
 ## [0.3.62] — 2026-11-05 · two numbers that came from comments, not from CATIA
 
 Checked the two real upstream commits (`f9751a1`, `b59a95b` — both field-verified

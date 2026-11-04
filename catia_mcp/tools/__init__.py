@@ -1,8 +1,9 @@
 """CATIA V5 MCP Tools - solid-modelling subset (lite fork).
 
-Dropped relative to upstream: ``drawing`` (needs a Drafting licence, 2D output)
-and ``knowledge`` (parameters / design tables). Everything that builds or
-measures a solid is kept.
+Dropped relative to upstream: ``drawing`` (needs a Drafting licence, 2D output).
+``knowledge`` was dropped with it and came back in 0.3.63, after its five tools
+were exercised on B30 rather than trusted. Everything that builds or measures a
+solid is kept.
 """
 
 from catia_mcp.tools.document import DocumentTools
@@ -13,6 +14,7 @@ from catia_mcp.tools.gsd import GSDTools
 from catia_mcp.tools.assembly import AssemblyTools
 from catia_mcp.tools.measurement import MeasurementTools
 from catia_mcp.tools.export import ExportTools
+from catia_mcp.tools.knowledge import KnowledgeTools
 from catia_mcp.tools.planner import PlannerTools
 
 __all__ = [
@@ -24,5 +26,6 @@ __all__ = [
     "AssemblyTools",
     "MeasurementTools",
     "ExportTools",
+    "KnowledgeTools",
     "PlannerTools",
 ]

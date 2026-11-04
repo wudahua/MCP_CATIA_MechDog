@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.62** · [what changed](CHANGELOG.md) ·
+**0.3.63** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -12,10 +12,11 @@ defects that make that loop lie to you. Most of the work since 0.3.0 came from
 people rebuilding real assemblies with it: the changelog is a list of things that
 produced a plausible number, a wrong number, or no explanation at all.
 
-**108 tools** (upstream: 98 — 16 dropped, 24 added). Nothing in the COM layer was
-rewritten — the value of upstream is the field-verified knowledge in its
-comments, so this fork is strictly add / subtract / patch. The count is asserted
-by `tests/test_readme_tool_counts.py`, so it cannot drift from the code again.
+**114 tools** (upstream 98: drawing's 11 dropped, knowledge's 5 kept and
+corrected, 27 added here). Nothing in the COM layer was rewritten — the value of upstream is
+the field-verified knowledge in its comments, so this fork is strictly add /
+subtract / patch. The count is asserted by `tests/test_readme_tool_counts.py`, so
+it cannot drift from the code again.
 
 ### What it can verify, not just build
 
@@ -48,15 +49,16 @@ by `tests/test_readme_tool_counts.py`, so it cannot drift from the code again.
 
 ## What this fork changes
 
-### Dropped (16 tools, 1,274 lines)
+### Dropped (11 tools, 995 lines)
 
 | Module | Tools | Why |
 |---|---|---|
 | `tools/drawing.py` | 11 | Needs a Drafting licence and produces 2D views, unrelated to solids |
-| `tools/knowledge.py` | 5 | Parameters / formulas / design tables |
 
-`export` (STEP/STL hand-off) and `http_transport` (remote agent) are kept: they
-are domain-neutral and cheap. See `FORK.md` §8 if you want to cut further.
+`knowledge` was dropped with it until 0.3.63 - it is back, measured, see the next
+section. `export` (STEP/STL hand-off) and `http_transport` (remote agent) are
+kept: they are domain-neutral and cheap. See `FORK.md` §8 if you want to cut
+further.
 
 ### Added (26 tools over upstream)
 
@@ -66,8 +68,8 @@ two - `catia_delete_body`, `catia_solid_loft`; 0.3.19: one - `catia_copy_compone
 0.3.51: one - `catia_check_surface`; 0.3.53: one - `catia_gsd_boundary`; 0.3.55: one - `catia_gsd_heal`; 0.3.56: two -
 `catia_gsd_fillet_surface`, `catia_gsd_spine`; 0.3.60: two -
 `catia_gsd_rotate`, `catia_gsd_translate`).
-Upstream 98 − 16 dropped + 26 added = 108. 0.3.20 added arguments instead of
-tools: a sketch support given as `origin`/`u`/`v`, edges given as coordinates,
+98 − 11 (drawing) + 27 added = 114, where the 27th is `catia_apply_design_table`
+under Knowledgeware below. 0.3.20 added arguments instead of tools: a sketch support given as `origin`/`u`/`v`, edges given as coordinates,
 arcs given as their two endpoints, and one plan per several documents.
 
 | Tool | What it gives you |
@@ -1115,8 +1117,29 @@ while a reply that only reports success cannot.
 | Assembly | **13** | upstream 9 + get/set component transform, rename, list constraints, copy component |
 | Measurement | 7 | inertia, distance, bounding box\*, parameters, `catia_check_surface` |
 | Export | 4 | STEP / STL / IGES hand-off |
+| Knowledge | 6 | parameters, formulas, relations, design tables - upstream's five, measured and corrected, plus `catia_apply_design_table` |
 | Planner | **2** | `run_plan`, `measure_topology` |
 | Diagnostics | 1 | `catia_diagnose` |
+
+#### Knowledgeware (6 tools, 0.3.63)
+
+Upstream's five were dropped when this fork was cut, and came back after each was
+run on B30 (`docs/upstream-diff.md` §8 explains what that costs). Four things in
+upstream's code did not behave as written, so the port is a rewrite:
+
+| Tool | What it gives you | What upstream had wrong |
+|---|---|---|
+| `catia_create_parameter` | Six types; an existing name gets its value set | `bool("false")` is True in Python, so a boolean sent as text was inverted. Parsed properly now, and unknown text is refused rather than guessed |
+| `catia_set_formula` | A formula driving a parameter, by name or by the parameter's full path | The target lookup is exact and LOCALIZED: a Chinese build names a pad's height `零件几何体\凸台.1\第一限制\长度`, so the English path in upstream's own docstring is not found. The failure now lists near matches |
+| `catia_list_relations` | Formulas, tables, rules, checks with their bodies | — (a relation's `Value` really is its expression; measured) |
+| `catia_delete_relation` | Delete one by name | — |
+| `catia_create_design_table` | A table from a sheet, associated to parameters by column header | It could create a table and never apply one - see the next row |
+| `catia_apply_design_table` | Switch the part to row N of a table | **New**: upstream calls `ConfigurationName`, which the DesignTable interface does not have. The real member is `Configuration`, it is writable, and writing 2 on a two-row sheet moved the part (LEN 20 → 30) |
+
+**A length column without a unit is read in METRES.** A sheet row reading `30` set
+a 20 mm parameter to 30000 mm; `30mm` and `0.03m` both gave 30. Both the create
+and the apply reply say so, because the alternative is a part 1000x too large
+with a success message.
 
 \* `catia_get_bounding_box` measures two ways, and `auto` takes the STL mesh:
 exact on planar-faced solids, a **lower bound ~0.5-0.7 % small** on curved ones.
