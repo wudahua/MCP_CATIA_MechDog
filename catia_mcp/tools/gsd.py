@@ -909,7 +909,19 @@ class GSDTools:
                     "elements with one name: 'elements' is resolved by name, so a "
                     "join can silently take the stale twin of a piece you thought you "
                     "had rebuilt. Check with catia_gsd_list_elements when a join "
-                    "fails for no geometric reason."
+                    "fails for no geometric reason. "
+                    "WHERE TO PUT THE SEAM ON A THIN WALL: in a CURVED region, not "
+                    "on a flat or plateau section. The mesh uses its largest triangles "
+                    "where curvature is near zero, and a 0.3 mm wall is narrow "
+                    "enough for one of them to bridge the two skins; the resulting "
+                    "triangle's normal sits between them and catia_check_surface "
+                    "then reports a 100 deg+ 'fold' that the surface does not have "
+                    "(reported 2026-11-04: a five-petal base whose seam fell on the "
+                    "near-flat bottom of its R3 foot read 124.05 deg there and "
+                    "nothing above 47.59 deg anywhere else; moving the seam off "
+                    "that radius took the extremes to 27.42 deg). Those edges are "
+                    "flagged cross_wall, and check_surface raises seam_hint when it "
+                    "sees them."
                 ),
                 "inputSchema": {
                     "type": "object",

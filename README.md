@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.56** · [what changed](CHANGELOG.md) ·
+**0.3.57** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1158,6 +1158,28 @@ Place the result with `catia_get_component_transform`.
   cost a release (declared with one argument, and unusable until `AddBodyToHeal`
   was called) - **but read it properly before calling something unusable**: a
   40-member interface is not absent because `dir()` showed nothing.
+* **A sliver along a seam reads as a fold, and `cross_wall` is how to tell.**
+  On a thin wall the mesh uses its largest triangles where curvature is near
+  zero, and one of them can bridge the two skins; its normal sits between them,
+  so `catia_check_surface` reports 100 deg+ on a surface that is continuous.
+  Those edges are now split out as `fold_deg_by_side.cross_wall` (a subset of
+  `mixed`: the edge itself runs from the outer skin to the inner one), each
+  `worst_creases` entry carries `cross_wall`, and `seam_hint` names the radius
+  band and says what to do. Measured on a synthesised 0.3 mm tube: 0 cross-wall
+  edges on a clean wall - its 64 rim folds at 90.0 deg stay `mixed` and nothing
+  else - and exactly 1 (169.98 deg) once one triangle was made to bridge. The
+  real case: a five-petal base whose seam fell on the near-flat bottom of its R3
+  foot read 124.05 deg at r=25 and nothing above 47.59 deg anywhere else, and
+  moving the seam off that radius took the region to 27.42 deg. Keep seams in
+  curved regions on thin walls.
+* **A `.CATPart` written by a newer CATIA may not open on an older one.**
+  Measured 2026-11-04: B30 `Documents.Open` on a file written by V5-6R2022
+  (B32 SP6) fails with a bare "method Open failed" - no version message, nothing
+  about the release - which reads like a corrupt file. Files do travel between
+  installations in a report chain, so check the writing release before believing
+  that. STL exports of the same part stayed readable on the older release, and
+  re-saving in a release both sides share avoids it. The reverse direction is
+  the same story.
 * **`set_view` works in the ABSOLUTE axis system, not the part's.** `front` means
   "look along −Y with +Z up" in the document's axes whatever the model's own
   orientation, so a part rotated in the tree (or a component placed with a

@@ -96,7 +96,11 @@ def test_every_bucket_is_present_even_when_empty(tmp_path):
     from catia_mcp.tools.measurement import _fold_stats
 
     stats = _fold_stats(_thin_wall(tmp_path), 25.0, 600000)
-    assert set(stats["fold_deg_by_side"]) == {"outer", "inner", "axial", "mixed"}
+    # 0.3.57 added cross_wall, a SUBSET of mixed (edges that run through the
+    # wall), so this fixture reports it too - empty, but present.
+    assert set(stats["fold_deg_by_side"]) == {"outer", "inner", "axial", "mixed",
+                                              "cross_wall"}
+    assert stats["fold_deg_by_side"]["cross_wall"]["edges"] == 0
 
 
 def test_an_axial_face_is_not_called_inner(tmp_path):

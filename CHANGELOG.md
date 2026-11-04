@@ -2,6 +2,59 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.57] — 2026-11-04 · a sliver is not a fold, and the documents CATIA opens for you
+
+The 0.3.56 acceptance report retracted its own root cause and asked for the split
+that would have saved it the retraction.
+
+**Slivers get their own bucket.** It had read 124 deg on a 0.3 mm wall and
+explained it as the inner skin of a thin wall. The explanation was wrong - two
+solid controls had already shown both skins reading identically - and the real
+shape of the fault is a triangulation bridge: where a joined seam cuts a nearly
+FLAT region the mesh uses its largest triangles, one of them spans the two skins,
+and its normal sits between them, so the dihedral reads like a fold that the
+surface does not have.
+
+`fold_deg_by_side.cross_wall` is that bucket, as a SUBSET of `mixed`: an edge
+whose two endpoints belong to opposite skins. Vertex skins are a majority vote of
+each vertex's triangles, so no wall thickness has to be guessed. The distinction
+that matters is what stays out: a rim fold is `mixed` and NOT `cross_wall`,
+because both of its endpoints sit on one skin and only the adjacent triangles
+disagree. Measured on a synthesised 0.3 mm tube (36 segments, outer r=10, inner
+r=9.7): 0 cross-wall edges clean - all 64 rim edges at 90.0 deg and un-flagged -
+and exactly 1 at 169.98 deg, sitting at r 9.81 between the skins, once one
+triangle was made to bridge. Every `worst_creases` entry now carries
+`cross_wall`, and when three or more cross-wall creases share a radius band
+`seam_hint` says so in words: which radius, why the mesh did it, and that the
+answer is to re-measure with `region` excluding it and move the seam into a
+curved region. The seam advice also went into `catia_gsd_join`'s description,
+because that is where a seam is made.
+
+**`catia_diagnose` now lists the open documents.** The same report measured every
+GSD call roughly twice as slow in a session it believed held one document, and
+found 18 CATIA sample catalogs loaded at startup. `session.open_documents` gives
+the count, the names, and how many of them live under `CATInstallPath` - the ones
+CATIA brought with it - plus a note above five documents.
+
+**The 2x itself did not reproduce here, and the note says so.** Measured on B30
+2026-11-04 with one CATIA process per condition: 90-point spline 855/872/873/898/
+904/923/940 ms with ONE document open against 858/885/885/994 ms with NINE, join
+467/541/550/560 ms against 558/600/631 ms. Eight extra empty Part documents cost
+nothing measurable, so document COUNT is not the mechanism; eighteen sample
+catalogs may well be, but that is their measurement, not ours. The note therefore
+tells the caller what to look at instead of what caused it - a wrong cause is
+worse than no cause, and this repository has already paid for that lesson twice.
+
+**Two limits that only lived in release notes are now in README.** That a
+`.CATPart` written by a newer CATIA fails to open on an older one with a bare
+"method Open failed" (B30 on a B32 SP6 file, 2026-11-04), and that a seam on a
+thin wall belongs in a curved region.
+
+950 tests, 10 new. The fixture is synthesised in the test, so the split is
+asserted without a CATIA session; the tool's own plumbing was checked once on B30
+(a 30 mm extruded r=10 circle reports the five buckets, `cross_wall` empty,
+`seam_hint` absent).
+
 ## [0.3.56] — 2026-11-04 · the fillet and the spine were never unusable
 
 Two sentences from 0.3.53 came off the "Known limits" list. Both were wrong, and

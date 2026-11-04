@@ -132,6 +132,17 @@ def _fold_stats(path: str, crease_deg: float, cap: int,
     for r 24..28 is how "which ring is too tight" gets answered instead of argued
     (requested 2026-11-03). Boundary and non-manifold counts stay whole-mesh -
     they describe the topology, not a place.
+
+    ``fold_deg_by_side.cross_wall`` splits the ``mixed`` bucket once more, and it
+    is a SUBSET of it: the edges whose two endpoints belong to opposite skins.
+    Such an edge runs through a thin wall, which is what a triangulation bridge
+    looks like when a joined seam cuts a nearly flat region - the report of
+    2026-11-04 read 124 deg on a 0.3 mm wall that way and spent a round proving
+    the surface was fine. A rim fold is ``mixed`` and NOT ``cross_wall`` (both
+    endpoints on one skin, only the adjacent triangles disagree), so the two
+    cases stay apart. Measured on a synthesised 0.3 mm tube: 0 cross-wall edges
+    clean, exactly 1 (169.98 deg) with one bridging triangle, while all 64 rim
+    edges stayed at 90.0 deg and un-flagged.
     """
     faces = _stl_triangles(path, cap)
 
@@ -172,11 +183,33 @@ def _fold_stats(path: str, crease_deg: float, cap: int,
         return "axial"
 
     edges: dict[Any, list[Any]] = {}
+    # Which skin each VERTEX belongs to, by majority vote of the triangles that
+    # touch it. This is what separates a sliver from a real fold: a sliver edge
+    # runs from the outer skin to the inner skin, while a real fold at a rim
+    # runs along one skin. A per-EDGE split cannot see that (reported
+    # 2026-11-04, with the criterion "the edge's endpoints differ in radius by
+    # about the wall thickness and share a z" - vertex skins say the same thing
+    # without having to guess the wall thickness).
+    votes: dict[Any, dict[str, int]] = {}
     for normal, verts in faces:
         side = side_of(normal, verts)
+        for point in verts:
+            bucket = votes.setdefault(key(point),
+                                      {"outer": 0, "inner": 0, "axial": 0})
+            bucket[side] += 1
         for a, b in ((0, 1), (1, 2), (2, 0)):
             ka, kb = key(verts[a]), key(verts[b])
             edges.setdefault((min(ka, kb), max(ka, kb)), []).append((normal, side))
+
+    def skin_of(vertex: Any) -> str:
+        bucket = votes.get(vertex) or {}
+        outer = bucket.get("outer", 0)
+        inner = bucket.get("inner", 0)
+        if outer > inner:
+            return "outer"
+        if inner > outer:
+            return "inner"
+        return "axial"
 
     def angle(n1: Any, n2: Any) -> float:
         dot = sum(x * y for x, y in zip(n1, n2))
@@ -191,7 +224,8 @@ def _fold_stats(path: str, crease_deg: float, cap: int,
     creases: list[dict[str, Any]] = []
     outside = 0
     by_side: dict[str, list[float]] = {"outer": [], "inner": [], "axial": [],
-                                       "mixed": []}
+                                       "mixed": [], "cross_wall": []}
+    cross_creases: list[dict[str, Any]] = []
 
     def inside(mid: tuple[float, float, float]) -> bool:
         if region is None:
@@ -227,13 +261,21 @@ def _fold_stats(path: str, crease_deg: float, cap: int,
         fold = angle(entries[0][0], entries[1][0])
         sides = {entries[0][1], entries[1][1]}
         side = sides.pop() if len(sides) == 1 else "mixed"
+        # A cross-wall edge is a MIXED edge whose two endpoints sit on opposite
+        # skins. That is a triangle bridging the wall - the signature of a sliver
+        # along a seam - and NOT what a rim fold looks like, where both endpoints
+        # are on the same skin and only the adjacent triangles disagree.
+        cross_wall = (side == "mixed"
+                      and {skin_of(edge[0]), skin_of(edge[1])} == {"outer", "inner"})
         by_side[side].append(fold)
+        if cross_wall:
+            by_side["cross_wall"].append(fold)
         folds.append(fold)
         if fold > worst[0]:
             worst = (fold, edge)
         if fold >= crease_deg:
             radius = math.hypot(mid[0], mid[1])
-            creases.append({
+            crease = {
                 "fold_deg": round(fold, 2),
                 "at": [list(edge[0]), list(edge[1])],
                 # The region keys are r/z/theta, so a caller reading a crease
@@ -243,7 +285,11 @@ def _fold_stats(path: str, crease_deg: float, cap: int,
                                    % 360.0, 2),
                 "z": round(mid[2], 3),
                 "side": side,
-            })
+                "cross_wall": cross_wall,
+            }
+            creases.append(crease)
+            if cross_wall:
+                cross_creases.append(crease)
     folds.sort()
 
     def at(quantile: float) -> float | None:
@@ -252,6 +298,29 @@ def _fold_stats(path: str, crease_deg: float, cap: int,
         return round(folds[min(len(folds) - 1, int(quantile * len(folds)))], 2)
 
     creases.sort(key=lambda item: -item["fold_deg"])
+
+    # A list of 60 creases cannot answer "what do I do next". When the extremes
+    # all cross the wall at one radius, the answer is "move the seam", and it is
+    # worth saying in words (requested 2026-11-04, after a report spent a round
+    # working it out by excluding radii one at a time).
+    seam_hint = None
+    if len(cross_creases) >= 3 and max(item["fold_deg"] for item in cross_creases) >= 60.0:
+        radii = sorted(item["r"] for item in cross_creases)
+        worst_fold = max(item["fold_deg"] for item in cross_creases)
+        seam_hint = (
+            f"SEAM SLIVER, not a fold: {len(cross_creases)} crease(s) run THROUGH "
+            f"the wall - one endpoint on the outer skin, one on the inner - and "
+            f"they sit at r {radii[0]:.2f}..{radii[-1]:.2f} mm, worst "
+            f"{worst_fold:.2f} deg. That is the signature of a joined seam "
+            f"cutting a nearly FLAT region: the triangulation uses its largest "
+            f"triangles where curvature is near zero, a thin wall is narrow "
+            f"enough for one of them to bridge both skins, and that triangle's "
+            f"normal sits between the two, so the dihedral reads like a fold. "
+            f"Confirm it by re-measuring with region excluding that radius - if "
+            f"the extremes collapse, the surface was fine and the seam should be "
+            f"moved into a curved region. A real fold at a rim is 'mixed' but "
+            f"NOT 'cross_wall'."
+        )
 
     def stats_of(values: list[float]) -> dict[str, Any]:
         ordered = sorted(values)
@@ -281,10 +350,15 @@ def _fold_stats(path: str, crease_deg: float, cap: int,
             "inner, otherwise axial), and an edge whose two triangles disagree "
             "is 'mixed'. That reads a wall's two skins apart only for a part "
             "that wraps around the Z axis (bottle base, shell of revolution, "
-            "turned part); on a prismatic part the split means little. 'mixed' "
-            "is not an error: on a 0.3 mm tube all 64 rim edges score 90.0 deg "
-            "there, because the wall's END faces meet both skins at a right "
-            "angle (measured on B30 2026-11-04)"),
+            "turned part); on a prismatic part the split means little. "
+            "'cross_wall' is a SUBSET of 'mixed': those edges whose two "
+            "endpoints belong to opposite skins (each vertex's skin is the "
+            "majority vote of its triangles), i.e. the edge itself runs through "
+            "the wall. A rim fold is NOT cross_wall - both of its endpoints are "
+            "on the same skin and only the adjacent triangles disagree - so the "
+            "0.3 mm tube's 64 rim edges at 90.0 deg stay 'mixed' and nothing "
+            "else. 'mixed' and 'cross_wall' overlap: do not add them up. "
+            "'mixed' is not an error"),
         "creases": len(creases),
         # 8 was a fixed cap, and two reports hit it: a five-petal base had 4586
         # creases and got the top 8, which cannot answer "where are they".
@@ -292,6 +366,8 @@ def _fold_stats(path: str, crease_deg: float, cap: int,
         "worst_creases_shown": min(len(creases), max(1, top)),
         "crease_threshold_deg": crease_deg,
     }
+    if seam_hint:
+        stats["seam_hint"] = seam_hint
     if region is not None:
         # Say what was left out, or "median 3.1 deg" reads as a whole-part fact.
         stats["interior_edges_total"] = len(folds) + outside
@@ -1301,6 +1377,19 @@ class MeasurementTools:
                     "boundary_edges counts edges used by one triangle only: normal "
                     "on the open border of a surface patch, a real gap when two "
                     "elements should have been joined. "
+                    "SLIVERS ARE NOT FOLDS, and telling them apart is what "
+                    "fold_deg_by_side.cross_wall is for: an edge whose two "
+                    "endpoints belong to OPPOSITE skins (outer and inner) runs "
+                    "through the wall, which is what a triangulation bridge across "
+                    "a thin wall looks like, and its dihedral then reads like a "
+                    "fold that the surface does not have. A real rim fold is "
+                    "'mixed' but NOT 'cross_wall' - on a 0.3 mm tube all 64 rim "
+                    "edges read 90.0 deg and none of them is cross_wall (measured "
+                    "on a synthesised wall, 2026-11-04). These bridges appear "
+                    "where a joined seam cuts a nearly FLAT region, because the "
+                    "mesh uses its largest triangles there; "
+                    "worst_creases[*].cross_wall marks them, and seam_hint appears "
+                    "with the radius band and what to do about it. "
                     "SCOPE: the STL export contains every VISIBLE element of the "
                     "document, so hide construction geometry before checking a "
                     "solid. The report says which case it read."

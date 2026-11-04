@@ -96,7 +96,11 @@ class DiagnosticsTools:
                     "in_work_object, body and shape count, selection size, "
                     "geometrical-set count, plus a one-line 'line' form and a "
                     "'note' wherever a reading has no meaning (no Part open, no "
-                    "document at all)."
+                    "document at all). session.open_documents lists every document "
+                    "in the session and how many of them CATIA loaded itself: a "
+                    "report measured 2-3x slower calls in a session whose owner "
+                    "thought one document was open while 18 sample catalogs were "
+                    "(2026-11-04), and nothing in the old block showed them."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -151,7 +155,76 @@ class DiagnosticsTools:
         except Exception as e:  # noqa: BLE001 - a diagnosis never fails
             return {"unavailable": str(e).splitlines()[0][:90]}
         snapshot["line"] = session_line(self.conn)
+        snapshot["open_documents"] = self._open_documents(self.conn.app)
         return snapshot
+
+    def _open_documents(self, app: Any) -> dict[str, Any]:
+        """Every document in the session, and which of them CATIA loaded itself.
+
+        Reported 2026-11-04: tool calls ran 2-3x slower in a session the caller
+        believed held "one document", and the cause was 18 sample catalogs CATIA
+        had loaded at startup and never closed. The block used to name only the
+        ACTIVE document, so there was no way to see them from here.
+
+        What it does NOT claim: that the count alone is the cost. Same report,
+        same author: on B30 eight extra empty Part documents changed nothing
+        measurable - 90-point spline 855/872/873/898/904/923/940 ms with one
+        document, 858/885/885/994 ms with nine, join 467/541/550/560 vs
+        558/600/631 ms (separate CATIA processes, 2026-11-04). So the note says
+        what to look at, not what caused it.
+        """
+        try:
+            documents = app.Documents
+            count = int(documents.Count)
+        except Exception as error:  # noqa: BLE001 - a diagnosis never fails
+            return {"unavailable": str(error).splitlines()[0][:90]}
+
+        install_root = ""
+        try:
+            install_root = str(app.SystemService.Environ("CATInstallPath") or "").lower()
+        except Exception:  # noqa: BLE001 - classification is best-effort
+            install_root = ""
+
+        names: list[str] = []
+        shipped: list[str] = []
+        for index in range(1, count + 1):
+            try:
+                doc = documents.Item(index)
+            except Exception:  # noqa: BLE001
+                continue
+            try:
+                name = str(doc.Name)
+            except Exception:  # noqa: BLE001
+                name = "?"
+            names.append(name)
+            path = ""
+            try:
+                path = str(doc.FullName or "")
+            except Exception:  # noqa: BLE001
+                path = ""
+            # A document living under the CATIA installation is one CATIA brought
+            # with it (the sample catalogs), not something the caller opened.
+            if install_root and path.lower().startswith(install_root):
+                shipped.append(name)
+
+        block: dict[str, Any] = {
+            "count": count,
+            "names": names[:20],
+            "shipped_with_catia": len(shipped),
+        }
+        if len(shipped):
+            block["shipped_names"] = shipped[:20]
+        if count > 5:
+            block["note"] = (
+                f"{count} documents are open"
+                + (f", {len(shipped)} of them shipped with CATIA" if shipped else "")
+                + ". Close the ones you are not using: a session holding 18 sample "
+                  "catalogs measured tool calls 2-3x slower (reported 2026-11-04), "
+                  "while eight extra empty Part documents changed nothing "
+                  "measurable here - so if calls feel slow, look at WHAT is open."
+            )
+        return block
+
 
     def _server_info(self) -> dict[str, Any]:
         """Name, version and registered tool count of this server.
