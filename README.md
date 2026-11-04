@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.57** · [what changed](CHANGELOG.md) ·
+**0.3.58** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1167,8 +1167,12 @@ Place the result with `catia_get_component_transform`.
   `worst_creases` entry carries `cross_wall`, and `seam_hint` names the radius
   band and says what to do. Measured on a synthesised 0.3 mm tube: 0 cross-wall
   edges on a clean wall - its 64 rim folds at 90.0 deg stay `mixed` and nothing
-  else - and exactly 1 (169.98 deg) once one triangle was made to bridge. The
-  real case: a five-petal base whose seam fell on the near-flat bottom of its R3
+  else - and exactly 1 (169.98 deg) once one triangle was made to bridge. On an
+  OPEN patch (`boundary_edges > 0`) the split means nothing - one skin, and a
+  border can look like a wall crossing - so `cross_wall` is withheld there and
+  `skin_note` says why: a 2026-11-04 report had a surface-only model flagged at
+  its skirt's top edge (r=33, z=110) with a hint to exclude r=33, which on a
+  66 mm bottle excludes everything. The real case: a five-petal base whose seam fell on the near-flat bottom of its R3
   foot read 124.05 deg at r=25 and nothing above 47.59 deg anywhere else, and
   moving the seam off that radius took the region to 27.42 deg. Keep seams in
   curved regions on thin walls.

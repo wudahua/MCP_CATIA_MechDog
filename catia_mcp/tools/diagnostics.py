@@ -207,21 +207,30 @@ class DiagnosticsTools:
             if install_root and path.lower().startswith(install_root):
                 shipped.append(name)
 
+        catalogs = [name for name in names if name.lower().endswith(".catfct")]
         block: dict[str, Any] = {
             "count": count,
             "names": names[:20],
             "shipped_with_catia": len(shipped),
+            "function_catalogs": len(catalogs),
         }
         if len(shipped):
             block["shipped_names"] = shipped[:20]
+        if catalogs:
+            block["function_catalog_names"] = catalogs[:20]
         if count > 5:
             block["note"] = (
                 f"{count} documents are open"
                 + (f", {len(shipped)} of them shipped with CATIA" if shipped else "")
-                + ". Close the ones you are not using: a session holding 18 sample "
-                  "catalogs measured tool calls 2-3x slower (reported 2026-11-04), "
-                  "while eight extra empty Part documents changed nothing "
-                  "measurable here - so if calls feel slow, look at WHAT is open."
+                + ". Closing is worth doing for the ones that HOLD GEOMETRY: measured "
+                  "2026-11-04, 15 shipped catalogs plus one Part ran a 90-point spline "
+                  "in 1.09 s - the same as a lone Part - while two finished Parts of "
+                  "about 2 MB each took it to 1.6 s and a 9-element join from 962 to "
+                  "1957 ms. Eight EMPTY Parts changed nothing measurable on B30, so it "
+                  "is the geometry that costs, not the count. The .CATfct catalogs "
+                  "cannot be released through automation: Documents.Close() returns "
+                  "without error and CATIA re-mounts them (reported 2026-11-04) - so "
+                  "ignore those and close your own finished models."
             )
         return block
 

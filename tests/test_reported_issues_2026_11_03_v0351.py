@@ -252,12 +252,14 @@ def test_check_surface_is_reachable_through_execute():
 
     tools = MeasurementTools(connection=None)
     captured = {}
-    tools._check_surface = lambda crease, cap, doc, region=None, top=8: captured.update(
-        {"crease": crease, "cap": cap, "doc": doc, "region": region, "top": top}) or "{}"
+    tools._check_surface = (lambda crease, cap, doc, region=None, top=8,
+                                   thickness=None: captured.update(
+        {"crease": crease, "cap": cap, "doc": doc, "region": region, "top": top,
+         "thickness": thickness}) or "{}")
     tools.execute("catia_check_surface", {"crease_deg": 15, "cap": 1000,
                                           "document": "X.CATPart"})
     assert captured == {"crease": 15.0, "cap": 1000, "doc": "X.CATPart",
-                        "region": None, "top": 8}
+                        "region": None, "top": 8, "thickness": None}
 
 
 def test_check_surface_defaults_are_the_documented_ones():
@@ -265,8 +267,11 @@ def test_check_surface_defaults_are_the_documented_ones():
 
     tools = MeasurementTools(connection=None)
     captured = {}
-    tools._check_surface = lambda crease, cap, doc, region=None, top=8: captured.update(
-        {"crease": crease, "cap": cap, "region": region, "top": top}) or "{}"
+    tools._check_surface = (lambda crease, cap, doc, region=None, top=8,
+                                   thickness=None: captured.update(
+        {"crease": crease, "cap": cap, "region": region, "top": top,
+         "thickness": thickness}) or "{}")
     tools.execute("catia_check_surface", {})
+    assert captured["thickness"] is None, "0.3.58 added it as an opt-in argument"
     assert captured["crease"] == 25.0
     assert captured["cap"] == 600000

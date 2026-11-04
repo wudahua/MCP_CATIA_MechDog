@@ -2519,7 +2519,14 @@ class GSDTools:
                 f"monotone along the lofting direction, to split the loft at the "
                 f"turn and join the pieces, or to use ruled=true (which covers all "
                 f"sections in one call: 10 sections measured at 1.39 s in the same "
-                f"report). Second: a section that is not ONE curve - a polygon "
+                f"report). A section with NO feature beside one that carries a DEEP "
+                f"one is the same fold in different clothes: measured on B32 SP6 "
+                f"2026-11-04 on a five-petal base, r=8 was a plain circle (valley and "
+                f"foot coincided there) and r=14 already carried an 8.6 mm valley, so "
+                f"the loft had to create the whole feature inside one span and "
+                f"self-intersected - while the same three sections split into two "
+                f"lofts built. Move the first wavy section closer to the circle, or "
+                f"split the loft there. Second: a section that is not ONE curve - a polygon "
                 f"outline is four curves however you draw it (four catia_sketch_line "
                 f"calls, and catia_sketch_rectangle too), and an Extract of it is "
                 f"still four, so a polygon section has to become a closed catia_gsd_spline "
@@ -2800,20 +2807,72 @@ class GSDTools:
         try:
             self._safe_update(thick)
         except Exception as error:
+            total = abs(float(thickness1)) + abs(float(thickness2))
             raise RuntimeError(
                 f"{error} ThickSurface offset {thickness1}+{thickness2} mm and the "
                 "update failed. The usual cause is geometric, not an argument: if "
                 "the surface is thinner somewhere than the total offset, the two "
                 "offset faces cross and CATIA refuses - measured on a 2.30 mm lens "
                 "section with 1.27/1.27 and with 2.54/0, both refused, while a 6 mm "
-                "hexagon of the same shape thickened. Try a smaller total, or model "
-                "the part as a padded polygon instead."
+                "hexagon of the same shape thickened."
+                + self._offset_blocker(part, total)
             ) from error
         self.conn.refresh_display()
         return (
             f"ThickSurface solid created from '{args['surface']}' "
             f"({thickness1}/{thickness2} mm). Feature: '{thick.Name}'"
         )
+
+    def _offset_blocker(self, part: Any, total: float) -> str:
+        """The tightest radius of curvature in this document's mesh, measured now.
+
+        "Update failed" is all CATIA says when an offset has to cross itself, and
+        the 2026-11-04 report rebuilt a 22-section model twice before working out
+        by hand that its valley walls had a 0.19-0.24 mm radius against a 0.3 mm
+        wall. The mesh carries that number (measurement._curvature_stats), so it
+        is read here and put in the error.
+
+        It runs in a FAILURE path, so everything is optional: the part is in an
+        error state, the export may write nothing, and the caller still has to
+        get a usable message. When the measurement cannot be taken, the reply
+        says where to get it instead of pretending.
+        """
+        pointer = (" Run catia_check_surface with thickness=<total> on this document "
+                   "to read the smallest radius of curvature and where it is.")
+        try:
+            from catia_mcp.tools.measurement import (MeasurementTools,
+                                                     _curvature_stats)
+
+            captured: dict[str, Any] = {}
+
+            def visit(path: str) -> None:
+                captured.update(_curvature_stats(path, total, 2))
+
+            MeasurementTools(self.conn)._mesh_export(part, None, visit)
+        except Exception:  # noqa: BLE001 - a failure path may not fail again
+            return pointer
+        data = captured
+        if not data or not data.get("edges_measured"):
+            return pointer
+        radius = data.get("tightest_smooth_radius_mm")
+        worst = (data.get("tightest_edges") or [{}])[0]
+        where = ""
+        if worst:
+            where = (f" at r={worst.get('r')}, theta={worst.get('theta_deg')} deg, "
+                     f"z={worst.get('z')}")
+        if radius is not None and radius < total:
+            return (f" MEASURED: the tightest smooth radius in the visible mesh is "
+                    f"{radius:.3f} mm{where}, which is less than the {total:.3f} mm "
+                    f"total offset - there the two offset faces must cross. Widen "
+                    f"that feature, or keep the total below {radius:.3f} mm. "
+                    f"(Read from the document's VISIBLE mesh over "
+                    f"{data['edges_measured']} interior edges; the estimate runs a "
+                    f"few percent low.)")
+        return (f" MEASURED: the tightest smooth radius in the visible mesh is "
+                f"{radius} mm{where}, which is NOT below the {total:.3f} mm offset - "
+                f"so on what this mesh resolves, curvature does not explain the "
+                f"failure. Look at a seam or a self-intersection in the surface "
+                f"itself, not at its radius.")
 
     def _close_surface(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()

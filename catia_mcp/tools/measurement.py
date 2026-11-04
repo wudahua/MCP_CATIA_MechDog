@@ -303,24 +303,7 @@ def _fold_stats(path: str, crease_deg: float, cap: int,
     # all cross the wall at one radius, the answer is "move the seam", and it is
     # worth saying in words (requested 2026-11-04, after a report spent a round
     # working it out by excluding radii one at a time).
-    seam_hint = None
-    if len(cross_creases) >= 3 and max(item["fold_deg"] for item in cross_creases) >= 60.0:
-        radii = sorted(item["r"] for item in cross_creases)
-        worst_fold = max(item["fold_deg"] for item in cross_creases)
-        seam_hint = (
-            f"SEAM SLIVER, not a fold: {len(cross_creases)} crease(s) run THROUGH "
-            f"the wall - one endpoint on the outer skin, one on the inner - and "
-            f"they sit at r {radii[0]:.2f}..{radii[-1]:.2f} mm, worst "
-            f"{worst_fold:.2f} deg. That is the signature of a joined seam "
-            f"cutting a nearly FLAT region: the triangulation uses its largest "
-            f"triangles where curvature is near zero, a thin wall is narrow "
-            f"enough for one of them to bridge both skins, and that triangle's "
-            f"normal sits between the two, so the dihedral reads like a fold. "
-            f"Confirm it by re-measuring with region excluding that radius - if "
-            f"the extremes collapse, the surface was fine and the seam should be "
-            f"moved into a curved region. A real fold at a rim is 'mixed' but "
-            f"NOT 'cross_wall'."
-        )
+    seam_hint = _seam_hint(cross_creases)
 
     def stats_of(values: list[float]) -> dict[str, Any]:
         ordered = sorted(values)
@@ -366,6 +349,25 @@ def _fold_stats(path: str, crease_deg: float, cap: int,
         "worst_creases_shown": min(len(creases), max(1, top)),
         "crease_threshold_deg": crease_deg,
     }
+    if boundary:
+        # One skin only: with open borders the "outer / inner" split has nothing
+        # to split, so a border can read as a wall crossing. Reported 2026-11-04
+        # on a surface patch whose skirt top edge (r=33, z=110, a BORDER) came
+        # back as 3 cross-wall creases at 180.0 deg, with a hint telling the
+        # caller to exclude r=33 - i.e. the whole bottle. The bucket is emptied
+        # and the hint withheld, because on a patch neither means anything.
+        for crease in creases:
+            crease["cross_wall"] = False
+        stats["fold_deg_by_side"]["cross_wall"] = stats_of([])
+        stats.pop("seam_hint", None)
+        stats["skin_note"] = (
+            f"cross_wall is NOT reported: this mesh has {boundary} open boundary "
+            f"edge(s), so it is a surface PATCH and not a closed shell. A patch has "
+            f"one skin, which makes the outer/inner split - and therefore 'this edge "
+            f"runs through the wall' - meaningless; a border can look like a wall "
+            f"crossing. Measure continuity on the patch itself with region instead, "
+            f"and re-run after the surface is closed or thickened."
+        )
     if seam_hint:
         stats["seam_hint"] = seam_hint
     if region is not None:
@@ -383,6 +385,182 @@ def _fold_stats(path: str, crease_deg: float, cap: int,
         )
     return stats
 
+
+def _seam_hint(cross_creases: list[dict[str, Any]]) -> str | None:
+    """The sentence that turns a list of 60 creases into "move the seam".
+
+    Kept separate from ``_fold_stats`` so the wording and the threshold can be
+    checked without building a mesh that produces the condition: on a closed
+    manifold tube a cross-wall edge cannot exist (both endpoints of every edge
+    belong to one skin), so the triggering geometry only appears where two
+    patches were joined with mismatched tessellation.
+    """
+    if len(cross_creases) < 3:
+        return None
+    worst_fold = max(item["fold_deg"] for item in cross_creases)
+    if worst_fold < 60.0:
+        return None
+    radii = sorted(item["r"] for item in cross_creases)
+    return (
+        f"SEAM SLIVER, not a fold: {len(cross_creases)} crease(s) run THROUGH "
+        f"the wall - one endpoint on the outer skin, one on the inner - and "
+        f"they sit at r {radii[0]:.2f}..{radii[-1]:.2f} mm, worst "
+        f"{worst_fold:.2f} deg. That is the signature of a joined seam "
+        f"cutting a nearly FLAT region: the triangulation uses its largest "
+        f"triangles where curvature is near zero, a thin wall is narrow "
+        f"enough for one of them to bridge both skins, and that triangle's "
+        f"normal sits between the two, so the dihedral reads like a fold. "
+        f"Confirm it by re-measuring with region excluding that radius - if "
+        f"the extremes collapse, the surface was fine and the seam should be "
+        f"moved into a curved region. A real fold at a rim is 'mixed' but "
+        f"NOT 'cross_wall'."
+    )
+
+
+def _curvature_stats(path: str, thickness: float | None = None,
+                     top: int = 3) -> dict[str, Any]:
+    """Smallest radius of curvature the mesh can resolve, and where it is.
+
+    A ThickSurface fails when the surface bends tighter than the offset it must
+    carry - a concave radius below the thickness. CATIA says only "update
+    failed", which is why the 2026-11-04 report rebuilt a 22-section model twice
+    before working the radius out by hand (R ~ w^2/(6h) on two valley walls,
+    0.19-0.24 mm against a 0.3 mm wall). This is the number that was missing.
+
+    Estimator: for each interior edge, kappa = (angle between the two adjacent
+    triangle normals, radians) / (edge length), radius = 1/kappa. For a chorded
+    cylinder of radius R the facet-to-facet angle IS chord/R, so the estimate
+    comes back as R rather than as a shape factor - which is what makes it
+    comparable to a thickness at all. Measured on B30 2026-11-04 against known
+    geometry: an extruded r=10 circle reads 9.74 (-2.6 %) and a r=5 fillet band
+    reads 4.77 (-4.5 %), so the estimate runs a few percent low - which is the
+    direction that makes a surface look TIGHTER than it is, not looser.
+
+    What it cannot do, said in the reply rather than discovered later: the mesh
+    cannot see a feature smaller than its own facets. Such a feature arrives as
+    a crease - a large angle across a short edge - and reports a near-zero
+    radius. That is honest ("nothing smoother than this exists in the mesh") but
+    it does not separate a tight smooth valley from a hard edge; ``fold_deg`` at
+    the same point does, and a radius below the facet length should be read as
+    "smaller than the mesh can resolve" rather than as a measurement.
+    """
+    faces = _stl_triangles(path, 400000)
+
+    def key(point: Any) -> tuple[float, float, float]:
+        return (round(point[0], 3), round(point[1], 3), round(point[2], 3))
+
+    def angle(n1: Any, n2: Any) -> float:
+        dot = sum(x * y for x, y in zip(n1, n2))
+        na = sum(x * x for x in n1) ** 0.5 or 1.0
+        nb = sum(x * x for x in n2) ** 0.5 or 1.0
+        return math.degrees(math.acos(max(-1.0, min(1.0, dot / (na * nb)))))
+
+    def circumcenter(verts: Any) -> Any:
+        """Centre of the circle through a triangle's three corners.
+
+        The dual length of an edge in a discrete curvature estimate is the
+        distance between the two adjacent triangles' circumcentres: for a chorded
+        cylinder that distance is the chord between the two facet centres, so
+        angle/dual comes back as 1/R. Centroids do not work - their distance to
+        the shared edge scales with the triangle's height, which made a r=10
+        cylinder read 20.15 and, on a vertical edge, 57.3 (measured 2026-11-04).
+        """
+        a, b, c = verts
+        ab = [b[i] - a[i] for i in range(3)]
+        ac = [c[i] - a[i] for i in range(3)]
+        abab = sum(x * x for x in ab)
+        acac = sum(x * x for x in ac)
+        abac = sum(ab[i] * ac[i] for i in range(3))
+        det = abab * acac - abac * abac
+        if abs(det) < 1e-12:
+            return None
+        d1 = abab / 2.0
+        d2 = acac / 2.0
+        u = (d1 * acac - d2 * abac) / det
+        v = (d2 * abab - d1 * abac) / det
+        return tuple(a[i] + u * ab[i] + v * ac[i] for i in range(3))
+
+    edges: dict[Any, list[Any]] = {}
+    for normal, verts in faces:
+        centre = circumcenter(verts)
+        if centre is None:
+            continue
+        for a, b in ((0, 1), (1, 2), (2, 0)):
+            ka, kb = key(verts[a]), key(verts[b])
+            edges.setdefault((min(ka, kb), max(ka, kb)), []).append(
+                (normal, centre))
+
+    rows: list[tuple[float, float, float, tuple[float, float, float]]] = []
+    for edge, entries in edges.items():
+        if len(entries) != 2:
+            continue
+        # The arc length is the distance between the two circumcentres (see
+        # circumcenter above): centring on the local circle is what makes this
+        # the surface's own radius rather than a function of triangle shape.
+        span = math.dist(entries[0][1], entries[1][1])
+        if span < 1e-3:
+            continue
+        fold = angle(entries[0][0], entries[1][0])
+        if fold < 1e-3:
+            continue                      # flat: infinite radius, no information
+        radius = span / math.radians(fold)
+        mid = tuple((edge[0][axis] + edge[1][axis]) / 2.0 for axis in range(3))
+        rows.append((radius, fold, math.dist(edge[0], edge[1]), mid))
+
+    if not rows:
+        return {"edges_measured": 0,
+                "note": "no interior edge carries any bend; nothing to estimate"}
+
+    def describe(row) -> dict[str, Any]:
+        radius, fold, length, mid = row
+        return {"radius_mm": round(radius, 4),
+                "fold_deg": round(fold, 2),
+                "edge_length_mm": round(length, 4),
+                "r": round(math.hypot(mid[0], mid[1]), 3),
+                "theta_deg": round(math.degrees(math.atan2(mid[1], mid[0])) % 360.0, 2),
+                "z": round(mid[2], 3)}
+
+    rows.sort(key=lambda row: row[0])
+    ordered = [row[0] for row in rows]
+
+    def at(quantile: float) -> float:
+        return round(ordered[min(len(ordered) - 1, int(quantile * len(ordered)))], 4)
+
+    # Degenerate slivers can produce a huge angle across a hair-thin edge and a
+    # radius of 0.001; the "smooth" reading excludes those so a caller has both
+    # numbers instead of one that is technically a minimum and practically noise.
+    smooth = [row for row in rows if row[1] <= 60.0] or rows
+    block: dict[str, Any] = {
+        "edges_measured": len(rows),
+        "min_radius_mm": round(rows[0][0], 4),
+        "tightest_edges": [describe(row) for row in rows[:max(1, top)]],
+        "tightest_smooth_radius_mm": round(smooth[0][0], 4),
+        "radius_percentiles_mm": {"p1": at(0.01), "p5": at(0.05),
+                                  "median": at(0.5)},
+        "method": ("per interior edge: radius = edge length / angle between the two "
+                   "normals, over the distance between the two triangle centroids. "
+                   "A chorded cylinder of radius R returns R, so the number is "
+                   "comparable to a wall thickness."),
+        "limits": ("the mesh cannot resolve a feature smaller than its facets: such "
+                   "a feature reads as a crease with a near-zero radius. Compare "
+                   "radius with edge_length_mm - a radius below the edge length is "
+                   "smaller than this mesh can measure, not a measured value."),
+    }
+    if thickness is not None and thickness > 0:
+        below = [row for row in rows if row[0] < thickness]
+        verdict = ("the surface bends tighter than the offset somewhere, so an "
+                   "offset of %.3g mm cannot be built without the two faces "
+                   "crossing" % thickness) if below else (
+                   "no interior edge bends tighter than %.3g mm, so the offset is "
+                   "not blocked by curvature on what this mesh can resolve"
+                   % thickness)
+        block["thickness_check"] = {
+            "thickness_mm": thickness,
+            "edges_tighter_than_thickness": len(below),
+            "worst": describe(below[0]) if below else None,
+            "verdict": verdict,
+        }
+    return block
 
 def _stl_scan(path: str, limit: int | None = None
               ) -> tuple[list[float], list[float], list[float] | None, int]:
@@ -1389,7 +1567,14 @@ class MeasurementTools:
                     "where a joined seam cuts a nearly FLAT region, because the "
                     "mesh uses its largest triangles there; "
                     "worst_creases[*].cross_wall marks them, and seam_hint appears "
-                    "with the radius band and what to do about it. "
+                    "with the radius band and what to do about it. On an OPEN "
+                    "surface patch (boundary_edges > 0) there is one skin, so "
+                    "cross_wall is withheld and skin_note says why - a border can "
+                    "otherwise read as a wall crossing. "
+                    "CURVATURE: the 'curvature' block estimates the smallest radius "
+                    "of curvature the mesh can resolve, with r/theta/z, and with "
+                    "'thickness' it says how many edges bend tighter than that - the "
+                    "question a failed ThickSurface leaves unanswered. "
                     "SCOPE: the STL export contains every VISIBLE element of the "
                     "document, so hide construction geometry before checking a "
                     "solid. The report says which case it read."
@@ -1428,6 +1613,24 @@ class MeasurementTools:
                                 "and you need all of them - 'creases' already "
                                 "reports the total, this only limits the list."),
                             "default": 8,
+                        },
+                        "thickness": {
+                            "type": "number",
+                            "exclusiveMinimum": 0,
+                            "description": (
+                                "Optional wall thickness in mm. Adds the "
+                                "'curvature' block's verdict: how many interior "
+                                "edges bend tighter than this, and where the worst "
+                                "one is. This is the check a failing "
+                                "catia_gsd_thick_surface needs - a ThickSurface fails when "
+                                "the surface's concave radius is smaller than the "
+                                "offset, and CATIA says only 'update failed'. "
+                                "Measured on B30 2026-11-04 against known geometry: "
+                                "an extruded r=10 circle reads 9.74 mm (-2.6 %) and "
+                                "a r=5 fillet band reads 4.77 (-4.5 %). The "
+                                "discrete estimate runs a few percent LOW, so a "
+                                "radius within ~5 % of the thickness is the boundary "
+                                "case it looks like, not a verdict."),
                         },
                         "region": {
                             "type": "object",
@@ -1494,7 +1697,9 @@ class MeasurementTools:
                     int(arguments.get("cap", 600000)),
                     arguments.get("document") or arguments.get("document_name"),
                     arguments.get("region"),
-                    int(arguments.get("top_creases", 8)))
+                    int(arguments.get("top_creases", 8)),
+                    float(arguments["thickness"]) if arguments.get("thickness")
+                    else None)
             case _:
                 raise ValueError(f"Unknown measurement tool: {tool_name}")
 
@@ -4088,7 +4293,8 @@ class MeasurementTools:
 
     def _check_surface(self, crease_deg: float = 25.0, cap: int = 600000,
                        document: str | None = None,
-                       region: Any = None, top: int = 8) -> str:
+                       region: Any = None, top: int = 8,
+                       thickness: float | None = None) -> str:
         """Dihedral-angle report of the active part's mesh: the zebra substitute.
 
         CATIA V5 exposes no zebra, curvature-comb or environment-mapping object
@@ -4123,6 +4329,10 @@ class MeasurementTools:
             # Runs INSIDE _mesh_export, before its finally removes the temporary
             # directory - the file is gone by the time the call returns.
             captured["stats"] = _fold_stats(path, crease_deg, cap, bounds, top)
+            # Same file, second pass: the curvature block answers the other
+            # question a surface raises - "will it take this thickness" - and
+            # costs one more read of a mesh already in hand.
+            captured["curvature"] = _curvature_stats(path, thickness, top)
 
         self._mesh_export(part, None, grab)
         stats = captured.get("stats")
@@ -4149,6 +4359,7 @@ class MeasurementTools:
                      f"{sets_total} geometrical set(s)")
         report: dict[str, Any] = {
             "document": str(getattr(part.Parent, "Name", "<part>")),
+            "curvature": captured.get("curvature"),
             "method": ("STL mesh: the angle between the two triangle normals "
                        "across every interior edge. This is what a zebra check "
                        "asks, answered as a number - CATIA V5 exposes no zebra, "
@@ -4169,16 +4380,16 @@ class MeasurementTools:
                 f"2026-11-03, AddNewHealing with Continuity 0, 1 and 2 left a "
                 f"90 deg fold at exactly 90 deg, with the same triangle count. "
                 f"ON A THIN-WALLED SOLID, read fold_deg_by_side before believing a "
-                f"large max: the inner skin is the outer one offset inwards, so "
-                f"the same corner is a smaller radius there and the mesh chords it "
-                f"harder. Check each worst_creases entry's r, z and side - if two "
-                f"creases share an r and their z differ by the wall thickness, the "
-                f"pair is the two skins of one feature, not two defects. Measured "
-                f"on B30 2026-11-04: a 0.3 mm tube and a 0.3 mm shell around an R3 "
-                f"fillet both read IDENTICAL statistics on the two skins (22.50 / "
-                f"22.50 and 13.38 / 13.38, max 29.89 on both), so an inner-face "
-                f"reading several times the outer one is a sliver along a seam "
-                f"rather than a property of thin walls."
+                f"large max: the two skins are separate features and a difference "
+                f"between them is about the geometry, not about thickness - a 0.3 mm "
+                f"tube and a 0.3 mm shell around an R3 fillet both read IDENTICAL "
+                f"statistics on their two skins (22.50 / 22.50 and 13.38 / 13.38, "
+                f"max 29.89 on both, measured on B30 2026-11-04). A skin reading "
+                f"several times the other is a sliver along a seam: those edges are "
+                f"cross_wall and seam_hint names them. Check each worst_creases "
+                f"entry's r, z and side - if two creases share an r and their z "
+                f"differ by the wall thickness, that pair is the two skins of one "
+                f"feature, not two defects."
             ),
         }
         if stats["boundary_edges"]:

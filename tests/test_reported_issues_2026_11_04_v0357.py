@@ -119,28 +119,49 @@ def test_a_clean_thin_wall_has_no_cross_wall_edges(tmp_path):
     assert "seam_hint" not in stats
 
 
-def test_one_bridging_triangle_is_flagged_and_the_rim_is_not(tmp_path):
+def test_a_bridging_triangle_opens_the_mesh_and_then_cross_wall_is_withheld(tmp_path):
+    """0.3.57 reported exactly this: a surface patch flagged as a sliver.
+
+    A bridge can only exist where the mesh is not a closed manifold - the rim of
+    a patch, or a seam whose two sides were tessellated separately - so the
+    fixture that contains one is by construction an open patch, and the answer
+    to "is this a wall crossing" there is "the question does not apply".
+    """
     stats = _stats(tmp_path, "bridged.stl", (5,))
-    sides = stats["fold_deg_by_side"]
-    assert sides["cross_wall"]["edges"] == 1
-    flagged = [crease for crease in stats["worst_creases"] if crease["cross_wall"]]
-    assert len(flagged) == 1
-    assert flagged[0]["fold_deg"] > 90.0
-    # It sits between the skins, not on either of them.
-    assert R_IN < flagged[0]["r"] < R_OUT
-    rim = [crease for crease in stats["worst_creases"] if not crease["cross_wall"]]
-    assert rim and all(crease["side"] == "mixed" for crease in rim)
+    assert stats["boundary_edges"] > 0, "the bridge leaves the patch open"
+    assert stats["fold_deg_by_side"]["cross_wall"]["edges"] == 0
+    assert all(not crease["cross_wall"] for crease in stats["worst_creases"])
+    assert "seam_hint" not in stats, (
+        "a hint telling the caller to exclude r=33 on a bottle whose radius IS 33 "
+        "is worse than no hint - that is the 2026-11-04 false positive")
+    note = stats["skin_note"]
+    assert "PATCH" in note and "boundary" in note
+    # The extremes are still reported - they are just not called slivers.
+    assert stats["fold_deg"]["max"] > 90.0
 
 
-def test_three_bridges_raise_the_seam_hint_with_a_radius_and_a_next_step(tmp_path):
-    stats = _stats(tmp_path, "bridges.stl", (3, 10, 20))
-    assert stats["fold_deg_by_side"]["cross_wall"]["edges"] == 3
-    hint = stats.get("seam_hint")
-    assert hint, "three cross-wall extremes at one radius is what the hint is for"
+def test_the_seam_hint_needs_three_cross_wall_creases_and_a_steep_one():
+    """Threshold and wording, checked directly - see _seam_hint's docstring."""
+    from catia_mcp.tools.measurement import _seam_hint
+
+    def crease(radius, fold):
+        return {"fold_deg": fold, "r": radius, "z": 0.0, "side": "mixed",
+                "cross_wall": True}
+
+    assert _seam_hint([]) is None
+    assert _seam_hint([crease(25.0, 124.0), crease(25.1, 120.0)]) is None, (
+        "two edges are not a pattern")
+    assert _seam_hint([crease(25.0, 20.0), crease(25.0, 25.0),
+                       crease(25.0, 30.0)]) is None, (
+        "three mild edges are background, not a sliver")
+    hint = _seam_hint([crease(25.06, 124.05), crease(25.12, 100.0),
+                       crease(25.16, 98.0)])
+    assert hint
     assert "SEAM SLIVER" in hint
-    assert "r " in hint and "mm" in hint
+    assert "r 25.06..25.16 mm" in hint, "the radius band is the actionable part"
+    assert "worst 124.05 deg" in hint
     assert "region" in hint, "the hint has to say how to confirm it"
-    assert "cross_wall" in hint
+    assert "NOT 'cross_wall'" in hint
 
 
 def test_cross_wall_is_documented_as_a_subset_of_mixed():

@@ -2,6 +2,65 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.58] — 2026-11-04 · the number a failed offset never gave
+
+Two reports on 0.3.57, both about things 0.3.57 introduced or claimed, and both
+were right.
+
+**`seam_hint` fired on a surface patch.** The caller had a model whose thickening
+had failed, so only the surface was left. Three creases at 180.0 deg on the
+skirt's top edge - r=33, z=110, which is a BORDER - came back as cross-wall, and
+the hint told them to re-measure with r=33 excluded. On a 66 mm bottle that
+excludes everything. The split needs two skins; a patch has one, and a border can
+therefore look like a wall crossing. `cross_wall` is now withheld whenever
+`boundary_edges > 0`, the hint is withheld with it, and `skin_note` says which
+question does not apply and why. The synthesised fixture that used to assert the
+opposite now asserts this - a bridging triangle necessarily leaves the mesh open,
+which is exactly the condition being excluded.
+
+**A failed `catia_gsd_thick_surface` now carries the radius.** The report rebuilt a
+22-section model twice before working out by hand that its valley walls were
+0.19-0.24 mm against a 0.3 mm wall. The mesh answers that:
+`catia_check_surface` has a `curvature` block (smallest radius, where it is, and
+with the new `thickness` argument how many edges bend tighter than that), and the
+thick-surface failure message measures the document's visible mesh and puts the
+number and the location in the error - falling back to pointing at the tool when
+the part is too broken to export.
+
+The estimator is `radius = dual length / normal angle`, with the dual length taken
+between the two triangles' CIRCUMCENTRES. Two cheaper lengths were wrong and are
+recorded here so they are not tried again: the edge's own length gave 57.3 mm on a
+vertical edge of a r=10 cylinder, and centroid-to-centroid gave 20.15 - both on a
+surface whose radius is 10. Measured accuracy on B30 2026-11-04 against known
+geometry: an extruded r=10 circle reads 9.74 (-2.6 %) and a r=5 fillet band reads
+4.77 (-4.5 %). It runs LOW, i.e. it can call a surface tighter than it is, and the
+reply says so rather than presenting the number as exact. A feature smaller than
+the mesh's own facets cannot be resolved at all and reads as a crease; `limits`
+says that too.
+
+**Documents: the catalogs are named, and the note is about geometry.** 0.3.57's
+`note` told the caller to close documents; the report found that 15 of the 18 were
+`.CATfct` function catalogs that `Documents.Close()` accepts and CATIA re-mounts.
+`session.open_documents` now counts and names `function_catalogs`, and the note
+says catalogs cannot be released through automation, and that what costs time is
+documents that HOLD GEOMETRY: 15 catalogs plus one Part ran a 90-point spline in
+1.09 s, the same as a lone Part, while two finished Parts took it to 1.6 s and a
+9-element join from 962 to 1957 ms - against eight EMPTY Parts changing nothing
+measurable here (0.3.57). Same file, same author, three conditions: the variable
+was never the count.
+
+**One more loft case, in the message where the fold is explained.** A section with
+no feature beside one carrying a deep one self-intersects the same way a
+non-monotone stack does: r=8 was a plain circle and r=14 already carried an 8.6 mm
+valley, so the loft had to create the whole feature inside one span; splitting it
+into two lofts built.
+
+963 tests, 13 new. What could NOT be measured: no surface built on B30 refused to
+thicken - not a 0.1 mm slot at 0.6 mm, not a r=0.2 cylinder at 0.3, not a r=5
+cylinder at 400 - so the failure TEXT was pinned with a stubbed export and a known
+STL rather than by a real failing part. The measurement itself is exercised on
+real geometry through `check_surface`.
+
 ## [0.3.57] — 2026-11-04 · a sliver is not a fold, and the documents CATIA opens for you
 
 The 0.3.56 acceptance report retracted its own root cause and asked for the split
