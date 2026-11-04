@@ -227,26 +227,6 @@ def _fold_stats(path: str, crease_deg: float, cap: int,
                                        "mixed": [], "cross_wall": []}
     cross_creases: list[dict[str, Any]] = []
 
-    def inside(mid: tuple[float, float, float]) -> bool:
-        if region is None:
-            return True
-        x, y, z = mid
-        radius = math.hypot(x, y)
-        theta = math.degrees(math.atan2(y, x)) % 360.0
-        for key, value in (("r", radius), ("z", z), ("theta_deg", theta)):
-            span = region.get(key)
-            if span is None:
-                continue
-            lo, hi = span
-            if key == "theta_deg" and lo > hi:
-                # a wedge across +X: 350..10 means 350..360 plus 0..10
-                if not (value >= lo or value <= hi):
-                    return False
-                continue
-            if not lo <= value <= hi:
-                return False
-        return True
-
     for edge, entries in edges.items():
         if len(entries) == 1:
             boundary += 1
@@ -255,7 +235,7 @@ def _fold_stats(path: str, crease_deg: float, cap: int,
             multi += 1
             continue
         mid = tuple((edge[0][axis] + edge[1][axis]) / 2.0 for axis in range(3))
-        if region is not None and not inside(mid):  # type: ignore[arg-type]
+        if not _in_region(mid, region):  # type: ignore[arg-type]
             outside += 1
             continue
         fold = angle(entries[0][0], entries[1][0])
@@ -386,6 +366,35 @@ def _fold_stats(path: str, crease_deg: float, cap: int,
     return stats
 
 
+def _in_region(mid: tuple[float, float, float],
+               region: dict[str, tuple[float, float]] | None) -> bool:
+    """Is this edge midpoint inside the region filter? See ``_region_bounds``.
+
+    Shared by the fold pass and the curvature pass, because a caller who says
+    "look at the bottle base" means the same place in both answers (reported
+    2026-11-04: ``region`` scoped ``fold_deg`` but the curvature block silently
+    kept reporting the whole mesh).
+    """
+    if region is None:
+        return True
+    x, y, z = mid
+    radius = math.hypot(x, y)
+    theta = math.degrees(math.atan2(y, x)) % 360.0
+    for key, value in (("r", radius), ("z", z), ("theta_deg", theta)):
+        span = region.get(key)
+        if span is None:
+            continue
+        lo, hi = span
+        if key == "theta_deg" and lo > hi:
+            # a wedge across +X: 350..10 means 350..360 plus 0..10
+            if not (value >= lo or value <= hi):
+                return False
+            continue
+        if not lo <= value <= hi:
+            return False
+    return True
+
+
 def _seam_hint(cross_creases: list[dict[str, Any]]) -> str | None:
     """The sentence that turns a list of 60 creases into "move the seam".
 
@@ -417,8 +426,13 @@ def _seam_hint(cross_creases: list[dict[str, Any]]) -> str | None:
     )
 
 
+FOLD_BACK_DEG = 175.0
+
+
 def _curvature_stats(path: str, thickness: float | None = None,
-                     top: int = 3) -> dict[str, Any]:
+                     top: int = 3,
+                     region: dict[str, tuple[float, float]] | None = None
+                     ) -> dict[str, Any]:
     """Smallest radius of curvature the mesh can resolve, and where it is.
 
     A ThickSurface fails when the surface bends tighter than the offset it must
@@ -427,22 +441,33 @@ def _curvature_stats(path: str, thickness: float | None = None,
     before working the radius out by hand (R ~ w^2/(6h) on two valley walls,
     0.19-0.24 mm against a 0.3 mm wall). This is the number that was missing.
 
-    Estimator: for each interior edge, kappa = (angle between the two adjacent
-    triangle normals, radians) / (edge length), radius = 1/kappa. For a chorded
-    cylinder of radius R the facet-to-facet angle IS chord/R, so the estimate
-    comes back as R rather than as a shape factor - which is what makes it
-    comparable to a thickness at all. Measured on B30 2026-11-04 against known
-    geometry: an extruded r=10 circle reads 9.74 (-2.6 %) and a r=5 fillet band
-    reads 4.77 (-4.5 %), so the estimate runs a few percent low - which is the
-    direction that makes a surface look TIGHTER than it is, not looser.
+    Estimator: for each interior edge, radius = (distance between the two
+    adjacent triangles' CIRCUMCENTRES) / (angle between their normals, radians).
+    For a chorded cylinder of radius R the facet-to-facet angle IS chord/R, so
+    the estimate comes back as R rather than as a shape factor - which is what
+    makes it comparable to a thickness at all. Measured on B30 2026-11-04
+    against known geometry: an extruded r=10 circle reads 9.74 (-2.6 %) and a
+    r=5 fillet band reads 4.77 (-4.5 %), so the estimate runs a few percent low -
+    the direction that makes a surface look TIGHTER than it is, not looser.
 
     What it cannot do, said in the reply rather than discovered later: the mesh
     cannot see a feature smaller than its own facets. Such a feature arrives as
     a crease - a large angle across a short edge - and reports a near-zero
     radius. That is honest ("nothing smoother than this exists in the mesh") but
     it does not separate a tight smooth valley from a hard edge; ``fold_deg`` at
-    the same point does, and a radius below the facet length should be read as
+    the same point does, and a radius below the edge length should be read as
     "smaller than the mesh can resolve" rather than as a measurement.
+
+    NOT every steep dihedral is a bend. At ``FOLD_BACK_DEG`` or more the two
+    triangles face opposite ways, and radius = span/pi is then the facet size
+    over pi rather than geometry. Two coincident patches with opposite
+    orientation measure exactly 180.00 deg on every edge they share (B30
+    2026-11-04) - which is how a duplicated or double-sided sheet becomes a
+    "0.034 mm radius" with an actionable "widen that feature" attached, at the
+    open top border of a skirt surface where there was no feature to widen
+    (reported the same day). Those edges are counted in
+    ``excluded.fold_back_edges`` and kept out of both the radius ranking and the
+    thickness verdict.
     """
     faces = _stl_triangles(path, 400000)
 
@@ -490,35 +515,133 @@ def _curvature_stats(path: str, thickness: float | None = None,
             edges.setdefault((min(ka, kb), max(ka, kb)), []).append(
                 (normal, centre))
 
-    rows: list[tuple[float, float, float, tuple[float, float, float]]] = []
+    rows: list[tuple[float, float, float, tuple[float, float, float], bool]] = []
+    folded: list[tuple[float, float, tuple[float, float, float], bool]] = []
+    border_vertices: set[Any] = set()
+    boundary = ambiguous = 0
+    outside = 0
     for edge, entries in edges.items():
-        if len(entries) != 2:
+        if len(entries) == 1:
+            boundary += 1
+            border_vertices.update(edge)
+            continue
+        if len(entries) > 2:
+            # More than two triangles on one edge means two sheets coincide (or
+            # a genuinely non-manifold mesh). Neither yields a curvature.
+            ambiguous += 1
+            continue
+        mid = tuple((edge[0][axis] + edge[1][axis]) / 2.0 for axis in range(3))
+        if not _in_region(mid, region):  # type: ignore[arg-type]
+            outside += 1
             continue
         # The arc length is the distance between the two circumcentres (see
         # circumcenter above): centring on the local circle is what makes this
         # the surface's own radius rather than a function of triangle shape.
         span = math.dist(entries[0][1], entries[1][1])
-        if span < 1e-3:
-            continue
         fold = angle(entries[0][0], entries[1][0])
         if fold < 1e-3:
             continue                      # flat: infinite radius, no information
-        radius = span / math.radians(fold)
-        mid = tuple((edge[0][axis] + edge[1][axis]) / 2.0 for axis in range(3))
-        rows.append((radius, fold, math.dist(edge[0], edge[1]), mid))
-
-    if not rows:
-        return {"edges_measured": 0,
-                "note": "no interior edge carries any bend; nothing to estimate"}
+        length = math.dist(edge[0], edge[1])
+        near_border = edge[0] in border_vertices or edge[1] in border_vertices
+        # Fold-back is judged BEFORE the span: two exactly coincident sheets have
+        # coincident circumcentres, so span is 0 and the old order dropped them
+        # as degenerate - which is why a duplicated sheet could disappear from
+        # the count while a nearly-coincident one (span 0.1 mm, fold 180.00)
+        # became a "0.034 mm radius". Same fault, two different silences.
+        if fold >= FOLD_BACK_DEG:
+            folded.append((fold, length, span, mid, near_border))
+            continue
+        if span < 1e-3:
+            continue                      # coincident circumcentres, no arc
+        rows.append((span / math.radians(fold), fold, length, mid, near_border))
 
     def describe(row) -> dict[str, Any]:
-        radius, fold, length, mid = row
+        radius, fold, length, mid, near_border = row
         return {"radius_mm": round(radius, 4),
                 "fold_deg": round(fold, 2),
                 "edge_length_mm": round(length, 4),
                 "r": round(math.hypot(mid[0], mid[1]), 3),
                 "theta_deg": round(math.degrees(math.atan2(mid[1], mid[0])) % 360.0, 2),
-                "z": round(mid[2], 3)}
+                "z": round(mid[2], 3),
+                "at_open_border": near_border}
+
+    excluded: dict[str, Any] = {
+        "fold_back_edges": len(folded),
+        "ambiguous_edges": ambiguous,
+        "open_boundary_edges": boundary,
+        "outside_region": outside,
+    }
+    if folded:
+        # Shortest edge first: that is the one that produced the smallest bogus
+        # radius, and therefore the one that got quoted back to the caller.
+        sample = sorted(folded, key=lambda row: row[2])[:max(1, top)]
+        excluded["fold_back_sample"] = [
+            {"fold_deg": round(fold, 2),
+             "edge_length_mm": round(length, 4),
+             # What the 0.3.58 formula would have published for this edge.
+             "radius_this_would_have_read_mm": round(span / math.pi, 4),
+             "r": round(math.hypot(mid[0], mid[1]), 3),
+             "theta_deg": round(math.degrees(math.atan2(mid[1], mid[0])) % 360.0, 2),
+             "z": round(mid[2], 3),
+             "at_open_border": near_border}
+            for fold, length, span, mid, near_border in sample
+        ]
+        excluded["fold_back_note"] = (
+            f"{len(folded)} edge(s) fold back by {FOLD_BACK_DEG:g} deg or more and "
+            f"are EXCLUDED from the radius and from the thickness verdict: at that "
+            f"angle the two faces point opposite ways, so 'radius' would be the "
+            f"facet size divided by pi, not a bend. Two coincident patches with "
+            f"opposite orientation measure exactly 180.00 deg on every shared edge "
+            f"(B30 2026-11-04), so a duplicated or double-sided sheet - or a "
+            f"surface that was split and left a coincident copy - lands here. A "
+            f"genuine zero-radius knife edge reads the same, so check "
+            f"'at_open_border' and whether the same location carries two sheets "
+            f"before treating one as geometry. Widen a feature only if the radius "
+            f"below is a real one."
+        )
+    if ambiguous:
+        excluded["ambiguous_note"] = (
+            f"{ambiguous} edge(s) are shared by more than two triangles, which in "
+            f"an exported mesh means two sheets coincide (the same surface "
+            f"exported twice, or a trimmed copy left visible). No curvature can be "
+            f"read across those either."
+        )
+
+    if not rows:
+        # Keep the keys a caller reads programmatically, with None where there is
+        # no value: a KeyError on 'min_radius_mm' would be a worse answer than a
+        # null one, and the reason is in 'note' either way.
+        block: dict[str, Any] = {
+            "edges_measured": 0,
+            "min_radius_mm": None,
+            "min_radius_at_open_border": None,
+            "tightest_edges": [],
+            "tightest_smooth_radius_mm": None,
+            "radius_percentiles_mm": None,
+            "excluded": excluded,
+            "note": ("no interior edge carries a bend that this estimate can use"
+                     + (" - every bend measured folds back on itself"
+                        if folded else "")),
+        }
+        if region is not None:
+            block["region"] = {k: [None if math.isinf(b) else b for b in span]
+                               for k, span in region.items()}
+            block["region_note"] = (
+                f"nothing inside the region is a bend this estimate can use; "
+                f"{outside} edge(s) outside it were not counted.")
+        if thickness is not None and thickness > 0:
+            block["thickness_check"] = {
+                "thickness_mm": thickness,
+                "edges_tighter_than_thickness": 0,
+                "worst": None,
+                "verdict": ("nothing measurable is tighter than %.3g mm, because "
+                            "nothing measurable is there: %d edge(s) fold back or "
+                            "overlap and were excluded. Curvature therefore cannot "
+                            "explain a failure on this mesh - look at the surface's "
+                            "continuity, at a seam, or at a self-intersection"
+                            % (thickness, len(folded) + ambiguous)),
+            }
+        return block
 
     rows.sort(key=lambda row: row[0])
     ordered = [row[0] for row in rows]
@@ -530,30 +653,47 @@ def _curvature_stats(path: str, thickness: float | None = None,
     # radius of 0.001; the "smooth" reading excludes those so a caller has both
     # numbers instead of one that is technically a minimum and practically noise.
     smooth = [row for row in rows if row[1] <= 60.0] or rows
-    block: dict[str, Any] = {
+    block = {
         "edges_measured": len(rows),
         "min_radius_mm": round(rows[0][0], 4),
+        "min_radius_at_open_border": rows[0][4],
         "tightest_edges": [describe(row) for row in rows[:max(1, top)]],
         "tightest_smooth_radius_mm": round(smooth[0][0], 4),
         "radius_percentiles_mm": {"p1": at(0.01), "p5": at(0.05),
                                   "median": at(0.5)},
-        "method": ("per interior edge: radius = edge length / angle between the two "
-                   "normals, over the distance between the two triangle centroids. "
-                   "A chorded cylinder of radius R returns R, so the number is "
+        "method": ("per interior edge: radius = (distance between the two adjacent "
+                   "triangles' circumcentres) / (angle between their normals). A "
+                   "chorded cylinder of radius R returns R, so the number is "
                    "comparable to a wall thickness."),
         "limits": ("the mesh cannot resolve a feature smaller than its facets: such "
                    "a feature reads as a crease with a near-zero radius. Compare "
                    "radius with edge_length_mm - a radius below the edge length is "
                    "smaller than this mesh can measure, not a measured value."),
+        "excluded": excluded,
     }
+    if region is not None:
+        block["region"] = {k: [None if math.isinf(b) else b for b in span]
+                           for k, span in region.items()}
+        block["region_note"] = (
+            f"radius figures cover the {len(rows)} edge(s) whose midpoint falls "
+            f"inside the region; {outside} edge(s) outside it were not counted."
+        )
     if thickness is not None and thickness > 0:
         below = [row for row in rows if row[0] < thickness]
-        verdict = ("the surface bends tighter than the offset somewhere, so an "
-                   "offset of %.3g mm cannot be built without the two faces "
-                   "crossing" % thickness) if below else (
-                   "no interior edge bends tighter than %.3g mm, so the offset is "
-                   "not blocked by curvature on what this mesh can resolve"
-                   % thickness)
+        if below:
+            verdict = ("the surface bends tighter than the offset somewhere, so an "
+                       "offset of %.3g mm cannot be built without the two faces "
+                       "crossing" % thickness)
+        elif folded:
+            verdict = ("no real bend is tighter than %.3g mm; the %d edge(s) that "
+                       "fold back are excluded (see excluded.fold_back_note), so on "
+                       "what this mesh can measure curvature does not block the "
+                       "offset - unless one of those fold-backs is a genuine knife "
+                       "edge, which reads identically" % (thickness, len(folded)))
+        else:
+            verdict = ("no interior edge bends tighter than %.3g mm, so the offset "
+                       "is not blocked by curvature on what this mesh can resolve"
+                       % thickness)
         block["thickness_check"] = {
             "thickness_mm": thickness,
             "edges_tighter_than_thickness": len(below),
@@ -561,6 +701,8 @@ def _curvature_stats(path: str, thickness: float | None = None,
             "verdict": verdict,
         }
     return block
+
+
 
 def _stl_scan(path: str, limit: int | None = None
               ) -> tuple[list[float], list[float], list[float] | None, int]:
@@ -1574,7 +1716,20 @@ class MeasurementTools:
                     "CURVATURE: the 'curvature' block estimates the smallest radius "
                     "of curvature the mesh can resolve, with r/theta/z, and with "
                     "'thickness' it says how many edges bend tighter than that - the "
-                    "question a failed ThickSurface leaves unanswered. "
+                    "question a failed ThickSurface leaves unanswered. NOT EVERY "
+                    "STEEP DIHEDRAL IS A BEND: edges that fold back (>= 175 deg) are "
+                    "counted in excluded.fold_back_edges and kept out of both the "
+                    "radius and the verdict, because two coincident patches with "
+                    "opposite orientation measure exactly 180.00 deg on every edge "
+                    "they share (measured on B30 2026-11-04) - that is a duplicated "
+                    "or double-sided sheet, and it is how a surface got a '0.034 mm "
+                    "radius' with a 'widen that feature' attached where no feature "
+                    "existed (reported 2026-11-04, at an open border the split was "
+                    "about to cut away). Edges shared by more than two triangles "
+                    "are counted as excluded.ambiguous_edges for the same reason. "
+                    "tightest_edges[*].at_open_border marks a real reading whose "
+                    "edge ends on a border, and excluded.open_boundary_edges says "
+                    "how many borders the mesh has. "
                     "SCOPE: the STL export contains every VISIBLE element of the "
                     "document, so hide construction geometry before checking a "
                     "solid. The report says which case it read."
@@ -1635,9 +1790,11 @@ class MeasurementTools:
                         "region": {
                             "type": "object",
                             "description": (
-                                "Restrict the fold statistics to one place in the "
-                                "model, so a tight transition band is not averaged "
-                                "away by a smooth wall. Any of the three keys, each "
+                                "Restrict BOTH blocks - the fold statistics and the "
+                                "curvature estimate - to one place in the model, so a "
+                                "tight transition band is not averaged away by a "
+                                "smooth wall and 'look at the bottle base' means the "
+                                "same place in both answers. Any of the three keys, each "
                                 "a [lo, hi] pair (either end may be null): 'r' = "
                                 "distance from the Z axis, 'z' = height, "
                                 "'theta_deg' = angle from +X in the XY plane, "
@@ -1647,7 +1804,8 @@ class MeasurementTools:
                                 "report called 'too tight': {\"r\": [24, 28]}. "
                                 "boundary_edges and non_manifold_edges stay "
                                 "whole-mesh; the reply reports how many edges the "
-                                "region excluded."),
+                                "region excluded, in region_note (fold pass) and "
+                                "curvature.region_note (radius pass) separately."),
                             "properties": {
                                 "r": {"type": "array", "items": {"type": "number"}},
                                 "z": {"type": "array", "items": {"type": "number"}},
@@ -4332,7 +4490,7 @@ class MeasurementTools:
             # Same file, second pass: the curvature block answers the other
             # question a surface raises - "will it take this thickness" - and
             # costs one more read of a mesh already in hand.
-            captured["curvature"] = _curvature_stats(path, thickness, top)
+            captured["curvature"] = _curvature_stats(path, thickness, top, bounds)
 
         self._mesh_export(part, None, grab)
         stats = captured.get("stats")
@@ -4370,7 +4528,8 @@ class MeasurementTools:
             "geometrical_sets": sets_total,
             "how_to_read": (
                 ("" if bounds is None else
-                 f"these figures cover the region only ({stats['region_note']}); ")
+                 f"these figures cover the region only, and the curvature block "
+                 f"honours the same region ({stats['region_note']}); ")
                 + f"median {median} deg is the mesh's own chording of curved faces, "
                 f"not a defect; the question is whether any edge sits far above "
                 f"it. {stats['creases']} edge(s) are at or above the "

@@ -2838,10 +2838,12 @@ class GSDTools:
         says where to get it instead of pretending.
         """
         pointer = (" Run catia_check_surface with thickness=<total> on this document "
-                   "to read the smallest radius of curvature and where it is.")
+                   "to read the smallest radius of curvature and where it is; add "
+                   "region, e.g. {\"z\": [-34, -14]}, to look at one band instead of "
+                   "the whole model.")
         try:
             from catia_mcp.tools.measurement import (MeasurementTools,
-                                                     _curvature_stats)
+                                                    _curvature_stats)
 
             captured: dict[str, Any] = {}
 
@@ -2852,14 +2854,51 @@ class GSDTools:
         except Exception:  # noqa: BLE001 - a failure path may not fail again
             return pointer
         data = captured
-        if not data or not data.get("edges_measured"):
+        if not data:
             return pointer
+
+        # What the estimate refused to call a bend. A duplicated or double-sided
+        # sheet folds back 180 deg, and "radius = facet / pi" from that used to be
+        # reported as the blocker - 0.034 mm at the open top border of a skirt,
+        # where there was nothing to widen (reported 2026-11-04). Those edges are
+        # now excluded, and this says how many so the number cannot silently
+        # disappear either.
+        excluded = data.get("excluded") or {}
+        folded = int(excluded.get("fold_back_edges") or 0)
+        ambiguous = int(excluded.get("ambiguous_edges") or 0)
+        borders = int(excluded.get("open_boundary_edges") or 0)
+        skip = ""
+        if folded or ambiguous:
+            parts = []
+            if folded:
+                parts.append(f"{folded} edge(s) fold back by 175 deg or more")
+            if ambiguous:
+                parts.append(f"{ambiguous} edge(s) are shared by more than two "
+                             f"triangles")
+            skip = (f" EXCLUDED from this number: {', '.join(parts)} - overlapping "
+                    f"or duplicated geometry, where 'radius' would be the facet "
+                    f"size, not a bend.")
+        if borders:
+            skip += (f" The visible mesh has {borders} open boundary edge(s): a "
+                     f"surface whose border is visible, so a reading within one "
+                     f"facet of a border may describe where the mesh ends rather "
+                     f"than a bend.")
+
+        if not data.get("edges_measured"):
+            return (f" MEASURED: nothing in the visible mesh is a bend this "
+                    f"estimate can use.{skip} Curvature therefore cannot explain "
+                    f"the failure; look at the surface's continuity or at a "
+                    f"self-intersection." + pointer)
+
         radius = data.get("tightest_smooth_radius_mm")
         worst = (data.get("tightest_edges") or [{}])[0]
         where = ""
         if worst:
             where = (f" at r={worst.get('r')}, theta={worst.get('theta_deg')} deg, "
                      f"z={worst.get('z')}")
+            if worst.get("at_open_border"):
+                where += (" (an endpoint of that edge lies on an OPEN BORDER, so "
+                          "check whether the bend is real or the mesh ends there)")
         if radius is not None and radius < total:
             return (f" MEASURED: the tightest smooth radius in the visible mesh is "
                     f"{radius:.3f} mm{where}, which is less than the {total:.3f} mm "
@@ -2867,12 +2906,12 @@ class GSDTools:
                     f"that feature, or keep the total below {radius:.3f} mm. "
                     f"(Read from the document's VISIBLE mesh over "
                     f"{data['edges_measured']} interior edges; the estimate runs a "
-                    f"few percent low.)")
+                    f"few percent low.){skip}")
         return (f" MEASURED: the tightest smooth radius in the visible mesh is "
                 f"{radius} mm{where}, which is NOT below the {total:.3f} mm offset - "
                 f"so on what this mesh resolves, curvature does not explain the "
                 f"failure. Look at a seam or a self-intersection in the surface "
-                f"itself, not at its radius.")
+                f"itself, not at its radius.{skip}")
 
     def _close_surface(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()

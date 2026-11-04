@@ -114,7 +114,16 @@ class ExportTools:
                     "table was wrong through 0.3.49 - front/back and top/bottom were "
                     "swapped, so 'front' gave a top-down picture; fixed and verified "
                     "with one screenshot per view on B30 2026-11-03. Unknown names "
-                    "are refused, never guessed."
+                    "are refused, never guessed. THE NAMES ARE IN THE DOCUMENT'S "
+                    "ABSOLUTE AXES, not the model's: 'front' is look-along-minus-Y "
+                    "with +Z up whatever the part's own orientation, so a part "
+                    "built rotated in the tree (or a component placed with a "
+                    "transform) will not line up with any of them, and no "
+                    "automation call reports the current right/up vectors the way "
+                    "the UI's 'Normal to' does. Build in the axes you want to "
+                    "photograph, or take the screenshot before placing the "
+                    "component (reported 0.3.50 as P3, documented here since "
+                    "0.3.59)."
                 ),
                 "inputSchema": {
                     "type": "object",

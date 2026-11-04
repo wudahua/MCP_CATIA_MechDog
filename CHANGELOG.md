@@ -2,6 +2,80 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.59] — 2026-11-04 · a duplicated sheet is not a 0.034 mm radius
+
+Two reports on 0.3.58. The technical one was right about the conclusion and its
+mechanism needed correcting, which changed the fix.
+
+**A steep dihedral is not always a bend, and the border was not the reason.**
+0.3.58's thick-surface failure reported its tightest radius as 0.034 mm at
+r=32.99, z=123.04 - the open top border of a skirt the split was about to cut
+away, where there was nothing to widen. The report read that as "the surface
+ends here", and that reading is wrong in a way worth recording: a plain open
+patch does NOT produce a steep dihedral at its border. Measured on B30
+2026-11-04, a 30 mm open tube's worst fold is 22.50 deg (its own chording) and a
+flat patch's is 0.00 - the border contributes nothing. What does produce it is
+two coincident sheets with opposite orientation: every edge they share measures
+exactly 180.00 deg, because the two triangles face opposite ways. That is a
+duplicated or double-sided sheet, which is what a split-and-copied surface
+leaves visible - and with `radius = span / pi` a 0.1 mm facet becomes 0.03 mm.
+
+So fold-back is now judged before the span, which matters twice over: two
+exactly coincident sheets have coincident circumcentres, so 0.3.58 dropped them
+as "degenerate" and they vanished from the count, while a nearly-coincident pair
+(span 0.1 mm, fold 180.00) became the invented radius. Same fault, two different
+silences. `catia_check_surface` now reports `excluded.fold_back_edges` with a
+sample (`fold_deg`, `edge_length_mm`, `radius_this_would_have_read_mm`, r/theta/z,
+`at_open_border`), counts edges shared by more than two triangles as
+`excluded.ambiguous_edges`, and keeps both out of the radius ranking and out of
+the thickness verdict. `min_radius_at_open_border` and
+`tightest_edges[*].at_open_border` still flag a REAL reading whose edge ends on a
+border, because that case exists too. A genuine zero-radius knife edge reads
+exactly like a duplicated sheet and the note says so instead of choosing.
+
+Measured end to end on B30 2026-11-04, one tube built once and then with a
+coincident second extrusion of the same circle: one surface reads 16 edges,
+min radius 9.745 mm, 0 fold-back; with the duplicate, 32 fold-back at 180.00 deg
+plus 32 ambiguous and no radius at all; hide the duplicate and the reading is
+9.745 again. The real geometry survives, the artifact does not.
+
+**`region` now scopes the curvature block.** It only ever scoped the fold
+statistics, so "exclude the skirt and look at the base" changed the angles and
+left the radii whole-mesh - the most natural way to work around the problem
+above was the one that did nothing. Both passes now share one region predicate
+and each reports its own count (`region_note`, `curvature.region_note`,
+`excluded.outside_region`).
+
+**The failure message repeats what it excluded.** A number that silently
+disappears is as bad as a wrong one, so `catia_gsd_thick_surface` names the
+fold-back and ambiguous counts, states how many open boundary edges the mesh has,
+marks a reading whose edge ends on a border, and points at
+`catia_check_surface` with a `region`. It says "widen that feature" only when the
+radius it quotes is a real bend - both directions are pinned by tests, so the
+advice did not get quietly neutered.
+
+**One docstring that described the estimator 0.3.58 replaced.** The acceptance
+report caught it: `_curvature_stats` documented `kappa = angle / edge length`
+while the code used the distance between the two triangles' circumcentres - the
+edge-length formula is the one that read 57.3 mm on a r=10 cylinder and was
+written off two revisions ago. Fixed, and a test now refuses "kappa" in that
+docstring, because that sentence would have led a reader to "fix" a correct
+implementation.
+
+**And one standing item answered at the point of call.** `set_view` has been
+documented as absolute-axes-only in README since 0.3.57, but the report asked
+why six versions of it went unanswered. The limitation is now in the tool
+description itself, where a caller reads it, with what to do about it.
+
+What could NOT be measured: the report's own model is V5-6R2022 B32 SP6 and
+does not open on B30, so the 0.034 mm figure was not reproduced on their
+geometry. The mechanism was measured on constructed geometry instead, and the
+failure TEXT with stubs over known STL files - B30 still refuses to fail a
+thicken (0.1 mm slot at 0.6, r=0.2 cylinder at 0.3, r=5 cylinder at 400, all
+built).
+
+970 tests, 7 new. Tools 106, unchanged: this release adds fields and a region
+scope, not tools.
 ## [0.3.58] — 2026-11-04 · the number a failed offset never gave
 
 Two reports on 0.3.57, both about things 0.3.57 introduced or claimed, and both

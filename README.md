@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.58** · [what changed](CHANGELOG.md) ·
+**0.3.59** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1176,6 +1176,27 @@ Place the result with `catia_get_component_transform`.
   foot read 124.05 deg at r=25 and nothing above 47.59 deg anywhere else, and
   moving the seam off that radius took the region to 27.42 deg. Keep seams in
   curved regions on thin walls.
+* **A 180 deg dihedral is not a bend, and a duplicated sheet is where it comes
+  from.** The curvature estimate divides a length by an angle, so an edge whose
+  two triangles face opposite ways reports a radius of "facet size / pi" - which
+  is how a surface was told its tightest radius was 0.034 mm at the open top
+  border of a skirt, with "widen that feature" attached, where the split was
+  about to cut the border away and there was nothing to widen (reported
+  2026-11-04). Measuring the mechanism first mattered: a plain open patch does
+  NOT read 180 deg at its border (a 30 mm open tube's worst fold is 22.50 deg,
+  its own chording; a flat patch's is 0.00), so "the surface ends here" was not
+  the cause. Two COINCIDENT patches with opposite orientation do - every edge
+  they share measures exactly 180.00 deg (B30 2026-11-04), which is what a
+  split-and-copied surface leaves visible. `catia_check_surface` therefore
+  judges fold-back (>= 175 deg) before anything else: those edges, and any
+  shared by more than two triangles, are counted in `excluded` and kept out of
+  both the radius ranking and the thickness verdict, `min_radius_at_open_border`
+  and `tightest_edges[*].at_open_border` flag a real reading that ends on a
+  border, and the thick-surface failure message repeats the count so a number
+  cannot silently vanish either. A genuine zero-radius knife edge reads exactly
+  the same, and the reply says so rather than choosing. `region` now scopes BOTH
+  blocks - before 0.3.59 it scoped the fold statistics only, so "exclude the
+  skirt and look at the base" changed the angles and left the radii whole-mesh.
 * **A `.CATPart` written by a newer CATIA may not open on an older one.**
   Measured 2026-11-04: B30 `Documents.Open` on a file written by V5-6R2022
   (B32 SP6) fails with a bare "method Open failed" - no version message, nothing
