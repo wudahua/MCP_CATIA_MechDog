@@ -211,18 +211,26 @@ class ExportTools:
                     continue
         except Exception:  # noqa: BLE001
             return
-        if solids or gsd:
+        if solids:
             return
-        raise ValueError(
-            f"Nothing to export as {fmt_key}: this part has no solid shape and no "
-            "GSD element, so there is nothing to tessellate. Exporting it is "
-            "pointless at best - one probe script that did it hung for five "
-            "minutes with no output and had to be killed (2026-11-04, not "
-            "reproduced since), which is the only reason this guard exists. "
-            "This does NOT mean CATIA refuses such a document loudly: a part "
-            "holding a single spline exported an STL fine on the same machine "
-            "the same day, so a curve-only part is not stopped here."
-        )
+        if not gsd:
+            raise ValueError(
+                f"Nothing to export as {fmt_key}: this part has no solid shape and "
+                "no GSD element, so there is nothing to tessellate. Exporting it is "
+                "pointless at best - one probe script that did it hung for five "
+                "minutes with no output and had to be killed (2026-11-04, not "
+                "reproduced since), which is the only reason this guard exists. "
+                "This does NOT mean CATIA refuses such a document loudly: a part "
+                "holding a single spline exported an STL fine on the same machine "
+                "the same day, so a curve-only part is not stopped here."
+            )
+        # Everything is present. Whether it is VISIBLE cannot be checked cheaply
+        # and correctly at once: HybridShape.Visible is not readable through
+        # automation at all ("AttributeError: Item.Visible", measured on B30
+        # 2026-11-04; writing it is refused too, which is why catia_set_visibility
+        # goes through the selection's VisProperties). Reading it per element
+        # means one selection round trip apiece. So the empty export is caught
+        # AFTER the call, by file size - see _export.
 
     def _export(self, file_path: str, fmt: str | None = None) -> str:
         self.conn.ensure_connected()
@@ -250,7 +258,51 @@ class ExportTools:
 
         # CATIA V5 export via SaveAs with format specification.
         # Normalize separators: ExportData rejects forward-slash paths (E_FAIL).
-        doc.ExportData(os.path.normpath(file_path), FORMAT_MAP[fmt_key])
+        #
+        # ExportData runs CATIA's FILE-ALERT path - it is a save - so a target that
+        # already exists raises a modal "要覆盖它吗?" nobody can answer on the
+        # automation thread, and the call never returns. Measured on B30
+        # 2026-11-04: the export hung until the dialog was clicked, which is how
+        # this was found (measurement._export_stl has switched the alerts off
+        # since 0.3.23; this tool never did). Restored in `finally` because
+        # leaving it off would make the NEXT interactive save fail silently.
+        alert_state = None
+        try:
+            alert_state = self.conn.app.DisplayFileAlerts
+            self.conn.app.DisplayFileAlerts = False
+        except Exception:  # noqa: BLE001 - not every build exposes it
+            alert_state = None
+        try:
+            doc.ExportData(os.path.normpath(file_path), FORMAT_MAP[fmt_key])
+        finally:
+            if alert_state is not None:
+                try:
+                    self.conn.app.DisplayFileAlerts = alert_state
+                except Exception:  # noqa: BLE001
+                    pass
+
+        # An export with nothing VISIBLE in it succeeds and writes an empty mesh -
+        # 37 bytes, 0 triangles - with no error at all (reported on B32 2026-11-04:
+        # every geometrical set hidden, "ok" returned, and the caller spent two
+        # rounds believing the file held geometry). Deleting it is part of the
+        # answer: a caller that ignores the exception must not be left holding a
+        # file that looks exported.
+        if fmt_key in MESH_FORMATS:
+            written = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+            if written < 128:
+                try:
+                    os.remove(file_path)
+                except OSError:  # noqa: BLE001 - the message matters, not the file
+                    pass
+                raise ValueError(
+                    f"The {fmt_key} came out EMPTY ({written} bytes, no triangles), "
+                    "so this part has no VISIBLE geometry to tessellate - elements "
+                    "that exist but are all hidden export as nothing, and CATIA "
+                    "reports success while doing it. Make at least one element or "
+                    "body visible (catia_set_visibility) and retry, or export "
+                    "STEP/IGES, which carry the tree rather than the visible skin. "
+                    "The empty file was removed rather than left behind."
+                )
 
         size_info = ""
         if os.path.exists(file_path):

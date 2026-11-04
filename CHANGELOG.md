@@ -2,6 +2,87 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.61] — 2026-11-04 · a verdict that contradicted the model it measured
+
+Two reports on 0.3.60, both about one failure mode from different ends: a number
+the mesh cannot support, quoted as geometry. Reproduced on B30 with this
+project's own delivered bottle base, which is a 0.3 mm surface CATIA thickened
+successfully.
+
+**The verdict said "cannot be built" about a surface that had just been built.**
+`check_surface(thickness=0.3)` on that solid: 103 edges below 0.3 mm, the tightest
+a **0.0888 mm radius across a 3.3218 mm edge** — 2.7 % of its own length, with
+7.16° of fold, which is a bend of about 27 mm, not 0.09. The reply's own `limits`
+string has said since 0.3.51 that "a radius below the edge length is smaller than
+this mesh can measure, not a measured value". Nothing acted on it; the reporter
+found the same at 0.0141 mm across 2.2146 mm (0.6 %).
+
+Now it acts. Edges whose radius is under a **tenth** of their own length go to
+`excluded.unresolvable_edges`, out of the ranking and out of the verdict, and the
+verdict is decided by the **5th percentile** instead of one edge: a minimum is a
+single triangle, a verdict is about a surface. Same solid after: min 0.1412,
+p5 1.326, 49 edges below 0.3 → **INCONCLUSIVE**, with the worst edge's
+`radius_over_edge` published so the caller can see why. A r=1 tube against a 5 mm
+offset still says "cannot be built", because there every edge agrees.
+
+The tenth, rather than "below the edge length", is an order-of-magnitude
+judgement and it is documented as one: it has to pass a cylinder's seam-direction
+edge (L 30, R 10, L/R = 3 — the edge runs where there is no curvature, and its
+reading is the same one the ring edges give) while dropping L/R = 37 and 157. A
+first draft used radius < edge length and threw away every cylinder; the test
+that caught it is in the suite.
+
+A second rule was written, measured and **removed**: comparing the circumcentre
+radius with L/(2 sin(f/2)) and dropping disagreements beyond 4×. On the same
+solid it excluded 3388 of 9411 edges and changed neither the minimum (0.1412
+either way) nor the count below the offset (49 either way). A rule that removes a
+third of the evidence and moves no conclusion is a rule that gets quoted later as
+if it did something.
+
+**`thick_surface` now retries once by itself.** The operator is session-sensitive
+the way the loft is — reported 2026-11-04: a 0.3 mm thickening failed on the last
+step of a 13-step plan, succeeded when called alone, and succeeded again with the
+whole tree visible, same document, same session, same numbers. One failure is not
+evidence about the geometry; two are. The reply says so when the retry is what
+worked, and the second failure's message states that it already retried.
+
+**Its diagnosis was reading the wrong mesh and prescribing from it.** The measured
+radius came from the document's whole visible geometry — nine overlapping lofts
+plus a skirt in the report — while the element being thickened was one of them.
+The message now carries a SCOPE line naming how many elements the mesh covered,
+and a tight reading that sits on an open border gets a **conditional**
+prescription ("IF THE BEND IS REAL: widen… / IF IT IS THE BORDER: nothing in the
+model needs changing") instead of a flat "keep the total below 0.079 mm".
+
+**An export with nothing visible writes 37 bytes and reports success.** Measured
+on B30 too, and reproduced: every GSD element hidden, `catia_export` returns ok,
+the STL holds 0 triangles. The empty file is now deleted and the call refuses,
+after the export rather than before it — `HybridShape.Visible` is not readable
+through automation at all (`AttributeError: Item.Visible`), so a pre-check would
+have to spend one selection round trip per element. The same size check ends the
+misdiagnosis in `check_surface`, where an empty mesh used to be reported as "the
+part is loaded inside an assembly and has no window of its own" — a different
+failure with advice that cannot help. It has its own exception now
+(`EmptyMesh`) and is re-raised rather than wrapped.
+
+**`catia_export` hung on an existing target.** ExportData runs CATIA's file-alert
+path, so exporting over a file raised a modal "要覆盖它吗?" that nothing on the
+automation thread can answer. `measurement._export_stl` has switched
+`DisplayFileAlerts` off since 0.3.23; this tool never did. Found by hanging on it.
+
+**Two smaller ones.** `catia_gsd_revolve` takes `axis='z'` like rotate does — it
+used to answer "Element 'z' not found in ... searched 12 tree name(s)", which
+reads like a data problem rather than a parameter one. And the plane aliases are
+in the **schema** now: 0.3.60's CHANGELOG said "all three answer to all three"
+while `required: [support_plane]` made two of them unreachable, because a client
+validates before the server can normalise. The canonical name left `required`,
+the alias list went into `properties`, and the server answers a missing one with
+all three spellings named.
+
+Measured: `tensor_ms` on a part with no product open **3103.8 ms → 42.0 ms**, by
+asking whether any Product document is open before walking every assembly to
+explain a tensor that was never available. 1006 offline tests.
+
 ## [0.3.60] — 2026-11-04 · a surface that could not be moved
 
 No acceptance report this time. These five came out of building the five-petal

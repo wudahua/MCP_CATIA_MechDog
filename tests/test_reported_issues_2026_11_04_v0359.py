@@ -125,8 +125,8 @@ def test_a_duplicated_sheet_does_not_change_the_radius_of_the_real_geometry(tmp_
     assert both["excluded"]["fold_back_edges"] == 4
     assert both["thickness_check"]["edges_tighter_than_thickness"] == 0
     verdict = both["thickness_check"]["verdict"]
-    assert "no real bend is tighter" in verdict
-    assert "fold back" in verdict, (
+    assert "no resolved edge bends tighter" in verdict
+    assert "fold-back" in verdict, (
         "the excluded set has to be named, or the caller cannot tell whether the "
         "number they saw before was dropped or fixed")
 

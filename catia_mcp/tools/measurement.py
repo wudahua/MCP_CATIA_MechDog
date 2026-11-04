@@ -429,6 +429,41 @@ def _seam_hint(cross_creases: list[dict[str, Any]]) -> str | None:
 FOLD_BACK_DEG = 175.0
 
 
+class EmptyMesh(RuntimeError):
+    """The STL export succeeded and contains no triangles.
+
+    Distinct from every other export failure on purpose. ``_mesh_export`` used to
+    wrap every exception in one paragraph about the in-context editing refusal,
+    so an EMPTY export - a different cause with a different fix - was reported as
+    "the part is loaded inside an assembly and has no window of its own", with
+    advice ("open it as its own document") that cannot help. Reported 2026-11-04
+    by a caller who followed that advice twice before noticing the file was 37
+    bytes and the document had simply been hidden.
+    """
+
+# How many edge-lengths a radius may be smaller than before the reading is called
+# unresolvable. A chorded facet covers a dozen degrees or so of its arc, so a
+# normal edge has L/R below 0.3; the threshold sits far outside that, at L/R > 10,
+# and it is an ORDER OF MAGNITUDE judgement, not a measured constant - it has to
+# pass the two cases that look alike and are not:
+#   * a cylinder's SEAM-DIRECTION edge: L 30, R 10, L/R = 3 - the edge runs along
+#     a direction with no curvature, which is legitimate, and its reading (10) is
+#     the same one the ring edges give;
+#   * a circumcentre degenerate reading: L 3.3218 with R 0.0888 (L/R = 37) on a
+#     0.3 mm wall that CATIA had just thickened, and L 2.2146 with R 0.0141
+#     (L/R = 157) on the reporter's surface (B32 2026-11-04).
+# Both were being called "cannot be built". Only the second kind should be dropped.
+#
+# A second check was tried and REMOVED, and the measurement is why: comparing the
+# dual-circumcentre radius with L/(2 sin(fold/2)) and dropping edges on which they
+# disagree by more than 4x. On the same 0.3 mm bottle base it excluded 3388 of
+# 9411 edges and changed NOTHING that matters - min 0.1412 and 49 edges below the
+# offset with it, min 0.1412 and 49 without it, p5 1.04 against 1.33. A rule that
+# removes a third of the evidence and moves no conclusion is a rule that will
+# later be quoted as if it did something.
+RESOLVABLE_LENGTH_RATIO = 10.0
+
+
 def _curvature_stats(path: str, thickness: float | None = None,
                      top: int = 3,
                      region: dict[str, tuple[float, float]] | None = None
@@ -517,6 +552,7 @@ def _curvature_stats(path: str, thickness: float | None = None,
 
     rows: list[tuple[float, float, float, tuple[float, float, float], bool]] = []
     folded: list[tuple[float, float, tuple[float, float, float], bool]] = []
+    unresolvable: list[tuple[float, float, float, tuple[float, float, float], bool]] = []
     border_vertices: set[Any] = set()
     boundary = ambiguous = 0
     outside = 0
@@ -553,7 +589,23 @@ def _curvature_stats(path: str, thickness: float | None = None,
             continue
         if span < 1e-3:
             continue                      # coincident circumcentres, no arc
-        rows.append((span / math.radians(fold), fold, length, mid, near_border))
+
+        radius = span / math.radians(fold)
+
+        # A radius that is a small FRACTION OF THE EDGE it was measured across is
+        # not a measurement - the reply's own `limits` has always said so, and
+        # nothing acted on it; on a 0.3 mm wall that gap decided the verdict.
+        # Measured on B32 2026-11-04 on a surface CATIA had just thickened by
+        # 0.3 mm: an edge of 3.3218 mm reported 0.0888 mm (2.7 %, L/R = 37) and
+        # the caller was told the offset "cannot be built without the two faces
+        # crossing", while 7.16 deg of fold across that length is a bend of
+        # ~27 mm, not 0.09. Same fault class as fold-back: a number the mesh
+        # cannot support, quoted as geometry.
+        if radius * RESOLVABLE_LENGTH_RATIO < length:
+            unresolvable.append((radius, fold, length, mid, near_border))
+            continue
+
+        rows.append((radius, fold, length, mid, near_border))
 
     def describe(row) -> dict[str, Any]:
         radius, fold, length, mid, near_border = row
@@ -570,6 +622,7 @@ def _curvature_stats(path: str, thickness: float | None = None,
         "ambiguous_edges": ambiguous,
         "open_boundary_edges": boundary,
         "outside_region": outside,
+        "unresolvable_edges": len(unresolvable),
     }
     if folded:
         # Shortest edge first: that is the one that produced the smallest bogus
@@ -606,7 +659,29 @@ def _curvature_stats(path: str, thickness: float | None = None,
             f"exported twice, or a trimmed copy left visible). No curvature can be "
             f"read across those either."
         )
-
+    if unresolvable:
+        sample = sorted(unresolvable, key=lambda row: row[0])[:max(1, top)]
+        excluded["unresolvable_sample"] = [
+            {"radius_mm": round(radius, 4),
+             "edge_length_mm": round(length, 4),
+             "radius_over_edge": round(radius / length, 4),
+             "fold_deg": round(fold, 2),
+             "r": round(math.hypot(mid[0], mid[1]), 3),
+             "theta_deg": round(math.degrees(math.atan2(mid[1], mid[0])) % 360.0, 2),
+             "z": round(mid[2], 3),
+             "at_open_border": near_border}
+            for radius, fold, length, mid, near_border in sample
+        ]
+        excluded["unresolvable_note"] = (
+            f"{len(unresolvable)} edge(s) report a radius SMALLER THAN THEIR OWN "
+            f"LENGTH, which is the one rule this estimate has always published: "
+            f"such a number is smaller than the mesh can measure, not a measured "
+            f"value. They are excluded from the radius ranking and from the "
+            f"thickness verdict. Read a sample both ways - 'radius_mm' and what "
+            f"the shared edge and dihedral imply (L/(2 sin(f/2))) - and they "
+            f"disagree by the ratio shown. To resolve such a feature, refine the "
+            f"mesh (a smaller STL facet), not the model."
+        )
     if not rows:
         # Keep the keys a caller reads programmatically, with None where there is
         # no value: a KeyError on 'min_radius_mm' would be a worse answer than a
@@ -635,11 +710,13 @@ def _curvature_stats(path: str, thickness: float | None = None,
                 "edges_tighter_than_thickness": 0,
                 "worst": None,
                 "verdict": ("nothing measurable is tighter than %.3g mm, because "
-                            "nothing measurable is there: %d edge(s) fold back or "
-                            "overlap and were excluded. Curvature therefore cannot "
-                            "explain a failure on this mesh - look at the surface's "
-                            "continuity, at a seam, or at a self-intersection"
-                            % (thickness, len(folded) + ambiguous)),
+                            "nothing measurable is there: %d edge(s) fold back, "
+                            "overlap, or cannot be resolved by this mesh and were "
+                            "excluded. Curvature therefore cannot explain a failure "
+                            "on this mesh - look at the surface's continuity, at a "
+                            "seam, or at a self-intersection"
+                            % (thickness, len(folded) + ambiguous
+                               + len(unresolvable))),
             }
         return block
 
@@ -668,7 +745,13 @@ def _curvature_stats(path: str, thickness: float | None = None,
         "limits": ("the mesh cannot resolve a feature smaller than its facets: such "
                    "a feature reads as a crease with a near-zero radius. Compare "
                    "radius with edge_length_mm - a radius below the edge length is "
-                   "smaller than this mesh can measure, not a measured value."),
+                   "smaller than this mesh can measure, not a measured value. That "
+                   "rule is APPLIED, not merely stated: those edges are counted in "
+                   "excluded.unresolvable_edges and kept out of both the ranking and "
+                   "the thickness verdict (the rule had been published since 0.3.51 "
+                   "while nothing acted on it, and that gap decided a verdict on B32 "
+                   "2026-11-04 - a 0.0141 mm radius across a 2.2146 mm edge, on a "
+                   "surface CATIA had just thickened by 0.3 mm)."),
         "excluded": excluded,
     }
     if region is not None:
@@ -679,17 +762,57 @@ def _curvature_stats(path: str, thickness: float | None = None,
             f"inside the region; {outside} edge(s) outside it were not counted."
         )
     if thickness is not None and thickness > 0:
+        # Only edges that can CARRY a verdict: resolved (not excluded above) and
+        # clear of an open border. A tight reading one facet in from a border
+        # describes where the mesh ends as often as it describes a bend - this
+        # reply has said so since 0.3.51 while the verdict used it anyway. On
+        # B32 2026-11-04 that made a surface CATIA had just thickened by 0.3 mm
+        # answer "cannot be built": 127 edges below 0.3, the worst of them a
+        # 0.0141 mm radius across a 2.2146 mm edge.
         below = [row for row in rows if row[0] < thickness]
-        if below:
-            verdict = ("the surface bends tighter than the offset somewhere, so an "
-                       "offset of %.3g mm cannot be built without the two faces "
-                       "crossing" % thickness)
-        elif folded:
-            verdict = ("no real bend is tighter than %.3g mm; the %d edge(s) that "
-                       "fold back are excluded (see excluded.fold_back_note), so on "
-                       "what this mesh can measure curvature does not block the "
-                       "offset - unless one of those fold-backs is a genuine knife "
-                       "edge, which reads identically" % (thickness, len(folded)))
+        p5 = at(0.05)
+        skipped = len(folded) + ambiguous + len(unresolvable)
+        tail = ""
+        if skipped:
+            tail = (f" {skipped} edge(s) were excluded before this count "
+                    f"({len(folded)} fold-back, {ambiguous} multi-sheet, "
+                    f"{len(unresolvable)} unresolvable); see 'excluded'.")
+        # A MINIMUM is one edge; a verdict is about the surface. When a handful
+        # of edges read tighter than the offset and the 5th percentile does not,
+        # the tightness is local - a seam, a sliver, a feature below one facet -
+        # and calling the whole surface unbuildable is the mistake this block is
+        # here to stop: on B32 2026-11-04 it told a caller to re-design a surface
+        # CATIA had just thickened by 0.3 mm (49 edges below 0.3, p5 1.04).
+        #
+        # at_open_border is deliberately NOT a filter here. An open tube with one
+        # band has every edge touching its top or bottom ring, so filtering on it
+        # drops the r=10 reading of a r=10 cylinder - measured while writing this.
+        # It stays a LABEL on 'tightest_edges' so a caller can see where the
+        # reading sits, and the thick-surface failure message uses it separately.
+        if below and p5 < thickness:
+            verdict = ("the surface bends tighter than the offset across a "
+                       "population of edges, not one or two: %d edge(s) are below "
+                       "%.3g mm and the 5th percentile is %.3g mm, so an offset of "
+                       "%.3g mm cannot be built without the two faces crossing"
+                       % (len(below), thickness, p5, thickness)) + tail
+        elif below:
+            verdict = ("INCONCLUSIVE: %d edge(s) read tighter than %.3g mm "
+                       "(tightest %.3g mm, at the 'worst' entry), but they are a "
+                       "minority - the 5th percentile is %.3g mm. That pattern is "
+                       "a local artifact or a feature smaller than one facet as "
+                       "often as it is a real bend, and this mesh cannot tell them "
+                       "apart. Do not re-design on the minimum alone: check the "
+                       "worst edge's radius_over_edge in "
+                       "'excluded.unresolvable_sample', re-measure with region set "
+                       "to that spot, or thicken and see."
+                       % (len(below), thickness, below[0][0], p5)) + tail
+        elif folded or unresolvable:
+            verdict = ("no resolved edge bends tighter than %.3g mm, so nothing "
+                       "this mesh can measure blocks the offset. The verdict rests "
+                       "on the remaining edges only - widen a feature only if "
+                       "excluded.fold_back_sample shows a real one, and treat an "
+                       "'unresolvable' edge as a mesh limit, not as geometry."
+                       % thickness) + tail
         else:
             verdict = ("no interior edge bends tighter than %.3g mm, so the offset "
                        "is not blocked by curvature on what this mesh can resolve"
@@ -697,6 +820,7 @@ def _curvature_stats(path: str, thickness: float | None = None,
         block["thickness_check"] = {
             "thickness_mm": thickness,
             "edges_tighter_than_thickness": len(below),
+            "radius_p5_mm": p5,
             "worst": describe(below[0]) if below else None,
             "verdict": verdict,
         }
@@ -2239,6 +2363,26 @@ class MeasurementTools:
             elapsed_ms=parts_ms))
         return json.dumps(payload, indent=2)
 
+    def _any_assembly_open(self) -> bool:
+        """Is any Product document open? "Cannot tell" counts as yes.
+
+        A part is only ever a component of an assembly that is OPEN, so a "no"
+        here answers the nesting question without walking anything. A wrong "no"
+        would hide a real cause, so the error paths return True and pay the old
+        cost rather than assert something they could not read.
+        """
+        try:
+            documents = self.conn.documents
+            for index in range(1, documents.Count + 1):
+                try:
+                    if str(documents.Item(index).Type) == "ProductDocument":
+                        return True
+                except Exception:  # noqa: BLE001 - one unreadable doc is not "none"
+                    continue
+        except Exception:  # noqa: BLE001
+            return True
+        return False
+
     def _tensor_refusal(self, doc: Any, label: str) -> tuple[str, str]:
         """Why the tensor is missing, as a code AND a sentence that agree.
 
@@ -2261,10 +2405,16 @@ class MeasurementTools:
         except Exception:  # noqa: BLE001 - the label is what the caller passed
             doc_name = str(label)
         users: list[str] = []
-        try:
-            users = list(self.conn.component_usage().get(doc_name) or [])
-        except Exception:  # noqa: BLE001 - a refusal is not worth an exception
-            users = []
+        # Only an open PRODUCT can make a part a component, so with no product
+        # open the question is already answered and component_usage() - which
+        # walks every open assembly - is not asked. It cost 3.1 s per call on a
+        # 18-document session where all 18 were parts, paid to explain a tensor
+        # that was never available in the first place (reported 2026-11-04).
+        if self._any_assembly_open():
+            try:
+                users = list(self.conn.component_usage().get(doc_name) or [])
+            except Exception:  # noqa: BLE001 - a refusal is not worth an exception
+                users = []
         if users:
             holders = ", ".join(f"'{name}'" for name in users)
             return ("nested_in_assembly",
@@ -4881,6 +5031,11 @@ class MeasurementTools:
                 "part edited in context - unsaved edits are not included"
                 + (" (reused: the same file was already measured in this session and "
                    "its size and modified time have not changed)" if cached else ""))
+        except EmptyMesh:
+            # Its own message already names the cause and the fix. Wrapping it in
+            # the in-context paragraph below would replace a correct diagnosis
+            # with the wrong one - which is exactly what the 2026-11-04 report hit.
+            raise
         except Exception as exc:  # noqa: BLE001
             # `part.Name` is not guaranteed (a Part from PartDocument has one, but
             # the error path must not raise a second error while formatting).
@@ -5058,8 +5213,17 @@ class MeasurementTools:
             self._export_stl(opened, path)
             size = os.path.getsize(path) if os.path.exists(path) else 0
             if size < 128:
-                raise RuntimeError(
-                    f"the copy opened as its own document still exported {size} bytes")
+                raise EmptyMesh(
+                    f"the STL came out EMPTY ({size} bytes, 0 triangles) - and that "
+                    f"is not the in-context refusal, which writes nothing at all. "
+                    f"CATIA writes an empty mesh when the document has no VISIBLE "
+                    f"geometry to tessellate: every geometrical-set element hidden, "
+                    f"the solid hidden, or nothing there yet. Measured on B32 "
+                    f"2026-11-04: a part whose only surface sat in a hidden "
+                    f"geometrical set exported 37 bytes and CATIA reported success. "
+                    f"Make the geometry visible (catia_set_visibility) and retry. "
+                    f"The copy was opened as its own document, so 'open it "
+                    f"separately' is not the missing step.")
             result = _stl_scan(path, limit)
         finally:
             try:

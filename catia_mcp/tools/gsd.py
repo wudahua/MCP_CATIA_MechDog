@@ -69,6 +69,45 @@ def _normalise_arguments(tool_name: str,
     return renamed
 
 
+# Keys a tool cannot work without, checked AFTER the aliases are folded in.
+#
+# They are deliberately absent from each tool's JSON `required`, and that is not
+# an oversight: a schema cannot express "one of three spellings" without anyOf,
+# so listing the canonical name makes every alias unreachable - the client
+# validates against the schema before the server sees the call. 0.3.60 shipped
+# exactly that contradiction: the CHANGELOG said "all three answer to all three"
+# while `required: [support_plane]` rejected `support` on the client side
+# (reported 2026-11-04). The check moved here, where it can name the spellings.
+_MISSING_KEYS: dict[str, tuple[str, ...]] = {
+    "catia_gsd_circle": ("support_plane",),
+    "catia_gsd_project": ("support",),
+    "catia_gsd_plane_offset": ("base_plane",),
+    "catia_gsd_intersection": ("element2",),
+    "catia_gsd_split": ("cutter",),
+}
+
+
+def _missing_key_error(tool_name: str, arguments: dict[str, Any]) -> str | None:
+    """The message for a call that gave none of a required key's spellings.
+
+    Normalises internally so the answer does not depend on the caller having
+    done it first, while still reporting the keys the CALLER typed.
+    """
+    resolved = _normalise_arguments(tool_name, arguments)
+    missing = [key for key in _MISSING_KEYS.get(tool_name, ())
+               if key not in resolved]
+    if not missing:
+        return None
+    aliases = _ARGUMENT_ALIASES.get(tool_name) or {}
+    spellings = []
+    for key in missing:
+        names = [key] + [alias for alias, canonical in aliases.items()
+                         if canonical == key]
+        spellings.append(" or ".join(f"'{name}'" for name in names))
+    return (f"{tool_name} needs {' and '.join(spellings)}; got: "
+            f"{sorted(arguments) or 'no arguments'}.")
+
+
 # Schema fragment: an element addressed by tree name, or [x, y, z] coordinates
 # (coordinates create a new 3D point on the fly).
 POINT_OR_NAME = {
@@ -198,6 +237,14 @@ class GSDTools:
                             "type": "string",
                             "description": "Reference plane: 'xy', 'yz', 'zx', or element name",
                         },
+                        "support": {
+                            "type": "string",
+                            "description": "Alias for base_plane",
+                        },
+                        "plane": {
+                            "type": "string",
+                            "description": "Alias for base_plane",
+                        },
                         "offset": {"type": "number", "description": "Offset distance (mm)"},
                         "reverse": {
                             "type": "boolean",
@@ -206,7 +253,8 @@ class GSDTools:
                         },
                         "name": {"type": "string", "description": "Optional name for the plane"},
                     },
-                    "required": ["base_plane", "offset"],
+                    # base_plane left out of required so its aliases can stand in.
+                    "required": ["offset"],
                 },
             },
             {
@@ -333,10 +381,29 @@ class GSDTools:
                             "type": "string",
                             "description": "Support plane: 'xy', 'yz', 'zx', or element name",
                         },
+                        # The same idea under the names the sibling tools use.
+                        # Declared here because a client validates against this
+                        # schema BEFORE the server can normalise anything, so an
+                        # alias the schema does not list is unreachable no matter
+                        # what execute() accepts (reported 2026-11-04 - the
+                        # CHANGELOG claimed "all three answer to all three" while
+                        # the schema refused two of them).
+                        "support": {
+                            "type": "string",
+                            "description": "Alias for support_plane",
+                        },
+                        "plane": {
+                            "type": "string",
+                            "description": "Alias for support_plane",
+                        },
                         "radius": {"type": "number", "description": "Radius (mm)"},
                         "name": {"type": "string", "description": "Optional name for the circle"},
                     },
-                    "required": ["center", "support_plane", "radius"],
+                    # support_plane is NOT required here for the sole reason that
+                    # aliases have to be able to stand in for it; the server
+                    # rejects the call when none of the three is given. Message is
+                    # from _MISSING_KEYS below.
+                    "required": ["center", "radius"],
                 },
             },
             {
@@ -353,9 +420,19 @@ class GSDTools:
                             "type": "string",
                             "description": "Projection support: 'xy', 'yz', 'zx', or element name",
                         },
+                        "support_plane": {
+                            "type": "string",
+                            "description": "Alias for support",
+                        },
+                        "plane": {
+                            "type": "string",
+                            "description": "Alias for support",
+                        },
                         "name": {"type": "string", "description": "Optional name for the result"},
                     },
-                    "required": ["element", "support"],
+                    # 'support' left out of required so its aliases can stand in;
+                    # the server rejects a call that gives none of the three.
+                    "required": ["element"],
                 },
             },
             {
@@ -607,9 +684,16 @@ class GSDTools:
                             "type": "string",
                             "description": "Second element: 'xy', 'yz', 'zx', or element name",
                         },
+                        "cutter": {
+                            "type": "string",
+                            "description": "Alias for element2 (the name catia_gsd_split uses)",
+                        },
                         "name": {"type": "string", "description": "Optional name for the result"},
                     },
-                    "required": ["element1", "element2"],
+                    # element2 left out of required so 'cutter' can stand in - and
+                    # so a caller who writes it does not get a KeyError that reads
+                    # as "the surfaces do not intersect".
+                    "required": ["element1"],
                 },
             },
             {
@@ -874,7 +958,13 @@ class GSDTools:
                     "type": "object",
                     "properties": {
                         "profile": {"type": "string", "description": "Profile element name"},
-                        "axis": {"type": "string", "description": "Axis line element name"},
+                        "axis": {
+                            "type": "string",
+                            "description": (
+                                "Rotation axis: a line element name, or 'x'/'y'/'z' "
+                                "(built as a line on first use, like catia_gsd_rotate)"
+                            ),
+                        },
                         "angle1": {
                             "type": "number",
                             "description": (
@@ -1024,6 +1114,10 @@ class GSDTools:
                             "type": "string",
                             "description": "Cutting element: 'xy', 'yz', 'zx', or element name",
                         },
+                        "element2": {
+                            "type": "string",
+                            "description": "Alias for cutter",
+                        },
                         "reverse": {
                             "type": "boolean",
                             "description": "Keep the other side",
@@ -1031,7 +1125,7 @@ class GSDTools:
                         },
                         "name": {"type": "string", "description": "Optional name for the result"},
                     },
-                    "required": ["element", "cutter"],
+                    "required": ["element"],
                 },
             },
             {
@@ -1149,6 +1243,14 @@ class GSDTools:
                 "description": (
                     "Turn a surface into a SOLID by adding thickness (Part Design "
                     "ThickSurface). The solid is created in the active body. "
+                    "IT RETRIES ONCE BY ITSELF, with identical arguments, before it "
+                    "reports a failure - and the reply says so when the second "
+                    "attempt is the one that worked. This operator is "
+                    "session-sensitive the way the loft is: reported 2026-11-04, a "
+                    "0.3 mm thickening failed on the last step of a 13-step plan, "
+                    "then succeeded called alone, then succeeded again with the whole "
+                    "tree visible - same document, same session, same numbers. So a "
+                    "single failure is not evidence about the geometry; two are. "
                     "THE TOTAL OFFSET MUST STAY BELOW TWICE THE SURFACE'S SMALLEST "
                     "RADIUS OF CURVATURE, and a thin wing section is the case that "
                     "breaks: the offset surfaces meet on the far side and the update "
@@ -1224,6 +1326,9 @@ class GSDTools:
 
     def execute(self, tool_name: str, arguments: dict[str, Any]) -> str:
         arguments = _normalise_arguments(tool_name, arguments)
+        problem = _missing_key_error(tool_name, arguments)
+        if problem:
+            raise ValueError(problem)
         match tool_name:
             case "catia_gsd_create_geoset":
                 return self._create_geoset(arguments)
@@ -2802,7 +2907,12 @@ class GSDTools:
     def _revolve(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
         profile_ref = self._ref(args["profile"])
-        axis_ref = self._ref(args["axis"])
+        # The axis takes the same 'x'/'y'/'z' shorthand rotate does. 0.3.60 gave
+        # the shorthand to rotate only, and a caller quoting "axis: 'z'" at
+        # revolve got "Element 'z' not found ... searched 12 tree name(s)" - a
+        # message that reads like a data problem instead of a parameter one
+        # (reported 2026-11-04).
+        axis_ref, axis_note = self._axis_ref(args["axis"], str(args["profile"]))
         angle1 = args.get("angle1", 360)
         angle2 = args.get("angle2", 0)
         revol = self._factory().AddNewRevol(profile_ref, angle1, angle2, axis_ref)
@@ -2811,7 +2921,7 @@ class GSDTools:
             revol, args.get("name"),
             f"Revolution surface created: {total:g}° swept about '{args['axis']}' "
             f"(angle1={angle1:g}° toward one side of the profile plane, "
-            f"angle2={angle2:g}° toward the other; total is their sum).",
+            f"angle2={angle2:g}° toward the other; total is their sum).{axis_note}",
         )
 
     def _fill(self, args: dict[str, Any]) -> str:
@@ -3092,17 +3202,42 @@ class GSDTools:
         thick = part.ShapeFactory.AddNewThickSurface(surface_ref, 0, thickness1, thickness2)
         try:
             self._safe_update(thick)
-        except Exception as error:
-            total = abs(float(thickness1)) + abs(float(thickness2))
-            raise RuntimeError(
-                f"{error} ThickSurface offset {thickness1}+{thickness2} mm and the "
-                "update failed. The usual cause is geometric, not an argument: if "
-                "the surface is thinner somewhere than the total offset, the two "
-                "offset faces cross and CATIA refuses - measured on a 2.30 mm lens "
-                "section with 1.27/1.27 and with 2.54/0, both refused, while a 6 mm "
-                "hexagon of the same shape thickened."
-                + self._offset_blocker(part, total)
-            ) from error
+        except Exception as first_error:
+            # RETRY ONCE, same arguments, before saying anything about geometry.
+            # Reported 2026-11-04: a 0.3 mm thickening failed on the last step of
+            # a 13-step plan, then succeeded immediately when called alone, and
+            # again with the whole tree visible - same document, same session,
+            # same numbers. This operator is session-sensitive the way the loft
+            # already documented is, and gsd_multi_section_surface has said
+            # "retry once" for months while thick_surface said nothing and
+            # instead handed the caller a radius to design against.
+            first_reason = str(first_error).splitlines()[0][:200]
+            try:
+                thick = part.ShapeFactory.AddNewThickSurface(
+                    surface_ref, 0, thickness1, thickness2)
+                self._safe_update(thick)
+            except Exception as second_error:
+                total = abs(float(thickness1)) + abs(float(thickness2))
+                raise RuntimeError(
+                    f"{second_error} ThickSurface offset {thickness1}+{thickness2} mm "
+                    "and the update failed TWICE - this call already retried once "
+                    f"with the same arguments (first attempt: {first_reason}). The "
+                    "usual cause is geometric, not an argument: if the surface is "
+                    "thinner somewhere than the total offset, the two offset faces "
+                    "cross and CATIA refuses - measured on a 2.30 mm lens section "
+                    "with 1.27/1.27 and with 2.54/0, both refused, while a 6 mm "
+                    "hexagon of the same shape thickened."
+                    + self._offset_blocker(part, total)
+                ) from second_error
+            self.conn.refresh_display()
+            return (
+                f"ThickSurface solid created from '{args['surface']}' "
+                f"({thickness1}/{thickness2} mm) on the SECOND attempt. The first "
+                f"update failed with: {first_reason}. That is session-sensitive, "
+                f"not a property of the surface - it succeeded with identical "
+                f"arguments, so do not re-design on the strength of the first "
+                f"failure. Feature: '{thick.Name}'"
+            )
         self.conn.refresh_display()
         return (
             f"ThickSurface solid created from '{args['surface']}' "
@@ -3185,19 +3320,73 @@ class GSDTools:
             if worst.get("at_open_border"):
                 where += (" (an endpoint of that edge lies on an OPEN BORDER, so "
                           "check whether the bend is real or the mesh ends there)")
+        # What the mesh actually covered. This diagnosis reads the DOCUMENT's
+        # visible geometry, and the surface being thickened is one element of it.
+        # Reported 2026-11-04: a 0.079 mm reading came from a mesh holding nine
+        # overlapping lofts plus a skirt, while the element being thickened had
+        # two tight edges of its own, both on a seam, and thickened fine once
+        # isolated. A number quoted without its scope invites exactly that.
+        visible = self._visible_element_count(part)
+        scope = ""
+        if visible > 1:
+            scope = (f" SCOPE: the mesh measured here is the document's VISIBLE "
+                     f"geometry - {visible} GSD element(s) are visible and the one "
+                     f"being thickened is only one of them, so a tight reading may "
+                     f"belong to a neighbour. Hide the others and re-run before "
+                     f"acting on any number in this message.")
+        on_border = bool(worst.get("at_open_border"))
         if radius is not None and radius < total:
-            return (f" MEASURED: the tightest smooth radius in the visible mesh is "
+            head = (f" MEASURED: the tightest smooth radius in the visible mesh is "
                     f"{radius:.3f} mm{where}, which is less than the {total:.3f} mm "
-                    f"total offset - there the two offset faces must cross. Widen "
-                    f"that feature, or keep the total below {radius:.3f} mm. "
-                    f"(Read from the document's VISIBLE mesh over "
+                    f"total offset.")
+            if on_border:
+                # A CONDITIONAL prescription, not a flat one. The report's point
+                # was that "keep the total below 0.079 mm" reads as an instruction;
+                # it is only an instruction if the bend is real, and an edge on an
+                # open border is where the mesh ends as often as it bends.
+                return (head + " That edge lies on an OPEN BORDER, where the mesh "
+                        "ends as often as the surface bends - so confirm the bend "
+                        "before acting on it. IF THE BEND IS REAL: Widen that "
+                        f"feature, or keep the total below {radius:.3f} mm. IF IT "
+                        "IS THE BORDER: nothing in the model needs changing, and "
+                        f"the failure is elsewhere - a seam or a "
+                        f"self-intersection.{skip}{scope}")
+            return (head + " There the two offset faces must cross: widen that "
+                    "feature, or keep the total below "
+                    f"{radius:.3f} mm. (Read from the document's VISIBLE mesh over "
                     f"{data['edges_measured']} interior edges; the estimate runs a "
-                    f"few percent low.){skip}")
+                    f"few percent low.){skip}{scope}")
         return (f" MEASURED: the tightest smooth radius in the visible mesh is "
                 f"{radius} mm{where}, which is NOT below the {total:.3f} mm offset - "
                 f"so on what this mesh resolves, curvature does not explain the "
                 f"failure. Look at a seam or a self-intersection in the surface "
-                f"itself, not at its radius.{skip}")
+                f"itself, not at its radius.{skip}{scope}")
+
+    def _visible_element_count(self, part: Any) -> int:
+        """How many GSD elements are visible - i.e. what an STL export contains.
+
+        Read from ``HybridShape.Visible``, which is readable even where writing it
+        is refused (setting ``Item.Visible`` fails; catia_set_visibility goes
+        through SetShow). An element whose flag cannot be read counts as visible:
+        over-reporting the scope is honest, under-reporting it is not.
+        """
+        total = 0
+        try:
+            bodies = part.HybridBodies
+            for index in range(1, bodies.Count + 1):
+                try:
+                    shapes = bodies.Item(index).HybridShapes
+                    for position in range(1, shapes.Count + 1):
+                        try:
+                            if shapes.Item(position).Visible:
+                                total += 1
+                        except Exception:  # noqa: BLE001
+                            total += 1
+                except Exception:  # noqa: BLE001
+                    continue
+        except Exception:  # noqa: BLE001 - no geometrical sets at all
+            return 0
+        return total
 
     def _close_surface(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()

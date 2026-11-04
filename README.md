@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.60** · [what changed](CHANGELOG.md) ·
+**0.3.61** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1200,6 +1200,16 @@ Place the result with `catia_get_component_transform`.
   the same, and the reply says so rather than choosing. `region` now scopes BOTH
   blocks - before 0.3.59 it scoped the fold statistics only, so "exclude the
   skirt and look at the base" changed the angles and left the radii whole-mesh.
+  `excluded.unresolvable_edges` is the THIRD channel, added 0.3.61: a radius
+  smaller than a tenth of the edge it was measured across is smaller than this
+  mesh can resolve, not a measurement, and the verdict is decided by the 5th
+  percentile rather than by the single smallest edge - a minimum is one triangle,
+  a verdict is about a surface. Both were needed before a surface CATIA had just
+  thickened by 0.3 mm stopped answering "cannot be built": reproduced on B30
+  2026-11-04 with 0.0888 mm across a 3.3218 mm edge (2.7 %, 7.16 deg of fold,
+  i.e. a bend of ~27 mm). A too-tight reading that is only a MINORITY now says
+  INCONCLUSIVE and names its `radius_over_edge` instead of prescribing a
+  redesign.
 * **A `.CATPart` written by a newer CATIA may not open on an older one.**
   Measured 2026-11-04: B30 `Documents.Open` on a file written by V5-6R2022
   (B32 SP6) fails with a bare "method Open failed" - no version message, nothing
