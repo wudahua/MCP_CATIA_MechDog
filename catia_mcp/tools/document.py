@@ -429,6 +429,10 @@ class DocumentTools:
         # the first pad/pocket in this document use the wrong profile.
         self.conn.last_sketch = None
         self.conn.active_body = None
+        try:
+            self.conn.last_part_name = str(doc.Name)
+        except Exception:  # noqa: BLE001 - drafting falls back to "pass part_name"
+            self.conn.last_part_name = None
         part = self.conn.part_of(doc)
         # Part.Name is read-only on V5-6R2020/B32 (measured: "方法 Name 失败"), so
         # `name` cannot rename the part. What it CAN do is set 零件编号 - the field
@@ -456,6 +460,9 @@ class DocumentTools:
             # document has a path from its first feature on.
             try:
                 saved = " " + self._save_document(str(file_path))
+                # SaveAs renames the document to the file name; a stale remembered
+                # name would send drafting to a part that no longer exists.
+                self.conn.last_part_name = str(doc.Name)
             except Exception as exc:  # noqa: BLE001 - the part itself exists
                 saved = (f" The part was created but could not be saved to "
                          f"'{file_path}' ({str(exc).splitlines()[0][:120]}). Call "
@@ -586,6 +593,11 @@ class DocumentTools:
         # belong to this one.
         self.conn.last_sketch = None
         self.conn.active_body = None
+        try:
+            if str(doc.Name).lower().endswith(".catpart"):
+                self.conn.last_part_name = str(doc.Name)
+        except Exception:  # noqa: BLE001
+            pass
         return f"Opened document: '{doc.Name}' from {file_path}"
 
     @staticmethod

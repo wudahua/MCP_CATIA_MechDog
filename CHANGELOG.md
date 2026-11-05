@@ -2,6 +2,50 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.64] — 2026-11-05 · drafting, which could not work here at all
+
+Upstream's eleven Drafting tools were the last module this fork had dropped. They
+are in, and the port is a rewrite of two paths because **face-driven projection
+could not work on this machine** and neither could hand dimensioning. 125 tools.
+
+**`"Topology.Face,sel"` is an English query.** A Chinese CATIA raises a bare
+`方法 Search 失败` for it and answers `拓扑.面,sel` with the six faces of the same
+plate. Upstream's own note says "field-proven on V5R20" — true, on an English
+install. This fork already had the localized fallback in `topo_search`; the
+drafting module just did not use it. Its face indices were also the last FEATURE's
+rather than the body's, so `Face.3` meant different geometry to `add_view` and to
+`catia_list_faces`. Both fixed by resolving through `topology_cells`.
+
+**A view's `GeometricElements` item 1 is the absolute axis.** Exactly as in a
+sketch — the same defect fixed for `catia_sketch_constraint` in 0.3.62, repeated
+in a new module. `element_index_1: 1` reached `Dimensions.Add` and CATIA answered
+`方法 Add 失败`, naming neither the axis nor the index. Both slots refuse it now.
+
+**`Dimensions.Add` failures are usually the geometry, not the call.** Measured
+before writing any fix: two parallel lines give a distance (0 → 1, 1 → 2), while a
+horizontal line and a vertical one raise the same bare error, and a radius on a
+line does too. The reply explains which pairings work instead of forwarding COM.
+
+**`add_view` demanded `part_name` whenever two parts were open** — including when
+the caller had just built one of them and CATIA had named it `Part1.CATPart`. The
+connection remembers the last part it created or opened, and that is used when the
+name is ambiguous. An explicit `part_name` still wins.
+
+Measured working, unchanged: drawing creation, plane-driven generative view (0.3 s
+for a 60×40×10 plate), projection with the sheet's first-angle layout, section
+view with hatching, circular detail, text, filled tables, and `GenerateDimensions`
+producing one `DimStatus 7` (3d_driven) radius from one sketch constraint — and
+zero where the profile carries no constraint, which the note now says instead of
+pointing at a `length` constraint that does not exist.
+
+Two limits recorded rather than worked around: a generative view cannot be
+hand-dimensioned at all (its curves are not addressable through automation), and
+**`Face.N` is session-scoped** — the same plate gave its hole's cylinder at
+`Face.1` in one build and `Face.7` in another.
+
+1 067 tests. Probes kept: `scripts/b30_v0364_drawing_two.py` (what Search and Dimensions.Add
+really do), `_fix.py` (GetPlane via topology_cells), `_accept.py` (19/19).
+
 ## [0.3.63] — 2026-11-05 · knowledge came back, after being measured
 
 Upstream's five Knowledgeware tools were dropped when this fork was cut. They are

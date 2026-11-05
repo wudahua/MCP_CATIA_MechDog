@@ -36,6 +36,13 @@ class CATIAConnection:
         self.last_sketch: Any | None = None
         # Solid body new features should go into. None = the part's MainBody.
         self.active_body: Any | None = None
+        # Name of the last Part document this session created or opened. Drafting
+        # needs it: `catia_drawing_add_view` has to name its source, and requiring
+        # `part_name` on every call means the caller has to remember a document
+        # name it never chose (CATIA names parts "Part1.CATPart"). Measured on B30
+        # 2026-11-05: with two parts open the call refuses with "Pass 'part_name'"
+        # even though the caller just built one of them.
+        self.last_part_name: str | None = None
         # What this server drew inside each sketch, plus where the sketch sits:
         #   {sketch name: {"placement": {"base": "xy", "distance": 50.0} | None,
         #                  "elements": [{"kind": "line", "x1": .., ...}, ...]}}

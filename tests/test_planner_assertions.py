@@ -253,9 +253,10 @@ def test_planner_tools_are_registered_in_the_server():
     names = set(server._tool_router)
     assert {"catia_run_plan", "catia_measure_topology",
             "catia_get_component_transform", "catia_set_component_transform"} <= names
-    # Drawing still stays out; knowledge came back in 0.3.63 after its five
-    # tools were measured on B30 (plus the one that applies a table).
-    assert not {"catia_drawing_add_view", "catia_new_drawing"} & names
+    # Nothing from upstream is dropped any more: knowledge came back in 0.3.63
+    # and drawing in 0.3.64, each after its tools were measured on B30.
+    assert {"catia_drawing_add_view", "catia_new_drawing",
+            "catia_drawing_generate_dimensions"} <= names
     assert {"catia_create_parameter", "catia_apply_design_table"} <= names
     assert len(json.dumps(list(names))) > 0
 

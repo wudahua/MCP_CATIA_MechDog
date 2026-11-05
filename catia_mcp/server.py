@@ -33,6 +33,7 @@ from catia_mcp.tools.gsd import GSDTools
 from catia_mcp.tools.measurement import MeasurementTools
 from catia_mcp.tools.part_design import PartDesignTools
 from catia_mcp.tools.knowledge import KnowledgeTools
+from catia_mcp.tools.drawing import DraftingTools
 from catia_mcp.tools.planner import PlannerTools
 from catia_mcp.tools.sketcher import SketcherTools
 
@@ -112,6 +113,7 @@ class CATIAMCPServer:
         self.measurement_tools = MeasurementTools(self.connection)
         self.export_tools = ExportTools(self.connection)
         self.knowledge_tools = KnowledgeTools(self.connection)
+        self.drafting_tools = DraftingTools(self.connection)
         self.planner_tools = PlannerTools(self.connection)
         self._tool_modules = [
             self.document_tools,
@@ -123,6 +125,7 @@ class CATIAMCPServer:
             self.measurement_tools,
             self.export_tools,
             self.knowledge_tools,
+            self.drafting_tools,
             self.planner_tools,
         ]
         self._tool_router: dict[str, Any] = {}

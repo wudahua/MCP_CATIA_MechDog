@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.63** · [what changed](CHANGELOG.md) ·
+**0.3.64** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -12,8 +12,9 @@ defects that make that loop lie to you. Most of the work since 0.3.0 came from
 people rebuilding real assemblies with it: the changelog is a list of things that
 produced a plausible number, a wrong number, or no explanation at all.
 
-**114 tools** (upstream 98: drawing's 11 dropped, knowledge's 5 kept and
-corrected, 27 added here). Nothing in the COM layer was rewritten — the value of upstream is
+**125 tools** (upstream 98 + 27 added, and nothing dropped any more: knowledge
+came back in 0.3.63 and drafting in 0.3.64, each after its tools were measured on
+B30 rather than trusted). Nothing in the COM layer was rewritten — the value of upstream is
 the field-verified knowledge in its comments, so this fork is strictly add /
 subtract / patch. The count is asserted by `tests/test_readme_tool_counts.py`, so
 it cannot drift from the code again.
@@ -49,16 +50,16 @@ it cannot drift from the code again.
 
 ## What this fork changes
 
-### Dropped (11 tools, 995 lines)
+### Dropped (nothing, since 0.3.64)
 
-| Module | Tools | Why |
-|---|---|---|
-| `tools/drawing.py` | 11 | Needs a Drafting licence and produces 2D views, unrelated to solids |
+Two modules were cut when this fork was made - `drawing` (needs a Drafting
+licence) and `knowledge` (parameters / design tables). Both are back, measured:
+knowledge in 0.3.63, drafting in 0.3.64. What was dropped was not the capability
+but the claim that it worked.
 
-`knowledge` was dropped with it until 0.3.63 - it is back, measured, see the next
-section. `export` (STEP/STL hand-off) and `http_transport` (remote agent) are
-kept: they are domain-neutral and cheap. See `FORK.md` §8 if you want to cut
-further.
+`export` (STEP/STL hand-off) and `http_transport` (remote agent) stay for the
+same reason they always did: domain-neutral and cheap. See `FORK.md` §8 if you
+want to cut further.
 
 ### Added (26 tools over upstream)
 
@@ -68,8 +69,9 @@ two - `catia_delete_body`, `catia_solid_loft`; 0.3.19: one - `catia_copy_compone
 0.3.51: one - `catia_check_surface`; 0.3.53: one - `catia_gsd_boundary`; 0.3.55: one - `catia_gsd_heal`; 0.3.56: two -
 `catia_gsd_fillet_surface`, `catia_gsd_spine`; 0.3.60: two -
 `catia_gsd_rotate`, `catia_gsd_translate`).
-98 − 11 (drawing) + 27 added = 114, where the 27th is `catia_apply_design_table`
-under Knowledgeware below. 0.3.20 added arguments instead of tools: a sketch support given as `origin`/`u`/`v`, edges given as coordinates,
+98 + 27 added = 125, where the 27th is `catia_apply_design_table` under
+Knowledgeware below and the 26 before it are listed above. 0.3.20 added
+arguments instead of tools: a sketch support given as `origin`/`u`/`v`, edges given as coordinates,
 arcs given as their two endpoints, and one plan per several documents.
 
 | Tool | What it gives you |
@@ -1118,6 +1120,7 @@ while a reply that only reports success cannot.
 | Measurement | 7 | inertia, distance, bounding box\*, parameters, `catia_check_surface` |
 | Export | 4 | STEP / STL / IGES hand-off |
 | Knowledge | 6 | parameters, formulas, relations, design tables - upstream's five, measured and corrected, plus `catia_apply_design_table` |
+| Drawing | 11 | upstream's drafting module, measured: new drawing, generative view (plane / face / body), projection, section, detail, text, table, generated and manual dimensions |
 | Planner | **2** | `run_plan`, `measure_topology` |
 | Diagnostics | 1 | `catia_diagnose` |
 
@@ -1140,6 +1143,30 @@ upstream's code did not behave as written, so the port is a rewrite:
 a 20 mm parameter to 30000 mm; `30mm` and `0.03m` both gave 30. Both the create
 and the apply reply say so, because the alternative is a part 1000x too large
 with a success message.
+
+#### Drafting (11 tools, 0.3.64)
+
+Upstream's module, ported only after all eleven tools were run on B30. Four things
+did not survive the measurement, so this is a rewrite of those paths:
+
+| Tool | What it gives you | What upstream had wrong |
+|---|---|---|
+| `catia_new_drawing` | A `.CATDrawing` with the default sheet and its Main/Background views | — |
+| `catia_drawing_add_view` | Generative front view of an open part: by plane (0.3 s for a plate), by **planar face** (~30 s), or one body only | Face-driven projection **could not work here**: it searched `"Topology.Face,sel"`, which is English - a Chinese CATIA raises `方法 Search 失败` and answers `拓扑.面,sel` - and its indices were the last FEATURE's, so `Face.N` meant different geometry to this tool and to `catia_list_faces` |
+| `catia_drawing_projection_view` | right/left/top/bottom/rear, placed by the sheet's first- or third-angle method | — (`ProjectionMethod` reads 0 = first angle on a fresh sheet, as assumed) |
+| `catia_drawing_section_view` | Section view or cut from a polyline profile, Offset or Aligned | — |
+| `catia_drawing_detail_view` | Circular detail at a scale | — |
+| `catia_drawing_add_text` / `_add_table` | Text and filled tables, incl. cells and per-column widths | — |
+| `catia_drawing_generate_dimensions` | One associative dimension per 3D sketch constraint, `DimStatus 7` = 3d_driven, follows the part | Its "no dimension" note told you to add a `length` constraint, which `catia_sketch_constraint` does not have (a length is `distance` with one element) |
+| `catia_drawing_list_dimensions` | Values, type codes, basic_2d vs 3d_driven | — |
+| `catia_drawing_list_view_geometry` | Indexed 2D elements of a view | Index 1 is the view's **absolute axis** - the same trap as a sketch |
+| `catia_drawing_add_dimension` | A dimension on hand-drawn 2D geometry | Index 1 reached `Dimensions.Add` and CATIA answered a bare `方法 Add 失败`; a pairing the geometry cannot carry (a horizontal line with a vertical one) was forwarded as that same error |
+
+Two limits worth knowing before drawing: a **generative view cannot be**
+hand-dimensioned at all - its curves are not addressable through automation, only
+`GenerateDimensions` reaches them - and **`Face.N` is session-scoped**. The same
+plate gave its hole's cylinder at `Face.1` in one build and at `Face.7` in another,
+so list faces and use the index immediately.
 
 \* `catia_get_bounding_box` measures two ways, and `auto` takes the STL mesh:
 exact on planar-faced solids, a **lower bound ~0.5-0.7 % small** on curved ones.
