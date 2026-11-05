@@ -350,7 +350,7 @@ def test_the_block_is_merged_into_the_expected_fields():
     assert (1, 6, 1, 3) in table.merges, "drawing number spans the other three"
     assert (5, 1, 1, 8) in table.merges, "footer is one full-width row"
     assert table.cells[(1, 1)] == "COLA BOTTLE PETAL BASE"
-    assert table.cells[(2, 1)] == "MATERIAL"
+    assert table.cells[(2, 1)] == "材料", "labels default to Chinese (0.3.66)"
     assert table.cells[(2, 3)] == "PET"
 
 

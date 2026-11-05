@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.65** · [what changed](CHANGELOG.md) ·
+**0.3.66** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1163,13 +1163,27 @@ did not survive the measurement, so this is a rewrite of those paths:
 | `catia_drawing_list_view_geometry` | Indexed 2D elements of a view | Index 1 is the view's **absolute axis** - the same trap as a sketch |
 | `catia_drawing_add_dimension` | A dimension on hand-drawn 2D geometry | Index 1 reached `Dimensions.Add` and CATIA answered a bare `方法 Add 失败`; a pairing the geometry cannot carry (a horizontal line with a vertical one) was forwarded as that same error |
 | `catia_drawing_set_sheet` (0.3.65) | A0-A4, landscape/portrait, sheet scale; replies with the size CATIA reports | Paper on a new sheet is `catPaperUser` (13) and `GetPaperWidth` raises until a real size is set; the ANSI names in the enum are refused by CATIA |
-| `catia_drawing_add_frame` (0.3.65) | ISO border (20 mm filing margin) + an 8x5 title-block table with merged fields, plus notes above it | New: upstream stops at "frame/title-block generators are the next step". `Tables.Add` anchors the TOP-left and grows down - the first version put the block below the sheet |
+| `catia_drawing_add_frame` (0.3.65) | ISO border (20 mm filing margin) + an 8x5 title-block table with merged fields, plus notes above it; labels in **Chinese by default** (0.3.66) | New: upstream stops at "frame/title-block generators are the next step". `Tables.Add` anchors the TOP-left and grows down - the first version put the block below the sheet |
 
 Two limits worth knowing before drawing: a **generative view cannot be**
 hand-dimensioned at all - its curves are not addressable through automation, only
 `GenerateDimensions` reaches them - and **`Face.N` is session-scoped**. The same
 plate gave its hole's cylinder at `Face.1` in one build and at `Face.7` in another,
 so list faces and use the index immediately.
+
+**0.3.66 made the sheet furniture Chinese by default.** The English was never
+CATIA: the labels were hard-coded and so were the default view names. Field
+labels are now 材料 / 比例 / 制图 / 日期 / 审核 / 张次 and views default to 主视图,
+右视图, 俯视图, 剖视图, 局部视图 - a view's `Name` is printed on the sheet, so this
+is visible output. `language: "en"` restores the ISO wording, and
+`labels: {"checked": "校对"}` changes a single field. Chinese view names work as
+handles (`parent_view: "主视图"` resolves on B30).
+
+The odd glyphs (`1` looking like `н`, so `1:1` reads as `1|1`) are CATIA's ISO
+single-stroke font `SICH`, not a translation problem. Both `SetFontName` and
+`TextProperties.FontName` accept `宋体`/`FangSong`/`SimHei` and read them back,
+but the exported PDF renders all of them in SICH - four lines set to four fonts
+came out identical. Changing it means changing the Drafting standard in CATIA.
 
 **0.3.65 added the frame** (`catia_drawing_set_sheet`, `catia_drawing_add_frame`).
 Three things had to be measured rather than assumed:

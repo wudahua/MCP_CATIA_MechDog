@@ -2,6 +2,48 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.66] — 2026-11-05 · the sheet furniture speaks Chinese by default
+
+The user asked why their drawing came out covered in English. Nothing about that
+came from CATIA: the field labels were hard-coded in `_add_frame`, and every
+default view name ("Front View", "right view", "section view") was English too.
+Chinese was never a font problem — CATIA's default drafting font `SICH` renders
+it, verified by writing 材料/图号/比例/制图/审核 into table cells, exporting a
+PDF and looking at it (`scripts/b30_v0366_zh_font.py`). 127 tools, unchanged.
+
+**What is Chinese now**
+
+- Title-block labels: 材料 / 比例 / 制图 / 日期 / 审核 / 张次 (was MATERIAL /
+  SCALE / DRAWN / DATE / CHECKED / SHEET).
+- Default view names: 主视图, 右视图 / 左视图 / 俯视图 / 仰视图 / 后视图,
+  剖视图, 局部视图. A view's `Name` is what gets printed under it, so this is
+  visible output, not just an API handle. Chinese names work as handles too —
+  `catia_drawing_projection_view {"parent_view": "主视图"}` resolves by name on
+  B30 (10/10 checks in `scripts/b30_v0366_zh_accept.py`).
+
+**Two escape hatches, because a Chinese sheet is not always wanted**
+
+- `language: "zh" | "en"` — ISO-wording sheets are one argument away. Aliases
+  `zh-CN` / `cn` / `中文` / `chinese` normalise to Chinese.
+- `labels: {"checked": "校对", "sheet": "SHEET NO."}` — overrides one field
+  without flipping the whole block; takes precedence over `language`.
+
+Your own strings (title, material, drawn_by, notes, footer) are never
+translated. An unknown `language` or label key is refused **before** the border
+is drawn, and the acceptance script asserts the Background view element count is
+unchanged after the refusal — the same rule the oversized-block check follows.
+The reply now states which language the labels came out in.
+
+**Font: measured, and deliberately not touched.** Both `DrawingText.SetFontName`
+and `DrawingText.TextProperties.FontName` accept a Windows font name and read it
+back (`宋体`, `FangSong`, `SimHei`, `Arial` all "ok"), but **the exported PDF
+renders every one of them in SICH**. Four lines set to four different fonts came
+out identical (`scripts/b30_v0366_font_faces.py`). So the odd glyph is not
+something this server sets: `SICH` is the ISO single-stroke font, and its digit
+`1` looks like `н`, which is why `1:1` reads as `1|1` and `0.05` as `0.05` with
+a hooked five. Changing it means changing the Drafting **standard** in CATIA,
+not calling a COM setter — nothing here pretends otherwise.
+
 ## [0.3.65] — 2026-11-05 · the frame, which was not where the numbers said
 
 Upstream's drafting module ends with "frame/title-block generators are the next

@@ -44,6 +44,13 @@ from catia_mcp.tools.measurement import read_measurable_array
 # binding): the projection of a view relative to its parent.
 _PROJECTION_TYPES = {"right": 0, "left": 1, "top": 2, "bottom": 3, "rear": 4}
 
+# A view's Name is printed under it on the sheet, so the defaults are Chinese
+# like the rest of the sheet furniture. Pass 'name' and nothing is translated.
+_PROJECTION_NAMES = {
+    "right": "右视图", "left": "左视图", "top": "俯视图",
+    "bottom": "仰视图", "rear": "后视图",
+}
+
 _PLANE_VECTORS = {
     "xy": (1, 0, 0, 0, 1, 0),
     "yz": (0, 1, 0, 0, 0, 1),
@@ -61,6 +68,37 @@ _PAPER_NAMES = {code: name for name, code in _PAPER_CODES.items()}
 # CatPaperOrientation: portrait = 0, landscape = 1, bestfit = 2.
 # 2 is accepted and reads back 1, i.e. it is silently ignored - not offered.
 _ORIENTATION_CODES = {"landscape": 1, "portrait": 0}
+
+# Title-block field labels. Chinese is the default because this installation is
+# a Chinese CATIA and its drafting font (SICH) does carry Chinese glyphs - a
+# table cell written as '材料' renders as 材料 in the exported PDF (probe
+# scripts/b30_v0366_zh_font.py, B30 2026-11-05). The English set stays
+# available because ISO 5457 sheets are routinely exchanged that way.
+_LABELS = {
+    "zh": {
+        "material": "材料", "scale": "比例", "drawn": "制图",
+        "date": "日期", "checked": "审核", "sheet": "张次",
+    },
+    "en": {
+        "material": "MATERIAL", "scale": "SCALE", "drawn": "DRAWN",
+        "date": "DATE", "checked": "CHECKED", "sheet": "SHEET",
+    },
+}
+_LANGUAGE_ALIASES = {
+    "zh": "zh", "zh-cn": "zh", "cn": "zh", "chinese": "zh", "中文": "zh",
+    "en": "en", "en-us": "en", "english": "en", "英文": "en",
+}
+
+
+def _normalise_language(value: Any) -> str:
+    key = str(value).strip().lower()
+    language = _LANGUAGE_ALIASES.get(key)
+    if language is None:
+        raise ValueError(
+            f"Unknown language '{value}'. Use 'zh' (中文, default) or 'en'. "
+            "To change a single label instead, pass labels={'material': ...}."
+        )
+    return language
 
 
 class DraftingTools:
@@ -215,7 +253,7 @@ class DraftingTools:
                             "type": "string",
                             "description": "Parent view name (default: last view of the active sheet)",
                         },
-                        "name": {"type": "string", "description": "New view name (default '<direction> view')"},
+                        "name": {"type": "string", "description": "New view name (default: 右视图/左视图/俯视图/仰视图/后视图 for the direction)"},
                         "gap": {
                             "type": "number",
                             "description": "Distance from the parent view in mm (default 100)",
@@ -411,7 +449,7 @@ class DraftingTools:
                         },
                         "name": {
                             "type": "string",
-                            "description": "View name (default 'Front View')",
+                            "description": "View name (default '主视图')",
                         },
                     },
                 },
@@ -514,6 +552,35 @@ class DraftingTools:
                                 "checked_by": {"type": "string"},
                                 "sheet": {"type": "string", "description": "Text, e.g. '1/2'"},
                                 "footer": {"type": "string", "description": "Merged bottom row"},
+                            },
+                        },
+                        "language": {
+                            "type": "string",
+                            "description": (
+                                "Language of the field labels the tool writes: "
+                                "'zh' (材料/比例/制图/日期/审核/张次) or 'en' "
+                                "(MATERIAL/SCALE/DRAWN/DATE/CHECKED/SHEET). "
+                                "Default 'zh' - CATIA's drafting font draws "
+                                "Chinese and this install is a Chinese one. "
+                                "Your own values (title, material, notes) are "
+                                "never translated."
+                            ),
+                        },
+                        "labels": {
+                            "type": "object",
+                            "description": (
+                                "Override single labels, e.g. "
+                                "{'checked': '校对'} or {'sheet': 'SHEET NO.'}. "
+                                "Keys: material, scale, drawn, date, checked, "
+                                "sheet. Takes precedence over language."
+                            ),
+                            "properties": {
+                                "material": {"type": "string"},
+                                "scale": {"type": "string"},
+                                "drawn": {"type": "string"},
+                                "date": {"type": "string"},
+                                "checked": {"type": "string"},
+                                "sheet": {"type": "string"},
                             },
                         },
                         "notes": {
@@ -703,6 +770,17 @@ class DraftingTools:
         # four stray lines on the sheet (measured on B30 2026-11-05: the
         # Background view went from 5 elements to 9). A refused call has to
         # leave the drawing alone.
+        # Labels resolve before anything is drawn, for the same reason the
+        # geometry does: a rejected call must leave the sheet alone.
+        labels = dict(_LABELS[language := _normalise_language(args.get("language") or "zh")])
+        for key, value in (args.get("labels") or {}).items():
+            if key not in labels:
+                raise ValueError(
+                    f"Unknown label '{key}'. The title block has "
+                    f"{', '.join(sorted(labels))}."
+                )
+            labels[key] = str(value)
+
         block = args.get("title_block") or {}
         block_w = float(block.get("width", 180.0))
         block_h = float(block.get("height", 45.0))
@@ -782,12 +860,12 @@ class DraftingTools:
         cells = {
             (1, 1): str(block.get("title") or ""),
             (1, 6): str(block.get("drawing_number") or ""),
-            (2, 1): "MATERIAL", (2, 3): str(block.get("material") or ""),
-            (2, 5): "SCALE", (2, 7): str(block.get("scale") or ""),
-            (3, 1): "DRAWN", (3, 3): str(block.get("drawn_by") or ""),
-            (3, 5): "DATE", (3, 7): str(block.get("date") or ""),
-            (4, 1): "CHECKED", (4, 3): str(block.get("checked_by") or ""),
-            (4, 5): "SHEET", (4, 7): str(block.get("sheet") or ""),
+            (2, 1): labels["material"], (2, 3): str(block.get("material") or ""),
+            (2, 5): labels["scale"], (2, 7): str(block.get("scale") or ""),
+            (3, 1): labels["drawn"], (3, 3): str(block.get("drawn_by") or ""),
+            (3, 5): labels["date"], (3, 7): str(block.get("date") or ""),
+            (4, 1): labels["checked"], (4, 3): str(block.get("checked_by") or ""),
+            (4, 5): labels["sheet"], (4, 7): str(block.get("sheet") or ""),
             (5, 1): str(block.get("footer") or ""),
         }
         filled = 0
@@ -838,7 +916,9 @@ class DraftingTools:
             f"Frame drawn on sheet '{sheet.Name}' ({self._sheet_summary(state)}): "
             f"{lines} border line(s) at {margin_left:g}/{margin:g} mm margins, "
             f"title block {block_w:g} x {block_h:g} mm at ({bx:g}, {by:g}) with "
-            f"{rows} x {columns} cells, {filled} filled, {len(notes)} note line(s). "
+            f"{rows} x {columns} cells, {filled} filled, labels in "
+            f"{'中文' if language == 'zh' else 'English'}, "
+            f"{len(notes)} note line(s). "
             f"Background view now holds {elements} element(s). "
             f"Drawing area is x {x0:g}..{x1:g}, y {y0:g}..{y1:g} mm - views placed "
             "outside it land on the border (this tool does not move views)."
@@ -954,7 +1034,7 @@ class DraftingTools:
         angle = args.get("angle")
 
         sheet = drawing.Sheets.ActiveSheet
-        view = sheet.Views.Add(args.get("name") or "Front View")
+        view = sheet.Views.Add(args.get("name") or "主视图")
 
         gb = view.GenerativeBehavior
         if target_body is not None:
@@ -1403,7 +1483,9 @@ class DraftingTools:
                 parent.GenerativeBehavior, _PROJECTION_TYPES[direction]
             )
 
-        view = self._create_derived_view(sheet, parent, args.get("name") or f"{direction} view", define)
+        view = self._create_derived_view(
+            sheet, parent, args.get("name") or _PROJECTION_NAMES[direction],
+            define)
         self._place(view, args.get("x", px + dx), args.get("y", py + dy), pscale)
         view.GenerativeBehavior.Update()
         self.conn.refresh_display()
@@ -1439,7 +1521,7 @@ class DraftingTools:
                 profile, section_type, profile_type, side, parent.GenerativeBehavior
             )
 
-        view = self._create_derived_view(sheet, parent, args.get("name") or "section view", define)
+        view = self._create_derived_view(sheet, parent, args.get("name") or "剖视图", define)
         self._place(view, args.get("x", px + 150.0), args.get("y", py), pscale)
         view.GenerativeBehavior.Update()
         self.conn.refresh_display()
@@ -1462,7 +1544,7 @@ class DraftingTools:
         def define(view: Any) -> None:
             view.GenerativeBehavior.DefineCircularDetailView(cx, cy, radius, parent.GenerativeBehavior)
 
-        view = self._create_derived_view(sheet, parent, args.get("name") or "detail view", define)
+        view = self._create_derived_view(sheet, parent, args.get("name") or "局部视图", define)
         applied = self._place(view, args.get("x", px + 150.0), args.get("y", py + 100.0), factor * pscale)
         view.GenerativeBehavior.Update()
         self.conn.refresh_display()
