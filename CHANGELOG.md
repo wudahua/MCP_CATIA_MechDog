@@ -2,6 +2,46 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.65] — 2026-11-05 · the frame, which was not where the numbers said
+
+Upstream's drafting module ends with "frame/title-block generators are the next
+step". They exist now: `catia_drawing_set_sheet` and `catia_drawing_add_frame`.
+127 tools.
+
+**A new drawing is not A3.** It comes up as `catPaperUser` (13) — an oversized
+custom sheet — and `GetPaperWidth()` **raises** on it (`方法 GetPaperWidth 失败`)
+until a real ISO size is set. So the first thing a frame has to do is establish
+the paper, and the first thing the tool has to survive is a sheet whose size
+CATIA will not state. `catPaperSize` also names Letter, Legal and A..F; writing
+any of them raises too (values 0, 1 and 7-12, measured), so only A0=2 … A4=6 are
+offered, and the refusal says why. `Orientation = 2` (best fit) is accepted and
+silently reads back as landscape.
+
+**`Tables.Add(x, y)` anchors the TOP-left corner and the block grows DOWN.**
+Passing the bottom margin put the whole title block below the sheet — visible in
+the exported PDF, invisible in the reply, which printed a position and 6 cells
+filled. The block now sits at `y0 + height` and is flush with the border.
+
+**A refused call used to draw first.** The block-size check ran after the border
+went down, so an oversized title block left four stray lines behind (Background
+view: 5 elements → 9). Every number is now resolved before anything touches the
+sheet, and the acceptance script asserts the element count is unchanged after a
+refusal.
+
+The border is ISO 5457 (20 mm filing margin, 10 mm elsewhere). The title block is
+a **real table**, 8 columns × 5 rows merged into title / drawing number /
+material / scale / drawn / date / checked / sheet / footer, so it stays editable
+in CATIA afterwards (`SetCellString`, `SetCellAlignment`, `MergeCells`,
+`SetRowSize` all confirmed). Notes are placed above it, anchored bottom-left.
+
+Two things are deliberately not done: **zone markings and the ISO corner grid**
+are not drawn, and the tool does **not** move views — it reports the drawing area
+(`x 20..410, y 10..287`) instead, because a projection placed at x=20 landed on
+the border in the A3 run and moving the caller's views would be worse than
+telling them where the border is.
+
+1 083 tests, 16 of them for this.
+
 ## [0.3.64] — 2026-11-05 · drafting, which could not work here at all
 
 Upstream's eleven Drafting tools were the last module this fork had dropped. They

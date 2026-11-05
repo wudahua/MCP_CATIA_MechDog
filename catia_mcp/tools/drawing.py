@@ -50,6 +50,18 @@ _PLANE_VECTORS = {
     "zx": (0, 0, 1, 1, 0, 0),
 }
 
+# CatPaperSize, read out of the DrawingSheet library on B30 2026-11-05:
+#   catPaperA0 = 2 ... catPaperA4 = 6, catPaperUser = 13
+# The enum also names Letter(0), Legal(1) and A..F(7-12); writing any of those on
+# this install raises 方法 PaperSize 失败, so offering them would be offering a
+# call that cannot work.
+_PAPER_CODES = {"A0": 2, "A1": 3, "A2": 4, "A3": 5, "A4": 6}
+_PAPER_NAMES = {code: name for name, code in _PAPER_CODES.items()}
+
+# CatPaperOrientation: portrait = 0, landscape = 1, bestfit = 2.
+# 2 is accepted and reads back 1, i.e. it is silently ignored - not offered.
+_ORIENTATION_CODES = {"landscape": 1, "portrait": 0}
+
 
 class DraftingTools:
     """Tools for CATIA V5 Drawing documents (generative drafting)."""
@@ -404,6 +416,114 @@ class DraftingTools:
                     },
                 },
             },
+            {
+                "name": "catia_drawing_set_sheet",
+                "description": (
+                    "Set the active sheet's paper size, orientation and scale. "
+                    "A NEW DRAWING IS NOT A3: it comes up as catPaperUser (13), "
+                    "an oversized custom sheet, so a frame drawn before this runs "
+                    "sits on the wrong page. Paper is one of the ISO A sizes - "
+                    "CatPaperSize also names Letter/Legal/A..F, and every one of "
+                    "them is REFUSED by this install (measured on B30 "
+                    "2026-11-05: values 0, 1 and 7-12 all raise), so they are not "
+                    "offered. The reply reports the size CATIA says it has, not "
+                    "the one asked for."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "paper": {
+                            "type": "string",
+                            "enum": ["A0", "A1", "A2", "A3", "A4"],
+                            "description": "ISO paper size (default: leave unchanged)",
+                        },
+                        "orientation": {
+                            "type": "string",
+                            "enum": ["landscape", "portrait"],
+                            "description": "Default: leave unchanged",
+                        },
+                        "scale": {
+                            "type": "number",
+                            "description": (
+                                "Sheet scale as a single number, e.g. 2 for 2:1 "
+                                "(default: leave unchanged)"
+                            ),
+                        },
+                    },
+                },
+            },
+            {
+                "name": "catia_drawing_add_frame",
+                "description": (
+                    "Draw a border and a title block on the active sheet, in the "
+                    "BACKGROUND view, and optionally set the paper first. The "
+                    "border is a single line at the margins (20 mm filing margin "
+                    "on the left by ISO 5457, 10 mm elsewhere) and the title "
+                    "block is a real CATIA table - 8 columns x 5 rows, merged into "
+                    "title / drawing number / material / scale / drawn / date / "
+                    "checked / sheet / footer - so its cells can be edited later "
+                    "in CATIA without redrawing it. Zone markings and the ISO "
+                    "corner grid are NOT drawn. Positions are sheet millimetres "
+                    "with the origin at the bottom-left; Table.Add anchors the "
+                    "block's TOP-left corner and it grows downward (measured)."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "paper": {
+                            "type": "string",
+                            "enum": ["A0", "A1", "A2", "A3", "A4"],
+                            "description": "Set the paper before drawing (default: leave as is)",
+                        },
+                        "orientation": {
+                            "type": "string",
+                            "enum": ["landscape", "portrait"],
+                            "description": "Only used together with paper",
+                        },
+                        "scale": {
+                            "type": "number",
+                            "description": "Sheet scale, e.g. 2 for 2:1 (default: leave as is)",
+                        },
+                        "margin": {
+                            "type": "number",
+                            "description": "Right/top/bottom margin in mm (default 10)",
+                        },
+                        "margin_left": {
+                            "type": "number",
+                            "description": "Left (filing) margin in mm (default 20)",
+                        },
+                        "border": {
+                            "type": "boolean",
+                            "description": "Draw the border rectangle (default true)",
+                        },
+                        "title_block": {
+                            "type": "object",
+                            "description": (
+                                "Title block layout and content. Any field left "
+                                "out stays empty rather than being invented."
+                            ),
+                            "properties": {
+                                "width": {"type": "number", "description": "mm (default 180)"},
+                                "height": {"type": "number", "description": "mm (default 45)"},
+                                "title": {"type": "string"},
+                                "drawing_number": {"type": "string"},
+                                "material": {"type": "string"},
+                                "scale": {"type": "string", "description": "Text, e.g. '1:1'"},
+                                "drawn_by": {"type": "string"},
+                                "date": {"type": "string"},
+                                "checked_by": {"type": "string"},
+                                "sheet": {"type": "string", "description": "Text, e.g. '1/2'"},
+                                "footer": {"type": "string", "description": "Merged bottom row"},
+                            },
+                        },
+                        "notes": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Lines printed just above the title block",
+                        },
+                    },
+                },
+            },
         ]
 
     def execute(self, tool_name: str, arguments: dict[str, Any]) -> str:
@@ -412,6 +532,10 @@ class DraftingTools:
                 return self._new_drawing()
             case "catia_drawing_add_view":
                 return self._add_view(arguments)
+            case "catia_drawing_set_sheet":
+                return self._set_sheet(arguments)
+            case "catia_drawing_add_frame":
+                return self._add_frame(arguments)
             case "catia_drawing_projection_view":
                 return self._projection_view(arguments)
             case "catia_drawing_section_view":
@@ -441,6 +565,284 @@ class DraftingTools:
             f"Drawing created: '{drawing.Name}' (active sheet '{sheet.Name}', "
             f"{drawing.Sheets.Count} sheet(s)). Use catia_drawing_add_view "
             "to project a part onto it."
+        )
+
+    # ── sheet setup and the frame ────────────────────────────────────────────
+
+    def _apply_paper(self, sheet: Any, paper: str | None,
+                     orientation: str | None,
+                     scale: float | None) -> dict[str, Any]:
+        """Set what was asked for, then report what CATIA says it now is.
+
+        The read-back is the point: a new drawing is catPaperUser (13), and
+        Orientation could not even be READ on that sheet ("方法 Orientation
+        失败") until a real paper size existed. So the reply is built from these
+        numbers, never from the arguments.
+        """
+        if paper is not None:
+            name = str(paper).upper()
+            code = _PAPER_CODES.get(name)
+            if code is None:
+                raise ValueError(
+                    f"Unknown paper '{paper}'. This server offers "
+                    f"{', '.join(_PAPER_CODES)}. CatPaperSize also names "
+                    "Letter/Legal/A..F, and CATIA refuses every one of them on "
+                    "this installation (values 0, 1, 7-12 all raise)."
+                )
+            sheet.PaperSize = code
+        if orientation is not None:
+            key = str(orientation).lower()
+            code = _ORIENTATION_CODES.get(key)
+            if code is None:
+                raise ValueError(
+                    f"Unknown orientation '{orientation}'. Use 'landscape' or "
+                    "'portrait'. 2 = best fit is accepted by CATIA and silently "
+                    "ignored (it reads back as landscape), so it is not offered."
+                )
+            sheet.Orientation = code
+        if scale is not None:
+            sheet.Scale = float(scale)
+
+        state: dict[str, Any] = {}
+        try:
+            state["paper_code"] = int(sheet.PaperSize)
+        except Exception:  # noqa: BLE001
+            state["paper_code"] = None
+        state["paper"] = _PAPER_NAMES.get(state["paper_code"])
+        try:
+            state["paper_name"] = str(sheet.PaperName)
+        except Exception:  # noqa: BLE001
+            state["paper_name"] = None
+        # GetPaperWidth/Height FAIL on a catPaperUser sheet - and a new drawing is
+        # exactly that (PaperSize 13), so this cannot be an unguarded call. The
+        # sheet only reports a width once a real ISO size is set (B30 2026-11-05).
+        state["width"] = None
+        state["height"] = None
+        try:
+            state["width"] = float(sheet.GetPaperWidth())
+            state["height"] = float(sheet.GetPaperHeight())
+        except Exception as error:  # noqa: BLE001
+            state["size_error"] = str(error).splitlines()[0][:90]
+        try:
+            state["orientation"] = int(sheet.Orientation)
+        except Exception:  # noqa: BLE001
+            state["orientation"] = None
+        try:
+            state["scale"] = float(sheet.Scale)
+        except Exception:  # noqa: BLE001
+            state["scale"] = None
+        return state
+
+    @staticmethod
+    def _sheet_summary(state: dict[str, Any]) -> str:
+        paper = state.get("paper") or state.get("paper_name") or "custom size"
+        orientation = {0: "portrait", 1: "landscape"}.get(
+            state.get("orientation"), f"orientation {state.get('orientation')}")
+        scale = state.get("scale")
+        if state.get("width") is None:
+            text = (f"{paper}, {orientation} - CATIA will not report a width "
+                    f"for it ({state.get('size_error', 'no size')})")
+        else:
+            text = (f"{paper} {state['width']:g} x {state['height']:g} mm "
+                    f"{orientation}")
+        if scale:
+            text += f", scale {scale:g}"
+        return text
+
+    def _set_sheet(self, args: dict[str, Any]) -> str:
+        self.conn.ensure_connected()
+        drawing = self._find_active_drawing()
+        drawing.Activate()
+        sheet = drawing.Sheets.ActiveSheet
+        before = self._apply_paper(sheet, None, None, None)
+        state = self._apply_paper(sheet, args.get("paper"),
+                                  args.get("orientation"), args.get("scale"))
+        self.conn.refresh_display()
+        changed = state != before
+        return (
+            f"Sheet '{sheet.Name}' is now {self._sheet_summary(state)} "
+            f"(read back from CATIA)."
+            + ("" if changed else
+               " Nothing changed - no paper, orientation or scale was given.")
+        )
+
+    def _add_frame(self, args: dict[str, Any]) -> str:
+        self.conn.ensure_connected()
+        drawing = self._find_active_drawing()
+        drawing.Activate()
+        sheet = drawing.Sheets.ActiveSheet
+        state = self._apply_paper(sheet, args.get("paper"),
+                                  args.get("orientation"), args.get("scale"))
+        if state.get("width") is None or state.get("height") is None:
+            raise RuntimeError(
+                "This sheet has no ISO paper size, so CATIA cannot say how big "
+                f"it is ({state.get('size_error', 'no width reported')}). A new "
+                "drawing starts as catPaperUser (13), which is an oversized "
+                "custom sheet. Pass paper='A3' (or A0/A1/A2/A4) to this tool, or "
+                "call catia_drawing_set_sheet first - a frame drawn on an "
+                "unmeasured sheet is a rectangle in the wrong place."
+            )
+        width, height = state["width"], state["height"]
+
+        margin = float(args.get("margin", 10.0))
+        margin_left = float(args.get("margin_left", 20.0))
+        if margin <= 0 or margin_left <= 0:
+            raise ValueError("margins must be positive (mm)")
+        x0, y0 = margin_left, margin
+        x1, y1 = width - margin, height - margin
+        if x1 - x0 < 100 or y1 - y0 < 60:
+            raise ValueError(
+                f"The border would leave only {x1 - x0:g} x {y1 - y0:g} mm on a "
+                f"{width:g} x {height:g} mm sheet - too small to hold a title "
+                "block. Set the paper first (catia_drawing_set_sheet) if this "
+                "sheet is still the custom default."
+            )
+
+        # Every number is resolved BEFORE anything is drawn. The first version
+        # drew the border and then refused an oversized title block, which left
+        # four stray lines on the sheet (measured on B30 2026-11-05: the
+        # Background view went from 5 elements to 9). A refused call has to
+        # leave the drawing alone.
+        block = args.get("title_block") or {}
+        block_w = float(block.get("width", 180.0))
+        block_h = float(block.get("height", 45.0))
+        if block_w <= 0 or block_h <= 0:
+            raise ValueError("title_block width and height must be positive (mm)")
+        if block_w > x1 - x0 or block_h > y1 - y0:
+            raise ValueError(
+                f"The title block is {block_w:g} x {block_h:g} mm but the border "
+                f"leaves {x1 - x0:g} x {y1 - y0:g} mm. Shrink the block or the "
+                "margins."
+            )
+
+        views = sheet.Views
+        if views.Count < 2:
+            raise RuntimeError(
+                "This sheet has no Background View, and a frame belongs there. "
+                "Create the drawing with catia_new_drawing first."
+            )
+        background = views.Item(2)
+        try:
+            background.Activate()
+        except Exception:  # noqa: BLE001 - the draws below still work or fail loudly
+            pass
+
+        problems: list[str] = []
+        lines = 0
+        if args.get("border", True):
+            factory = background.Factory2D
+            for a, b, c, d in ((x0, y0, x1, y0), (x1, y0, x1, y1),
+                               (x1, y1, x0, y1), (x0, y1, x0, y0)):
+                try:
+                    factory.CreateLine(float(a), float(b), float(c), float(d))
+                    lines += 1
+                except Exception as error:  # noqa: BLE001
+                    problems.append(
+                        f"border line ({a:g},{b:g})-({c:g},{d:g}) failed: "
+                        f"{str(error).splitlines()[0][:60]}")
+            if lines == 0:
+                raise RuntimeError(
+                    "The border could not be drawn: CATIA refused all four "
+                    f"Factory2D.CreateLine calls ({problems[0] if problems else ''}). "
+                    "The Background View has to be active for it."
+                )
+
+                # Tables.Add anchors the TOP-left corner and the rows grow DOWNWARD.
+        # Passing the bottom margin put the whole block off the sheet - seen in
+        # the exported PDF on the first run (B30 2026-11-05).
+        bx = x1 - block_w
+        by = y0 + block_h
+        rows, columns = 5, 8
+        table = background.Tables.Add(bx, by, rows, columns,
+                                      block_h / rows, block_w / columns)
+        for index in range(1, columns + 1):
+            try:
+                table.SetColumnSize(index, block_w / columns)
+            except Exception as error:  # noqa: BLE001
+                problems.append(f"column {index} size: {str(error).splitlines()[0][:50]}")
+        for index, share in enumerate((0.26, 0.185, 0.185, 0.185, 0.185), start=1):
+            try:
+                table.SetRowSize(index, block_h * share)
+            except Exception as error:  # noqa: BLE001
+                problems.append(f"row {index} size: {str(error).splitlines()[0][:50]}")
+
+        merges = (
+            (1, 1, 1, 5), (1, 6, 1, 3),
+            (2, 1, 1, 2), (2, 3, 1, 2), (2, 5, 1, 2), (2, 7, 1, 2),
+            (3, 1, 1, 2), (3, 3, 1, 2), (3, 5, 1, 2), (3, 7, 1, 2),
+            (4, 1, 1, 2), (4, 3, 1, 2), (4, 5, 1, 2), (4, 7, 1, 2),
+            (5, 1, 1, 8),
+        )
+        for merge in merges:
+            try:
+                table.MergeCells(*merge)
+            except Exception as error:  # noqa: BLE001
+                problems.append(f"merge {merge}: {str(error).splitlines()[0][:50]}")
+
+        cells = {
+            (1, 1): str(block.get("title") or ""),
+            (1, 6): str(block.get("drawing_number") or ""),
+            (2, 1): "MATERIAL", (2, 3): str(block.get("material") or ""),
+            (2, 5): "SCALE", (2, 7): str(block.get("scale") or ""),
+            (3, 1): "DRAWN", (3, 3): str(block.get("drawn_by") or ""),
+            (3, 5): "DATE", (3, 7): str(block.get("date") or ""),
+            (4, 1): "CHECKED", (4, 3): str(block.get("checked_by") or ""),
+            (4, 5): "SHEET", (4, 7): str(block.get("sheet") or ""),
+            (5, 1): str(block.get("footer") or ""),
+        }
+        filled = 0
+        for (row, column), value in cells.items():
+            try:
+                table.SetCellString(row, column, value)
+                if value:
+                    filled += 1
+            except Exception as error:  # noqa: BLE001
+                problems.append(
+                    f"cell {row},{column}: {str(error).splitlines()[0][:50]}")
+
+        for row, column, align in ((1, 1, 1), (1, 6, 1), (5, 1, 0)):
+            try:
+                table.SetCellAlignment(row, column, align)
+            except Exception as error:  # noqa: BLE001
+                problems.append(
+                    f"alignment {row},{column}: {str(error).splitlines()[0][:50]}")
+
+        title = cells[(1, 1)]
+        if title:
+            try:
+                text_object = table.GetCellObject(1, 1)
+                text_object.SetFontSize(1, len(title), 5.0)
+            except Exception as error:  # noqa: BLE001
+                problems.append(f"title font: {str(error).splitlines()[0][:50]}")
+
+        notes = [str(line) for line in (args.get("notes") or []) if str(line)]
+        note_top = y0 + block_h + 6.0
+        for offset, line in enumerate(notes):
+            try:
+                note = background.Texts.Add(line, x0 + 5.0, note_top - offset * 5.0)
+                note.AnchorPosition = 3          # catBottomLeft
+                note.SetFontSize(1, len(line), 3.5)
+            except Exception as error:  # noqa: BLE001
+                problems.append(f"note {offset + 1}: {str(error).splitlines()[0][:50]}")
+
+        self.conn.refresh_display()
+        try:
+            elements = background.GeometricElements.Count
+        except Exception:  # noqa: BLE001
+            elements = -1
+        note = ""
+        if problems:
+            note = (" NOT EVERYTHING TOOK: " + "; ".join(problems[:6])
+                    + (f" (+{len(problems) - 6} more)" if len(problems) > 6 else ""))
+        return (
+            f"Frame drawn on sheet '{sheet.Name}' ({self._sheet_summary(state)}): "
+            f"{lines} border line(s) at {margin_left:g}/{margin:g} mm margins, "
+            f"title block {block_w:g} x {block_h:g} mm at ({bx:g}, {by:g}) with "
+            f"{rows} x {columns} cells, {filled} filled, {len(notes)} note line(s). "
+            f"Background view now holds {elements} element(s). "
+            f"Drawing area is x {x0:g}..{x1:g}, y {y0:g}..{y1:g} mm - views placed "
+            "outside it land on the border (this tool does not move views)."
+            + note
         )
 
     def _find_part_document(self, part_name: str | None) -> Any:

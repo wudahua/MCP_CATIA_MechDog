@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.64** · [what changed](CHANGELOG.md) ·
+**0.3.65** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -12,7 +12,7 @@ defects that make that loop lie to you. Most of the work since 0.3.0 came from
 people rebuilding real assemblies with it: the changelog is a list of things that
 produced a plausible number, a wrong number, or no explanation at all.
 
-**125 tools** (upstream 98 + 27 added, and nothing dropped any more: knowledge
+**127 tools** (upstream 98 + 29 added, and nothing dropped any more: knowledge
 came back in 0.3.63 and drafting in 0.3.64, each after its tools were measured on
 B30 rather than trusted). Nothing in the COM layer was rewritten — the value of upstream is
 the field-verified knowledge in its comments, so this fork is strictly add /
@@ -69,9 +69,10 @@ two - `catia_delete_body`, `catia_solid_loft`; 0.3.19: one - `catia_copy_compone
 0.3.51: one - `catia_check_surface`; 0.3.53: one - `catia_gsd_boundary`; 0.3.55: one - `catia_gsd_heal`; 0.3.56: two -
 `catia_gsd_fillet_surface`, `catia_gsd_spine`; 0.3.60: two -
 `catia_gsd_rotate`, `catia_gsd_translate`).
-98 + 27 added = 125, where the 27th is `catia_apply_design_table` under
-Knowledgeware below and the 26 before it are listed above. 0.3.20 added
-arguments instead of tools: a sketch support given as `origin`/`u`/`v`, edges given as coordinates,
+98 + 29 added = 127, where the 27th is `catia_apply_design_table` under
+Knowledgeware below, and 0.3.65 added `catia_drawing_set_sheet` and
+`catia_drawing_add_frame` under Drafting. 0.3.20 added arguments instead of
+tools: a sketch support given as `origin`/`u`/`v`, edges given as coordinates,
 arcs given as their two endpoints, and one plan per several documents.
 
 | Tool | What it gives you |
@@ -1120,7 +1121,7 @@ while a reply that only reports success cannot.
 | Measurement | 7 | inertia, distance, bounding box\*, parameters, `catia_check_surface` |
 | Export | 4 | STEP / STL / IGES hand-off |
 | Knowledge | 6 | parameters, formulas, relations, design tables - upstream's five, measured and corrected, plus `catia_apply_design_table` |
-| Drawing | 11 | upstream's drafting module, measured: new drawing, generative view (plane / face / body), projection, section, detail, text, table, generated and manual dimensions |
+| Drawing | 13 | upstream's drafting module, measured, plus `catia_drawing_set_sheet` and `catia_drawing_add_frame`: new drawing, generative view (plane / face / body), projection, section, detail, text, table, generated and manual dimensions, paper size, border and title block |
 | Planner | **2** | `run_plan`, `measure_topology` |
 | Diagnostics | 1 | `catia_diagnose` |
 
@@ -1144,7 +1145,7 @@ a 20 mm parameter to 30000 mm; `30mm` and `0.03m` both gave 30. Both the create
 and the apply reply say so, because the alternative is a part 1000x too large
 with a success message.
 
-#### Drafting (11 tools, 0.3.64)
+#### Drafting (13 tools, 0.3.64-0.3.65)
 
 Upstream's module, ported only after all eleven tools were run on B30. Four things
 did not survive the measurement, so this is a rewrite of those paths:
@@ -1161,12 +1162,31 @@ did not survive the measurement, so this is a rewrite of those paths:
 | `catia_drawing_list_dimensions` | Values, type codes, basic_2d vs 3d_driven | — |
 | `catia_drawing_list_view_geometry` | Indexed 2D elements of a view | Index 1 is the view's **absolute axis** - the same trap as a sketch |
 | `catia_drawing_add_dimension` | A dimension on hand-drawn 2D geometry | Index 1 reached `Dimensions.Add` and CATIA answered a bare `方法 Add 失败`; a pairing the geometry cannot carry (a horizontal line with a vertical one) was forwarded as that same error |
+| `catia_drawing_set_sheet` (0.3.65) | A0-A4, landscape/portrait, sheet scale; replies with the size CATIA reports | Paper on a new sheet is `catPaperUser` (13) and `GetPaperWidth` raises until a real size is set; the ANSI names in the enum are refused by CATIA |
+| `catia_drawing_add_frame` (0.3.65) | ISO border (20 mm filing margin) + an 8x5 title-block table with merged fields, plus notes above it | New: upstream stops at "frame/title-block generators are the next step". `Tables.Add` anchors the TOP-left and grows down - the first version put the block below the sheet |
 
 Two limits worth knowing before drawing: a **generative view cannot be**
 hand-dimensioned at all - its curves are not addressable through automation, only
 `GenerateDimensions` reaches them - and **`Face.N` is session-scoped**. The same
 plate gave its hole's cylinder at `Face.1` in one build and at `Face.7` in another,
 so list faces and use the index immediately.
+
+**0.3.65 added the frame** (`catia_drawing_set_sheet`, `catia_drawing_add_frame`).
+Three things had to be measured rather than assumed:
+
+| What | What CATIA actually does |
+|---|---|
+| A new drawing's paper | It is `catPaperUser` (13), not A3 - an oversized custom sheet. `GetPaperWidth` **raises** until a real ISO size is set, so a frame drawn first lands on an unmeasured page |
+| Paper values | `CatPaperSize` names Letter/Legal/A..F too, and **every one of them raises** on this install (values 0, 1, 7-12). Only A0=2 … A4=6 and User=13 write. `bestfit` orientation is accepted and silently becomes landscape |
+| `Tables.Add(x, y)` | Anchors the **TOP**-left corner and grows **downward**. Passing the bottom margin drew the whole title block below the sheet and still printed a position |
+
+The title block is a real table - 8 columns × 5 rows merged into title /
+drawing number / material / scale / drawn / date / checked / sheet / footer - so
+it stays editable in CATIA: `SetCellString`, `SetCellAlignment`, `MergeCells`,
+`SetRowSize` all confirmed. Border margins are ISO 5457 (20 mm filing margin,
+10 mm elsewhere). **Zone markings and the ISO corner grid are not drawn**, and
+the tool does not move views - it reports the drawing area (`x 20..410`) so the
+caller can place them; one view landed on the border when it was not.
 
 \* `catia_get_bounding_box` measures two ways, and `auto` takes the STL mesh:
 exact on planar-faced solids, a **lower bound ~0.5-0.7 % small** on curved ones.

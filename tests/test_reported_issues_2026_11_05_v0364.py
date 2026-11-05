@@ -446,10 +446,11 @@ def test_third_angle_puts_the_right_view_on_the_right():
 # ── the module itself ───────────────────────────────────────────────────────
 
 
-def test_all_eleven_tools_are_declared_once():
+def test_every_drafting_tool_is_declared_once():
     tools = DraftingTools(_Conn())
     names = [d["name"] for d in tools.get_tool_definitions()]
-    assert len(names) == len(set(names)) == 11
+    # 11 ported from upstream in 0.3.64, plus set_sheet and add_frame in 0.3.65.
+    assert len(names) == len(set(names)) == 13
     assert "catia_drawing_generate_dimensions" in names
 
 
