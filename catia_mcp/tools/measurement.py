@@ -361,7 +361,9 @@ def _fold_stats(path: str, crease_deg: float, cap: int,
         stats["region_note"] = (
             f"fold figures cover the {len(folds)} interior edge(s) whose midpoint "
             f"falls inside the region; {outside} edge(s) outside it were not "
-            f"counted. boundary_edges and non_manifold_edges are still whole-mesh."
+            f"counted. boundary_edges and non_manifold_edges are still whole-mesh "
+            f"- the same rule excluded.ambiguous_edges applies, except that one "
+            f"only looks inside the region, so it can report fewer."
         )
     return stats
 
@@ -1874,7 +1876,10 @@ class MeasurementTools:
                     "radius' with a 'widen that feature' attached where no feature "
                     "existed (reported 2026-11-04, at an open border the split was "
                     "about to cut away). Edges shared by more than two triangles "
-                    "are counted as excluded.ambiguous_edges for the same reason. "
+                    "are counted as excluded.ambiguous_edges for the same reason - "
+                    "these are the edges this same report lists as "
+                    "non_manifold_edges, counted in the curvature pass only inside "
+                    "'region' when one is given, so the two numbers can differ. "
                     "tightest_edges[*].at_open_border marks a real reading whose "
                     "edge ends on a border, and excluded.open_boundary_edges says "
                     "how many borders the mesh has. "
@@ -4738,7 +4743,9 @@ class MeasurementTools:
             report["non_manifold_note"] = (
                 f"{stats['non_manifold_edges']} edge(s) are shared by more than "
                 "two triangles, which in an exported mesh usually means two "
-                "overlapping pieces of geometry rather than a modelling fault.")
+                "overlapping pieces of geometry rather than a modelling fault. "
+                "excluded.ambiguous_edges below counts the same rule but only "
+                "inside 'region', so it can be smaller than this number.")
         if stats["triangles"] >= cap:
             report["warnings"] = [
                 f"the mesh was larger than the {cap} triangle cap and only the "

@@ -17,53 +17,53 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
+def _import_sweep():
+    """Import every module under catia_mcp.tools; returns how many there were.
+
+    0.3.67: the list is DISCOVERED, not written out. It used to name nine
+    modules; knowledge.py (0.3.63) and drawing.py (0.3.64) were never added,
+    so nineteen tools were registered by the server and checked by nothing
+    here. A new file in that package is now imported and scanned the moment it
+    exists.
+    """
+    import importlib
+    import pkgutil
+
+    import catia_mcp.tools as package
+
+    names = sorted(info.name for info in pkgutil.iter_modules(package.__path__)
+                   if not info.name.startswith("_"))
+    for name in names:
+        importlib.import_module(f"{package.__name__}.{name}")
+    print(f"  All {len(names)} modules imported: {', '.join(names)}")
+    return len(names)
+
+
 def test_imports():
-    """Test that all modules import without errors."""
+    """Pytest entry point; the work happens in _import_sweep."""
     print("Testing imports...")
-    from catia_mcp.connection import CATIAConnection
-    from catia_mcp.tools.document import DocumentTools
-    from catia_mcp.tools.sketcher import SketcherTools
-    from catia_mcp.tools.part_design import PartDesignTools
-    from catia_mcp.tools.diagnostics import DiagnosticsTools
-    from catia_mcp.tools.gsd import GSDTools
-    from catia_mcp.tools.assembly import AssemblyTools
-    from catia_mcp.tools.planner import PlannerTools
-    from catia_mcp.tools.measurement import MeasurementTools
-    from catia_mcp.tools.export import ExportTools
-    print("  All modules imported successfully")
+    assert _import_sweep() >= 11
 
 
-def _collect_tool_definitions():
-    """Validate every module's tool definitions; returns the total count."""
+def _collect_tool_definitions(server=None):
+    """Validate every tool the SERVER registers; returns the total count.
+
+    0.3.67: the module list is the server's own ``_tool_modules`` - the same
+    list ``_tool_router`` is built from. A copy kept here is exactly how this
+    check came to validate 108 tools while the router served 127, and how
+    ``python tests/test_server.py`` exited 1 while ``pytest tests`` stayed
+    green: the equality assert lived only in main().
+    """
     print("Testing tool definitions...")
-    from catia_mcp.connection import CATIAConnection
-    from catia_mcp.tools.document import DocumentTools
-    from catia_mcp.tools.sketcher import SketcherTools
-    from catia_mcp.tools.part_design import PartDesignTools
-    from catia_mcp.tools.diagnostics import DiagnosticsTools
-    from catia_mcp.tools.gsd import GSDTools
-    from catia_mcp.tools.assembly import AssemblyTools
-    from catia_mcp.tools.planner import PlannerTools
-    from catia_mcp.tools.measurement import MeasurementTools
-    from catia_mcp.tools.export import ExportTools
+    from catia_mcp.server import CATIAMCPServer
 
-    conn = CATIAConnection()
-    modules = {
-        "Document": DocumentTools(conn),
-        "Sketcher": SketcherTools(conn),
-        "Part Design": PartDesignTools(conn),
-        "GSD": GSDTools(conn),
-        "Diagnostics": DiagnosticsTools(conn),
-        "Assembly": AssemblyTools(conn),
-        "Measurement": MeasurementTools(conn),
-        "Export": ExportTools(conn),
-        "Planner": PlannerTools(conn),
-    }
+    server = server or CATIAMCPServer()
 
     total_tools = 0
     all_tool_names = set()
 
-    for module_name, module in modules.items():
+    for module in server._tool_modules:
+        module_name = type(module).__name__.removesuffix("Tools")
         tools = module.get_tool_definitions()
         print(f"  {module_name}: {len(tools)} tools")
 
@@ -100,11 +100,12 @@ def test_tool_definitions():
     assert _collect_tool_definitions() > 0
 
 
-def _collect_server_creation():
+def _collect_server_creation(server=None):
     """Create the server without running it; returns the router size."""
     print("Testing server creation...")
     from catia_mcp.server import CATIAMCPServer
-    server = CATIAMCPServer()
+
+    server = server or CATIAMCPServer()
     tool_count = len(server._tool_router)
     print(f"  Server created with {tool_count} tools in router")
     return tool_count
@@ -113,6 +114,36 @@ def _collect_server_creation():
 def test_server_creation():
     """Pytest entry point; the work happens in _collect_server_creation."""
     assert _collect_server_creation() > 0
+
+
+def _check_tools_match_router(server=None):
+    """One server, both numbers, one assertion - shared by main() and pytest.
+
+    The equality check used to exist only in ``main()``, which is why
+    ``python tests/test_server.py`` exited 1 on 0.3.66 while
+    ``python -m pytest tests -q`` reported 1100 passed: two commands, two
+    answers, and the one with the strong assertion was not the one in CI.
+    """
+    from catia_mcp.server import CATIAMCPServer
+
+    server = server or CATIAMCPServer()
+    defined = _collect_tool_definitions(server)
+    defined_names = {tool["name"] for module in server._tool_modules
+                     for tool in module.get_tool_definitions()}
+    assert defined_names == set(server._tool_router), (
+        "the router holds tools no module defines, or the reverse: "
+        f"{sorted(defined_names ^ set(server._tool_router))}"
+    )
+    routed = _collect_server_creation(server)
+    assert defined == routed, (
+        f"Mismatch: {defined} tools defined but {routed} in router"
+    )
+    return defined
+
+
+def test_tool_definitions_match_the_router():
+    """The equality check main() always did, now collected by pytest."""
+    assert _check_tools_match_router() > 0
 
 
 def main():
@@ -125,15 +156,8 @@ def main():
         test_imports()
         print()
 
-        total_tools = _collect_tool_definitions()
+        total_tools = _check_tools_match_router()
         print()
-
-        router_count = _collect_server_creation()
-        print()
-
-        assert total_tools == router_count, (
-            f"Mismatch: {total_tools} tools defined but {router_count} in router"
-        )
 
         print("=" * 60)
         print(f"ALL TESTS PASSED — {total_tools} tools ready")

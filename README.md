@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.66** · [what changed](CHANGELOG.md) ·
+**0.3.67** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -932,7 +932,16 @@ python -m venv .venv
 
 # offline test suite, no CATIA needed
 .venv/Scripts/python -m pytest tests -q
+
+# the smoke check: 127 tool definitions == 127 routes
+.venv/Scripts/python tests/test_server.py
 ```
+
+Both commands run the same equality assert since 0.3.67. Until then the smoke
+script kept its own list of nine modules and reported "108 tools defined but 127
+in router" while `pytest` stayed green — the strong check was the one CI never
+ran. The scan now reads the server's own module list, so a new module is
+covered the moment it is registered (`tests/test_reported_issues_2026_11_05_v0367.py`).
 
 > **Do not install this into the same virtualenv as upstream.** Both provide the
 > `catia_mcp` import package, so one silently shadows the other.

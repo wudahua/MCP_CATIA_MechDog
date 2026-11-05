@@ -3,7 +3,11 @@
 上游：[daiemon12/catia-v5-mcp-server](https://github.com/daiemon12/catia-v5-mcp-server)（MIT，作者 Adam M'HAMDI）
 本 fork 保留上游全部 COM 现场知识，砍掉与实体建模无关的模块，补上"建模—验收"闭环最缺的四件事。
 
-**工具数：98 → 96**（−11 绘图、−5 知识工程，+14 新增：fork 原创 5 个、0.3.1 加 3 个、0.3.2 加 4 个、0.3.4 加 1 个、0.3.5 加 1 个）
+**工具数：上游 98 → 本 fork 127**（当前值以 README 顶部为准；工具名逐条见 README 的工具表）
+
+历史上先砍掉上游的绘图 11 个与知识工程 5 个、再补 14 个建模缺口；0.3.63–0.3.65 又把砍掉的两块
+取回并逐项实测修正——知识工程 6 个（多出的一个是上游没有的"切换设计表配置"）、绘图 13 个
+（多出的两个是上游写成"下一步"的图框/标题栏）。所以 96 这个数字属于 0.3.5，早已不成立。
 
 ---
 
@@ -198,9 +202,14 @@ python -m venv .venv
 跑测试（不需要 CATIA，纯离线）：
 
 ```bash
-.venv/Scripts/python -m pytest tests/test_planner_assertions.py tests/test_server_runtime.py -q
-# 72 passed
+.venv/Scripts/python -m pytest tests -q      # 全量
+.venv/Scripts/python tests/test_server.py    # 冒烟：工具定义数 == 路由数，127/127
 ```
+
+这里刻意不写"多少 passed"：写死的数字过时过两次（"72 passed" 是 0.3.5 的，
+到 0.3.66 只剩 31），以命令输出为准。冒烟脚本在 0.3.66 曾因漏检 knowledge/drawing
+的 19 个工具而退出码 1（108 对 127），0.3.67 改成从服务器自己的模块清单取全量，
+并让 pytest 也跑同一个等号断言。
 
 MCP 客户端配置：
 

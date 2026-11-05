@@ -2,6 +2,72 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.67] — 2026-11-05 · the smoke script checked 108 of 127, and said so only outside CI
+
+Reported 2026-11-05 (B32, v0.3.66), P1. Two commands, two answers:
+
+```
+python tests/test_server.py   -> "Mismatch: 108 tools defined but 127 in router", exit 1
+pytest tests/test_server.py   -> 3 passed
+```
+
+Both were right. `test_imports()` and `_collect_tool_definitions()` each held a
+**hand-written list of nine modules**; `knowledge.py` (0.3.63, 6 tools) and
+`drawing.py` (0.3.64, 13 tools) were registered by the server and validated by
+nothing. Nineteen tools had never been through the name/description/
+`inputSchema.type`/duplicate/prefix assertions — 15 % of the guard's nominal
+coverage, and neither `pytest` nor CI would have noticed a bad schema in them.
+The equality assert lived only in `main()`, so the strong check was the one
+CI does not run — the same "one command, one number" failure 0.3.53 fixed,
+reappearing at the module dimension.
+
+**All three fixes, not just the one that turns the light green**
+
+- **Root cause**: `_collect_tool_definitions()` now walks `server._tool_modules`
+  — the same list `_tool_router` is built from. A module added to the server can
+  no longer be missing from the scan, because there is no second list to forget.
+- **Imports**: `_import_sweep()` discovers every `.py` under `catia_mcp.tools`
+  with `pkgutil.iter_modules`, instead of importing nine names.
+- **Recurrence**: `_check_tools_match_router()` is one function used by both
+  `main()` and the new `test_tool_definitions_match_the_router`, so
+  `python -m pytest tests -q` now runs the equality assert too. `tests/
+  test_reported_issues_2026_11_05_v0367.py` pins the fix from the side that
+  keeps it fixed: fake servers with a missing description, a non-object schema,
+  a duplicate name, a missing prefix, a ghost tool in the router and a tool
+  missing from it. A test that only counted 127 would pass again the day
+  someone pastes a new list in.
+
+Verified after the fix: `ALL TESTS PASSED — 127 tools ready`, exit 0, and the
+scan now prints Knowledge: 6 / Drafting: 13 alongside the other nine.
+
+**P3 — a document about stale numbers whose own numbers were stale.**
+`docs/upstream-diff.md` said "currently 108 tools, 951 test functions / 1020
+collected" (0.3.62 figures) and told readers to update `FORK.md`, whose
+"98 → 96" and "# 72 passed" were 0.3.5-era. Both updated. The FORK.md test
+command now runs the full suite and **deliberately states no passed count** —
+a hard-coded number has been wrong twice, so the third time it is not written.
+The count was 72 → 31 over five releases, which is exactly how a stale number
+stops being harmless.
+
+**The two suggestions from the 0.3.60 report, open for three releases**
+
+- *Is copy-mode explicit?* It is: both `HybridShapeRotate` and
+  `HybridShapeTranslate` expose `SetCreationMode` / `GetCreationMode`. Measured
+  on B30 2026-11-05, one part per condition: a fresh rotate reads mode 1,
+  `SetCreationMode(0)` reads back as **2**, modes 1 and 2 read back as 1, and
+  in every case the source line is still in the geometrical set
+  (`scripts/b30_v0367_creation_mode.py`, `..._translate.py`). So no mode
+  consumes the original and **nothing is set**: hard-coding a value whose enum
+  the type library does not name would be inventing a constant. The finding is
+  in both tool descriptions with its date, so it is not re-investigated a
+  fourth time.
+- *Two names for one count.* `non_manifold_edges` (whole mesh) and
+  `excluded.ambiguous_edges` (curvature pass, region-limited) are one rule at
+  two scopes. They now point at each other in the `catia_check_surface`
+  description and in the report's `non_manifold_note` / `region_note`.
+
+1113 tests, 127 tools.
+
 ## [0.3.66] — 2026-11-05 · the sheet furniture speaks Chinese by default
 
 The user asked why their drawing came out covered in English. Nothing about that
