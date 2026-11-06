@@ -2,6 +2,54 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.70] — 2026-11-06 · the core layer, where a bug looked like a COM failure
+
+0.3.69 emptied `catia_mcp/tools/`: 169 sites, every one with a code. The same
+scan over `catia_mcp/` — the package, not just its tools — still found **eleven**,
+and they were the ones a caller is least able to interpret:
+
+| Site | Was | Now |
+|---|---|---|
+| `server.__init__` duplicate tool | `ValueError` | `INTERNAL_ERROR` / `internal` |
+| `guard.run` unknown operation | `ValueError` | same |
+| `regime.describe` invented route | `ValueError` | same |
+| `topo_search._enumerate_cells` "unreachable" | `RuntimeError` | same |
+| `arguments.alias_properties` no names | `ValueError` | same |
+| `connection.connect` no pywin32 | `RuntimeError` | `DEPENDENCY_MISSING` / `connect` |
+| `connection._interface` no Part behind the document | `RuntimeError` | `PRECONDITION_FAILED` / `validate` |
+| `topo_search.topology_reference(s)` no solid shape | `RuntimeError` | `PRECONDITION_FAILED` / `validate` |
+| `dialogs.save_as` / `dialogs.save` after 6 attempts | `RuntimeError` | `SAVE_FAILED` / `execute` |
+
+**A fourth stage, `internal`.** "Duplicate tool: X" is not an argument the caller
+got wrong and it is not CATIA refusing anything — it is this package
+contradicting its own tables, and telling the caller to inspect the model for it
+is worse than useless. `server._execute_tool` treats `internal` like `connect`
+and `validate`: `modified:false`, no `recovery` block, and the next action is
+"report the tool and this message".
+
+Two of the eleven were not defects at all. "The active document exposes no
+'Part'" and "the active body has no solid shape yet" are **states**, and a state
+is fixed by opening or building something — not by changing an argument, and not
+by reading a COM error. They are `PreconditionRejected` now, the class 0.3.69
+added for exactly this.
+
+**The guard covers the package now.** `scan_bare_raises()` walks
+`catia_mcp/**.py` instead of `catia_mcp/tools/*.py`, so the next core-layer
+`raise RuntimeError` fails CI the same way a tool's would. Zero left.
+
+`InternalError` subclasses `ValueError` like the other refusals, because
+`guard.run("format_hard_disk")` and `describe(route="probe")` have been asserted
+with `pytest.raises(ValueError)` for several releases, and an operation name that
+is not in the table IS a value problem — just one only this package can cause.
+
+B30, `scripts/b30_v0370_core_envelopes.py`, 20/20: `catia_list_components` on a
+Part answers `PRECONDITION_FAILED` / `validate` / `modified:false`; `catia_pad`
+with a drawing active answers the same about the missing Part; an injected
+internal defect answers `INTERNAL_ERROR` / `internal` with no recovery block; and
+a 40 × 20 × 8 pad still builds at 6400.0 mm³.
+
+1146 tests, 127 tools.
+
 ## [0.3.69] — 2026-11-06 · every refusal has a code, and the register is gone
 
 0.3.68 converted twenty raise sites and registered the other 81 in

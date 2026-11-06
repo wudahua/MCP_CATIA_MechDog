@@ -45,6 +45,7 @@ same scope; a different scope gets a sentence saying so instead of a number.
 from __future__ import annotations
 
 from typing import Any
+from catia_mcp.results import InternalError
 
 #: The keys every measuring route publishes, empty ones included. The matrix
 #: test asserts exactly this set, so a new route cannot ship half of it.
@@ -218,7 +219,7 @@ class SessionBooks:
         footnote in a field of its own.
         """
         if route not in KNOWN_ROUTES:
-            raise ValueError(
+            raise InternalError(
                 f"route={route!r} is not one of the {len(KNOWN_ROUTES)} measuring "
                 f"routes this server publishes ({', '.join(sorted(KNOWN_ROUTES))}). "
                 "Adding a route means adding it to KNOWN_ROUTES here AND giving it "

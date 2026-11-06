@@ -19,6 +19,7 @@ read it - `_pick(arguments, *ELEMENT1_NAMES)` and
 from __future__ import annotations
 
 from typing import Any
+from catia_mcp.results import InternalError
 
 # The first name is the one the schema's `required` list and every document use;
 # the rest are spellings callers have used since before the schemas agreed.
@@ -36,7 +37,7 @@ def alias_properties(names: tuple[str, ...], *,
     no explanation reads like a second, different argument.
     """
     if not names:
-        raise ValueError("alias_properties needs at least one name")
+        raise InternalError("alias_properties needs at least one name")
     primary, *rest = names
     properties: dict[str, Any] = {
         primary: {"type": "string", "description": description or role},

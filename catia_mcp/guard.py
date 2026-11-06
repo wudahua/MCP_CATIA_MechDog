@@ -46,6 +46,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from catia_mcp.results import InternalError
 #: Operations the child process knows how to run. Kept small on purpose: every
 #: entry is a call whose failure mode is "a dialog nobody can answer".
 OPS = ("add_components", "ping")
@@ -109,7 +110,7 @@ def run(op: str, payload: dict[str, Any], seconds: float | None = None) -> Guard
     Never raises for a CATIA problem: the caller decides what a timeout means.
     """
     if op not in OPS:
-        raise ValueError(f"Unknown guarded operation: {op}")
+        raise InternalError(f"Unknown guarded operation: {op}")
     limit = timeout() if seconds is None else seconds
     folder = tempfile.mkdtemp(prefix="catia_guard_")
     args_path = os.path.join(folder, "args.json")

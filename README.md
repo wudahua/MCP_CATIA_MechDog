@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.69** · [what changed](CHANGELOG.md) ·
+**0.3.70** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1179,6 +1179,22 @@ hand-dimensioned at all - its curves are not addressable through automation, onl
 `GenerateDimensions` reaches them - and **`Face.N` is session-scoped**. The same
 plate gave its hole's cylinder at `Face.1` in one build and at `Face.7` in another,
 so list faces and use the index immediately.
+
+**0.3.70 finished it in the core layer.** The same scan over the package rather
+than its tools directory found eleven more, and they were the ones a caller can
+do nothing with: "Duplicate tool: X", "unknown guarded operation", "route= is not
+one of the 7 measuring routes", the "unreachable" branch of the topology
+enumerator. Reported as `COM_ERROR` they send someone to inspect a model for a bug
+that lives here. They carry `INTERNAL_ERROR` and a fourth stage, `internal`, whose
+next action is "report the tool and this message" - no recovery block, because
+there is nothing to repair.
+
+Two more were states, not failures: "the active document exposes no 'Part'" and
+"the active body has no solid shape yet" are `PRECONDITION_FAILED`, and
+`dialogs.save_as`/`save` — six attempts around a modal dialog, then a real failure
+— is `SAVE_FAILED` at the execute stage. The structural guard now walks
+`catia_mcp/**`, so a core-layer `raise RuntimeError` fails CI the way a tool's
+does. Zero left.
 
 **0.3.69 finished that sweep: 169 raise sites, no register left.** 0.3.68
 converted twenty and registered the other 81 in a JSON baseline; 0.3.69

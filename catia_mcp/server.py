@@ -20,6 +20,7 @@ from catia_mcp import __version__
 from catia_mcp.connection import CATIAConnection
 from catia_mcp.results import (
     NO_RECOVERY,
+    InternalError,
     failure_code,
     is_read_only,
     operation_result,
@@ -134,7 +135,7 @@ class CATIAMCPServer:
             for definition in module.get_tool_definitions():
                 name = definition["name"]
                 if name in self._tool_router:
-                    raise ValueError(f"Duplicate tool: {name}")
+                    raise InternalError(f"Duplicate tool: {name}")
                 self._tool_router[name] = module
                 self._schemas[name] = definition["inputSchema"]
         # The planner dispatches sub-steps through this same router, so it can
@@ -364,11 +365,18 @@ class CATIAMCPServer:
             # the ARGUMENT and there is no model state to repair, because none
             # was touched. Its next_actions still survive - operation_result
             # moves them into data when the block is suppressed.
-            modified = False if (read_only or stage in {"connect", "validate"}) else \
+            #
+            # 0.3.70 adds "internal": a bug in this package ("Duplicate tool",
+            # "unknown guarded operation", "unreachable") also wrote nothing, and
+            # telling the caller to inspect the model for it is worse than
+            # useless. Two names, one meaning: CATIA was not asked to change
+            # anything, so `modified` is a known no.
+            silent = stage in {"connect", "validate", "internal"}
+            modified = False if (read_only or silent) else \
                 getattr(error, "modified", None)
             return failure(code, message, stage, modified, name,
                            rolled_back=getattr(error, "rolled_back", None),
-                           recovery=NO_RECOVERY if (read_only or stage == "validate") else None,
+                           recovery=NO_RECOVERY if (read_only or silent) else None,
                            next_actions=getattr(error, "next_actions", None),
                            data_extra=getattr(error, "data", None))
 

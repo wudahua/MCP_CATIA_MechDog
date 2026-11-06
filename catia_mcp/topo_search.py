@@ -22,7 +22,8 @@ from __future__ import annotations
 
 import re
 from typing import Any, NamedTuple
-from catia_mcp.results import ArgumentOutOfRange
+from catia_mcp.results import ArgumentOutOfRange, PreconditionRejected
+from catia_mcp.results import InternalError
 
 # Verified localized type names (Simplified Chinese CATIA V5).
 _LOCALIZED_TYPE_NAMES: dict[str, str] = {
@@ -279,7 +280,7 @@ def _enumerate_cells(conn: Any, body: Any, kind: str
                 "the call - the geometry is untouched."
             ) from error
         return cells, reasons, sel.Count, False
-    raise RuntimeError("unreachable")
+    raise InternalError("unreachable")
 
 
 def topology_reference(conn: Any, body: Any, kind: str, index: int,
@@ -306,7 +307,7 @@ def topology_reference(conn: Any, body: Any, kind: str, index: int,
     ``keep=False`` only when the reference is used for reading.
     """
     if body.Shapes.Count == 0:
-        raise RuntimeError("The active body has no solid shape yet.")
+        raise PreconditionRejected("The active body has no solid shape yet.")
     sel = conn.hso
     cells = topology_cells(conn, body, kind)
     count = len(cells)
@@ -342,7 +343,7 @@ def topology_references(conn: Any, body: Any, kind: str,
     if not indices:
         return []
     if body.Shapes.Count == 0:
-        raise RuntimeError("The active body has no solid shape yet.")
+        raise PreconditionRejected("The active body has no solid shape yet.")
     cells = topology_cells(conn, body, kind)
     out = []
     for index in indices:

@@ -30,7 +30,7 @@ import threading
 import time
 from ctypes import wintypes as _wt
 
-from catia_mcp.results import PathNotSupported
+from catia_mcp.results import CodedError, PathNotSupported
 
 YES_WORDS = ("是", "Yes", "确定", "OK", "&Yes", "&是(Y)", "是(Y)")
 NO_WORDS = ("否", "No", "&No", "否(N)", "&否(N)")
@@ -227,7 +227,17 @@ def save_as(doc, path: str, tries: int = 6, wait: float = 0.6) -> str:
             clicks = dismiss(rounds=2, wait=0.3)
             # A retry without a dismissed dialog is just a busy loop.
             time.sleep(wait if clicks else min(0.2 * (attempt + 1), 1.5))
-    raise RuntimeError(f"SaveAs failed after {tries} attempts: {target} ({last})")
+    raise CodedError(
+        f"SaveAs failed after {tries} attempts: {target} ({last})",
+        code="SAVE_FAILED",
+        stage="execute",
+        next_actions=[
+            "The file may be locked by another process or read-only; the document "
+            "is still open and unsaved. Close what holds it, then call "
+            "catia_save_as_copy again - whether a partial file exists was not "
+            "verified",
+        ],
+    )
 
 
 def save(doc, tries: int = 3) -> str:
@@ -243,4 +253,12 @@ def save(doc, tries: int = 3) -> str:
             last = error
             dismiss(rounds=2, wait=0.3)
             time.sleep(0.5)
-    raise RuntimeError(f"Save failed after {tries} attempts: {name} ({last})")
+    raise CodedError(
+        f"Save failed after {tries} attempts: {name} ({last})",
+        code="SAVE_FAILED",
+        stage="execute",
+        next_actions=[
+            "The document is still open and unsaved. A dialog may have blocked the "
+            "call; dismiss it and call catia_save_document again",
+        ],
+    )

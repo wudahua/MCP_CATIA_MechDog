@@ -175,6 +175,37 @@ class PreconditionRejected(CodedError, ValueError):
     ]
 
 
+class InternalError(CodedError, ValueError):
+    """The server contradicted its own tables - a defect, not a bad argument.
+
+    Added in 0.3.70 for the core layer, where the bare ``RuntimeError``s were
+    things a CALLER cannot cause and cannot fix: "Duplicate tool: X" at start-up,
+    "unknown guarded operation", "route= is not one of the routes this server
+    publishes", the "unreachable" branch of the topology enumerator. Reported as
+    ``COM_ERROR`` they read as "CATIA failed", which sends the caller looking at
+    the model for a bug that lives in this package.
+
+    ``stage="internal"`` - a fourth stage, because "validate" would claim the
+    argument was wrong and "execute" would claim CATIA was asked to do something.
+    Neither happened. ``server._execute_tool`` treats it like the other two: the
+    model was not written, so ``modified`` is false and there is no recovery
+    block to fill with model advice.
+
+    A ``ValueError`` as well, for the same reason the two refusals are: an
+    operation name or a route name that is not in the table IS a value problem,
+    just one only this package can cause - and ``guard.run("format_hard_disk")``
+    has been asserted with ``pytest.raises(ValueError)`` since 0.3.x.
+    """
+
+    code = "INTERNAL_ERROR"
+    modified = False
+    stage = "internal"
+    next_actions = [
+        "This is a defect in this server, not something to fix in the call: "
+        "report the tool and this message. Nothing was changed",
+    ]
+
+
 class PathNotSupported(CodedError):
     r"""The target path cannot work on this CATIA build, whatever the model is.
 

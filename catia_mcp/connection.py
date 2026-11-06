@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from catia_mcp.results import CodedError, PreconditionRejected
 
 logger = logging.getLogger("catia_mcp")
 
@@ -95,9 +96,16 @@ class CATIAConnection:
         Returns a status message string.
         """
         if not HAS_COM:
-            raise RuntimeError(
+            raise CodedError(
                 "pywin32 is not installed. Install it with: pip install pywin32\n"
-                "Note: This MCP server requires Windows with CATIA V5 installed."
+                "Note: This MCP server requires Windows with CATIA V5 installed.",
+                code="DEPENDENCY_MISSING",
+                stage="connect",
+                modified=False,
+                next_actions=[
+                    "pip install pywin32, then restart the server - no CATIA call "
+                    "was attempted and nothing was changed",
+                ],
             )
 
         if self.is_connected:
@@ -583,7 +591,7 @@ class CATIAConnection:
                 return getattr(candidate, name)
             except Exception:
                 continue
-        raise RuntimeError(
+        raise PreconditionRejected(
             f"Active document '{getattr(doc, 'Name', '?')}' exposes no '{name}'. "
             + (
                 "Open or create a Part document first."

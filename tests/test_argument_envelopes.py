@@ -40,6 +40,7 @@ from catia_mcp.server import CATIAMCPServer
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "catia_mcp" / "tools"
+PACKAGE = ROOT / "catia_mcp"
 
 
 # ── the scan: a bare raise outside an except block ──────────────────────────
@@ -100,9 +101,16 @@ class _Scan(ast.NodeVisitor):
 
 
 def scan_bare_raises() -> list[tuple[str, int, str, str]]:
-    """Every raise of a code-less exception that is NOT re-wrapping a failure."""
+    """Every raise of a code-less exception that is NOT re-wrapping a failure.
+
+    Whole package, not just `tools/`: 0.3.70 converted the eleven that lived in
+    connection.py, dialogs.py, guard.py, regime.py, server.py, arguments.py and
+    topo_search.py. Those answered COM_ERROR for things a caller cannot cause
+    ("Duplicate tool", "unknown guarded operation") or cannot fix by changing an
+    argument ("no Part document behind the active one").
+    """
     found: list[tuple[str, int, str, str]] = []
-    for path in sorted(TOOLS.glob("*.py")):
+    for path in sorted(PACKAGE.rglob("*.py")):
         scanner = _Scan(path.name)
         scanner.visit(ast.parse(path.read_text(encoding="utf-8")))
         found.extend(scanner.found)
