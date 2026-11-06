@@ -707,27 +707,45 @@ class AssemblyTools:
 
         done = 0
         last = ""
+        product = self._require_active_product()
+        # The names of the instances this call created, in order. The reply used
+        # to name only the LAST one, so a caller that had asked for six had to
+        # call catia_list_components to work out the {part_number, occurrence}
+        # pairs it could already have been told (reported 2026-11-06, P3-8).
+        instances: list[str] = []
         for index in range(1, count + 1):
             try:
                 last = self._add_component(file_path)
             except Exception as error:  # noqa: BLE001 - reported with the count
-                raise RuntimeError(
+                raise CodedError(
                     f"Inserted {done} of {count} instance(s) of "
                     f"'{os.path.basename(file_path)}', then instance {index} "
                     f"failed: {error}. The {done} that landed are untouched - "
                     "check catia_list_components before retrying, and note that "
                     "a retry of the full count would double the ones that already "
-                    "succeeded."
+                    "succeeded.",
+                    code="COMPONENT_NOT_ADDED",
+                    stage="execute",
+                    modified=True,
+                    next_actions=[
+                        f"Add the remaining {count - done} one at a time (count=1) "
+                        "after reading catia_list_components - the ones already "
+                        "inserted stay",
+                    ],
                 ) from error
             done += 1
-        product = self._require_active_product()
+            try:
+                instances.append(str(product.Products.Item(product.Products.Count).Name))
+            except Exception:  # noqa: BLE001 - the name is a convenience
+                pass
         try:
             total = int(product.Products.Count)
         except Exception:  # noqa: BLE001
             total = None
         holds = f"; the assembly now holds {total} component(s)" if total is not None else ""
+        listed = (f" Instances: {', '.join(instances)}." if instances else "")
         return (f"{done} instance(s) of '{os.path.basename(file_path)}' inserted"
-                f"{holds}. Each insert ran in its own isolated process, so a "
+                f"{holds}.{listed} Each insert ran in its own isolated process, so a "
                 "CATIA dialog could not block the session. Last: " + last)
 
     def _insert_blocked_hint(self, path: str) -> str:

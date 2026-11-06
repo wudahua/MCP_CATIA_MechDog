@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.70** · [what changed](CHANGELOG.md) ·
+**0.3.71** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1179,6 +1179,26 @@ hand-dimensioned at all - its curves are not addressable through automation, onl
 `GenerateDimensions` reaches them - and **`Face.N` is session-scoped**. The same
 plate gave its hole's cylinder at `Face.1` in one build and at `Face.7` in another,
 so list faces and use the index immediately.
+
+**0.3.71 closed the last two exemptions and fixed four replies that lied.** Nine
+lookups raised inside an `except` still answered `COM_ERROR` / `execute` /
+`modified:null` — including "No active document in CATIA", which is every tool
+call of a cold session — and seven `CodedError`s carried `DOCUMENT_NOT_FOUND` /
+`SKETCH_NOT_FOUND` at the execute stage for a typo. Both are validate now, and two
+static tests hold the line: `except`-block raises that print a list to choose from
+must carry a code, and no validate-family code may arrive without
+`stage="validate"`.
+
+The other four were replies stating a cause the code never measured: `seam_hint`
+was popped for a surface patch and added straight back two lines later (so a reply
+carried "cross_wall is NOT reported" beside "38 creases run THROUGH the wall");
+`catia_close_sketch` called a plate with a hole self-intersecting because it
+compared bounding boxes; a threaded hole that failed the update left a zombie
+feature behind and reported `modified:null`; and `document=` spent 790 ms
+computing, then explaining, a tensor that route cannot return (11 ms with one
+document open). Saving to a non-ASCII path no longer hides inside a successful
+reply — `catia_new_part` / `catia_new_product` raise `SAVE_FAILED` with
+`modified:true` instead of letting `catia_run_plan` mark the step done.
 
 **0.3.70 finished it in the core layer.** The same scan over the package rather
 than its tools directory found eleven more, and they were the ones a caller can

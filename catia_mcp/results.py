@@ -443,9 +443,30 @@ def operation_result(
         payload["data"] = {
             **payload["data"],
             "next_actions": actions,
+            # The subject of the advice has to match the reason, or the two
+            # fields contradict each other in one reply: `PreconditionRejected`
+            # ships "This is a state, not a typo" and this note called it "the
+            # ARGUMENT this call used" (reported 2026-11-06, P3).
             "next_actions_note": (
-                "there is no 'recovery' block to carry these: they are about the "
-                "ARGUMENT this call used, and nothing was written, so there is no "
-                "model state to repair"),
+                f"there is no 'recovery' block to carry these: they are about "
+                f"{_topic(code)}, and nothing was written, so there is no model "
+                f"state to repair"),
         }
     return payload
+
+
+def _topic(code: str) -> str:
+    """What the next actions are about, in the words the code itself uses."""
+    if code == "INTERNAL_ERROR":
+        return "a defect in this server (the call never reached CATIA)"
+    if code == "PRECONDITION_FAILED":
+        return "the STATE of the document, not a typo in an argument"
+    if code == "ARGUMENT_OUT_OF_RANGE":
+        return "an index that is not in the list this call just read"
+    if code.startswith("ARGUMENT") or code == "INVALID_ARGUMENT":
+        return "the ARGUMENT this call used"
+    if code.endswith("_NOT_FOUND") or code.endswith("_AMBIGUOUS"):
+        return "the NAME this call used"
+    if code == "UNKNOWN_ARGUMENT":
+        return "an argument this tool does not read"
+    return "the CALL itself, which CATIA did not act on"

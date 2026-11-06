@@ -36,7 +36,12 @@ import os
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
-from catia_mcp.results import ArgumentOutOfRange, ArgumentRejected, FeatureRejected
+from catia_mcp.results import (
+    ArgumentOutOfRange,
+    ArgumentRejected,
+    FeatureRejected,
+    PreconditionRejected,
+)
 
 _UNITS = {"length": "mm", "angle": "deg"}
 
@@ -503,7 +508,7 @@ class KnowledgeTools:
         try:
             relations.Item(name)
         except Exception:
-            raise RuntimeError(f"No relation named '{name}'. See catia_list_relations.")
+            raise ArgumentRejected(f"No relation named '{name}'. See catia_list_relations.")
         relations.Remove(name)
         part.Update()
         return f"Relation '{name}' deleted."
@@ -556,14 +561,14 @@ class KnowledgeTools:
         try:
             table = part.Relations.Item(name)
         except Exception as error:  # noqa: BLE001
-            raise RuntimeError(
+            raise ArgumentRejected(
                 f"No relation named '{name}'. See catia_list_relations; only a "
                 "design table can be applied."
             ) from error
         try:
             total = int(table.ConfigurationsNb)
         except Exception as error:  # noqa: BLE001
-            raise RuntimeError(
+            raise PreconditionRejected(
                 f"'{name}' does not report a configuration count, so it is probably "
                 f"not a design table ({str(error).splitlines()[0][:90]})."
             ) from error

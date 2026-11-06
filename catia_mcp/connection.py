@@ -181,7 +181,19 @@ class CATIAConnection:
         try:
             return self.app.ActiveDocument
         except Exception:
-            raise RuntimeError("No active document in CATIA. Create or open a document first.")
+            # The first step of a cold session: CATIA is running and no document
+            # is open. The message always said "create or open one first"; the
+            # envelope said COM_ERROR / execute / modified:null, which sends the
+            # caller looking for a model that does not exist (reported 2026-11-06,
+            # P2-A - every tool call in a fresh session looked like this).
+            raise PreconditionRejected(
+                "No active document in CATIA. Create or open a document first.",
+                next_actions=[
+                    "Call catia_new_part / catia_new_drawing / catia_new_product, "
+                    "or catia_open_document - no document was open, so nothing "
+                    "could have been read or changed",
+                ],
+            ) from None
 
     @property
     def active_window(self) -> Any:

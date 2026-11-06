@@ -302,14 +302,31 @@ def _sketches():
     return tools
 
 
-def test_two_overlapping_rectangles_are_reported():
+def test_two_partly_overlapping_rectangles_are_reported():
+    """Crossing loops have no valid profile; one inside the other does.
+
+    0.3.71: this test used 30x20 with a 25x15 rectangle centred inside it - which
+    is a plate with a rectangular hole, the most ordinary profile there is. It was
+    reported as a self-intersection and the pad built it correctly anyway
+    (reported 2026-11-06, after the same false positive on a rectangle with an
+    inscribed circle). Partial intersection is the defect; containment is a hole.
+    """
+    tools = _sketches()
+    tools._note_element("rectangle", x1=0, y1=0, x2=30, y2=20)
+    tools._note_element("rectangle", x1=20, y1=10, x2=50, y2=30)
+    warning = tools._loop_warning("Sketch.1")
+    assert "2 closed loops" in warning
+    assert "partially overlap" in warning
+    assert "600.0 mm2" in warning and "600.0 mm2" in warning
+
+
+def test_a_loop_inside_another_is_a_hole_not_a_self_intersection():
     tools = _sketches()
     tools._note_element("rectangle", x1=0, y1=0, x2=30, y2=20)
     tools._note_element("rectangle", x1=5, y1=5, x2=25, y2=15)
     warning = tools._loop_warning("Sketch.1")
-    assert "2 closed loops" in warning
-    assert "overlap" in warning
-    assert "600.0 mm2" in warning and "200.0 mm2" in warning
+    assert "WARNING" not in warning
+    assert "HOLE" in warning, "say what it is, or the caller will 'fix' a good sketch"
 
 
 def test_two_separate_rectangles_are_a_legitimate_profile():
@@ -348,12 +365,14 @@ def test_the_shell_reply_names_the_side_the_wall_grew_on():
 def test_tensor_reason_has_a_code():
     from catia_mcp.tools import measurement
 
-    # 0.3.37: still a code beside the sentence, but the code now comes from a
-    # decision ("is this part actually held by an assembly?") instead of being
-    # the constant `no_own_window` - which asserted "component of an open
-    # assembly" about parts no assembly referenced (reported 2026-10-28, §6.3).
+    # 0.3.71: the document= route does not attempt the tensor at all - it cannot
+    # return one by design (its own `tensor_partial_route.does_not_answer` says
+    # so), and the attempt plus its diagnosis cost 790 ms on a 3-document session
+    # (reported 2026-11-06). The code is a fact about the ROUTE now.
     source = inspect.getsource(measurement.MeasurementTools._part_inertia)
-    assert 'payload["tensor_reason_code"] = code' in source
+    assert 'payload["tensor_reason_code"] = "not_on_this_route"' in source
+    assert "_tensor_for" not in source
+    # The active-document route still explains its own refusals.
     refusal = inspect.getsource(measurement.MeasurementTools._tensor_refusal)
     assert '"nested_in_assembly"' in refusal
     assert '"not_activated"' in refusal

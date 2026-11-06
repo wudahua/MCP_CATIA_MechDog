@@ -348,7 +348,12 @@ def _fold_stats(path: str, crease_deg: float, cap: int,
             f"crossing. Measure continuity on the patch itself with region instead, "
             f"and re-run after the surface is closed or thickened."
         )
-    if seam_hint:
+    # `and not boundary`, because the branch above just popped it: the old line
+    # put the hint straight back, so a reply could carry `skin_note` ("cross_wall
+    # is NOT reported on a patch") and `seam_hint` ("38 creases run THROUGH the
+    # wall") side by side (reported 2026-11-06, twice - the numbers were identical
+    # to the previous round because this line undid the fix).
+    if seam_hint and not boundary:
         stats["seam_hint"] = seam_hint
     if region is not None:
         # Say what was left out, or "median 3.1 deg" reads as a whole-part fact.
@@ -609,9 +614,24 @@ def _curvature_stats(path: str, thickness: float | None = None,
 
         rows.append((radius, fold, length, mid, near_border))
 
+    def chord_radius(fold: float, length: float) -> float | None:
+        """The other way to read a radius: L / (2 sin(f/2)).
+
+        Published beside the circumcentre value because the reply's own notes tell
+        the caller to compare the two - and until 0.3.71 the number to compare
+        with was never in the reply, so "they disagree by the ratio shown" pointed
+        at nothing (reported twice, 2026-11-06). None when the fold is too small
+        to divide by.
+        """
+        if fold <= 0.0:
+            return None
+        value = length / (2.0 * math.sin(math.radians(fold) / 2.0))
+        return round(value, 4) if math.isfinite(value) else None
+
     def describe(row) -> dict[str, Any]:
         radius, fold, length, mid, near_border = row
         return {"radius_mm": round(radius, 4),
+                "radius_chord_mm": chord_radius(fold, length),
                 "fold_deg": round(fold, 2),
                 "edge_length_mm": round(length, 4),
                 "r": round(math.hypot(mid[0], mid[1]), 3),
@@ -665,6 +685,7 @@ def _curvature_stats(path: str, thickness: float | None = None,
         sample = sorted(unresolvable, key=lambda row: row[0])[:max(1, top)]
         excluded["unresolvable_sample"] = [
             {"radius_mm": round(radius, 4),
+             "radius_chord_mm": chord_radius(fold, length),
              "edge_length_mm": round(length, 4),
              "radius_over_edge": round(radius / length, 4),
              "fold_deg": round(fold, 2),
@@ -679,10 +700,10 @@ def _curvature_stats(path: str, thickness: float | None = None,
             f"LENGTH, which is the one rule this estimate has always published: "
             f"such a number is smaller than the mesh can measure, not a measured "
             f"value. They are excluded from the radius ranking and from the "
-            f"thickness verdict. Read a sample both ways - 'radius_mm' and what "
-            f"the shared edge and dihedral imply (L/(2 sin(f/2))) - and they "
-            f"disagree by the ratio shown. To resolve such a feature, refine the "
-            f"mesh (a smaller STL facet), not the model."
+            f"thickness verdict. Read a sample both ways - 'radius_mm' (the "
+            f"circumcentre) against 'radius_chord_mm' (L/(2 sin(f/2))) - and the "
+            f"two differ by the factor you can see in the same row. To resolve such "
+            f"a feature, refine the mesh (a smaller STL facet), not the model."
         )
     if not rows:
         # Keep the keys a caller reads programmatically, with None where there is
@@ -2199,7 +2220,7 @@ class MeasurementTools:
                     "different part numbers with catia_new_part or close one: no "
                     "argument can tell them apart",
                 ],
-                data={"candidates": rows},
+                data={"candidates": rows}, stage="validate",
             )
         opened = self._open_component_part(name)
         if opened is not None:
@@ -2219,7 +2240,7 @@ class MeasurementTools:
             next_actions=[
                 "Pass a name from catia_list_documents, or open the file first - "
                 "no document was opened or changed by this call"
-            ],
+            ], stage="validate",
         )
 
     def _open_component_part(self, name: str) -> Any:
@@ -2296,52 +2317,35 @@ class MeasurementTools:
         # to return volume/area/centroid without one - and getting nine parts'
         # tensors took 18 calls (open + activate each). CATIA's activation is
         # temporary here: activate, read, restore (reported 2026-10-24).
+        #
+        # 0.3.71: this route does not TRY. Measuring `document=` never returns a
+        # matrix by design (`tensor_partial_route.does_not_answer` says so), so
+        # the attempt could only fail - and then the WHY walked every open
+        # document to explain it. Measured on B32 2026-11-06: 11 ms with one
+        # document open, 790 ms with three, for an answer already known. Asking
+        # whether any Product is open was the wrong gate: the cost tracks the
+        # number of open documents, not the number of assemblies.
         t_tensor = time.perf_counter()
-        tensor = self._tensor_for(part)
-        if tensor:
-            payload.update(tensor)
-            if "mass_kg" in payload:
-                payload["mass_note"] = _MASS_NOTE
-            payload["note"] = (
-                "measured on this document's own Part. The inertia tensor came from "
-                "activating it for the measurement and restoring the previous active "
-                "document afterwards.")
-        else:
-            # A field, not a paragraph: this used to be five lines of prose in
-            # EVERY reply of a nine-part sweep, and a caller had to read it to
-            # find out whether the tensor was missing or merely unreadable
-            # (reported 2026-10-25). The prose stays, but only as the reason -
-            # and beside a one-word CODE, because nine parts in a row produced
-            # nine identical sentences and the only thing a reader needs is which
-            # case it is (reported 2026-10-26).
-            payload["tensor"] = None
-            code, reason = self._tensor_refusal(doc, label)
-            payload["tensor_reason_code"] = code
-            payload["tensor_reason"] = reason
-            # The partial route is a FACT, not prose: it says which fields a plan
-            # can still assert on and which it cannot. Nine identical sentences in
-            # a nine-part sweep were the second-longest block in the reply
-            # (reported 2026-10-26); the same information in one object is
-            # readable by a caller and costs 4 lines instead of 7.
-            payload["tensor_partial_route"] = {
-                "code": "plan_expect_document",
-                "tool": "catia_run_plan",
-                "shape": {"expect": [{"document": "<name>"}]},
-                "borrows_activation": True,
-                "answers": ["volume_mm3", "volume_cm3", "area_mm2", "area_cm2",
-                            "center_of_gravity_mm", "mass_kg/mass_g (with density)"],
-                "does_not_answer": ["inertia_tensor"],
-            }
-            payload["note"] = (
-                "measured on this document's own Part, independent of which document "
-                "CATIA reports as active. The inertia tensor is missing - see "
-                "tensor_reason.")
-        # The window closes HERE, not right after `_tensor_for`: working out WHY
-        # the tensor is missing is part of the tensor step (the refusal asks the
-        # connection which assemblies hold the part, and that walks every open
-        # product). Closing it earlier made the diagnosis look like unattributed
-        # overhead - 18-19 % of parts_ms on three samples, with no field to
-        # account for it (reported 2026-10-29, §6.1).
+        payload["tensor"] = None
+        payload["tensor_reason_code"] = "not_on_this_route"
+        payload["tensor_reason"] = (
+            "this route measures the named Part without borrowing CATIA's focus, "
+            "and does not compute the inertia tensor by design. For the 3x3 matrix, "
+            "call catia_get_inertia() with no 'document' (the tensor is only "
+            "defined for the ACTIVE document).")
+        payload["tensor_partial_route"] = {
+            "code": "plan_expect_document",
+            "tool": "catia_run_plan",
+            "shape": {"expect": [{"document": "<name>"}]},
+            "borrows_activation": False,
+            "answers": ["volume_mm3", "volume_cm3", "area_mm2", "area_cm2",
+                        "center_of_gravity_mm", "mass_kg/mass_g (with density)"],
+            "does_not_answer": ["inertia_tensor"],
+        }
+        payload["note"] = (
+            "measured on this document's own Part, independent of which document "
+            "CATIA reports as active. The inertia tensor is not part of this route "
+            "- see tensor_reason.")
         tensor_ms = round((time.perf_counter() - t_tensor) * 1000, 1)
         # What this route cost, in the vocabulary the assembly route already uses,
         # so "174.3 ms here, 2 117.3 ms there, same tool" has an answer inside the

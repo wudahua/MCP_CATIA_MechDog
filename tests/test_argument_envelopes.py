@@ -303,3 +303,108 @@ def test_a_plan_and_a_bare_call_name_the_same_argument_problem():
         "caller branching on code must not need two paths")
     assert reply["data"]["failure_stage"] == "validate"
     assert reply["effects"]["modified"] is False
+
+
+# ── 0.3.71: the two exemptions that housed validate-stage failures ─────────
+
+#: Codes that say "what you gave me does not exist" or "fix the argument". An
+#: envelope that reports one of these at the execute stage is telling the caller
+#: CATIA was asked to do something and failed, which is not what happened.
+VALIDATE_CODES = {
+    "ARGUMENT_REJECTED", "ARGUMENT_OUT_OF_RANGE", "PRECONDITION_FAILED",
+    "INVALID_ARGUMENT", "UNKNOWN_ARGUMENT", "UNKNOWN_TOOL",
+    "DOCUMENT_NOT_FOUND", "DOCUMENT_NAME_AMBIGUOUS", "SKETCH_NOT_FOUND",
+    "COMPONENT_NOT_FOUND", "PART_NOT_LOADED", "PATH_NOT_ASCII",
+    "INTERNAL_ERROR",
+}
+# DEPENDENCY_MISSING is deliberately absent: it is `connect`, which is also a
+# stage that wrote nothing but is not about an argument.
+
+#: A message that prints the list to choose from is a lookup, not a CATIA
+#: failure - even when it is raised from inside an `except` that caught the
+#: lookup miss. Those were the 9 sites that still answered COM_ERROR for a call
+#: that never changed anything (reported 2026-11-06, P2-A).
+LOOKUP_MARKERS = ("No active document", "Available:", "Top-level bodies:",
+                  "See catia_list_", "Bodies:", ". Open:")
+
+
+def _raises_inside_except() -> list[tuple[str, int, str, str]]:
+    found: list[tuple[str, int, str, str]] = []
+
+    class Scan(ast.NodeVisitor):
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.depth = 0
+
+        def visit_ExceptHandler(self, node):  # noqa: N802 - ast API name
+            self.depth += 1
+            self.generic_visit(node)
+            self.depth -= 1
+
+        def visit_Raise(self, node):  # noqa: N802 - ast API name
+            if self.depth and _raised_name(node) in BARE:
+                found.append((self.name, node.lineno, _raised_name(node),
+                              _raised_message(node)))
+            self.generic_visit(node)
+
+    for path in sorted(PACKAGE.rglob("*.py")):
+        Scan(path.name).visit(ast.parse(path.read_text(encoding="utf-8")))
+    return found
+
+
+def test_a_lookup_miss_is_not_reported_as_a_catia_failure():
+    """`except` is an exemption for RE-REPORTING, not for translating a miss.
+
+    `connection.active_document` answered COM_ERROR / execute / modified:null for
+    "No active document in CATIA" - the first call of every cold session, with a
+    message that already said what to do. Eight more sites did the same for a name
+    that is not in the tree (reported 2026-11-06, P2-A). A message that prints the
+    list to pick from is a lookup.
+    """
+    offenders = [row for row in _raises_inside_except()
+                 if any(marker in row[3] for marker in LOOKUP_MARKERS)]
+    assert not offenders, (
+        "these print a list to choose from but carry no code, so they answer "
+        "COM_ERROR / execute / modified:null for a lookup that changed nothing:/n  "
+        + "\n  ".join(f"{name}:{line} {cls}: {message[:80]!r}"
+                      for name, line, cls, message in offenders)
+        + "\nRaise ArgumentRejected (the name is wrong) or PreconditionRejected "
+          "(the document is not in that state).")
+
+
+def test_a_validate_code_never_arrives_at_the_execute_stage():
+    """P2-B: seven `CodedError(code=...modified=False)` had no stage at all.
+
+    `server._execute_tool` defaults to "execute", so `DOCUMENT_NOT_FOUND` and
+    `SKETCH_NOT_FOUND` said "CATIA was asked and failed" for a typo - the same
+    misreading 0.3.68/0.3.69 set out to end, wearing a different code.
+    """
+    offenders: list[str] = []
+    for path in sorted(PACKAGE.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Raise) or not isinstance(node.exc, ast.Call):
+                continue
+            func = node.exc.func
+            name = getattr(func, "id", getattr(func, "attr", ""))
+            if name not in {"CodedError", "ArgumentRejected", "ArgumentOutOfRange",
+                            "PreconditionRejected", "InternalError",
+                            "ComponentNotFound", "PathNotSupported"}:
+                continue
+            # The four classes carry their own stage; only a bare CodedError can
+            # get this wrong.
+            if name != "CodedError":
+                continue
+            kwargs = {key.arg: key.value for key in node.exc.keywords}
+            code_node = kwargs.get("code")
+            if not isinstance(code_node, ast.Constant):
+                continue
+            code = code_node.value
+            stage_node = kwargs.get("stage")
+            stage = (stage_node.value if isinstance(stage_node, ast.Constant)
+                     else None)
+            if code in VALIDATE_CODES and stage != "validate":
+                offenders.append(f"{path.name}:{node.lineno} {code} stage={stage!r}")
+    assert not offenders, (
+        "these carry a validate-family code but not stage='validate', so the "
+        "envelope still reports the execute stage:/n  " + "\n  ".join(offenders))

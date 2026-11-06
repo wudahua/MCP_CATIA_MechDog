@@ -134,13 +134,20 @@ def test_assembly_inertia_returns_a_partial_result_like_the_box():
     assert "Could not measure any component" not in source
 
 
-def test_get_inertia_by_document_also_gives_the_tensor():
-    """CATIA only computes the tensor for the active document, so getting nine
-    parts' took 18 calls. It borrows the activation and restores it."""
+def test_get_inertia_by_document_does_not_pay_for_a_tensor_it_cannot_return():
+    """It used to borrow the activation; the matrix never came back.
+
+    0.3.71: the route's own `tensor_partial_route.does_not_answer` has said
+    "inertia_tensor" for several releases, and the reply still spent the time
+    activating (and then explaining the failure): 11 ms with one document open,
+    790 ms with three, on B32 2026-11-06. The borrow now belongs to the
+    active-document route alone.
+    """
     from catia_mcp.tools.measurement import MeasurementTools as MT
 
     source = inspect.getsource(MT._part_inertia)
-    assert "_tensor_for" in source
+    assert "_tensor_for" not in source
+    assert "not_on_this_route" in source
     borrow = inspect.getsource(MT._tensor_for)
     assert "doc.Activate()" in borrow
     assert "previous" in borrow

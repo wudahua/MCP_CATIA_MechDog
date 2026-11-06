@@ -339,7 +339,14 @@ def test_the_part_route_publishes_the_same_two_buckets():
                  1) == stamped["elapsed_ms"]
 
 
-def test_the_tensor_step_is_timed_because_a_failed_one_still_costs():
+def test_the_tensor_step_costs_nothing_on_the_document_route():
+    """The timer stays - the work it measured is gone.
+
+    0.3.71: `document=` cannot return a matrix by design, so the attempt and its
+    diagnosis were pure cost (790 ms on a three-document session, reported
+    2026-11-06). `tensor_ms` is still published, and is now ~0, which is the
+    number a caller can assert on.
+    """
     from catia_mcp.tools.measurement import MeasurementTools
 
     tools = MeasurementTools(connection=None)
@@ -358,8 +365,9 @@ def test_the_tensor_step_is_timed_because_a_failed_one_still_costs():
 
     tools._tensor_for = _slow
     reply = json.loads(tools._part_inertia(_PartForCost(), None, "P37.CATPart"))
-    assert slept["how"] == 1
-    assert reply["tensor_ms"] >= 15.0
+    assert slept["how"] == 0, "this route must not attempt the tensor"
+    assert reply["tensor_ms"] < 5.0
+    assert reply["tensor_reason_code"] == "not_on_this_route"
     assert "borrowing the activation" in reply["overhead_note"]
 
 

@@ -1428,7 +1428,7 @@ class PartDesignTools:
                         "names that still resolve to it) or call "
                         "catia_list_features to see the body's sketches; this "
                         "call created nothing, so nothing has to be undone"
-                    ],
+                    ], stage="validate",
                 )
 
         remembered = getattr(self.conn, "last_sketch", None)
@@ -1460,7 +1460,7 @@ class PartDesignTools:
                 return shapes.Item(feature_name)
             except Exception:
                 names = ", ".join(str(shapes.Item(i).Name) for i in range(1, shapes.Count + 1))
-                raise RuntimeError(
+                raise ArgumentRejected(
                     f"No feature named '{feature_name}' in the active body. "
                     f"Available: {names or 'none'}."
                 )
@@ -2063,7 +2063,7 @@ class PartDesignTools:
         try:
             return elements.Item(1)
         except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(
+            raise PreconditionRejected(
                 "This sketch exposes no absolute axis, so it cannot be revolved. "
                 "Re-create the sketch and try again."
             ) from exc
@@ -2683,7 +2683,7 @@ class PartDesignTools:
             try:
                 values = [float(v) for v in item]
             except Exception as exc:  # noqa: BLE001
-                raise RuntimeError(
+                raise ArgumentRejected(
                     f"edge_anchors entries must be [x, y, z]; got {item!r}."
                 ) from exc
             if len(values) != 3:
@@ -3523,11 +3523,27 @@ class PartDesignTools:
                 hole.ThreadingMode = wanted_mode
             except Exception as error:  # noqa: BLE001
                 if threaded:
-                    raise RuntimeError(
-                        f"Hole '{hole.Name}' was created but CATIA refused its "
-                        f"threading mode ({str(error).splitlines()[0][:110]}), so the "
-                        "bore is SMOOTH. Delete it with catia_delete_feature before "
-                        "retrying, or keep it if a plain bore is what you wanted."
+                    # The hole EXISTS and is a valid plain bore: nothing to roll
+                    # back, and `modified` is a measured TRUE, not "unknown".
+                    # It used to be a bare RuntimeError, i.e. COM_ERROR /
+                    # modified:null / "inspect the model" for a call whose result
+                    # the reply itself could describe (reported 2026-11-06).
+                    raise CodedError(
+                        f"Hole '{hole.Name}' was created as a SMOOTH bore: CATIA "
+                        f"refused the threading-mode write "
+                        f"({str(error).splitlines()[0][:110]}). This build does not "
+                        "let this server thread a hole through ThreadingMode alone. "
+                        f"Delete it with catia_delete_feature('{hole.Name}') if you "
+                        "did not want a plain bore.",
+                        code="FEATURE_INCOMPLETE",
+                        stage="execute",
+                        modified=True,
+                        next_actions=[
+                            f"Delete it with catia_delete_feature('{hole.Name}') "
+                            "and build the thread in CATIA by hand, or keep it if a "
+                            "plain bore is what you wanted - the bore is valid, "
+                            "the thread is missing",
+                        ],
                     ) from error
                 # A plain hole that keeps the previous bore's thread is worse than
                 # a plain hole, but it is still a hole: say so rather than throw.
@@ -3541,13 +3557,45 @@ class PartDesignTools:
                     part.Update()
                 except Exception as error:  # noqa: BLE001
                     if threaded:
-                        raise RuntimeError(
+                        # Measured on B32 (2026-11-06, 5/5): the write lands, the
+                        # update after it fails, and the hole stays in the tree
+                        # with no geometry - a zombie that poisons every later
+                        # Update. So it is removed here, and `modified` says which
+                        # of the two happened instead of `null`.
+                        removed = False
+                        try:
+                            part.Selection.Clear()
+                            part.Selection.Add(hole)
+                            part.Selection.Delete()
+                            part.Selection.Clear()
+                            removed = True
+                        except Exception:  # noqa: BLE001 - the caller is told
+                            removed = False
+                        failure = CodedError(
                             f"Hole '{hole.Name}' had its threading mode set but the "
                             f"part update after it failed "
-                            f"({str(error).splitlines()[0][:110]}). The thread may "
-                            "not be in the geometry - open the part and look before "
-                            "relying on it."
-                        ) from error
+                            f"({str(error).splitlines()[0][:110]}). The bore has no "
+                            "geometry in the part"
+                            + (" and the feature was removed again, so the tree is "
+                               "as it was before this call."
+                               if removed else
+                               ". The feature is STILL IN THE TREE and every later "
+                               "update in this part may fail until it is deleted."),
+                            code="FEATURE_INCOMPLETE",
+                            stage="execute",
+                            modified=not removed,
+                            next_actions=(
+                                ["Retry the bore without threading (threaded=false) "
+                                 "- the thread is what this build refused"]
+                                if removed else
+                                [f"Delete it now with catia_delete_feature("
+                                 f"'{hole.Name}') before building anything else"]),
+                        )
+                        # The envelope publishes `rolled_back`; a caller branching
+                        # on it must not be told "unknown" about a feature this
+                        # method just removed (or failed to).
+                        failure.rolled_back = removed
+                        raise failure from error
                     note = (
                         " The threading mode was reset to smooth but the part update "
                         "after it raised; verify the bore in CATIA."
@@ -3842,7 +3890,7 @@ class PartDesignTools:
             except Exception:
                 names = ", ".join(str(shapes.Item(i).Name)
                                   for i in range(1, shapes.Count + 1))
-                raise RuntimeError(
+                raise ArgumentRejected(
                     f"No feature named '{feature_name}' in the active body. "
                     f"Available: {names or 'none'}."
                 ) from None
@@ -5205,6 +5253,7 @@ class PartDesignTools:
         part = self.conn.get_active_part()
         target = None
         where = ""
+        parent_set = ""
 
         def try_get(collection, label):
             try:
@@ -5234,11 +5283,11 @@ class PartDesignTools:
                     break
                 got, lbl = try_get(hb.HybridShapes, "geometrical element")
                 if got is not None:
-                    target, where = got, lbl
+                    target, where, parent_set = got, lbl, str(hb.Name)
                     break
                 got, lbl = try_get(hb.HybridSketches, "sketch")
                 if got is not None:
-                    target, where = got, lbl
+                    target, where, parent_set = got, lbl, str(hb.Name)
                     break
 
         if target is None:
@@ -5281,7 +5330,19 @@ class PartDesignTools:
             self._clear_selection()
         self.conn.refresh_display()
         extra = f" and {children} element(s) inside it" if children else ""
-        return f"'{name}' ({where}) is now {'shown' if show else 'hidden'}{extra}."
+        # An element inside a HIDDEN set stays invisible however it is set: the
+        # UI greys the lightbulb and CATIA keeps the parent's visibility. The
+        # reply used to say "is now shown" and leave it at that (reported
+        # 2026-11-06, twice). The parent's own state cannot be read cheaply
+        # (`HybridShape.Visible` raises), so the note names the parent instead
+        # of guessing its state.
+        parent_note = (
+            f" Note: it lives in geometrical set '{parent_set}', and a hidden set "
+            f"hides its contents - if it is still not on screen, show the set "
+            f"first (catia_set_visibility(name='{parent_set}', show=true))."
+            if (show and parent_set) else "")
+        return (f"'{name}' ({where}) is now {'shown' if show else 'hidden'}"
+                f"{extra}.{parent_note}")
 
     def _set_visibility_kind(self, kind: str, show: bool) -> str:
         """Show or hide a whole class of tree bookkeeping at once.
@@ -5365,7 +5426,7 @@ class PartDesignTools:
         except Exception:
             names = ", ".join(str(bodies.Item(i).Name)
                               for i in range(1, bodies.Count + 1))
-            raise RuntimeError(
+            raise ArgumentRejected(
                 f"No body named '{args['tool_body']}'. Bodies: {names or 'none'}."
             ) from None
 
@@ -5373,7 +5434,7 @@ class PartDesignTools:
             try:
                 target = bodies.Item(args["target_body"])
             except Exception:
-                raise RuntimeError(
+                raise ArgumentRejected(
                     f"No body named '{args['target_body']}'."
                 ) from None
         else:
@@ -5482,7 +5543,7 @@ class PartDesignTools:
             except Exception:
                 names = ", ".join(str(part.Bodies.Item(i).Name)
                                   for i in range(1, part.Bodies.Count + 1))
-                raise RuntimeError(
+                raise ArgumentRejected(
                     f"No body named '{body_name}'. Top-level bodies: {names or 'none'}."
                 )
         spa = self._topo_measure(part)

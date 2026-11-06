@@ -469,9 +469,31 @@ class DocumentTools:
                 # name would send drafting to a part that no longer exists.
                 self.conn.last_part_name = str(doc.Name)
             except Exception as exc:  # noqa: BLE001 - the part itself exists
-                saved = (f" The part was created but could not be saved to "
-                         f"'{file_path}' ({str(exc).splitlines()[0][:120]}). Call "
-                         "catia_save_document(file_path=...) before building on it.")
+                # 0.3.71: this used to be a sentence glued into a SUCCESSFUL
+                # reply ("ok" absent, first word "Created"), so catia_run_plan
+                # marked the step done and the failure only surfaced at the last
+                # save - after dozens of steps of modelling (reported 2026-11-06,
+                # P0-1: a Chinese file name, and the parent folder was Chinese
+                # too, which CATIA refuses even when the file name is ASCII).
+                raise CodedError(
+                    f"Part '{part_name}' was created but COULD NOT BE SAVED to "
+                    f"'{file_path}' ({str(exc).splitlines()[0][:120]}). The "
+                    "document is open and unsaved: it has no path, so it cannot be "
+                    "referenced by an assembly. CATIA refuses a first SaveAs when "
+                    "the TARGET PATH contains non-ASCII characters (the folder "
+                    "counts, not only the file name).",
+                    code="SAVE_FAILED",
+                    stage="execute",
+                    modified=True,
+                    next_actions=[
+                        "Save it to an ASCII path now - "
+                        "catia_save_document(file_path='C:/temp/part.CATPart') - "
+                        "then rename the file afterwards; the .CATPart does not "
+                        "care what it is called, only CATIA's SaveAs does",
+                        "The part in memory is complete: nothing else needs to be "
+                        "rebuilt",
+                    ],
+                ) from exc
         hint = (" Save it now - catia_save_document(file_path='...') - because a "
                 "part that has geometry but no path cannot be saved later."
                 if not file_path else "")
@@ -560,12 +582,34 @@ class DocumentTools:
         if file_path:
             try:
                 saved = " " + self._save_document(str(file_path))
+                # SaveAs renames the document to the FILE name. Reporting the name
+                # it was CREATED with left the caller guessing which of the two
+                # `document=` takes (reported 2026-11-06, P3-9: created as
+                # 'Gripper.CATProduct', saved as 'ASM.CATProduct', and the reply
+                # mentioned both).
+                doc_name = str(doc.Name)
+                saved += f" For every document= argument use '{doc_name}'."
             except Exception as exc:  # noqa: BLE001 - the product itself exists
-                saved = (f" The product was created but could not be saved to "
-                         f"'{file_path}' ({str(exc).splitlines()[0][:200]}). Call "
-                         "catia_save_document(file_path=...) before adding "
-                         "components - an assembly with no path cannot be "
-                         "referenced.")
+                # Same defect as _new_part's, measured on B32 2026-11-06: the
+                # Chinese path failed and the reply still began with "Created"
+                # (reported 2026-11-06, §2 / §5.3).
+                raise CodedError(
+                    f"Product '{doc_name}' was created but COULD NOT BE SAVED to "
+                    f"'{file_path}' ({str(exc).splitlines()[0][:200]}). The "
+                    "assembly is open and unsaved: it has no path, so no component "
+                    "can reference it. CATIA refuses a first SaveAs when the "
+                    "TARGET PATH contains non-ASCII characters - and it is the "
+                    "FIRST save of this document that fails, not later ones.",
+                    code="SAVE_FAILED",
+                    stage="execute",
+                    modified=True,
+                    next_actions=[
+                        "Save it to an ASCII path now - "
+                        "catia_save_document(file_path='C:/temp/asm.CATProduct') - "
+                        "then rename the file; a product that already has a path "
+                        "can be re-saved to a non-ASCII one",
+                    ],
+                ) from exc
         return (
             f"Created a Product document '{doc_name}' whose root product is "
             f"'{product_name}'{rename_note}. In this session the document is called "
@@ -996,6 +1040,7 @@ class DocumentTools:
                     "not in this list: open it with catia_open_document, or "
                     "measure it by name with document=",
                 ],
+                stage="validate",
             )
         # Activating one of two same-named documents is a coin toss the caller
         # cannot see either: the reply would name the document, and both answer to

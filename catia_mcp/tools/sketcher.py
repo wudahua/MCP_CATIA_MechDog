@@ -1124,14 +1124,41 @@ class SketcherTools:
                 })
         if len(loops) < 2:
             return ""
-        overlapping = []
+
+        def inside(inner: tuple[float, ...], outer: tuple[float, ...]) -> bool:
+            return (inner[0] >= outer[0] and inner[2] <= outer[2]
+                    and inner[1] >= outer[1] and inner[3] <= outer[3])
+
+        overlapping: list[tuple[int, int]] = []
+        nested: list[tuple[int, int]] = []
         for i in range(len(loops)):
             for j in range(i + 1, len(loops)):
                 a, b = loops[i]["box"], loops[j]["box"]
-                if a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]:
+                if not (a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]):
+                    continue
+                # One box inside the other is a HOLE (or a ring), which is the
+                # most ordinary profile in CAD: a plate with a bore. It used to be
+                # reported as "overlapping loops make a self-intersecting profile"
+                # on a rectangle + inscribed circle whose pad then built exactly
+                # the right solid - 30066.24 mm3, topology matching the drawing
+                # (reported 2026-11-06, P1-2b). Only a partial intersection is a
+                # self-intersection.
+                if inside(a, b) or inside(b, a):
+                    nested.append((i, j))
+                else:
                     overlapping.append((i, j))
+        notes = ""
+        if nested and not overlapping:
+            pairs = "; ".join(
+                f"loop {j + 1} ({loops[j]['kind']}) sits inside loop {i + 1} "
+                f"({loops[i]['kind']})"
+                for i, j in nested[:3])
+            notes = (f" Note: {pairs} - a loop inside another is a HOLE in that "
+                     "face, not a self-intersection, and pad/pocket build it as one "
+                     "profile. Total loop area below is therefore larger than the "
+                     "profile area; that is expected.")
         if not overlapping:
-            return ""
+            return notes
         pairs = "; ".join(
             f"loop {i + 1} ({loops[i]['kind']}, {loops[i]['area']:.1f} mm2) overlaps "
             f"loop {j + 1} ({loops[j]['kind']}, {loops[j]['area']:.1f} mm2)"
@@ -1140,13 +1167,14 @@ class SketcherTools:
         total = sum(loop["area"] for loop in loops)
         return (
             f" WARNING: this sketch holds {len(loops)} closed loops and "
-            f"{len(overlapping)} pair(s) of them overlap: {pairs}. Overlapping or "
-            "nested closed loops make a self-intersecting profile - the pad/pocket "
-            "either fails at update or builds a solid nobody meant. Total loop area "
+            f"{len(overlapping)} pair(s) of them partially overlap: {pairs}. Two "
+            "loops that cross without one containing the other make a "
+            "self-intersecting profile - the pad/pocket either fails at update or "
+            "builds a solid nobody meant. Total loop area "
             f"{total:.1f} mm2 is NOT the profile area when they overlap. Note that "
             "catia_sketch_rectangle already draws a COMPLETE rectangle, so a "
             "rectangular frame is four LINES, not two rectangle calls."
-        )
+        ) + notes
 
     def _profile_warning(self) -> str:
         """Name every breakpoint that will make pad/pocket fail.
@@ -1224,13 +1252,21 @@ class SketcherTools:
             + "; ".join(lines) + "."
         )
         if tiny:
+            # It used to say "CATIA still refuses the feature" as a fact. It is
+            # not one: this server cannot know whether the update closes a gap of
+            # 0.0002 mm, and on the runs measured so far (2026-11-06, three parts
+            # with 6-arc outlines) the pad SUCCEEDED every time. Telling an AI
+            # caller that a working sketch is broken costs it a rebuild
+            # (reported 2026-11-06, P1-2c).
             text += (
-                " The first gap(s) are within 0.05 mm: that is a rounding "
-                "artefact, and CATIA still refuses the feature - pad/pocket "
-                "report 'open polyline or an arc chain with a gap'. Make the "
-                "shared coordinate literally identical (use the exact "
-                "circle-circle intersection at a junction, and project a "
-                "line end onto the arc rather than recomputing it)."
+                f" The smallest gap(s) are within {self._NEAR_TOL:g} mm: at that "
+                "size they are usually a rounding artefact of how the endpoints "
+                "were computed, and CATIA closes them at update more often than "
+                "not - so close the sketch and try the feature before rebuilding "
+                "anything. If pad/pocket do report 'open polyline or an arc chain "
+                "with a gap', make the shared coordinate literally identical (the "
+                "exact circle-circle intersection at a junction, and a line end "
+                "projected onto the arc rather than recomputed)."
             )
         text += (
             " (Computed from the coordinates passed to the sketch tools; "
@@ -1443,14 +1479,24 @@ class SketcherTools:
                  if sweep > 180.5 else
                  "180deg half circle" if abs(sweep - 180) <= 0.5 else
                  "minor arc")
+        # CATIA stores an arc as a start angle plus a counter-clockwise sweep, so
+        # a clockwise request is written as the SAME points in the reverse order.
+        # The reply used to describe the stored form only ("from -105.1 to -68.8,
+        # swept 36.3 counter-clockwise") and then add a bracket apologising for
+        # it, which reads as "the endpoints were swapped" to anything that
+        # stitches a profile by order (reported 2026-11-06, P3-7). Say both.
+        if direction == "cw" and p1 is not None:
+            span = (f"from p1 ({p1[0]:g}, {p1[1]:g}) to p2 ({p2[0]:g}, {p2[1]:g}), "
+                    f"which is clockwise from p1 to p2, {abs(sweep):.4f}° (stored "
+                    f"as {end_angle:.4f}° -> {start_angle:.4f}°, swept "
+                    f"{abs(sweep):.4f}° counter-clockwise - the same arc)")
+        else:
+            span = (f"from {start_angle:.4f}° to {end_angle:.4f}° - swept "
+                    f"{sweep:.4f}° counter-clockwise")
         return (
             f"Arc created at ({cx}, {cy}), radius={radius} mm, "
-            f"from {start_angle:.4f}° to {end_angle:.4f}° - swept "
-            f"{sweep:.4f}° counter-clockwise ({swept}), arc length "
-            f"{radius * math.radians(sweep):.4f} mm"
-            + ("" if direction != "cw" or p1 is None else
-               " [entered clockwise from p1 to p2; the endpoints are the ones "
-               "you gave]")
+            f"{span} ({swept}), arc length "
+            f"{radius * math.radians(abs(sweep)):.4f} mm"
             + "".join(notes)
         )
         # Remember the arc's own ends, computed from the numbers we were given.
@@ -1680,7 +1726,7 @@ class SketcherTools:
                         "Use one of the names in 'Sketches', or call "
                         "catia_list_features to see them with their aliases; "
                         "nothing was created or edited by this call"
-                    ],
+                    ], stage="validate",
                 ) from None
         if self._active_sketch is not None:
             return self._active_sketch, "open in the editor"

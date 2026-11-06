@@ -2,6 +2,91 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.71] — 2026-11-06 · the last two exemptions, and four replies that lied
+
+Four reports arrived together against 0.3.70. Two are about the envelope; the
+other two are about replies that state a cause the code never measured.
+
+**P2-A — the `except` exemption housed nine lookups.** The rule was "a raise
+inside `except` is re-reporting a CATIA failure". But the common pattern there is
+translating a lookup miss into a sentence, and nine of them still answered
+`COM_ERROR` / `execute` / `modified:null`:
+
+`connection.active_document` ("No active document in CATIA"), six
+`No <thing> named '…'` sites across Part Design / Knowledge / Drafting, and the
+"smooth bore is not a design table" state. That first one is **every tool call of
+a cold session**. All now `PRECONDITION_FAILED` / `ARGUMENT_REJECTED` / validate,
+and the guard fails on any `except`-block raise whose message prints a list to
+choose from.
+
+**P2-B — seven `CodedError`s never declared a stage.** `DOCUMENT_NOT_FOUND`,
+`DOCUMENT_NAME_AMBIGUOUS`, `SKETCH_NOT_FOUND` all said `execute`: "CATIA was asked
+and failed" for a typo. They carry `stage="validate"` now, and a static test fails
+on any `CodedError` whose code is in the validate family without it.
+
+**The note told the wrong story.** `data.next_actions_note` said "they are about
+the ARGUMENT this call used" on every refusal, including `PreconditionRejected`,
+whose own next action says "this is a state, not a typo". The subject now comes
+from the code (argument / state / index / name / server defect).
+
+**`threaded=true` (B32): not supported on that build, and now it says so.**
+Five failures across three reports, each leaving `孔.1` in the tree with no
+geometry. The update failure now removes the feature again, reports
+`FEATURE_INCOMPLETE` / `execute` with a **measured** `modified` (false when the
+remove worked, true when it did not) and `rolled_back`, instead of
+`COM_ERROR` / `modified:null` / "inspect the model". When the write itself is
+refused the hole is a valid plain bore and the reply says exactly that.
+**Recorded as a known B32 limitation**: this server cannot thread a hole through
+`ThreadingMode` alone there; B30 reports `NO_MATERIAL` before the write, so the
+failure cannot be reproduced here.
+
+**`document=` no longer pays for a tensor it cannot return.** The route's own
+`does_not_answer` has said `inertia_tensor` for releases, and the attempt plus the
+"why" walked every open document: 11 ms with one open, 790 ms with three (B32
+2026-11-06). `tensor_ms` is 0.0 now, and the reason is about the route instead of
+a "focus refusal" that told the caller to activate a document that was already
+active.
+
+**`seam_hint` was popped and then added straight back.** `if boundary:` emptied
+the bucket for a surface patch, and two lines later `if seam_hint:` put it back —
+which is why a reply carried `skin_note` ("cross_wall is NOT reported on a
+patch") beside "38 creases run THROUGH the wall". One `and not boundary`.
+
+**`catia_close_sketch` called a plate with a hole self-intersecting.** The loop
+check used bounding-box overlap, so a rectangle with an inscribed circle (and a
+rectangle with a smaller rectangle) was reported as a self-intersection whose pad
+then built the right solid. Containment is a HOLE; only partial intersection
+warns. The 0.0002 mm gap text no longer asserts "CATIA still refuses the feature"
+— this server cannot know that, and on the three parts measured the pad succeeded.
+
+**Saving to a non-ASCII path stopped being a warning.** `catia_new_part` /
+`catia_new_product` answered a successful-looking reply ("Created …") with the
+failure buried in prose, so `catia_run_plan` marked the step done and the loss
+surfaced at the last save (reported as the worst item of the round). They raise
+`SAVE_FAILED` / `execute` / `modified:true` now, naming the ASCII workaround, and
+`SAVE_FAILED`'s advice says "first save of a document whose path is non-ASCII"
+instead of blaming a dialog.
+
+Smaller, same reports: `radius_chord_mm` is published in the curvature blocks
+(the note asked the caller to compare two radii and only one was there);
+`catia_set_visibility` names the hidden parent set; `catia_add_component(count=N)`
+lists every instance it created; a clockwise arc reports "from p1 … to p2 …
+clockwise (stored as the reverse angles)" instead of only the stored form;
+`catia_new_product` reports the name `document=` should use after SaveAs.
+
+**Not in this release** (measured, not forgotten): `method='mesh'` for a Product
+document and the systematic vertex-scan underestimate it causes;
+`matches_request`'s 4-decimal tolerance; product-level `catia_set_visibility`;
+the structured gap list from `close_sketch`. The first needs a per-part mesh cache
+shared across instances, which is a design change rather than a fix.
+
+B30, `scripts/b30_v0371_envelopes.py`, 16/16: cold start is
+`PRECONDITION_FAILED` / validate / modified:false with no recovery;
+`document:"NOPE"` is `DOCUMENT_NOT_FOUND` / validate; `tensor_ms` is 0.0 with
+`not_on_this_route`; the plate still builds 8000.0 mm³.
+
+1161 tests, 127 tools.
+
 ## [0.3.70] — 2026-11-06 · the core layer, where a bug looked like a COM failure
 
 0.3.69 emptied `catia_mcp/tools/`: 169 sites, every one with a code. The same

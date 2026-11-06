@@ -232,9 +232,12 @@ def save_as(doc, path: str, tries: int = 6, wait: float = 0.6) -> str:
         code="SAVE_FAILED",
         stage="execute",
         next_actions=[
-            "The file may be locked by another process or read-only; the document "
-            "is still open and unsaved. Close what holds it, then call "
-            "catia_save_as_copy again - whether a partial file exists was not "
+            "If this document has NEVER been saved and the target path contains "
+            "non-ASCII characters (a Chinese folder counts, not only the file "
+            "name), save to an ASCII path first and rename the file afterwards - "
+            "that is the one workaround measured to work",
+            "Otherwise the file is probably locked or read-only: the document is "
+            "still open and unsaved, and whether a partial file exists was not "
             "verified",
         ],
     )
@@ -258,7 +261,9 @@ def save(doc, tries: int = 3) -> str:
         code="SAVE_FAILED",
         stage="execute",
         next_actions=[
-            "The document is still open and unsaved. A dialog may have blocked the "
-            "call; dismiss it and call catia_save_document again",
+            "If this document has never been saved and its path contains "
+            "non-ASCII characters, this is the build's limit, not a dialog: save "
+            "to an ASCII path (catia_save_as_copy) and rename the file afterwards",
+            "The document is still open and unsaved either way - nothing was lost",
         ],
     )

@@ -726,7 +726,7 @@ class PlannerTools:
                 + ". Nothing was counted - pass the full path of the one you mean.",
                 code="DOCUMENT_NAME_AMBIGUOUS",
                 modified=False,
-                data={"candidates": rows},
+                data={"candidates": rows}, stage="validate",
             )
         docs = self.conn.documents
         names = []
@@ -743,7 +743,7 @@ class PlannerTools:
             # Same reasoning as the measurement route: a name that is not open is
             # not a CATIA failure (reported 2026-10-28, §5.3).
             code="DOCUMENT_NOT_FOUND",
-            modified=False,
+            modified=False, stage="validate",
         )
 
     # Published in every topology answer: the counting rule changed twice, and a

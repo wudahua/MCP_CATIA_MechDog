@@ -1072,7 +1072,7 @@ class DraftingTools:
                 target_body = bodies.Item(body_name)
             except Exception:
                 names = ", ".join(str(bodies.Item(i).Name) for i in range(1, bodies.Count + 1))
-                raise RuntimeError(
+                raise ArgumentRejected(
                     f"No body named '{body_name}' in '{part_doc.Name}'. "
                     f"Top-level bodies: {names or 'none'}."
                 )
@@ -1316,7 +1316,7 @@ class DraftingTools:
                 area = f" (its area reads {float(measurable.Area) * 1e6:.1f} mm2, so the face itself is fine)"
             except Exception:  # noqa: BLE001
                 pass
-            raise RuntimeError(
+            raise ArgumentRejected(
                 f"{face_name} has no plane, so it cannot drive a projection. A "
                 f"cylindrical or free-form face has no plane{area} - pick a flat "
                 "one: catia_list_faces reports each face's area and the feature "
