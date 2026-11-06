@@ -2,6 +2,60 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.69] — 2026-11-06 · every refusal has a code, and the register is gone
+
+0.3.68 converted twenty raise sites and registered the other 81 in
+`tests/argument_rejection_baseline.json`. That register was the wrong shape of
+fix twice over: it made "unfixed" a state somebody could add to, and the scan
+that fed it matched **words** — "must", "unknown", "requires", "out of range" —
+so it never saw `"Pass either 'points' or 'element', not both"` or `"No active
+sketch"`, which are refusals too.
+
+**169 sites, 0 left.** The number went UP from 81 because the measurement was
+incomplete, not because new problems appeared: 88 bare raises were invisible to
+the vocabulary scan, and the four that were neither argument nor state (a CATIA
+result that came back wrong) needed a fourth answer rather than a code of their
+own invention.
+
+**Three refusal classes**, because the caller's fix differs:
+
+| Class | Code | Means |
+|---|---|---|
+| `ArgumentRejected` | `ARGUMENT_REJECTED` | a typo: change the value |
+| `PreconditionRejected` (new) | `PRECONDITION_FAILED` | the model is not in that state; changing the argument will not help |
+| `ArgumentOutOfRange` | `ARGUMENT_OUT_OF_RANGE` | enumerate first, the number is in the reply |
+
+All three carry `stage:"validate"` and `modified:false`, and all three subclass
+`ValueError` — 80+ existing handlers and tests catch that type, and moving the
+raises must not break them.
+
+A failure that really is CATIA's answer keeps `stage:"execute"` and stops being
+`COM_ERROR`: `COMPONENT_NOT_ADDED`, `CALL_ABANDONED`, `CLOSE_NOT_CONFIRMED`,
+`ACTIVATION_FAILED`, `DRAW_FAILED`, `VIEW_LINK_LOST`, `NO_VISIBLE_GEOMETRY`,
+`COM_RESULT_UNEXPECTED`, `FEATURE_INCOMPLETE`, `FEATURE_REJECTED`,
+`DELETE_NOT_CONFIRMED`, `INTERNAL_ERROR`.
+
+**The guard is structural now.** A raise inside an `except` block re-wraps a
+failure CATIA produced (execute stage, nothing for the caller to fix); a raise
+anywhere else is a decision the tool made, and a decision carries a code. The
+baseline file is deleted — there is nothing left to register, and no list to grow.
+
+**A `NameError` wearing an envelope.** `sketcher` and `document` raised
+`PreconditionRejected` before importing it; the caller got `COM_ERROR` /
+`execute` / `modified:null` with the message `'PreconditionRejected' is not
+defined`. pytest stayed green because no test walked those two paths — the B30
+acceptance script found it on the first run. Added
+`test_every_class_a_tool_raises_is_reachable_from_that_module`, which parses the
+package and fails on any raise whose class is not imported in that module.
+
+B30, `scripts/b30_v0369_envelopes.py`, 37/37: the three classes each answer with
+their own code, `validate`, `modified:false`, no `recovery`, one next action and
+no "inspect the CATIA model"; five refusals leave the volume at 115 200.0 mm³ and
+the document count at 1; a second pad still builds (117 713.3 mm³) and a GSD point
+and translate behave, so the sweep did not break the ordinary path.
+
+1140 tests, 127 tools.
+
 ## [0.3.68] — 2026-11-05 · the refusal envelope, which the new modules never got
 
 Reported 2026-11-05, P1. `catia_fillet {radius:3, edge_name:"NO_SUCH_EDGE"}`

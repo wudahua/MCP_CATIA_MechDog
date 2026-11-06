@@ -36,7 +36,7 @@ import os
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
-from catia_mcp.results import ArgumentRejected, FeatureRejected
+from catia_mcp.results import ArgumentOutOfRange, ArgumentRejected, FeatureRejected
 
 _UNITS = {"length": "mm", "angle": "deg"}
 
@@ -72,7 +72,7 @@ def _as_bool(value: Any) -> bool:
         return True
     if text in _FALSY:
         return False
-    raise ValueError(
+    raise ArgumentRejected(
         f"{value!r} is not a boolean. Use true/false (or 1/0, yes/no)."
     )
 
@@ -241,7 +241,7 @@ class KnowledgeTools:
             case "catia_apply_design_table":
                 return self._apply_design_table(arguments)
             case _:
-                raise ValueError(f"Unknown knowledge tool: {tool_name}")
+                raise ArgumentRejected(f"Unknown knowledge tool: {tool_name}")
 
     # ------------------------------------------------------------------
     def _find_parameter(self, params: Any, name: str) -> Any | None:
@@ -448,7 +448,7 @@ class KnowledgeTools:
             near = self._near_names(params, wanted)
             hint = (" Names that end the same way: " + ", ".join(f"'{n}'" for n in near)
                     + "." if near else "")
-            raise RuntimeError(
+            raise ArgumentRejected(
                 f"No parameter '{wanted}' on the active part. The lookup is exact, "
                 "and a feature's own dimension is named in the build's language - "
                 "on this Chinese B30 a pad's height is "
@@ -514,7 +514,7 @@ class KnowledgeTools:
         params = part.Parameters
         path = args["file_path"]
         if not os.path.exists(path):
-            raise RuntimeError(
+            raise ArgumentRejected(
                 f"No sheet at '{path}'. The path is read on the CATIA machine, not "
                 "where this server runs, and it must be absolute."
             )
@@ -526,7 +526,7 @@ class KnowledgeTools:
                 near = self._near_names(params, name)
                 if near:
                     hint += (f" '{name}' may be {', '.join(repr(n) for n in near)};")
-            raise RuntimeError(
+            raise ArgumentRejected(
                 f"Unknown parameter(s): {', '.join(missing)}. Create them first "
                 "with catia_create_parameter." + (f" Near matches:{hint}" if hint else "")
             )
@@ -569,7 +569,7 @@ class KnowledgeTools:
             ) from error
         wanted = int(args["configuration"])
         if wanted < 1 or wanted > total:
-            raise RuntimeError(
+            raise ArgumentOutOfRange(
                 f"Configuration {wanted} is out of range: '{name}' has {total} "
                 "row(s), numbered from 1."
             )

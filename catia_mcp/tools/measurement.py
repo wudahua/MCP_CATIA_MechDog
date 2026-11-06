@@ -29,8 +29,8 @@ from catia_mcp.arguments import (
     ELEMENT2_NAMES,
     alias_properties as _alias_properties,
 )
-from catia_mcp.results import CodedError
-from catia_mcp.results import ArgumentOutOfRange, ArgumentRejected
+from catia_mcp.results import CodedError, ComponentNotFound
+from catia_mcp.results import ArgumentOutOfRange, ArgumentRejected, PreconditionRejected
 from catia_mcp.topo_search import is_construction, nls_of, search_topology
 
 
@@ -867,7 +867,7 @@ def _stl_scan(path: str, limit: int | None = None
     with open(path, "rb") as handle:
         head = handle.read(84)
         if len(head) < 84:
-            raise RuntimeError(f"STL export produced only {size} bytes")
+            raise CodedError(f"STL export produced only {size} bytes", code="NO_VISIBLE_GEOMETRY", stage="execute")
         triangles = struct.unpack("<I", head[80:84])[0]
         if triangles and size == 84 + 50 * triangles:
             for _ in range(triangles):
@@ -887,7 +887,7 @@ def _stl_scan(path: str, limit: int | None = None
                     if len(parts) >= 4:
                         add(float(parts[1]), float(parts[2]), float(parts[3]))
     if not seen:
-        raise RuntimeError("STL export contained no triangles")
+        raise CodedError("STL export contained no triangles", code="NO_VISIBLE_GEOMETRY", stage="execute")
     return lo, hi, cloud, seen
 
 
@@ -1113,9 +1113,9 @@ def read_measurable_array(app: Any, measurable: Any, method: str, count: int) ->
     result = app.SystemService.Evaluate(code, 0, "catia_mcp_out", [measurable])
     values = [float(v) for v in result]
     if len(values) != count:
-        raise RuntimeError(
+        raise CodedError(
             f"{method} returned {len(values)} values, expected {count}"
-        )
+        , code="COM_RESULT_UNEXPECTED", stage="execute")
     return values
 
 
@@ -1144,9 +1144,9 @@ def read_min_distance_points(app: Any, measurable: Any,
                                         [measurable, other_ref])
     values = [float(v) for v in result]
     if len(values) != 6:
-        raise RuntimeError(
+        raise CodedError(
             f"GetMinimumDistancePoints returned {len(values)} values, expected 6"
-        )
+        , code="COM_RESULT_UNEXPECTED", stage="execute")
     return values[:3], values[3:]
 
 
@@ -2012,7 +2012,7 @@ class MeasurementTools:
                     float(arguments["thickness"]) if arguments.get("thickness")
                     else None)
             case _:
-                raise ValueError(f"Unknown measurement tool: {tool_name}")
+                raise ArgumentRejected(f"Unknown measurement tool: {tool_name}")
 
     def _evaluate_floats(self, script: str, func: str, params: list) -> list[float]:
         """Run a VBScript function inside CATIA and return its array as floats.
@@ -2077,7 +2077,7 @@ class MeasurementTools:
                 kind, idx = topo.group(1), int(topo.group(2))
                 body = self.conn.get_active_part_body()
                 if body.Shapes.Count == 0:
-                    raise RuntimeError(
+                    raise PreconditionRejected(
                         f"Cannot resolve '{name}': the active body has no "
                         "solid shape to enumerate topology from."
                     )
@@ -2257,7 +2257,7 @@ class MeasurementTools:
                 except Exception:  # noqa: BLE001
                     path = ""
                 if not path or not os.path.isabs(path):
-                    raise RuntimeError(
+                    raise PreconditionRejected(
                         f"'{name}' is a component of '{document.Name}' but its part "
                         "has never been saved, so it cannot be opened as its own "
                         "document; save the part first (catia_save_document)."
@@ -2274,7 +2274,7 @@ class MeasurementTools:
         doc = part.Parent
         body = part.MainBody
         if body.Shapes.Count == 0:
-            raise RuntimeError(self._no_solid_reason(part, body, label))
+            raise PreconditionRejected(self._no_solid_reason(part, body, label))
         # Where the milliseconds of this route go, measured rather than inferred.
         # A 24000 mm3 box measured in 2 117.3 ms next to a 12-times smaller
         # 174.3 ms for another part is not explainable from `elapsed_ms` alone,
@@ -2623,7 +2623,7 @@ class MeasurementTools:
         # Say it here: run_plan records this as inertia_error and carries on.
         try:
             if body.Shapes.Count == 0:
-                raise RuntimeError(self._no_solid_reason(part, body, part.Name))
+                raise PreconditionRejected(self._no_solid_reason(part, body, part.Name))
         except RuntimeError:
             raise
         except Exception:  # noqa: BLE001 - Shapes is readable on every part
@@ -2729,7 +2729,7 @@ class MeasurementTools:
 
         vals = position_components(self.conn.app, child.Position)
         if len(vals) < 12:
-            raise RuntimeError(f"Position.GetComponents returned {len(vals)} values")
+            raise CodedError(f"Position.GetComponents returned {len(vals)} values", code="COM_RESULT_UNEXPECTED", stage="execute")
         matrix = [[vals[0], vals[3], vals[6]],
                   [vals[1], vals[4], vals[7]],
                   [vals[2], vals[5], vals[8]]]
@@ -3113,7 +3113,7 @@ class MeasurementTools:
         poses_route = self._poses_route
         if only and not rows:
             names = ", ".join(str(r["name"]) for r in self._components_doc(doc))
-            raise RuntimeError(
+            raise ComponentNotFound(
                 f"No component matches '{only}'. Components: {names or 'none'}. "
                 "This matches TOP-LEVEL components only - a component that lives "
                 "inside a sub-assembly has to be measured through that "
@@ -4237,7 +4237,7 @@ class MeasurementTools:
         try:
             body = part.MainBody
             if body.Shapes.Count == 0:
-                raise RuntimeError("no solid in the main body")
+                raise PreconditionRejected("no solid in the main body")
             spa = part.Parent.GetWorkbench("SPAWorkbench")
             measurable = spa.GetMeasurable(part.CreateReferenceFromObject(body))
             result = {
@@ -4298,7 +4298,7 @@ class MeasurementTools:
         started = time.perf_counter()
         body = part.MainBody
         if body.Shapes.Count == 0:
-            raise RuntimeError("That part has no solid shape yet.")
+            raise PreconditionRejected("That part has no solid shape yet.")
         # Which regime this is. Peek now, RECORD at the return, because the reason
         # depends on the route this part ends up taking: a vertex sweep paid for a
         # topology read, an STL export paid for the export, and calling both "the
@@ -4373,10 +4373,17 @@ class MeasurementTools:
                     },
                 )
             if method == "vertices":
-                raise RuntimeError(
+                raise CodedError(
                     "UNSUPPORTED_CAPABILITY: that part exposes no vertices (fully "
                     "curved solid), so a vertex sweep cannot bound it. Use "
-                    "method='mesh'."
+                    "method='mesh'.",
+                    code="UNSUPPORTED_CAPABILITY",
+                    stage="validate",
+                    modified=False,
+                    next_actions=[
+                        "Call again with method='mesh' - this body has no vertices "
+                        "to sweep, and nothing was changed",
+                    ],
                 )
         corners, triangles, copy_note = self._mesh_corners(part)
         # A Part document exports as ONE STL, and that STL contains every
@@ -4677,11 +4684,20 @@ class MeasurementTools:
         self._mesh_export(part, None, grab)
         stats = captured.get("stats")
         if stats is None:
-            raise RuntimeError(
+            raise CodedError(
                 "no STL was produced, so the mesh cannot be inspected; the part "
                 "has to be measurable the same way catia_get_bounding_box "
                 "measures it (open it as its own document if it is a component "
-                "of an assembly)")
+                "of an assembly)",
+                code="MESH_NOT_PRODUCED",
+                stage="execute",
+                modified=False,
+                next_actions=[
+                    "Call catia_get_bounding_box first: if it fails the same way, "
+                    "the part has nothing tessellatable; if it succeeds, run "
+                    "catia_check_surface again with the document opened on its own",
+                ],
+            )
         fold = stats["fold_deg"]
         median = fold["median"]
         shown, sets_total = self._visible_hybrid_sets(part)
@@ -4814,13 +4830,13 @@ class MeasurementTools:
                 return json.dumps(payload, indent=2)
             if len(candidates) > 1:
                 names = ", ".join(f"'{str(doc.Name)}'" for doc in candidates)
-                raise RuntimeError(
+                raise ArgumentRejected(
                     f"component='{component}' exists in more than one open assembly "
                     f"({names}), and the active document is not an assembly. Pass "
                     "document='<assembly>.CATProduct' to say which one - guessing "
                     "would give N plausible numbers from the wrong assembly."
                 )
-            raise RuntimeError(
+            raise ArgumentRejected(
                 f"component='{component}' was NOT measured: the active document is "
                 "'" + self._active_name() + "', which is not an assembly, and no "
                 "open assembly has a component by that name. Two routes: pass "
@@ -4840,7 +4856,7 @@ class MeasurementTools:
             part = self.conn.get_active_part()
             body = self.conn.get_active_part_body()
             if body.Shapes.Count == 0:
-                raise RuntimeError("The active body has no solid shape yet.")
+                raise PreconditionRejected("The active body has no solid shape yet.")
         except Exception as exc:  # noqa: BLE001 - name the document, then re-raise
             raise RuntimeError(
                 f"this measured '{active_name}', which is not a part with a solid "
@@ -5195,7 +5211,7 @@ class MeasurementTools:
                 "exported in place while it is being edited inside an assembly"
             ) from exc
         if not full or not os.path.isabs(full):
-            raise RuntimeError(
+            raise PreconditionRejected(
                 f"'{getattr(doc, 'Name', '?')}' has never been saved, so there is no "
                 "file to copy and it cannot be exported while editing in context; "
                 "save it first (catia_save_document)"

@@ -20,6 +20,7 @@ import sys
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
+from catia_mcp.results import ArgumentRejected
 
 # Factory methods probed on an active Part document. These lists mirror
 # the methods the real tools call, so a probe that fails here fails the
@@ -114,7 +115,7 @@ class DiagnosticsTools:
             case "catia_diagnose":
                 return self._diagnose()
             case _:
-                raise ValueError(f"Unknown diagnostics tool: {tool_name}")
+                raise ArgumentRejected(f"Unknown diagnostics tool: {tool_name}")
 
     def _diagnose(self) -> str:
         self.conn.ensure_connected()

@@ -19,7 +19,7 @@ import re
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
-from catia_mcp.results import ArgumentOutOfRange, ArgumentRejected
+from catia_mcp.results import ArgumentOutOfRange, ArgumentRejected, CodedError
 from catia_mcp.topo_search import search_topology
 
 # Origin plane aliases (same convention as sketcher.py)
@@ -1339,7 +1339,7 @@ class GSDTools:
         arguments = _normalise_arguments(tool_name, arguments)
         problem = _missing_key_error(tool_name, arguments)
         if problem:
-            raise ValueError(problem)
+            raise ArgumentRejected(problem)
         match tool_name:
             case "catia_gsd_create_geoset":
                 return self._create_geoset(arguments)
@@ -1404,7 +1404,7 @@ class GSDTools:
             case "catia_gsd_close_surface":
                 return self._close_surface(arguments)
             case _:
-                raise ValueError(f"Unknown GSD tool: {tool_name}")
+                raise ArgumentRejected(f"Unknown GSD tool: {tool_name}")
 
     # ────────────────────────────────────────────────────────────
     # Helpers: geoset management and element resolution
@@ -1511,7 +1511,7 @@ class GSDTools:
                         f"and '{alias}' is not in the tree either.")
         else:
             message += " Use catia_gsd_list_elements to see available names."
-        raise RuntimeError(message)
+        raise ArgumentRejected(message)
 
     def _lookup_element(self, part: Any, name: str) -> Any | None:
         """One pass over the tree for that exact name, or None.
@@ -1698,7 +1698,7 @@ class GSDTools:
                 refs.append(self._ref(spec))
                 continue
             if not (isinstance(spec, (list, tuple)) and len(spec) == 3):
-                raise ValueError(
+                raise ArgumentRejected(
                     f"Invalid point spec: {spec!r}. Use an element name or [x, y, z].")
             if context is None:
                 context = (self.conn.get_active_part(), self._factory(),
@@ -1988,7 +1988,7 @@ class GSDTools:
         self._coordinate_points = 0
 
         if element and args.get("points"):
-            raise ValueError(
+            raise ArgumentRejected(
                 "Pass either 'points' or 'element', not both: 'element' takes the "
                 "corners of a sketch this server drew, 'points' takes them from you."
             )
@@ -1999,7 +1999,7 @@ class GSDTools:
         else:
             points = args.get("points")
             if not points:
-                raise ValueError(
+                raise ArgumentRejected(
                     "catia_gsd_spline needs 'points' (element names or [x, y, z]) "
                     "or 'element' (a sketch whose outline this server drew)."
                 )
@@ -2075,7 +2075,7 @@ class GSDTools:
         if not recorded and alias and alias != name:
             recorded = outlines.get(f"{document}::{alias}")
         if not recorded:
-            raise RuntimeError(
+            raise ArgumentRejected(
                 f"No outline recorded for sketch '{name}' in '{document}'. This "
                 "server remembers the outlines it drew in THIS session and THIS "
                 "document - reopening a file does not restore them, and a sketch "
@@ -2088,7 +2088,7 @@ class GSDTools:
                    "outline was recorded for either name.)" if alias else "")
             )
         if not self._sketch_exists(name):
-            raise RuntimeError(
+            raise ArgumentRejected(
                 f"Sketch '{name}' is not in '{document}', although this session "
                 "drew an outline under that name - the sketch was renamed or "
                 "deleted. Run catia_list_features and read its 'sketches' array "
@@ -2099,7 +2099,7 @@ class GSDTools:
             )
         placement = recorded.get("placement")
         if not placement:
-            raise RuntimeError(
+            raise ArgumentRejected(
                 f"'{name}' was not created on a datum plane (it sits on a face, "
                 "or on an element whose frame cannot be read back), so its 2D "
                 "coordinates cannot be turned into global XYZ here. Pass the "
@@ -2109,7 +2109,7 @@ class GSDTools:
 
         loop = self._chain_outline(recorded.get("elements") or [], name)
         if len(loop) < 2:
-            raise RuntimeError(
+            raise ArgumentRejected(
                 f"'{name}' holds {len(loop)} usable corner(s); a spline needs at "
                 "least 2."
             )
@@ -2159,18 +2159,18 @@ class GSDTools:
 
         already = kinds & {"circle", "arc"}
         if already:
-            raise RuntimeError(
+            raise ArgumentRejected(
                 f"'{name}' holds a {sorted(already)[0]}, which is already ONE "
                 "curve - pass the sketch itself as the loft section; it needs no "
                 "3D spline."
             )
         if "spline" in kinds:
-            raise RuntimeError(
+            raise ArgumentRejected(
                 f"'{name}' already holds a spline, which is one curve: pass the "
                 "sketch itself as the section instead of wrapping it in a 3D "
                 "spline."
             )
-        raise RuntimeError(
+        raise ArgumentRejected(
             f"Cannot turn '{name}' into a corner list: it holds "
             f"{sorted(kinds) or 'nothing'}. Only a rectangle or a chain of lines "
             "is supported; pass 'points' for anything else."
@@ -2202,7 +2202,7 @@ class GSDTools:
                 remaining.pop(index)
                 break
             else:
-                raise RuntimeError(
+                raise ArgumentRejected(
                     f"The lines in '{name}' do not form one chain: after "
                     f"{len(loop)} corner(s) nothing continues from "
                     f"({tail[0]:g}, {tail[1]:g}). Draw them end to end, or pass "
@@ -2428,7 +2428,7 @@ class GSDTools:
             kept.append((o1, o2, shape))
 
         if not kept:
-            raise RuntimeError(
+            raise CodedError(
                 f"CATIA refused a {radius} mm fillet between '{first}' and "
                 f"'{second}' in all four orientations, so nothing was created:\n  "
                 + "\n  ".join(failed)
@@ -2438,7 +2438,7 @@ class GSDTools:
                   "two disjoint parallel cylinders, 0 of 9 combinations). Check "
                   "that they meet with catia_measure_distance; if the wall is "
                   "thick enough, catia_fillet rounds a solid edge."
-            )
+            , code="FEATURE_REJECTED", stage="execute")
 
         if len(kept) > 1:
             # Different survivors are different surfaces, not variants of one:
@@ -2518,18 +2518,18 @@ class GSDTools:
             # The healing lesson: a call that returns without raising can still
             # be a no-op. Count, do not assume.
             if registered != len(sections):
-                raise RuntimeError(
+                raise CodedError(
                     f"CATIA kept {registered} of the {len(sections)} sections "
                     f"({', '.join(sections)}). Sections have to be curves the "
                     "spine can run normal to; a point or a surface is accepted by "
-                    "AddSection and then silently dropped.")
+                    "AddSection and then silently dropped.", code="FEATURE_INCOMPLETE", stage="execute")
             for name in guides:
                 spine.AddGuide(self._ref(name))
             guide_count = int(spine.GetNumberOfGuides())
             if guides and guide_count != len(guides):
-                raise RuntimeError(
+                raise CodedError(
                     f"CATIA kept {guide_count} of the {len(guides)} guides "
-                    f"({', '.join(guides)}).")
+                    f"({', '.join(guides)}).", code="FEATURE_INCOMPLETE", stage="execute")
         except Exception:
             # Same rule as the fillet search: never leave an element in error.
             try:
@@ -2720,7 +2720,7 @@ class GSDTools:
         guides = args.get("guides", [])
         orientations = args.get("orientations") or [1] * len(sections)
         if len(orientations) != len(sections):
-            raise ValueError(
+            raise ArgumentRejected(
                 f"'orientations' has {len(orientations)} entries but there are "
                 f"{len(sections)} sections — lengths must match."
             )
@@ -2729,7 +2729,7 @@ class GSDTools:
 
         if args.get("ruled"):
             if args.get("start_tangent") or args.get("end_tangent"):
-                raise ValueError(
+                raise ArgumentRejected(
                     "'ruled' and an end tangency condition cannot be combined: the "
                     "ruled path is built from one blend per section pair, so there is "
                     "no single loft feature to carry the condition. Drop 'ruled' if "
@@ -2990,13 +2990,13 @@ class GSDTools:
         # Arguments are validated before CATIA is even touched.
         elements = args.get("elements") or args.get("surfaces") or args.get("curves")
         if not elements:
-            raise ValueError(
+            raise ArgumentRejected(
                 "catia_gsd_join needs 'elements': the list of curves/surfaces to "
                 "join, in order, e.g. {\"elements\": [\"C1\", \"C2\", \"Shell\"]}. "
                 "('surfaces' is accepted as a synonym.)"
             )
         if not isinstance(elements, list) or len(elements) < 2:
-            raise ValueError(
+            raise ArgumentRejected(
                 "catia_gsd_join needs at least two elements; got "
                 f"{elements!r}. Joining one element is a no-op in CATIA."
             )
@@ -3138,7 +3138,7 @@ class GSDTools:
         label = ""
         if isinstance(spec, (list, tuple)):
             if len(spec) != 3:
-                raise ValueError(
+                raise ArgumentRejected(
                     "catia_gsd_translate's direction needs exactly 3 numbers "
                     f"[x, y, z]; got {len(spec)}."
                 )
@@ -3154,7 +3154,7 @@ class GSDTools:
                 return self._adopt_direction(from_line, owner, f"the direction of '{spec}'")
 
         if not any(abs(value) > 1e-9 for value in vector):
-            raise ValueError(
+            raise ArgumentRejected(
                 "catia_gsd_translate's direction is the zero vector, so there is "
                 "no direction to move along."
             )

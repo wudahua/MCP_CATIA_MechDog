@@ -11,7 +11,12 @@ from typing import Any
 
 from catia_mcp import dialogs
 from catia_mcp.connection import CATIAConnection
-from catia_mcp.results import ArgumentRejected, CodedError, ComponentNotFound
+from catia_mcp.results import (
+    ArgumentRejected,
+    CodedError,
+    ComponentNotFound,
+    PreconditionRejected,
+)
 
 
 class DocumentTools:
@@ -321,7 +326,7 @@ class DocumentTools:
                 return self._set_part_number(
                     arguments["part_number"], arguments.get("component_name"))
             case _:
-                raise ValueError(f"Unknown document tool: {tool_name}")
+                raise ArgumentRejected(f"Unknown document tool: {tool_name}")
 
     def _twin_documents(self, doc: Any) -> list[dict[str, Any]]:
         """Other open documents with the SAME ``Name`` as ``doc`` - not ``doc``.
@@ -647,7 +652,7 @@ class DocumentTools:
                     name = dialogs.save(doc)
                     return f"Document '{name}' saved"
                 users = self._component_usage().get(str(holder.Name)) or []
-                raise RuntimeError(
+                raise ArgumentRejected(
                     # Report what is there FIRST, whichever guard fires: the two
                     # refusals lead to different next steps, and only "what is on
                     # disk" lets a caller tell a finished part from a stale one
@@ -665,7 +670,7 @@ class DocumentTools:
                 )
             replaced = self._existing_file_note(file_path)
             if replaced and not overwrite:
-                raise RuntimeError(
+                raise ArgumentRejected(
                     f"'{file_path}' already exists ({replaced}) and is not this "
                     "document's file. Saving there would replace it, and a "
                     "verification run that did exactly that lost a finished part "
@@ -686,7 +691,7 @@ class DocumentTools:
             # is pure delay: there is no path to write to, and SaveAs is refused
             # once the part carries geometry. Say that instead of burning three
             # attempts and reporting "Save failed after 3 attempts".
-            raise RuntimeError(
+            raise PreconditionRejected(
                 f"'{doc.Name}' has never been saved, so there is no file for Save "
                 "to overwrite"
                 # Saying this explicitly: a plan that writes overwrite=true on
@@ -744,7 +749,7 @@ class DocumentTools:
         except Exception:
             current = ""
         if not current or not os.path.dirname(current):
-            raise RuntimeError(
+            raise PreconditionRejected(
                 "This document has never been saved, so it has no path to copy from. "
                 "CATIA only accepts a path before geometry exists: create the part, "
                 "call catia_save_document(file_path=...) on the empty part, then build "
@@ -834,14 +839,14 @@ class DocumentTools:
                     "with '方法 SaveAs 失败', and that error looks unrelated to "
                     "the assembly."
                 )
-            raise RuntimeError(
+            raise CodedError(
                 f"CLOSE NOT CONFIRMED: '{name}' is still open after Close() "
                 f"({before.count(name)} entry/entries before, {after.count(name)} "
                 "after), and NO open assembly references it - so this is not the "
                 "component case. Usual cause: a modal dialog holding the document "
                 "(a save prompt, or 'document modified'). Answer or cancel it, "
                 "then retry."
-            )
+            , code="CLOSE_NOT_CONFIRMED", stage="execute")
         return f"Document '{name}' closed" + (" (saved)" if save else "")
 
     def _list_documents(self) -> str:
@@ -1025,31 +1030,31 @@ class DocumentTools:
                 # the caller had just opened and closed by name (reported
                 # 2026-10-26), which sends them off to re-open a document that is
                 # already open.
-                raise RuntimeError(
+                raise CodedError(
                     f"CATIA did not switch to '{target.Name}': ActiveDocument is "
                     f"still '{active}'. '{target.Name}' HAS a window of its own "
                     "(CATIA lists it), so this is a foreground/focus refusal - most "
                     "often because an open assembly still references it, and CATIA "
                     "refused the close that was asked for just before."
                     + routes
-                )
+                , code="ACTIVATION_FAILED", stage="execute", modified=False)
             if window is False:
-                raise RuntimeError(
+                raise CodedError(
                     f"CATIA did not switch to '{target.Name}': ActiveDocument is "
                     f"still '{active}'. '{target.Name}' has no window of its own - "
                     "it is being edited in context as a component of an open "
                     "product." + routes
-                )
+                , code="ACTIVATION_FAILED", stage="execute", modified=False)
             # None: no usable window list (not exposed, or no windows at all), so
             # neither cause can be ruled out - say both instead of picking one.
-            raise RuntimeError(
+            raise CodedError(
                 f"CATIA did not switch to '{target.Name}': ActiveDocument is "
                 f"still '{active}'. CATIA reported no usable window list, so the "
                 "cause cannot be told apart: either the part has no window of its "
                 "own (a component of an open assembly, edited in context), or "
                 "CATIA refused it the foreground while the assembly still "
                 "references it." + routes
-            )
+            , code="ACTIVATION_FAILED", stage="execute", modified=False)
         return (f"Activated document: '{target.Name}'"
                 + (f" - but {len(twins) + 1} open documents carry that name, and "
                    "this activated the first match, which may not be the one you "

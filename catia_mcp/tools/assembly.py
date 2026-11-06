@@ -11,7 +11,13 @@ import os
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
-from catia_mcp.results import ComponentNotFound
+from catia_mcp.results import (
+    ArgumentOutOfRange,
+    ArgumentRejected,
+    CodedError,
+    ComponentNotFound,
+    PreconditionRejected,
+)
 
 
 # `Position.GetComponents` fills 12 by-ref slots; pywin32 cannot call that
@@ -547,7 +553,7 @@ class AssemblyTools:
             case "catia_set_component_transform":
                 return self._set_component_transform(arguments)
             case _:
-                raise ValueError(f"Unknown assembly tool: {tool_name}")
+                raise ArgumentRejected(f"Unknown assembly tool: {tool_name}")
 
     def _add_component(self, file_path: str) -> str:
         """Insert a part file, in a process that a dialog cannot take hostage.
@@ -606,7 +612,7 @@ class AssemblyTools:
                 except Exception:  # noqa: BLE001
                     pass
                 added = after - before
-                raise RuntimeError(
+                raise CodedError(
                     f"catia_add_component was abandoned after "
                     f"{outcome.data.get('seconds', guard.timeout()):.0f} s: CATIA put up "
                     "a modal dialog and never returned, so the call was run in a "
@@ -617,14 +623,14 @@ class AssemblyTools:
                     "verify with catia_list_components before retrying. Path used: "
                     f"'{native_path}'. If it was a file prompt, the file may not be "
                     "a saved .CATPart, or another application holds it open."
-                )
+                , code="CALL_ABANDONED", stage="execute")
             if not outcome.unavailable:
                 if not outcome.ok:
-                    raise RuntimeError(
+                    raise CodedError(
                         f"CATIA did not add the component ({outcome.code}): "
                         f"{outcome.message}. Path used: '{native_path}'."
                         + self._insert_blocked_hint(native_path)
-                    )
+                    , code="COMPONENT_NOT_ADDED", stage="execute")
                 after = int(outcome.data.get("after") or before)
                 added = outcome.data.get("added") or []
                 self.conn.refresh_display()
@@ -657,13 +663,24 @@ class AssemblyTools:
         after = products.Count
         self.conn.refresh_display()
         if after <= before:
-            raise RuntimeError(
+            # CATIA was called and the count did not move: that is an execution
+            # result, not a refusal of the argument - `stage` says so, and
+            # `modified` is a measured FALSE (the collection is the same size).
+            raise CodedError(
                 f"CATIA accepted the call but no component appeared (count stayed "
                 f"{before}). Path used: '{native_path}'. On this build "
                 "AddComponentsFromFiles rejects forward-slash paths and then opens a "
                 "modal dialog that blocks the automation thread; if the file is not "
                 "a saved .CATPart, save it first - or build it in place with "
-                "catia_add_new_part."
+                "catia_add_new_part.",
+                code="COMPONENT_NOT_ADDED",
+                stage="execute",
+                modified=False,
+                next_actions=[
+                    "Pass a Windows path with backslashes to a saved .CATPart, or "
+                    "build the part in place with catia_add_new_part - the "
+                    "assembly's component count did not change",
+                ],
             )
         note = ""
         if guard.enabled():
@@ -683,7 +700,7 @@ class AssemblyTools:
         requested instances actually landed.
         """
         if count < 1:
-            raise ValueError(f"count must be at least 1; got {count}.")
+            raise ArgumentRejected(f"count must be at least 1; got {count}.")
         if count == 1:
             return self._add_component(file_path)
         import os
@@ -844,7 +861,7 @@ class AssemblyTools:
                     # reply has to say it happened.
                     self._activated_for_insert = open_products[0]
                     return self.conn.product_of(doc)
-        raise RuntimeError(
+        raise PreconditionRejected(
             f"catia_add_component needs the ASSEMBLY to be the active document, and "
             f"'{active}' is active. A component can only be inserted into a Product. "
             + (f"Open assemblies: {', '.join(open_products)} - activate one with "
@@ -1004,7 +1021,7 @@ class AssemblyTools:
             wanted = str(name.get("part_number") or name.get("name") or "").strip()
             occurrence = int(name.get("occurrence", 1))
             if not wanted:
-                raise ValueError(
+                raise ArgumentRejected(
                     "The component object needs 'part_number' (and optionally "
                     "'occurrence', 1-based)."
                 )
@@ -1021,12 +1038,12 @@ class AssemblyTools:
             if not matches:
                 available = [products.Item(i).Name
                              for i in range(1, products.Count + 1)]
-                raise ValueError(
+                raise ArgumentRejected(
                     f"No component whose part is '{wanted}'. Available: {available}"
                 )
             if not 1 <= occurrence <= len(matches):
                 names = [str(c.Name) for c in matches]
-                raise ValueError(
+                raise ArgumentOutOfRange(
                     f"'{wanted}' has {len(matches)} instance(s) in this assembly "
                     f"({', '.join(names)}), so occurrence {occurrence} does not "
                     "exist. Occurrence is 1-based, in tree order."
@@ -1136,7 +1153,7 @@ class AssemblyTools:
         # 48 mirrored instances hid it because their rotation is symmetric.
         convention = args.get("rotation_convention")
         if convention is not None and convention not in ("matrix", "basis"):
-            raise ValueError(
+            raise ArgumentRejected(
                 "rotation_convention must be 'matrix' (P_asm = A·P_local + T, the "
                 "default) or 'basis' (row i = where local axis i points in global)"
             )
@@ -1153,17 +1170,17 @@ class AssemblyTools:
         components = args.get("position_components")
         translation = [float(v) for v in (args.get("translation") or [0.0, 0.0, 0.0])]
         if len(translation) != 3:
-            raise ValueError("translation must hold exactly three numbers")
+            raise ArgumentRejected("translation must hold exactly three numbers")
 
         if components is not None:
             values = [float(v) for v in components]
             if len(values) != 12:
-                raise ValueError("position_components must hold exactly twelve numbers")
+                raise ArgumentRejected("position_components must hold exactly twelve numbers")
             values[9:12] = translation
             source = "position_components"
         elif rows is not None:
             if len(rows) != 3 or any(len(row) != 3 for row in rows):
-                raise ValueError("rotation_rows must be a 3x3 array")
+                raise ArgumentRejected("rotation_rows must be a 3x3 array")
             convention = convention or "matrix"
             values = self._rotation_components(rows, convention) + translation
             source = (
@@ -1179,7 +1196,7 @@ class AssemblyTools:
             values = current[:9] + translation
             source = "translation only (orientation preserved)"
         else:
-            raise ValueError(
+            raise ArgumentRejected(
                 "Provide rotation_rows, position_components, or a non-zero translation"
             )
 
@@ -1239,7 +1256,7 @@ class AssemblyTools:
         results: list[dict[str, Any]] = []
         for index, entry in enumerate(placements, start=1):
             if not isinstance(entry, dict) or not entry.get("component_name"):
-                raise ValueError(
+                raise ArgumentRejected(
                     f"placements[{index - 1}] must be an object with "
                     "'component_name' plus the same arguments a single call takes "
                     "(rotation_rows / position_components / translation)."
@@ -1367,7 +1384,7 @@ class AssemblyTools:
         source = self._resolve_component(product, args["component_name"])
         count = int(args.get("count", 1))
         if count < 1:
-            raise ValueError("count must be at least 1")
+            raise ArgumentRejected("count must be at least 1")
 
         products = product.Products
         before = products.Count
@@ -1485,7 +1502,7 @@ class AssemblyTools:
         except Exception:  # noqa: BLE001 - not a Part, i.e. the expected case
             pass
         else:
-            raise RuntimeError(self._no_active_assembly_text())
+            raise PreconditionRejected(self._no_active_assembly_text())
         product = self.conn.get_active_product()
         products = product.Products
 

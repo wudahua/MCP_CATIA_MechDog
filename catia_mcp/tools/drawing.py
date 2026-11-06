@@ -36,7 +36,12 @@ import re
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
-from catia_mcp.results import ArgumentOutOfRange, ArgumentRejected
+from catia_mcp.results import (
+    ArgumentOutOfRange,
+    ArgumentRejected,
+    CodedError,
+    PreconditionRejected,
+)
 from catia_mcp.tools.measurement import read_measurable_array
 
 # DefineFrontView takes the two sheet-plane axis vectors expressed in the
@@ -636,7 +641,7 @@ class DraftingTools:
             case "catia_drawing_add_dimension":
                 return self._add_dimension(arguments)
             case _:
-                raise ValueError(f"Unknown drafting tool: {tool_name}")
+                raise ArgumentRejected(f"Unknown drafting tool: {tool_name}")
 
     def _new_drawing(self) -> str:
         self.conn.ensure_connected()
@@ -815,7 +820,7 @@ class DraftingTools:
         state = self._apply_paper(sheet, args.get("paper"),
                                   args.get("orientation"), args.get("scale"))
         if state.get("width") is None or state.get("height") is None:
-            raise RuntimeError(
+            raise PreconditionRejected(
                 "This sheet has no ISO paper size, so CATIA cannot say how big "
                 f"it is ({state.get('size_error', 'no width reported')}). A new "
                 "drawing starts as catPaperUser (13), which is an oversized "
@@ -851,7 +856,7 @@ class DraftingTools:
 
         views = sheet.Views
         if views.Count < 2:
-            raise RuntimeError(
+            raise PreconditionRejected(
                 "This sheet has no Background View, and a frame belongs there. "
                 "Create the drawing with catia_new_drawing first."
             )
@@ -875,11 +880,11 @@ class DraftingTools:
                         f"border line ({a:g},{b:g})-({c:g},{d:g}) failed: "
                         f"{str(error).splitlines()[0][:60]}")
             if lines == 0:
-                raise RuntimeError(
+                raise CodedError(
                     "The border could not be drawn: CATIA refused all four "
                     f"Factory2D.CreateLine calls ({problems[0] if problems else ''}). "
                     "The Background View has to be active for it."
-                )
+                , code="DRAW_FAILED", stage="execute")
 
                 # Tables.Add anchors the TOP-left corner and the rows grow DOWNWARD.
         # Passing the bottom margin put the whole block off the sheet - seen in
@@ -997,7 +1002,7 @@ class DraftingTools:
 
         if part_name:
             names = ", ".join(str(d.Name) for d in open_parts) or "none"
-            raise RuntimeError(
+            raise ArgumentRejected(
                 f"No open Part named '{part_name}'. Open parts: {names}."
             )
         if len(open_parts) == 1:
@@ -1017,7 +1022,7 @@ class DraftingTools:
                 except Exception:  # noqa: BLE001
                     continue
         names = ", ".join(str(d.Name) for d in open_parts) or "none"
-        raise RuntimeError(
+        raise ArgumentRejected(
             "Pass 'part_name' to pick the part to project - more than one part "
             f"is open and none of them is the one this session last built. "
             f"Open parts: {names}."
@@ -1042,7 +1047,7 @@ class DraftingTools:
                 continue
         if len(drawings) == 1:
             return drawings[0]
-        raise RuntimeError(
+        raise PreconditionRejected(
             "No active Drawing document. Run catia_new_drawing first."
         )
 
@@ -1148,9 +1153,9 @@ class DraftingTools:
                 if str(v.Name) == view_name:
                     return v
             names = ", ".join(str(views.Item(i).Name) for i in range(1, views.Count + 1))
-            raise RuntimeError(f"No view named '{view_name}'. Views: {names}.")
+            raise ArgumentRejected(f"No view named '{view_name}'. Views: {names}.")
         if views.Count < 3:
-            raise RuntimeError(
+            raise PreconditionRejected(
                 "The active sheet has no user view yet (only Main/Background). "
                 "Add one with catia_drawing_add_view."
             )
@@ -1209,12 +1214,12 @@ class DraftingTools:
             if index is None:
                 continue
             if index < 1 or index > geoms.Count:
-                raise RuntimeError(
+                raise ArgumentOutOfRange(
                     f"{label} is {index}, but view '{view.Name}' has "
                     f"{geoms.Count} element(s). Use catia_drawing_list_view_geometry."
                 )
             if index == 1:
-                raise RuntimeError(
+                raise ArgumentRejected(
                     f"{label} is 1, which is the view's ABSOLUTE AXIS, not "
                     "geometry you drew. The first element you draw is index 2 - "
                     "confirm with catia_drawing_list_view_geometry."
@@ -1288,10 +1293,10 @@ class DraftingTools:
         part = part_doc.Part
         body = part.Bodies.Item(body_name) if body_name else part.MainBody
         if body.Shapes.Count == 0:
-            raise RuntimeError("The body has no solid shape to take a face from.")
+            raise PreconditionRejected("The body has no solid shape to take a face from.")
         cells = topology_cells(self.conn, body, "Face")
         if idx < 1 or idx > len(cells):
-            raise RuntimeError(
+            raise ArgumentOutOfRange(
                 f"{face_name} is out of range: body '{body.Name}' has "
                 f"{len(cells)} face(s). Use catia_list_faces to see them."
             )
@@ -1318,7 +1323,7 @@ class DraftingTools:
                 f"that made it. Underlying call: {str(e).splitlines()[0][:90]}"
             ) from e
         if not any(abs(v) > 0 for v in plane):
-            raise RuntimeError(
+            raise ArgumentRejected(
                 f"{face_name} returned no usable plane (not planar?). Pick a "
                 "planar face."
             )
@@ -1370,7 +1375,7 @@ class DraftingTools:
         sheet = drawing.Sheets.ActiveSheet
         active_doc = str(app.ActiveDocument.Name)
         if active_doc != str(drawing.Name):
-            raise RuntimeError(
+            raise PreconditionRejected(
                 f"Could not activate drawing '{drawing.Name}' (active "
                 f"document is '{active_doc}'); GenerateDimensions would "
                 "silently do nothing. Bring the drawing window to front and "
@@ -1381,7 +1386,7 @@ class DraftingTools:
         except Exception:
             active_view = None
         if active_view is not None and active_view != str(view.Name):
-            raise RuntimeError(
+            raise PreconditionRejected(
                 f"Could not activate view '{view.Name}' (active view is "
                 f"'{active_view}'); retry or pass view_name explicitly."
             )
@@ -1474,10 +1479,10 @@ class DraftingTools:
                 except Exception:
                     pass
             if not linked:
-                raise RuntimeError(
+                raise CodedError(
                     "Could not carry the parent's 3D link to the new view; "
                     "it would generate no geometry."
-                )
+                , code="VIEW_LINK_LOST", stage="execute")
             define(view)
             return view
         except Exception:

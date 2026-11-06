@@ -12,7 +12,7 @@ import re
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
-from catia_mcp.results import CodedError, FeatureRejected
+from catia_mcp.results import CodedError, FeatureRejected, PreconditionRejected
 from catia_mcp.results import ArgumentOutOfRange, ArgumentRejected
 from catia_mcp.topo_search import (
     edge_fingerprint,
@@ -1383,7 +1383,7 @@ class PartDesignTools:
                     bool(arguments.get("include_nls", True)),
                     bool(arguments.get("coords", False)))
             case _:
-                raise ValueError(f"Unknown part design tool: {tool_name}")
+                raise ArgumentRejected(f"Unknown part design tool: {tool_name}")
 
     def _get_last_sketch(self, sketch_name: str | None = None) -> Any:
         """Get a sketch by name, or the most recently created one.
@@ -1440,7 +1440,7 @@ class PartDesignTools:
                 self.conn.last_sketch = None
 
         if sketches.Count == 0:
-            raise RuntimeError("No sketches found in the active body. Create a sketch first.")
+            raise PreconditionRejected("No sketches found in the active body. Create a sketch first.")
         return sketches.Item(sketches.Count)
 
     def _get_last_shape(self, feature_name: str | None = None) -> Any:
@@ -1466,7 +1466,7 @@ class PartDesignTools:
                 )
 
         if shapes.Count == 0:
-            raise RuntimeError("No features found in the active body.")
+            raise PreconditionRejected("No features found in the active body.")
         return body
 
     def _clear_selection(self) -> None:
@@ -1503,13 +1503,21 @@ class PartDesignTools:
         part = self.conn.get_active_part()
         spa = self._topo_measure(part)
         if spa is None:
-            raise RuntimeError(
+            raise CodedError(
                 "SPAWorkbench is not available, so edge anchors cannot be "
-                "measured. Use Edge.N or a fingerprint from catia_list_edges."
+                "measured. Use Edge.N or a fingerprint from catia_list_edges.",
+                code="UNSUPPORTED_CAPABILITY",
+                stage="validate",
+                modified=False,
+                next_actions=[
+                    "Address the edges as 'Edge.N' or as a fingerprint from "
+                    "catia_list_edges - anchors need SPAWorkbench, which this "
+                    "session does not expose",
+                ],
             )
         table = self._edge_table(body)
         if not table:
-            raise RuntimeError("The active body has no edges to fillet yet.")
+            raise PreconditionRejected("The active body has no edges to fillet yet.")
         measurables = []
         for entry in table:
             try:
@@ -1530,7 +1538,7 @@ class PartDesignTools:
         try:
             for anchor in anchors:
                 if len(anchor) != 3:
-                    raise RuntimeError(
+                    raise ArgumentRejected(
                         f"Each edge anchor must be [x, y, z]; got {anchor!r}."
                     )
                 point_ref = probe.add(*anchor)
@@ -1543,7 +1551,7 @@ class PartDesignTools:
                         continue
                 dists.sort()
                 if not dists:
-                    raise RuntimeError(
+                    raise PreconditionRejected(
                         f"No edge of the body could be measured against anchor "
                         f"{anchor}."
                     )
@@ -2073,7 +2081,7 @@ class PartDesignTools:
             return axis.HorizontalReference
         if mode == "vertical":
             return axis.VerticalReference
-        raise ValueError(f"Unknown axis '{mode}'. Use 'horizontal' or 'vertical'.")
+        raise ArgumentRejected(f"Unknown axis '{mode}'. Use 'horizontal' or 'vertical'.")
 
     def _build_revolution(self, part: Any, sketch: Any, angle: float, axis_mode: str,
                           from_ref: str, label: str) -> Any:
@@ -2477,7 +2485,7 @@ class PartDesignTools:
     def _topo_index(name: str, kind: str) -> int:
         m = re.match(rf"^{kind}\.(\d+)$", name or "")
         if not m:
-            raise ValueError(
+            raise ArgumentRejected(
                 f"Expected an indexed name like '{kind}.1' (from "
                 f"catia_list_faces / catia_list_edges), got '{name}'."
             )
@@ -2571,7 +2579,7 @@ class PartDesignTools:
         if table is None:
             table = self._edge_table(body)
         if not table:
-            raise RuntimeError("The active body has no edges to fillet yet.")
+            raise PreconditionRejected("The active body has no edges to fillet yet.")
         labels: list[str] = []
         refs: list[Any] = []
         for spec in specs:
@@ -2587,7 +2595,7 @@ class PartDesignTools:
                     # of two indistinguishable edges. If the index no longer
                     # carries those faces, the tree changed under them, and
                     # quietly filleting the wrong edge is worse than stopping.
-                    raise RuntimeError(
+                    raise ArgumentRejected(
                         f"Edge.{index} is not the edge you fingerprinted: its "
                         f"bounding faces are {sorted(entry['bounded_by'])} but the "
                         f"spec gave {sorted(set(faces))}. Re-run catia_list_edges "
@@ -2679,14 +2687,14 @@ class PartDesignTools:
                     f"edge_anchors entries must be [x, y, z]; got {item!r}."
                 ) from exc
             if len(values) != 3:
-                raise RuntimeError(
+                raise ArgumentRejected(
                     f"edge_anchors entries must be [x, y, z]; got {item!r}."
                 )
             cleaned.append(values)
         tol = args.get("anchor_tol")
         tol = 0.5 if tol is None else float(tol)
         if tol <= 0:
-            raise RuntimeError(
+            raise ArgumentRejected(
                 f"anchor_tol must be greater than 0; got {tol}. It is a "
                 "distance in mm - 0.5 accepts a coordinate rounded to a tenth."
             )
@@ -3121,7 +3129,7 @@ class PartDesignTools:
         self._clear_selection()
         if update_error is not None:
             gone = self._remove_feature(part, chamfer, body)
-            raise RuntimeError(
+            raise CodedError(
                 "CATIA rejected the chamfer"
                 + (" and it was removed from the tree" if gone else
                    " (the dead feature could NOT be deleted - close the document "
@@ -3129,7 +3137,7 @@ class PartDesignTools:
                 + f". {length} mm at {angle} deg on {scope}. A chamfer longer "
                 "than the adjacent face, or an edge shared with an existing "
                 f"fillet, cannot build. Original error: {update_error}"
-            ) from update_error
+            , code="FEATURE_REJECTED", stage="execute") from update_error
         return f"Chamfer created: {length} mm at {angle} deg on {scope}. Feature: '{chamfer.Name}'"
 
     def _hole(self, args: dict[str, Any]) -> str:
@@ -3242,14 +3250,14 @@ class PartDesignTools:
                 # out and say where it went.
                 went = self._remove_feature(part, hole, body)
                 survived = self._sketch_present(part, sketch)
-                raise RuntimeError(
+                raise CodedError(
                     f"The bore is not where the profile is, so it was "
                     + ("rolled back" if went else
                        "left in the tree (it could NOT be deleted - close the "
                        "document without saving)")
                     + f". {wrong_at}"
                     + self._recover_lost_sketch(part, body, sketch_name, survived)
-                ) from None
+                , code="FEATURE_REJECTED", stage="execute") from None
             note = ""
             if update_error is not None:
                 note = (" (CATIA raised during the update, but the bore is in the "
@@ -3373,7 +3381,7 @@ class PartDesignTools:
             where = _sketch_point_world(placement, first["x"], first["y"])
             gap = _in_plane_distance(
                 where, target, placement) if where is not None else None
-            raise RuntimeError(
+            raise ArgumentRejected(
                 f"Sketch '{profile['name']}' holds a point at ({first['x']:g}, "
                 f"{first['y']:g}) and a circle centred at ({cx:g}, {cy:g})"
                 + (f", {gap:.3f} mm apart" if gap is not None else "")
@@ -3626,21 +3634,21 @@ class PartDesignTools:
         dir1_axis = (args.get("dir1_axis") or "").lower() or None
         dir2_axis = (args.get("dir2_axis") or "").lower() or None
         if bool(dir1_edge) != bool(dir2_edge):
-            raise ValueError(
+            raise ArgumentRejected(
                 "Pass both 'dir1_edge' and 'dir2_edge' ('Edge.N' from "
                 "catia_list_edges, two adjacent edges sharing a corner), "
                 "or neither."
             )
         if (dir1_axis or dir2_axis) and (dir1_edge or dir2_edge):
-            raise ValueError(
+            raise ArgumentRejected(
                 "Use either dir1_axis/dir2_axis or dir1_edge/dir2_edge, not both. "
                 "The axis form is the readable one."
             )
         for value in (dir1_axis, dir2_axis):
             if value and value not in ("x", "y", "z"):
-                raise ValueError("dir1_axis / dir2_axis must be 'x', 'y' or 'z'")
+                raise ArgumentRejected("dir1_axis / dir2_axis must be 'x', 'y' or 'z'")
         if dir1_axis and dir2_axis and dir1_axis == dir2_axis:
-            raise ValueError(
+            raise ArgumentRejected(
                 "dir1_axis and dir2_axis are the same axis; CATIA rejects two "
                 "parallel directions, and so does this tool."
             )
@@ -3661,7 +3669,7 @@ class PartDesignTools:
             first = dir1_axis or "x"
             second = dir2_axis or cyclic[first]
             if second == first:
-                raise ValueError(
+                raise ArgumentRejected(
                     f"dir1_axis and dir2_axis are both '{first}'; a pattern needs two "
                     "different directions."
                 )
@@ -3827,7 +3835,7 @@ class PartDesignTools:
         """
         shapes = body.Shapes
         if shapes.Count == 0:
-            raise RuntimeError("No features to pattern in the active body.")
+            raise PreconditionRejected("No features to pattern in the active body.")
         if feature_name:
             try:
                 return shapes.Item(feature_name)
@@ -3861,10 +3869,10 @@ class PartDesignTools:
             angular_spacing = 360.0 / count
         axis = (args.get("axis") or "z").lower()
         if axis not in ("x", "y", "z"):
-            raise ValueError("axis must be 'x', 'y' or 'z'")
+            raise ArgumentRejected("axis must be 'x', 'y' or 'z'")
         center = args.get("center") or [0.0, 0.0, 0.0]
         if len(center) != 3:
-            raise ValueError("center must be [x, y, z] in mm")
+            raise ArgumentRejected("center must be [x, y, z] in mm")
         # The seed must be a FEATURE, not the body: _get_last_shape(None) returns
         # the body on purpose (topology searches want it), but patterning the
         # body is what made every circular pattern fail at update - the pattern
@@ -3923,7 +3931,7 @@ class PartDesignTools:
             # that is worth saying because the old failure mode looked like the
             # seed had vanished (it had not; a dead 圆形阵列.1 was in the tree).
             gone = self._remove_feature(part, pattern, body)
-            raise RuntimeError(
+            raise CodedError(
                 "CATIA rejected the circular pattern"
                 + (" and it was removed from the tree" if gone else
                    " (the dead feature could NOT be deleted - close the document "
@@ -3933,7 +3941,7 @@ class PartDesignTools:
                 "the seed already removed, or 'count' exceeds what fits in "
                 f"angular_spacing ({angular_spacing} deg). Original error: "
                 f"{update_error}"
-            ) from update_error
+            , code="FEATURE_REJECTED", stage="execute") from update_error
 
         detail = ""
         if moved is not None and abs(moved) > 1e-6:
@@ -3996,7 +4004,7 @@ class PartDesignTools:
             # Field-proven trap: the last item of body.Sketches is stale right
             # after CloseEdition and resolves to the previous sketch, so the
             # points sketch must be addressed by name.
-            raise ValueError(
+            raise ArgumentRejected(
                 "catia_user_pattern requires 'sketch_name': the points sketch "
                 "name reported by catia_close_sketch (e.g. 'Sketch.3')."
             )
@@ -4065,7 +4073,7 @@ class PartDesignTools:
         plane_key = args["plane"].lower()
         planes = self.conn.get_origin_elements()
         if plane_key not in planes:
-            raise ValueError(f"Unknown plane '{plane_key}'. Use 'xy', 'yz', or 'zx'.")
+            raise ArgumentRejected(f"Unknown plane '{plane_key}'. Use 'xy', 'yz', or 'zx'.")
 
         mirror_plane = planes[plane_key]
         ref = part.CreateReferenceFromObject(mirror_plane)
@@ -4114,7 +4122,7 @@ class PartDesignTools:
             pass
         faces = args.get("faces_to_remove") or []
         if not faces:
-            raise ValueError(
+            raise ArgumentRejected(
                 "catia_shell requires 'faces_to_remove' with at least one "
                 "indexed face name ('Face.N' from catia_list_faces): "
                 "AddNewShell's first parameter is the face to remove."
@@ -4184,7 +4192,7 @@ class PartDesignTools:
         angle = args["angle"]
         face_name = args.get("face_name")
         if not face_name:
-            raise ValueError(
+            raise ArgumentRejected(
                 "catia_draft requires 'face_name' ('Face.N' from "
                 "catia_list_faces): the face to draft."
             )
@@ -4193,7 +4201,7 @@ class PartDesignTools:
         plane_key = args.get("pulling_direction", "xy").lower()
         planes = self.conn.get_origin_elements()
         if plane_key not in ("xy", "yz", "zx") or not planes.get(plane_key):
-            raise ValueError(f"Unknown pulling direction plane: {plane_key}")
+            raise ArgumentRejected(f"Unknown pulling direction plane: {plane_key}")
 
         # The neutral element has to be a face of the solid, not a datum plane:
         # AddNewDraft rejects the datum and fails before it even gets to the
@@ -4211,7 +4219,7 @@ class PartDesignTools:
             others = [f for f in faces if f.get("name") != face_name]
             others.sort(key=lambda f: -(f.get("area_mm2") or 0))
             if not others:
-                raise RuntimeError(
+                raise PreconditionRejected(
                     "catia_draft needs a neutral face, and this body reports only "
                     "the face being drafted. Pass neutral_face explicitly.")
             # Area alone is not the criterion - the neutral face also has to be
@@ -4255,7 +4263,7 @@ class PartDesignTools:
                                               "deleted - close the document without "
                                               "saving)"))
         self.conn.refresh_display()
-        raise RuntimeError(
+        raise CodedError(
             "CATIA rejected the draft on every neutral face tried. "
             f"{angle} deg on {face_name}, pulling direction {plane_key} "
             f"({'/'.join(str(v) for v in direction)}). Check the DIRECTION first: a "
@@ -4266,7 +4274,7 @@ class PartDesignTools:
             "that is NOT that wall's normal. Only then try neutral_face: it has to "
             "touch the drafted face and be perpendicular to the pulling direction. "
             "Tried - " + "; ".join(errors)
-        )
+        , code="FEATURE_REJECTED", stage="execute")
 
     def _thickness(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
@@ -4277,7 +4285,7 @@ class PartDesignTools:
         offset = args["offset"]
         face_name = args.get("face_name")
         if not face_name:
-            raise ValueError(
+            raise ArgumentRejected(
                 "catia_thickness requires 'face_name' ('Face.N' from "
                 "catia_list_faces): the face to thicken."
             )
@@ -4361,7 +4369,7 @@ class PartDesignTools:
                     "last=true to mean this one."
                 )
             if shapes.Count == 0:
-                raise RuntimeError("The active body has no features to delete.")
+                raise PreconditionRejected("The active body has no features to delete.")
             target = str(shapes.Item(shapes.Count).Name)
         if not target:
             shapes = self.conn.get_active_part_body().Shapes
@@ -4843,7 +4851,7 @@ class PartDesignTools:
         if len(sections) < 2:
             # Checked before touching CATIA: a bad argument should not depend on
             # a document being open.
-            raise ValueError("A loft needs at least two sections.")
+            raise ArgumentRejected("A loft needs at least two sections.")
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
         body = self._prepare_body(part)
@@ -4954,7 +4962,7 @@ class PartDesignTools:
                     except Exception:  # noqa: BLE001
                         continue
                     return part.CreateReferenceFromObject(element)
-        raise RuntimeError(
+        raise ArgumentRejected(
             f"No sketch or geometrical element named '{name}' to use as a loft "
             "section. catia_list_features (its 'sketches' array) and "
             "catia_gsd_list_elements both report the names this accepts."
@@ -4982,11 +4990,11 @@ class PartDesignTools:
             if label == name:
                 target = body
         if target is None:
-            raise RuntimeError(
+            raise ArgumentRejected(
                 f"No solid body named '{name}'. Bodies: {', '.join(names) or 'none'}."
             )
         if str(target.Name) == str(part.MainBody.Name):
-            raise RuntimeError(
+            raise PreconditionRejected(
                 f"'{name}' is the MainBody and cannot be deleted: every part needs "
                 "one. Delete its features instead, or build the geometry in another "
                 "body and leave this one empty."
@@ -4996,7 +5004,7 @@ class PartDesignTools:
         except Exception:  # noqa: BLE001 - unknown, so do not force
             count = None
         if count and not force:
-            raise RuntimeError(
+            raise ArgumentRejected(
                 f"Body '{name}' still holds {count} feature(s), and deleting the body "
                 "deletes them too. Pass force=true if that is what you want, or "
                 "remove the features first with catia_delete_feature."
@@ -5017,11 +5025,11 @@ class PartDesignTools:
             self.conn.active_body = None
         after = part.Bodies.Count
         if after >= before:
-            raise RuntimeError(
+            raise CodedError(
                 f"CATIA accepted the deletion but '{name}' is still there "
                 f"({before} -> {after} bodies). Close the document without saving "
                 "and rebuild, or empty the body and leave it."
-            )
+            , code="DELETE_NOT_CONFIRMED", stage="execute")
         return (f"Body '{name}' deleted ({before} -> {after} bodies)."
                 + (f" Its {count} feature(s) went with it." if count else ""))
 
@@ -5067,7 +5075,7 @@ class PartDesignTools:
                 break
         if body is None:
             names = ", ".join(str(bodies.Item(i).Name) for i in range(1, bodies.Count + 1))
-            raise RuntimeError(
+            raise ArgumentRejected(
                 f"No solid body named '{name}'. Bodies: {names or 'none'}."
             )
         self.conn.active_body = body
@@ -5234,7 +5242,7 @@ class PartDesignTools:
                     break
 
         if target is None:
-            raise RuntimeError(
+            raise ArgumentRejected(
                 f"No tree node named '{name}'. Use catia_list_bodies, "
                 "catia_list_features or catia_gsd_list_elements to see names."
             )
@@ -5333,7 +5341,7 @@ class PartDesignTools:
         self.conn.refresh_display()
 
         if not counts["sketch"] and not counts["datum_plane"]:
-            raise RuntimeError(
+            raise PreconditionRejected(
                 f"Nothing of kind '{kind}' found to {'show' if show else 'hide'}: "
                 "the part has no sketches (or no datum planes). Use "
                 "catia_list_features to see what the tree holds."
@@ -5378,13 +5386,13 @@ class PartDesignTools:
             elif str(part.MainBody.Name) != str(tool.Name):
                 target = part.MainBody
             else:
-                raise ValueError(
+                raise ArgumentRejected(
                     f"'{tool.Name}' is the only candidate; pass target_body "
                     f"explicitly to say which body should survive."
                 )
 
         if str(tool.Name) == str(target.Name):
-            raise ValueError(
+            raise ArgumentRejected(
                 "tool_body and target_body are the same body - a boolean needs two."
             )
 
@@ -5455,7 +5463,7 @@ class PartDesignTools:
         """
         body = body if body is not None else self.conn.get_active_part_body()
         if body.Shapes.Count == 0:
-            raise RuntimeError(
+            raise PreconditionRejected(
                 f"Body '{body.Name}' has no solid shape yet."
             )
         cells = topology_cells(self.conn, body, kind)

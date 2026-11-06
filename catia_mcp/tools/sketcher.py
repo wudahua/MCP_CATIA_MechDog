@@ -11,7 +11,11 @@ from typing import Any
 
 from catia_mcp.connection import CATIAConnection
 from catia_mcp.results import CodedError
-from catia_mcp.results import ArgumentOutOfRange, ArgumentRejected
+from catia_mcp.results import (
+    ArgumentOutOfRange,
+    ArgumentRejected,
+    PreconditionRejected,
+)
 from catia_mcp.topo_search import topology_reference
 
 # Plane name mapping
@@ -580,11 +584,11 @@ class SketcherTools:
                 return self._delete_element(arguments["index"],
                                             arguments.get("sketch_name"))
             case _:
-                raise ValueError(f"Unknown sketcher tool: {tool_name}")
+                raise ArgumentRejected(f"Unknown sketcher tool: {tool_name}")
 
     def _ensure_sketch_open(self) -> None:
         if self._active_sketch is None:
-            raise RuntimeError(
+            raise PreconditionRejected(
                 "No active sketch. Use catia_create_sketch first to open a sketch."
             )
 
@@ -663,19 +667,19 @@ class SketcherTools:
         second = plane.get("v")
         for label, value in (("origin", origin), ("u", first), ("v", second)):
             if not isinstance(value, (list, tuple)) or len(value) != 3:
-                raise ValueError(
+                raise ArgumentRejected(
                     f"plane of type 'frame' needs '{label}' as [x, y, z], got {value!r}."
                 )
         o = [float(v) for v in origin]
         u = [float(v) for v in first]
         v = [float(v) for v in second]
         if max(abs(c) for c in u) < 1e-9 or max(abs(c) for c in v) < 1e-9:
-            raise ValueError("'u' and 'v' must be direction vectors, not zero.")
+            raise ArgumentRejected("'u' and 'v' must be direction vectors, not zero.")
         cross = [u[1] * v[2] - u[2] * v[1],
                  u[2] * v[0] - u[0] * v[2],
                  u[0] * v[1] - u[1] * v[0]]
         if max(abs(c) for c in cross) < 1e-9:
-            raise ValueError("'u' and 'v' are parallel, so they span no plane.")
+            raise ArgumentRejected("'u' and 'v' are parallel, so they span no plane.")
 
         def unit(vector: list[float], length: float = 10.0) -> list[float]:
             norm = sum(component * component for component in vector) ** 0.5
@@ -738,14 +742,14 @@ class SketcherTools:
         if isinstance(plane, str):
             key = plane.lower()
             if key not in PLANE_MAP:
-                raise ValueError(f"Unknown plane '{plane}'. Use 'xy', 'yz', or 'zx'.")
+                raise ArgumentRejected(f"Unknown plane '{plane}'. Use 'xy', 'yz', or 'zx'.")
             return (
                 self._reference_plane(part, body, key, offset),
                 self._describe_plane(key, offset),
             )
 
         if not isinstance(plane, dict):
-            raise ValueError(
+            raise ArgumentRejected(
                 "plane must be 'xy'/'yz'/'zx' or an object with a 'type' of "
                 f"'offset' or 'face', got {type(plane).__name__}."
             )
@@ -759,7 +763,7 @@ class SketcherTools:
         if kind == "face":
             index = plane.get("index")
             if isinstance(index, bool) or not isinstance(index, int):
-                raise ValueError(
+                raise ArgumentRejected(
                     "plane of type 'face' needs an integer 'index' - a 1-based "
                     "Face.N from catia_list_faces. The face order is CATIA's "
                     "own, so read the list before choosing."
@@ -781,12 +785,12 @@ class SketcherTools:
         if kind == "offset":
             base = str(plane.get("base", "xy")).strip().lower()
             if base not in PLANE_MAP:
-                raise ValueError(
+                raise ArgumentRejected(
                     f"Unknown offset base '{plane.get('base')}'. Use 'xy', 'yz', or 'zx'."
                 )
             distance = plane.get("distance", plane.get("offset", 0))
             if isinstance(distance, bool) or not isinstance(distance, (int, float)):
-                raise ValueError(
+                raise ArgumentRejected(
                     "plane of type 'offset' needs a numeric 'distance' in mm "
                     f"(it may be negative), got {distance!r}."
                 )
@@ -796,7 +800,7 @@ class SketcherTools:
                 self._describe_plane(base, distance),
             )
 
-        raise ValueError(
+        raise ArgumentRejected(
             f"Unknown plane type {plane.get('type')!r}. Use 'offset', 'face', or "
             "pass plane='xy' | 'yz' | 'zx'."
         )
@@ -1342,7 +1346,7 @@ class SketcherTools:
         notes: list[str] = []
         if p1 is not None or p2 is not None:
             if p1 is None or p2 is None:
-                raise ValueError(
+                raise ArgumentRejected(
                     "catia_sketch_arc needs BOTH p1 and p2 (the two endpoints), "
                     "or start_angle and end_angle. Got only one endpoint."
                 )
@@ -1414,7 +1418,7 @@ class SketcherTools:
             start_rad = math.radians(start_angle)
             end_rad = math.radians(end_angle)
         else:
-            raise ValueError(
+            raise ArgumentRejected(
                 "catia_sketch_arc needs either start_angle and end_angle, or p1 "
                 "and p2."
             )
@@ -1564,7 +1568,7 @@ class SketcherTools:
                 # nor the index. The delete path has refused index 1 for a while;
                 # this one did not, so "my first line" (which is index 2) looked
                 # broken (measured on B30 2026-11-05: '绝对轴' at 1, '直线.1' at 2).
-                raise RuntimeError(
+                raise ArgumentRejected(
                     f"{label} is {index}, which is the sketch's ABSOLUTE AXIS "
                     f"('{element.Name}'), not geometry you drew. The first element "
                     "you draw is index 2. Use the index from "
@@ -1576,9 +1580,9 @@ class SketcherTools:
         # Dimensional constraints (need a geometry reference + value)
         if constraint_type in ("distance", "radius", "angle"):
             if value is None:
-                raise ValueError(f"Constraint type '{constraint_type}' requires a 'value' parameter.")
+                raise ArgumentRejected(f"Constraint type '{constraint_type}' requires a 'value' parameter.")
             if idx1 is None:
-                raise ValueError(f"Constraint type '{constraint_type}' requires 'geometry_index_1'.")
+                raise ArgumentRejected(f"Constraint type '{constraint_type}' requires 'geometry_index_1'.")
 
             if constraint_type == "distance" and idx2 is not None:
                 cst = constraints.AddBiEltCst(
@@ -1594,7 +1598,7 @@ class SketcherTools:
                     self._CST_RADIUS, _ref(idx1, "geometry_index_1"))
             else:  # angle
                 if idx2 is None:
-                    raise ValueError("Angle constraint requires 'geometry_index_2'.")
+                    raise ArgumentRejected("Angle constraint requires 'geometry_index_2'.")
                 cst = constraints.AddBiEltCst(
                     self._CST_ANGLE,
                     _ref(idx1, "geometry_index_1"),
@@ -1617,16 +1621,16 @@ class SketcherTools:
 
         cst_code = cst_type_map.get(constraint_type)
         if cst_code is None:
-            raise ValueError(f"Unknown constraint type: {constraint_type}")
+            raise ArgumentRejected(f"Unknown constraint type: {constraint_type}")
 
         if constraint_type in ("horizontal", "vertical", "fix"):
             if idx1 is None:
-                raise ValueError(f"Constraint '{constraint_type}' requires 'geometry_index_1'.")
+                raise ArgumentRejected(f"Constraint '{constraint_type}' requires 'geometry_index_1'.")
             cst = constraints.AddMonoEltCst(
                 cst_code, _ref(idx1, "geometry_index_1"))
         else:
             if idx1 is None or idx2 is None:
-                raise ValueError(
+                raise ArgumentRejected(
                     f"Constraint '{constraint_type}' requires both 'geometry_index_1' and 'geometry_index_2'."
                 )
             cst = constraints.AddBiEltCst(
@@ -1688,7 +1692,7 @@ class SketcherTools:
             except Exception:
                 self.conn.last_sketch = None
         names = self._sketch_names(body)
-        raise RuntimeError(
+        raise PreconditionRejected(
             "No sketch is open and none was created in this session, so there is "
             "nothing to default to. Pass sketch_name explicitly. Sketches in the "
             f"active body: {names or 'none'}."
@@ -1847,7 +1851,7 @@ class SketcherTools:
                 )
             axis_element = geom.Item(index)
             if self._is_absolute_axis(axis_element, index):
-                raise RuntimeError(
+                raise ArgumentRejected(
                     "Element 1 is the sketch's absolute axis, not a profile "
                     "element - deleting it would break the sketch. Pick another "
                     "index from catia_sketch_get_geometry."

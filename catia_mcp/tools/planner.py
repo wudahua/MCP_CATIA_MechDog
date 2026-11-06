@@ -24,6 +24,7 @@ from typing import Any
 
 from catia_mcp.connection import CATIAConnection
 from catia_mcp.results import CodedError
+from catia_mcp.results import ArgumentRejected, PreconditionRejected
 from catia_mcp.results import reject_validation
 from catia_mcp.results import failure_code as shared_failure_code
 from catia_mcp.topo_search import topology_cells
@@ -222,12 +223,12 @@ class PlannerTools:
                 return json.dumps(self._count_topology(arguments.get("document")),
                                  indent=2, ensure_ascii=False)
             case _:
-                raise ValueError(f"Unknown planner tool: {tool_name}")
+                raise ArgumentRejected(f"Unknown planner tool: {tool_name}")
 
     # ---- plan execution -----------------------------------------------------
     def _validate_steps(self, steps: list[dict[str, Any]]) -> list[str]:
         if self._router is None:
-            raise RuntimeError("Planner is not bound to the tool router")
+            raise CodedError("Planner is not bound to the tool router", code="INTERNAL_ERROR", stage="validate", modified=False)
         problems: list[str] = []
         # 0.3.68: remember which problems are literally "the tool does not read
         # that argument", so the refusal can publish the SAME code a bare call
@@ -403,7 +404,7 @@ class PlannerTools:
 
     def _run_plan(self, arguments: dict[str, Any]) -> dict[str, Any]:
         if self._router is None:
-            raise RuntimeError("Planner is not bound to the tool router")
+            raise CodedError("Planner is not bound to the tool router", code="INTERNAL_ERROR", stage="validate", modified=False)
         steps = arguments.get("steps") or []
         if not steps:
             # Used to raise ValueError, which the server turned into COM_ERROR
@@ -976,7 +977,7 @@ class PlannerTools:
             # face/edge/vertex counts (found 2026-10-25 while adding per-document
             # assertions - the same trap that made add_component fail on a Part).
             if not self._is_product_document(self._named_document(document)):
-                raise RuntimeError("not a Product document")
+                raise PreconditionRejected("not a Product document")
             measurements["topology"] = (
                 "n/a (Product document: faces/edges/vertices belong to each part - "
                 "run catia_measure_topology while a part is active)")
@@ -1046,7 +1047,7 @@ class PlannerTools:
                 continue
             if key in names:
                 return doc
-        raise RuntimeError(
+        raise ArgumentRejected(
             f"'{document}' is not open. Documents: "
             + ", ".join(str(docs.Item(i).Name) for i in range(1, docs.Count + 1))
         )

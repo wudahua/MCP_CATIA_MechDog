@@ -11,6 +11,7 @@ import os
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
+from catia_mcp.results import ArgumentRejected, CodedError, PreconditionRejected
 
 # CATIA export format identifiers
 FORMAT_MAP = {
@@ -173,7 +174,7 @@ class ExportTools:
             case "catia_fit_all":
                 return self._fit_all()
             case _:
-                raise ValueError(f"Unknown export tool: {tool_name}")
+                raise ArgumentRejected(f"Unknown export tool: {tool_name}")
 
     def _assert_has_mesh_geometry(self, doc: Any, fmt_key: str) -> None:
         """Refuse a mesh export when the part has nothing to tessellate.
@@ -214,7 +215,7 @@ class ExportTools:
         if solids:
             return
         if not gsd:
-            raise ValueError(
+            raise PreconditionRejected(
                 f"Nothing to export as {fmt_key}: this part has no solid shape and "
                 "no GSD element, so there is nothing to tessellate. Exporting it is "
                 "pointless at best - one probe script that did it hung for five "
@@ -244,7 +245,7 @@ class ExportTools:
         fmt_key = fmt.lower()
         if fmt_key not in FORMAT_MAP:
             supported = ", ".join(sorted(set(FORMAT_MAP.keys())))
-            raise ValueError(
+            raise ArgumentRejected(
                 f"Unsupported export format: '{fmt}'. Supported: {supported}"
             )
 
@@ -294,7 +295,7 @@ class ExportTools:
                     os.remove(file_path)
                 except OSError:  # noqa: BLE001 - the message matters, not the file
                     pass
-                raise ValueError(
+                raise CodedError(
                     f"The {fmt_key} came out EMPTY ({written} bytes, no triangles), "
                     "so this part has no VISIBLE geometry to tessellate - elements "
                     "that exist but are all hidden export as nothing, and CATIA "
@@ -302,7 +303,7 @@ class ExportTools:
                     "body visible (catia_set_visibility) and retry, or export "
                     "STEP/IGES, which carry the tree rather than the visible skin. "
                     "The empty file was removed rather than left behind."
-                )
+                , code="NO_VISIBLE_GEOMETRY", stage="execute")
 
         size_info = ""
         if os.path.exists(file_path):
@@ -432,7 +433,7 @@ class ExportTools:
         }
 
         if view not in views:
-            raise ValueError(f"Unknown view: '{view}'")
+            raise ArgumentRejected(f"Unknown view: '{view}'")
 
         v = views[view]
         sight = v["sight"]

@@ -40,16 +40,22 @@ from catia_mcp.server import CATIAMCPServer
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "catia_mcp" / "tools"
-BASELINE = pathlib.Path(__file__).resolve().parent / "argument_rejection_baseline.json"
 
 
-# ── the scan: bare raise + a message about an argument, outside except ──────
+# ── the scan: a bare raise outside an except block ──────────────────────────
+#
+# 0.3.69 replaced the keyword scan. The old guard matched a message against
+# ("must", "unknown", "requires", ...) and kept a baseline of the sites it could
+# not fix: 81 entries. Reading the other 88 bare raises by hand showed the table
+# was never the problem - "Pass either 'points' or 'element', not both" and "No
+# active sketch" were refusals too, invisible only because of their wording.
+#
+# So the rule is structural now, and a structure cannot be paraphrased away:
+# a raise inside an `except` block re-wraps a failure CATIA produced (execute
+# stage, no argument to fix); a raise ANYWHERE ELSE is a decision the tool made.
+# A decision has a code. There is no baseline to grow, because there is nothing
+# left to register.
 
-PARAMETER_WORDS = (
-    "must", "cannot", "can not", "unknown", "no such", "not a ", "needs",
-    "requires", "invalid", "out of range", "does not", "not supported here",
-    "至少", "不能", "必须", "未知", "无效", "超出", "不是",
-)
 BARE = {"ValueError", "RuntimeError", "TypeError", "KeyError"}
 
 
@@ -78,7 +84,7 @@ def _raised_message(node: ast.Raise) -> str:
 class _Scan(ast.NodeVisitor):
     def __init__(self, name: str) -> None:
         self.name = name
-        self.found: set[tuple[str, str]] = set()
+        self.found: list[tuple[str, int, str, str]] = []
         self._inside_except = 0
 
     def visit_ExceptHandler(self, node):  # noqa: N802 - ast API name
@@ -88,54 +94,41 @@ class _Scan(ast.NodeVisitor):
 
     def visit_Raise(self, node):  # noqa: N802 - ast API name
         if _raised_name(node) in BARE and not self._inside_except:
-            text = _raised_message(node)
-            if text and any(word in text.casefold() for word in PARAMETER_WORDS):
-                self.found.add((self.name,
-                                re.sub(r"\s+", " ", text).strip()))
+            self.found.append((self.name, node.lineno, _raised_name(node),
+                               _raised_message(node)))
         self.generic_visit(node)
 
 
-def scan_parameter_raises() -> set[tuple[str, str]]:
-    found: set[tuple[str, str]] = set()
+def scan_bare_raises() -> list[tuple[str, int, str, str]]:
+    """Every raise of a code-less exception that is NOT re-wrapping a failure."""
+    found: list[tuple[str, int, str, str]] = []
     for path in sorted(TOOLS.glob("*.py")):
         scanner = _Scan(path.name)
         scanner.visit(ast.parse(path.read_text(encoding="utf-8")))
-        found |= scanner.found
+        found.extend(scanner.found)
     return found
 
 
-def test_no_new_bare_raise_talks_about_an_argument():
-    """The guard. A new site must either carry a code or be registered on purpose.
+def test_no_tool_raises_a_bare_exception_of_its_own():
+    """The guard. An unreported refusal is a COM_ERROR for a call that never ran.
 
-    The baseline is not a list of acceptable behaviour - it is the register of
-    what is still unfixed as of 0.3.68, so the number can only go down. Adding
-    to it is a deliberate act with a reason, not something that happens because
-    a module was written on a Tuesday.
+    0.3.43 fixed fifteen sites by hand and three modules written afterwards
+    started from the old shape again; 0.3.68 converted twenty and left 81
+    registered; 0.3.69 converted all 169 that were left. The way that stops
+    repeating is a rule the code cannot satisfy by accident - either the raise
+    is inside an `except` (a CATIA failure being reported) or it carries a code.
     """
-    registered = {(row[0], row[1]) for row in
-                  json.loads(BASELINE.read_text(encoding="utf-8"))["sites"]}
-    found = scan_parameter_raises()
-
-    new = sorted(found - registered)
-    assert not new, (
-        "these raise sites talk about an argument but carry no code, so they "
-        "will answer COM_ERROR for a call that never reached CATIA:\n  "
-        + "\n  ".join(f"{name}: {message[:90]}" for name, message in new)
-        + "\nRaise ArgumentRejected / ArgumentOutOfRange instead, or add the site "
-          "to tests/argument_rejection_baseline.json with a reason.")
-
-    gone = sorted(registered - found)
-    assert not gone, (
-        "these sites are no longer in the code, so the baseline is stale - "
-        "delete them from tests/argument_rejection_baseline.json (the count can "
-        "only go down):\n  "
-        + "\n  ".join(f"{name}: {message[:90]}" for name, message in gone))
-
-
-def test_the_baseline_still_describes_the_current_code():
-    payload = json.loads(BASELINE.read_text(encoding="utf-8"))
-    assert payload["count"] == len(payload["sites"])
-    assert len(scan_parameter_raises()) == payload["count"]
+    found = scan_bare_raises()
+    assert not found, (
+        "these raises carry no code and are the tool's own decision, so they "
+        "answer COM_ERROR / modified:null for a call that never reached CATIA:\n  "
+        + "\n  ".join(f"{name}:{line} {cls}: {message[:80]!r}"
+                      for name, line, cls, message in found)
+        + "\nRaise ArgumentRejected (bad argument), PreconditionRejected (model "
+          "state), ArgumentOutOfRange (index/name past the end), or "
+          "CodedError(..., stage=\"execute\") (CATIA ran and the result was not "
+          "what the call asked for)."
+    )
 
 
 # ── the shape itself, through the server ───────────────────────────────────

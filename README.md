@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.68** · [what changed](CHANGELOG.md) ·
+**0.3.69** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1180,6 +1180,38 @@ hand-dimensioned at all - its curves are not addressable through automation, onl
 plate gave its hole's cylinder at `Face.1` in one build and at `Face.7` in another,
 so list faces and use the index immediately.
 
+**0.3.69 finished that sweep: 169 raise sites, no register left.** 0.3.68
+converted twenty and registered the other 81 in a JSON baseline; 0.3.69
+converted all of them, and the 88 more that the old keyword scan could never
+see. The count went **up** because the measurement was wrong, not the work:
+"Pass either 'points' or 'element', not both" and "No active sketch" are
+refusals too, and they contain none of the words ("must", "unknown", "requires")
+the scan matched. Every one of the 169 now answers `ok:false` with
+`failure_stage`, `modified`, and what to fix.
+
+Three classes, because the fix differs: `ArgumentRejected` (a typo - change the
+value), `PreconditionRejected` (the model is not in that state - build or open
+what the message names, and changing the argument will not help), and
+`ArgumentOutOfRange` (enumerate first). A failure that really is CATIA's answer
+keeps `stage:"execute"` and gets its own code instead of `COM_ERROR`:
+`NO_VISIBLE_GEOMETRY`, `COM_RESULT_UNEXPECTED`, `FEATURE_INCOMPLETE`,
+`ACTIVATION_FAILED`, `COMPONENT_NOT_ADDED`, `CLOSE_NOT_CONFIRMED`. All three
+refusal classes subclass `ValueError` as well as `RuntimeError`, so the handlers
+written against the old types keep working.
+
+The guard is structural now, in `tests/test_argument_envelopes.py`: a raise
+inside an `except` re-wraps a CATIA failure (execute stage); a raise anywhere
+else is a decision the tool made, and a decision carries a code. There is no
+baseline to add to, because there is nothing left to register.
+
+One thing this release found the hard way: `sketcher` and `document` raised
+`PreconditionRejected` before importing it, and the caller saw `COM_ERROR` /
+`execute` with the message `'PreconditionRejected' is not defined` - a `NameError`
+wearing an envelope. pytest was green throughout, because no test walked those
+two paths; the B30 acceptance script found it. `test_every_class_a_tool_raises_
+is_reachable_from_that_module` now parses the package and fails on any raise whose
+class is not imported in that module.
+
 **0.3.68 closed the refusal-envelope gap the new modules reopened.** 0.3.43 gave
 every pre-execution refusal one shape (`ok:false`, `failure_stage:"validate"`,
 `modified:false`, no `recovery`, next actions) by converting fifteen raise sites
@@ -1191,9 +1223,10 @@ knowledge parameter path now raise `ArgumentRejected`; what schema can express
 
 The guard is `tests/test_argument_envelopes.py`: an offline matrix asserting the
 envelope for every refusal the fix touched, plus a static scan that fails CI when
-a **new** bare raise starts talking about an argument. 81 sites are registered in
-`tests/argument_rejection_baseline.json` as the honest remaining count — it can
-only go down, and a site that vanishes must be deleted from the register too.
+a **new** bare raise starts talking about an argument. The 81 sites it could not
+reach were registered in `tests/argument_rejection_baseline.json` as the honest
+remaining count — a register 0.3.69 emptied and deleted (see above); the scan
+matches structure now, not wording.
 
 A server-layer inference ("a bare ValueError means a validate-stage rejection")
 was tried first and **reverted within the hour**: `test_server_runtime` raises

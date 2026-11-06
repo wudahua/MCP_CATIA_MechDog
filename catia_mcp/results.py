@@ -145,6 +145,36 @@ class ArgumentOutOfRange(ArgumentRejected):
     ]
 
 
+class PreconditionRejected(CodedError, ValueError):
+    """The model or the session is not in a state this call can act on.
+
+    Split from ``ArgumentRejected`` on 0.3.69 because the two need different
+    advice and the difference is real: "plane must be 'xy'" is a typo the caller
+    fixes in the argument, while "the active body has no solid shape" is a fact
+    about the document that changing the argument cannot mend - the caller has to
+    build something first, or pass a body that already has geometry.
+
+    Both are refusals that wrote nothing, so both carry ``stage="validate"`` (the
+    field means "CATIA was not asked to change anything"; a lookup that read
+    ``Shapes.Count`` did not modify the model) and ``modified=False``. Keeping one
+    code for both would have made 81 conversions into one bucket and lost the
+    only field a caller can branch on.
+
+    A ``ValueError`` as well, like the two classes above: call sites and tests
+    have been catching that type for years ("Nothing to export as stl" was a
+    ``ValueError`` for five releases), and moving 80+ raises to a new class must
+    not break the handlers that already work.
+    """
+
+    code = "PRECONDITION_FAILED"
+    modified = False
+    stage = "validate"
+    next_actions = [
+        "This is a state, not a typo: build or open what the message names, "
+        "then retry - the call changed nothing",
+    ]
+
+
 class PathNotSupported(CodedError):
     r"""The target path cannot work on this CATIA build, whatever the model is.
 
