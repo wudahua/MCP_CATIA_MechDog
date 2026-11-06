@@ -229,6 +229,12 @@ class PlannerTools:
         if self._router is None:
             raise RuntimeError("Planner is not bound to the tool router")
         problems: list[str] = []
+        # 0.3.68: remember which problems are literally "the tool does not read
+        # that argument", so the refusal can publish the SAME code a bare call
+        # answers (UNKNOWN_ARGUMENT) beside its own INVALID_PLAN. Reported
+        # 2026-11-05 (P3): the behaviour matched, the code did not, so a caller
+        # branching on `code` took two paths for one mistake.
+        self._unknown_argument_problems = 0
         for index, step in enumerate(steps, start=1):
             tool = step.get("tool")
             if not tool:
@@ -251,6 +257,7 @@ class PlannerTools:
                 args = step.get("args") or {}
                 unknown = [key for key in args if key not in props]
                 if unknown:
+                    self._unknown_argument_problems += 1
                     problems.append(
                         f"step {index}: {tool} does not read "
                         f"{', '.join(repr(k) for k in sorted(unknown))} - it takes "
@@ -436,14 +443,30 @@ class PlannerTools:
                 code = "BAD_ARGS"
             else:
                 code = "INVALID_EXPECT"
+            # The same mistake answered UNKNOWN_ARGUMENT on the bare-call path
+            # (server._execute_tool) and INVALID_PLAN inside a plan, which is
+            # one mistake with two codes - the thing 0.3.34 fixed for step
+            # failures. `problem_code` carries the bare-call answer without
+            # changing what a plan-level refusal means (reported 2026-11-05, P3).
+            data: dict[str, Any] = {
+                "problems": messages,
+                "expect_problems": expect_problems,
+            }
+            if self._unknown_argument_problems and (
+                    self._unknown_argument_problems == len(problems)):
+                data["problem_code"] = "UNKNOWN_ARGUMENT"
+                data["problem_code_note"] = (
+                    "the only problem is an argument a step's tool does not "
+                    "declare; a bare call of the same tool answers "
+                    "UNKNOWN_ARGUMENT for it, so this is the same refusal with "
+                    "the plan's own code on top")
             return reject_validation(
                 tool="catia_run_plan",
                 code=code,
                 message="Plan rejected before touching the model: "
                         + "; ".join(messages[:3]),
                 details=arg_problems or None,
-                data={"problems": messages,
-                      "expect_problems": expect_problems},
+                data=data,
                 next_actions=[
                     "Fix the named argument and re-submit: this plan was rejected "
                     "before its first step, so nothing was opened, measured or "

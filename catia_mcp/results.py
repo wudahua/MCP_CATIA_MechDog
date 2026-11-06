@@ -90,8 +90,13 @@ class ComponentNotFound(CodedError, ValueError):
     code = "COMPONENT_NOT_FOUND"
 
 
-class ArgumentRejected(CodedError):
+class ArgumentRejected(CodedError, ValueError):
     """The tool said no to its own arguments, before it called CATIA at all.
+
+    A ``ValueError`` too, like ``ComponentNotFound``: tool code and tests have
+    been catching that type for years, and a refusal that carries a code is
+    still the same fact it always was. 0.3.68 needed the parent because the
+    sites that were converted kept being caught as ``ValueError`` elsewhere.
 
     0.3.39 promised that every pre-execution rejection has one envelope -
     ``ok:false``, ``failure_stage:"validate"``, ``modified:false``, no

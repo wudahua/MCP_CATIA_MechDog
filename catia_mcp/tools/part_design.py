@@ -2537,10 +2537,19 @@ class PartDesignTools:
             length = None if m.group(1) == "?" else float(m.group(1))
             faces = [f for f in rest.split("|") if f.strip()]
             return None, faces, length
-        raise ValueError(
+        # 0.3.43's fix table named this exact call as an example of the new
+        # envelope and the site was never converted, so the one row the
+        # CHANGELOG used to demonstrate the rule was the row that broke it
+        # (reported 2026-11-05, P1 §2.1).
+        raise ArgumentRejected(
             f"Edge reference '{spec}' is neither 'Edge.N' nor a fingerprint from "
             "catia_list_edges ('L17.6112|Pad.6;2|Sketch.7;2'), nor an object "
-            "like {\"length_mm\": 17.6112, \"faces\": [\"Pad.6;2\"]}."
+            "like {\"length_mm\": 17.6112, \"faces\": [\"Pad.6;2\"]}.",
+            next_actions=[
+                "Run catia_list_edges and pass one of the 'Edge.N' indices it "
+                "returns, or copy one of its fingerprint strings unchanged - "
+                "nothing was changed by this call",
+            ],
         )
 
     def _resolve_edge_specs(self, body: Any, specs: list[Any],
@@ -3839,7 +3848,14 @@ class PartDesignTools:
 
         count = int(args["count"])
         if count < 1:
-            raise ValueError("count must be at least 1")
+            raise ArgumentRejected(
+                "count must be at least 1",
+                next_actions=[
+                    "Pass count >= 1 - a pattern of 0 instances is not a pattern. "
+                    "The model was read to prepare the pattern and not written, "
+                    "so nothing needs repairing",
+                ],
+            )
         angular_spacing = args.get("angular_spacing")
         if angular_spacing is None:
             angular_spacing = 360.0 / count
@@ -3967,7 +3983,14 @@ class PartDesignTools:
         feature = self._pattern_seed(body, args.get("feature_name"))
         count = int(args["count"])
         if count < 1:
-            raise ValueError("count must be at least 1")
+            raise ArgumentRejected(
+                "count must be at least 1",
+                next_actions=[
+                    "Pass count >= 1 - a pattern of 0 instances is not a pattern. "
+                    "The model was read to prepare the pattern and not written, "
+                    "so nothing needs repairing",
+                ],
+            )
         sketch_name = args.get("sketch_name")
         if not sketch_name:
             # Field-proven trap: the last item of body.Sketches is stale right
@@ -4068,7 +4091,7 @@ class PartDesignTools:
         thickness = float(args["thickness"])
         external = float(args.get("external_thickness") or 0.0)
         if thickness < 0:
-            raise ValueError(
+            raise ArgumentRejected(
                 f"'thickness' cannot be negative, got {thickness}. CATIA's Shell "
                 "offsets INWARD by this amount and rejects a negative one at "
                 "update with a message that looks like a bad feature name. To put "
@@ -4076,9 +4099,9 @@ class PartDesignTools:
                 "the wall purely outward pass thickness=0 with external_thickness>0."
             )
         if external < 0:
-            raise ValueError("'external_thickness' cannot be negative.")
+            raise ArgumentRejected("'external_thickness' cannot be negative.")
         if thickness == 0 and external == 0:
-            raise ValueError(
+            raise ArgumentRejected(
                 "'thickness' and 'external_thickness' are both 0, so the shell "
                 "would have no wall at all. Give one of them a value."
             )

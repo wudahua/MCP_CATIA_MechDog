@@ -36,6 +36,7 @@ import re
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
+from catia_mcp.results import ArgumentOutOfRange, ArgumentRejected
 from catia_mcp.tools.measurement import read_measurable_array
 
 # DefineFrontView takes the two sheet-plane axis vectors expressed in the
@@ -94,9 +95,13 @@ def _normalise_language(value: Any) -> str:
     key = str(value).strip().lower()
     language = _LANGUAGE_ALIASES.get(key)
     if language is None:
-        raise ValueError(
+        raise ArgumentRejected(
             f"Unknown language '{value}'. Use 'zh' (中文, default) or 'en'. "
-            "To change a single label instead, pass labels={'material': ...}."
+            "To change a single label instead, pass labels={'material': ...}.",
+            next_actions=[
+                "Pass language='zh' or language='en' (zh-CN, cn, 中文 and "
+                "chinese are accepted as Chinese) - nothing was drawn",
+            ],
         )
     return language
 
@@ -524,10 +529,12 @@ class DraftingTools:
                         },
                         "margin": {
                             "type": "number",
+                            "exclusiveMinimum": 0,
                             "description": "Right/top/bottom margin in mm (default 10)",
                         },
                         "margin_left": {
                             "type": "number",
+                            "exclusiveMinimum": 0,
                             "description": "Left (filing) margin in mm (default 20)",
                         },
                         "border": {
@@ -541,8 +548,10 @@ class DraftingTools:
                                 "out stays empty rather than being invented."
                             ),
                             "properties": {
-                                "width": {"type": "number", "description": "mm (default 180)"},
-                                "height": {"type": "number", "description": "mm (default 45)"},
+                                "width": {"type": "number", "exclusiveMinimum": 0,
+                                          "description": "mm (default 180)"},
+                                "height": {"type": "number", "exclusiveMinimum": 0,
+                                           "description": "mm (default 45)"},
                                 "title": {"type": "string"},
                                 "drawing_number": {"type": "string"},
                                 "material": {"type": "string"},
@@ -556,6 +565,8 @@ class DraftingTools:
                         },
                         "language": {
                             "type": "string",
+                            "enum": ["zh", "en", "zh-CN", "cn", "chinese", "中文",
+                                     "en-US", "english", "英文"],
                             "description": (
                                 "Language of the field labels the tool writes: "
                                 "'zh' (材料/比例/制图/日期/审核/张次) or 'en' "
@@ -563,7 +574,10 @@ class DraftingTools:
                                 "Default 'zh' - CATIA's drafting font draws "
                                 "Chinese and this install is a Chinese one. "
                                 "Your own values (title, material, notes) are "
-                                "never translated."
+                                "never translated. The enum is what makes an "
+                                "unknown language a schema rejection "
+                                "(INVALID_ARGUMENT/validate) instead of a COM "
+                                "error."
                             ),
                         },
                         "labels": {
@@ -646,27 +660,43 @@ class DraftingTools:
         失败") until a real paper size existed. So the reply is built from these
         numbers, never from the arguments.
         """
+        # Both lookups run before either write: passing paper='A4' with a bad
+        # orientation used to leave the sheet on A4 and then refuse, which is a
+        # partial write on a call that reported a rejection (0.3.68, same rule
+        # as the frame's oversized block).
+        new_paper: int | None = None
+        new_orientation: int | None = None
         if paper is not None:
             name = str(paper).upper()
-            code = _PAPER_CODES.get(name)
-            if code is None:
-                raise ValueError(
+            new_paper = _PAPER_CODES.get(name)
+            if new_paper is None:
+                raise ArgumentRejected(
                     f"Unknown paper '{paper}'. This server offers "
                     f"{', '.join(_PAPER_CODES)}. CatPaperSize also names "
                     "Letter/Legal/A..F, and CATIA refuses every one of them on "
-                    "this installation (values 0, 1, 7-12 all raise)."
+                    "this installation (values 0, 1, 7-12 all raise).",
+                    next_actions=[
+                        f"Pass paper as one of {', '.join(_PAPER_CODES)} - the "
+                        "sheet was not changed",
+                    ],
                 )
-            sheet.PaperSize = code
         if orientation is not None:
             key = str(orientation).lower()
-            code = _ORIENTATION_CODES.get(key)
-            if code is None:
-                raise ValueError(
+            new_orientation = _ORIENTATION_CODES.get(key)
+            if new_orientation is None:
+                raise ArgumentRejected(
                     f"Unknown orientation '{orientation}'. Use 'landscape' or "
                     "'portrait'. 2 = best fit is accepted by CATIA and silently "
-                    "ignored (it reads back as landscape), so it is not offered."
+                    "ignored (it reads back as landscape), so it is not offered.",
+                    next_actions=[
+                        "Pass orientation='landscape' or 'portrait' - the sheet "
+                        "was not changed",
+                    ],
                 )
-            sheet.Orientation = code
+        if new_paper is not None:
+            sheet.PaperSize = new_paper
+        if new_orientation is not None:
+            sheet.Orientation = new_orientation
         if scale is not None:
             sheet.Scale = float(scale)
 
@@ -738,6 +768,50 @@ class DraftingTools:
         drawing = self._find_active_drawing()
         drawing.Activate()
         sheet = drawing.Sheets.ActiveSheet
+        # ── everything that can be refused BEFORE the sheet is touched ──
+        # 0.3.68: this function used to call _apply_paper first, so
+        # `{paper:'A4', margin:0}` left the sheet on A4 and then reported a
+        # rejection - a refused call that had written (reported 2026-11-05, P1;
+        # the same rule the oversized title block already followed).
+        margin = float(args.get("margin", 10.0))
+        margin_left = float(args.get("margin_left", 20.0))
+        if margin <= 0 or margin_left <= 0:
+            raise ArgumentRejected(
+                f"margins must be positive (mm), got margin={margin:g} and "
+                f"margin_left={margin_left:g}",
+                next_actions=[
+                    "Pass margin and margin_left in millimetres, both greater "
+                    "than 0 (the ISO 5457 defaults are 10 and 20) - the sheet "
+                    "was not changed",
+                ],
+            )
+        # Labels resolve before anything is drawn, for the same reason the
+        # geometry does: a rejected call must leave the sheet alone.
+        labels = dict(_LABELS[language := _normalise_language(args.get("language") or "zh")])
+        for key, value in (args.get("labels") or {}).items():
+            if key not in labels:
+                raise ArgumentRejected(
+                    f"Unknown label '{key}'. The title block has "
+                    f"{', '.join(sorted(labels))}.",
+                    next_actions=[
+                        "Use one of the label keys listed above, or put the text "
+                        "in title_block instead - nothing was drawn",
+                    ],
+                )
+            labels[key] = str(value)
+
+        block = args.get("title_block") or {}
+        block_w = float(block.get("width", 180.0))
+        block_h = float(block.get("height", 45.0))
+        if block_w <= 0 or block_h <= 0:
+            raise ArgumentRejected(
+                f"title_block width and height must be positive (mm), got "
+                f"{block_w:g} x {block_h:g}",
+                next_actions=["Pass title_block.width and .height in millimetres, "
+                              "both > 0 - nothing was drawn"],
+            )
+
+        # ── now the sheet ──
         state = self._apply_paper(sheet, args.get("paper"),
                                   args.get("orientation"), args.get("scale"))
         if state.get("width") is None or state.get("height") is None:
@@ -751,46 +825,28 @@ class DraftingTools:
             )
         width, height = state["width"], state["height"]
 
-        margin = float(args.get("margin", 10.0))
-        margin_left = float(args.get("margin_left", 20.0))
-        if margin <= 0 or margin_left <= 0:
-            raise ValueError("margins must be positive (mm)")
         x0, y0 = margin_left, margin
         x1, y1 = width - margin, height - margin
         if x1 - x0 < 100 or y1 - y0 < 60:
-            raise ValueError(
+            raise ArgumentRejected(
                 f"The border would leave only {x1 - x0:g} x {y1 - y0:g} mm on a "
                 f"{width:g} x {height:g} mm sheet - too small to hold a title "
                 "block. Set the paper first (catia_drawing_set_sheet) if this "
-                "sheet is still the custom default."
+                "sheet is still the custom default.",
+                next_actions=[
+                    "Set a real paper size with catia_drawing_set_sheet (paper='A3' "
+                    "and up), or pass smaller margins - nothing was drawn",
+                ],
             )
-
-        # Every number is resolved BEFORE anything is drawn. The first version
-        # drew the border and then refused an oversized title block, which left
-        # four stray lines on the sheet (measured on B30 2026-11-05: the
-        # Background view went from 5 elements to 9). A refused call has to
-        # leave the drawing alone.
-        # Labels resolve before anything is drawn, for the same reason the
-        # geometry does: a rejected call must leave the sheet alone.
-        labels = dict(_LABELS[language := _normalise_language(args.get("language") or "zh")])
-        for key, value in (args.get("labels") or {}).items():
-            if key not in labels:
-                raise ValueError(
-                    f"Unknown label '{key}'. The title block has "
-                    f"{', '.join(sorted(labels))}."
-                )
-            labels[key] = str(value)
-
-        block = args.get("title_block") or {}
-        block_w = float(block.get("width", 180.0))
-        block_h = float(block.get("height", 45.0))
-        if block_w <= 0 or block_h <= 0:
-            raise ValueError("title_block width and height must be positive (mm)")
         if block_w > x1 - x0 or block_h > y1 - y0:
-            raise ValueError(
+            raise ArgumentRejected(
                 f"The title block is {block_w:g} x {block_h:g} mm but the border "
                 f"leaves {x1 - x0:g} x {y1 - y0:g} mm. Shrink the block or the "
-                "margins."
+                "margins.",
+                next_actions=[
+                    "Pass a smaller title_block.width/.height, or smaller margins "
+                    "- nothing was drawn",
+                ],
             )
 
         views = sheet.Views
@@ -998,7 +1054,7 @@ class DraftingTools:
 
         plane = (args.get("plane") or "xy").lower()
         if plane not in _PLANE_VECTORS:
-            raise ValueError(f"Unknown plane '{plane}'. Use 'xy', 'yz', or 'zx'.")
+            raise ArgumentRejected(f"Unknown plane '{plane}'. Use 'xy', 'yz', or 'zx'.")
         vx1, vy1, vz1, vx2, vy2, vz2 = _PLANE_VECTORS[plane]
 
         # Resolve every input before touching the sheet, so a bad argument
@@ -1130,7 +1186,7 @@ class DraftingTools:
         dim_type = args["type"]
         code = self._DIM_TYPES.get(dim_type)
         if code is None:
-            raise ValueError(
+            raise ArgumentRejected(
                 f"Unknown dimension type '{dim_type}'. Use one of: "
                 + ", ".join(self._DIM_TYPES)
             )
@@ -1141,7 +1197,7 @@ class DraftingTools:
         idx2 = args.get("element_index_2")
         two_element_types = ("distance", "angle")
         if dim_type in two_element_types and idx2 is None:
-            raise ValueError(f"'{dim_type}' needs element_index_2 as well.")
+            raise ArgumentRejected(f"'{dim_type}' needs element_index_2 as well.")
 
         # Item 1 is the view's ABSOLUTE AXIS, exactly as in a sketch (measured on
         # B30 2026-11-05: the listing of a fresh manual view reads
@@ -1227,7 +1283,7 @@ class DraftingTools:
 
         m = re.match(r"^Face\.(\d+)$", face_name or "")
         if not m:
-            raise ValueError(f"'face' must look like 'Face.3' (from catia_list_faces), got '{face_name}'.")
+            raise ArgumentRejected(f"'face' must look like 'Face.3' (from catia_list_faces), got '{face_name}'.")
         idx = int(m.group(1))
         part = part_doc.Part
         body = part.Bodies.Item(body_name) if body_name else part.MainBody
@@ -1395,7 +1451,7 @@ class DraftingTools:
         except Exception:
             generative = True  # cannot tell; let CATIA decide
         if not generative:
-            raise ValueError(
+            raise ArgumentRejected(
                 f"'{parent.Name}' is not a generative view; derive from a "
                 "view created by catia_drawing_add_view."
             )
@@ -1455,7 +1511,7 @@ class DraftingTools:
         self.conn.ensure_connected()
         direction = str(args["direction"]).lower()
         if direction not in _PROJECTION_TYPES:
-            raise ValueError(f"Unknown direction '{direction}'. Use right, left, top, bottom or rear.")
+            raise ArgumentRejected(f"Unknown direction '{direction}'. Use right, left, top, bottom or rear.")
         gap = float(args.get("gap", 100.0))
         drawing = self._find_active_drawing()
         sheet = drawing.Sheets.ActiveSheet
@@ -1499,16 +1555,16 @@ class DraftingTools:
         self.conn.ensure_connected()
         profile = [float(v) for v in args["profile"]]
         if len(profile) < 4 or len(profile) % 2:
-            raise ValueError("profile must be a flat list [x1, y1, x2, y2, ...] with at least two points")
+            raise ArgumentRejected("profile must be a flat list [x1, y1, x2, y2, ...] with at least two points")
         section_type = args.get("section_type") or "SectionView"
         profile_type = args.get("profile_type") or "Offset"
         if section_type not in ("SectionView", "SectionCut"):
-            raise ValueError("section_type must be 'SectionView' or 'SectionCut'")
+            raise ArgumentRejected("section_type must be 'SectionView' or 'SectionCut'")
         if profile_type not in ("Offset", "Aligned"):
-            raise ValueError("profile_type must be 'Offset' or 'Aligned'")
+            raise ArgumentRejected("profile_type must be 'Offset' or 'Aligned'")
         side = int(args.get("side", 1))
         if side not in (0, 1):
-            raise ValueError("side must be 0 (clockwise) or 1 (counterclockwise)")
+            raise ArgumentRejected("side must be 0 (clockwise) or 1 (counterclockwise)")
         drawing = self._find_active_drawing()
         sheet = drawing.Sheets.ActiveSheet
         parent = self._parent_generative_view(args.get("parent_view"))
@@ -1534,7 +1590,7 @@ class DraftingTools:
         self.conn.ensure_connected()
         cx, cy, radius = float(args["center_x"]), float(args["center_y"]), float(args["radius"])
         if radius <= 0:
-            raise ValueError("radius must be positive")
+            raise ArgumentRejected("radius must be positive")
         factor = float(args.get("scale", 2.0))
         drawing = self._find_active_drawing()
         sheet = drawing.Sheets.ActiveSheet
@@ -1566,7 +1622,7 @@ class DraftingTools:
         view = self._find_view_any(args.get("view_name"))
         rows, cols = int(args["rows"]), int(args["columns"])
         if rows < 1 or cols < 1:
-            raise ValueError("rows and columns must be at least 1")
+            raise ArgumentRejected("rows and columns must be at least 1")
         table = view.Tables.Add(
             float(args["x"]), float(args["y"]), rows, cols,
             float(args.get("row_height", 8.0)), float(args.get("column_width", 40.0)),

@@ -36,6 +36,7 @@ import os
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
+from catia_mcp.results import ArgumentRejected, FeatureRejected
 
 _UNITS = {"length": "mm", "angle": "deg"}
 
@@ -284,6 +285,16 @@ class KnowledgeTools:
         if ptype == "boolean":
             value = _as_bool(value)
 
+        # Convert BEFORE anything is created. The old order was
+        #   param = params.CreateDimension(name, "LENGTH", 0)
+        #   param.ValuateFromString(f"{float(value)}mm")   <- raises here
+        # so catia_create_parameter{value:"abc"} answered a failure and left a
+        # value=0 parameter behind - a call that said it did not work and had
+        # already changed the model (reported 2026-11-05, P2). Same for angle.
+        coerced = self._coerce_value(ptype, value, name)
+        if coerced is not None:
+            value = coerced
+
         existing = self._find_parameter(params, name)
         if existing is not None:
             try:
@@ -302,25 +313,117 @@ class KnowledgeTools:
             return (f"Parameter '{existing.Name}' already existed; value set to "
                     f"{value}{_UNITS.get(ptype, '')} (type unchanged).")
 
-        if ptype == "length":
-            param = params.CreateDimension(name, "LENGTH", 0)
-            param.ValuateFromString(f"{float(value)}mm")
-        elif ptype == "angle":
-            param = params.CreateDimension(name, "ANGLE", 0)
-            param.ValuateFromString(f"{float(value)}deg")
-        elif ptype == "real":
-            param = params.CreateReal(name, float(value))
-        elif ptype == "integer":
-            param = params.CreateInteger(name, int(value))
-        elif ptype == "string":
-            param = params.CreateString(name, str(value))
-        elif ptype == "boolean":
-            param = params.CreateBoolean(name, bool(value))
-        else:
-            raise ValueError(f"Unknown parameter type '{ptype}'")
+        created: Any = None
+        try:
+            if ptype == "length":
+                created = params.CreateDimension(name, "LENGTH", 0)
+                created.ValuateFromString(f"{float(value)}mm")
+            elif ptype == "angle":
+                created = params.CreateDimension(name, "ANGLE", 0)
+                created.ValuateFromString(f"{float(value)}deg")
+            elif ptype == "real":
+                created = params.CreateReal(name, float(value))
+            elif ptype == "integer":
+                created = params.CreateInteger(name, int(value))
+            elif ptype == "string":
+                created = params.CreateString(name, str(value))
+            elif ptype == "boolean":
+                created = params.CreateBoolean(name, bool(value))
+            else:
+                raise ArgumentRejected(
+                    f"Unknown parameter type '{ptype}'. Use one of: length, "
+                    "angle, real, integer, string, boolean.",
+                    next_actions=["Pass type='length' (mm), 'angle' (deg), "
+                                  "'real', 'integer', 'string' or 'boolean' - "
+                                  "nothing was created"],
+                )
+        except Exception as error:
+            # A created-then-failed parameter is the 0.3.68 P2 defect: the call
+            # must either not create it or take it back out. The value is
+            # already converted above, so reaching here means CATIA itself
+            # refused the assignment.
+            if created is not None:
+                residual = self._discard_parameter(params, created, name)
+                if residual:
+                    raise FeatureRejected(
+                        f"{error}{residual}", rolled_back=False,
+                        next_actions=[
+                            f"Delete the leftover parameter '{name}' with "
+                            "catia_list_relations / the Part tree before "
+                            "retrying - it is already in the model",
+                        ],
+                    ) from error
+                raise ArgumentRejected(
+                    f"{error} The half-created parameter '{name}' was removed "
+                    "again, so the model is unchanged.",
+                    next_actions=["Fix the value and retry - the failed "
+                                  "parameter was deleted, nothing is left over"],
+                ) from error
+            raise
         part.Update()
-        return (f"Parameter '{param.Name}' ({ptype}) created with value "
+        return (f"Parameter '{created.Name}' ({ptype}) created with value "
                 f"{value}{_UNITS.get(ptype, '')}.")
+
+    @staticmethod
+    def _discard_parameter(params: Any, param: Any, name: str) -> str:
+        """Remove a parameter this call created; returns a note if it survived."""
+        for target in (getattr(param, "Name", None), name):
+            if not target:
+                continue
+            try:
+                params.Remove(str(target))
+                return ""
+            except Exception:  # noqa: BLE001 - try the other spelling
+                continue
+        return (f" The parameter '{name}' could not be removed again, so it is "
+                "still in the model with its old value.")
+
+    @staticmethod
+    def _coerce_value(ptype: str, value: Any, name: str) -> Any:
+        """The numeric form of ``value``, refused before anything is created.
+
+        length and angle are millimetres and degrees (the same units
+        ``_UNITS`` writes back); a unit suffix such as ``'30mm'`` belongs in a
+        design-table CELL, where a bare number means metres - not here
+        (reported 2026-11-05, P2, and 0.3.63 for the table rule).
+        """
+        if ptype in ("length", "angle"):
+            unit = "millimetres" if ptype == "length" else "degrees"
+            suffix = "mm" if ptype == "length" else "deg"
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                raise ArgumentRejected(
+                    f"Parameter '{name}' is a {ptype}, so its value is a plain "
+                    f"number in {unit}; got {value!r}. Write 30 (or \"30\") for "
+                    f"30 {suffix}. A unit suffix ('30mm') only applies inside a "
+                    "design-table cell. Nothing was created.",
+                    next_actions=[
+                        f"Pass value as a number (30), not a string with units "
+                        f"('30{suffix}') - no parameter was created",
+                    ],
+                ) from None
+        if ptype == "real":
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                raise ArgumentRejected(
+                    f"Parameter '{name}' is a real, so its value must be a "
+                    f"number; got {value!r}. Nothing was created.",
+                    next_actions=["Pass a number for value - nothing was "
+                                  "created"],
+                ) from None
+        if ptype == "integer":
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                raise ArgumentRejected(
+                    f"Parameter '{name}' is an integer, so its value must be a "
+                    f"whole number; got {value!r}. Nothing was created.",
+                    next_actions=["Pass a whole number for value - nothing was "
+                                  "created"],
+                ) from None
+        return value
 
     @staticmethod
     def _assign(param: Any, ptype: str, value: Any) -> None:

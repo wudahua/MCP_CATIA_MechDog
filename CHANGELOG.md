@@ -2,6 +2,88 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.68] — 2026-11-05 · the refusal envelope, which the new modules never got
+
+Reported 2026-11-05, P1. `catia_fillet {radius:3, edge_name:"NO_SUCH_EDGE"}`
+answered `COM_ERROR` / `failure_stage: execute` / `modified: null`, with a
+`recovery` block and the "check in_work_object" paragraph — on a call that never
+touched CATIA. That exact call is **row three of the 0.3.43 fix table**: the
+release that introduced the envelope missed its own example, and both modules
+written since (Knowledge 0.3.63, Drafting 0.3.64–0.3.66) started from the old
+shape. The report counts 104 uncoded raise sites whose message is about a
+parameter, against 48 coded ones.
+
+**The server-layer inference was tried and reverted the same hour.** The obvious
+fix — treat a bare `ValueError`/`TypeError`/`KeyError` as a validate-stage
+argument refusal — broke `test_server_runtime` immediately: it raises
+`ValueError("Wrong sketch")` as its stand-in for an ordinary failure, and the
+inference reported that as `ARGUMENT_REJECTED` with `modified: false`. A
+**claimed fact about a model nobody had read**. A Python type is not evidence
+that a tool only looked at its arguments, so the envelope stays something the
+raise site *declares*. That decision is recorded in `server.py` where the note
+would otherwise have been, because "why not just check the type" is the first
+question the next reader will ask.
+
+**What is actually fixed**
+
+| Site | Was | Now |
+|---|---|---|
+| `_parse_edge_spec` (part_design) | `ValueError` → COM_ERROR | `ArgumentRejected`, next action points at `catia_list_edges` |
+| `circ_pattern` count 0 (×2), `shell` walls, `set_part_number ""` | named in the report as leaks | `ArgumentRejected` |
+| Drafting: paper, orientation, margins, label keys, block size, plane, dimension pairing, face format, section, detail, table, direction | 13 sites | `ArgumentRejected` |
+| `catia_create_parameter` unknown type, non-numeric value | `ValueError` | `ArgumentRejected` |
+
+`ArgumentRejected` is now a `ValueError` as well as a `CodedError` (like
+`ComponentNotFound`), so the tool code and tests that have caught that type for
+years keep working while the envelope gains its code.
+
+**Schema took what schema can express.** `language` is an enum
+(`zh`/`en`/`zh-CN`/`cn`/`chinese`/`中文`/`en-US`/`english`/`英文`), `margin` and
+`margin_left` are `exclusiveMinimum: 0`, `title_block.width/.height` likewise.
+Those four frame refusals now never reach the tool, which is why the matrix test
+below runs **offline**.
+
+**The guard, which is the part that keeps it fixed.** `tests/
+test_argument_envelopes.py` does three things:
+
+1. A 9-case matrix through `_execute_tool` asserting the validate shape
+   (ok false, `failure_stage: validate`, `modified: false`, no `recovery`, no
+   "inspect the CATIA model", next actions present) for every refusal the fix
+   touched, including all four of the report's drawing cases.
+2. A static scan: every bare `raise ValueError/RuntimeError/TypeError/KeyError`
+   whose message talks about an argument and which is **not** inside an `except`
+   block must be in `tests/argument_rejection_baseline.json`. 81 sites are
+   registered there as the honest current state; a NEW one fails CI with the
+   message and the fix. The count can only go down — a site that disappears
+   fails too, so the register cannot rot.
+3. The named call sites, called directly, plus a stub `Parameters` proving
+   `catia_create_parameter` creates nothing before it converts.
+
+**P2 — a failed call that wrote the model.** `catia_create_parameter{value:"abc"}`
+answered a failure and left `LEN366B = 0` in the parameter tree, because the old
+order was `CreateDimension(...)` **then** `float(value)`. Values are converted
+before anything is created now; if CATIA still refuses the assignment after
+creation, the parameter is removed again and the reply says which of the two
+happened (`rolled_back`). Measured on B30 2026-11-05: the parameter list is
+byte-identical before and after the failed call.
+
+**P3 — one mistake, two codes.** A step argument the tool does not declare
+answered `INVALID_PLAN` inside a plan and `UNKNOWN_ARGUMENT` on its bare call.
+The plan keeps its own code (a plan-level refusal is a different fact) and now
+carries `data.problem_code: "UNKNOWN_ARGUMENT"`, so a caller branching on `code`
+does not need two paths.
+
+**On the test count the report flagged.** 0.3.65's CHANGELOG says 1083 tests
+because that is what 0.3.65 shipped; 0.3.66 added 17 (1100) and 0.3.68 adds 30
+(1130). Each entry states its own release's number rather than being rewritten
+later — the `--collect-only` figure is the one CI checks.
+
+Verified on B30 through the real server envelope (`scripts/b30_v0368_envelopes.py`,
+24/24): six refusals all validate / not modified / no recovery / next actions,
+volume unchanged across all six, no orphan parameter, plan and bare call agreeing.
+
+1130 tests, 127 tools, and 81 registered sites still to migrate.
+
 ## [0.3.67] — 2026-11-05 · the smoke script checked 108 of 127, and said so only outside CI
 
 Reported 2026-11-05 (B32, v0.3.66), P1. Two commands, two answers:

@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.67** · [what changed](CHANGELOG.md) ·
+**0.3.68** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1179,6 +1179,27 @@ hand-dimensioned at all - its curves are not addressable through automation, onl
 `GenerateDimensions` reaches them - and **`Face.N` is session-scoped**. The same
 plate gave its hole's cylinder at `Face.1` in one build and at `Face.7` in another,
 so list faces and use the index immediately.
+
+**0.3.68 closed the refusal-envelope gap the new modules reopened.** 0.3.43 gave
+every pre-execution refusal one shape (`ok:false`, `failure_stage:"validate"`,
+`modified:false`, no `recovery`, next actions) by converting fifteen raise sites
+by hand — and missed the very call its own table used as the example. Knowledge
+(0.3.63) and Drafting (0.3.64–0.3.66) then started from the old shape again.
+Thirteen sites in Drafting, five in Part Design, one in Document and the
+knowledge parameter path now raise `ArgumentRejected`; what schema can express
+(`language` enum, `exclusiveMinimum` on margins and block size) moved there.
+
+The guard is `tests/test_argument_envelopes.py`: an offline matrix asserting the
+envelope for every refusal the fix touched, plus a static scan that fails CI when
+a **new** bare raise starts talking about an argument. 81 sites are registered in
+`tests/argument_rejection_baseline.json` as the honest remaining count — it can
+only go down, and a site that vanishes must be deleted from the register too.
+
+A server-layer inference ("a bare ValueError means a validate-stage rejection")
+was tried first and **reverted within the hour**: `test_server_runtime` raises
+`ValueError("Wrong sketch")` as its ordinary-failure stand-in, and the inference
+reported that as `modified: false`. The envelope is declared by the raise site,
+not guessed at the boundary.
 
 **0.3.66 made the sheet furniture Chinese by default.** The English was never
 CATIA: the labels were hard-coded and so were the default view names. Field

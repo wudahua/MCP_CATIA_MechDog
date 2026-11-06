@@ -320,6 +320,16 @@ class CATIAMCPServer:
             # "Edge.99 is out of range: the final shape exposes 12 edge(s)"
             # (reported 2026-10-31, P1). Read before the message branches, so
             # both the paragraph and the recovery block below agree with it.
+            #
+            # 0.3.68 tried to INFER this from a bare ValueError and reverted the
+            # same hour: `test_server_runtime` raises ValueError("Wrong sketch")
+            # as its stand-in for an ordinary failure, and the inference turned
+            # that into ARGUMENT_REJECTED / modified false - a claimed fact
+            # about a model nobody had read. A type is not evidence that a tool
+            # only looked at its arguments, so the envelope stays a thing the
+            # raise site DECLARES (reported 2026-11-05, P1: the answer to "the
+            # sites keep being missed" is a guard that fails CI, not a guess
+            # made at the envelope layer - see tests/test_argument_envelopes.py).
             stage = getattr(error, "stage", stage)
             if code == "UNSUPPORTED_CAPABILITY":
                 message = (

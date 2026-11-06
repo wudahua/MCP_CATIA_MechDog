@@ -11,7 +11,7 @@ from typing import Any
 
 from catia_mcp import dialogs
 from catia_mcp.connection import CATIAConnection
-from catia_mcp.results import CodedError, ComponentNotFound
+from catia_mcp.results import ArgumentRejected, CodedError, ComponentNotFound
 
 
 class DocumentTools:
@@ -1099,7 +1099,13 @@ class DocumentTools:
         self.conn.ensure_connected()
         part_number = (part_number or "").strip()
         if not part_number:
-            raise ValueError("part_number must not be empty")
+            raise ArgumentRejected(
+                "part_number must not be empty",
+                next_actions=[
+                    "Pass the 零件编号 you want written - an empty string would "
+                    "clear it, which this tool does not do; nothing was changed",
+                ],
+            )
         doc = self.conn.active_document
 
         if component_name:
