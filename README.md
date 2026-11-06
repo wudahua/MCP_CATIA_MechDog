@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.71** · [what changed](CHANGELOG.md) ·
+**0.3.72** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1179,6 +1179,27 @@ hand-dimensioned at all - its curves are not addressable through automation, onl
 `GenerateDimensions` reaches them - and **`Face.N` is session-scoped**. The same
 plate gave its hole's cylinder at `Face.1` in one build and at `Face.7` in another,
 so list faces and use the index immediately.
+
+**0.3.72 made the assembly envelope usable, and made its cache arrive in time.**
+`method='mesh'` on a Product has worked since 0.3.45; the schema entry for
+`document=` still said it was refused, so a 2026-11-06 report read the text and
+concluded there was no official way to get a precise assembly envelope. The text
+is fixed and a test holds it to the behaviour.
+
+The reply also stopped being two answers at once: `complete: true` means every
+instance got a box, `bounds` said the boxes came from a vertex sweep — true, and
+unreadable together. `exact` and `bounds_code` (`mesh_chord` / `vertex_sweep` /
+`mixed` / `complete_failed` / `empty`) now say how the numbers can be short. On
+the acceptance product `auto` returns x max 205 against a true 220 and says
+`exact: false` rather than leaving the caller to reconcile prose.
+
+The per-part mesh cache had existed since 0.3.32 and saved nothing, because the
+lookup ran after `part.Update()` and `_edited_in_context` — 4.2 s of window
+switching (Activate 2.4 s + restore 1.8 s) around a 10 ms export, paid again on
+a call that then answered from the cache in 0.6 ms. It is now consulted before
+any COM call and gated on `Document.Saved`: a clean part is answered from its
+file in ~16 ms, a part with unsaved edits is measured and explicitly not cached.
+Same product, reopened from disk: **32 938 ms → 184 ms**.
 
 **0.3.71 closed the last two exemptions and fixed four replies that lied.** Nine
 lookups raised inside an `except` still answered `COM_ERROR` / `execute` /

@@ -1046,6 +1046,22 @@ _MESH_CACHE_LIMIT = 48
 # is, so an extent-only caller keeps hitting the cache.
 _MESH_CACHE_CLOUD_LIMIT = 50_000
 
+# What happened to the per-part mesh cache on this call, in words a caller can act
+# on. Reported per part (0.3.72) because "why is this call slow" is a question
+# about one part, not about the assembly: on the 2026-11-06 report's product, five
+# curved parts paid an export on every call while six planar ones cost nothing.
+_MESH_CACHE_NOTE = {
+    "reused": ("this part's mesh box was reused from an earlier call: its file is "
+               "unchanged (same size and modified time) and it had no unsaved "
+               "edits, so the numbers are the same ones an export would give"),
+    "kept": ("this part's mesh box came from an export of the live document, and "
+             "the document was clean, so it was stored under its file and a later "
+             "call over the same assembly can reuse it"),
+    "unsaved": ("this part has unsaved edits, so its mesh box was NOT cached: a "
+                "file key cannot describe a live document that differs from it"),
+    "hit": "the mesh box came from the file cache",
+}
+
 # What this PROCESS has read, per JOB. Session state - CATIA's own caches are
 # session state too, so two tool objects talking to one CATIA share it (a second
 # book would report "first time" about a part this server had already read).
@@ -1069,6 +1085,25 @@ def _file_identity(path: str) -> tuple[str, int, int] | None:
     except OSError:  # deleted, moved, or unreadable: do not cache
         return None
     return (os.path.normcase(os.path.abspath(path)), stat.st_size, stat.st_mtime_ns)
+
+
+def _doc_is_saved(doc: Any) -> bool | None:
+    """``Document.Saved`` - True when the live part IS what is on disk.
+
+    The one cheap validity signal for a file-keyed cache, and it has to be read
+    BEFORE the measurement, because the measurement itself destroys it:
+    ``part.Update()`` clears the flag on a document that was not rebuilt at all.
+    Measured on B30 2026-11-06 - a part reopened from disk read ``Saved: True``,
+    and an ``Update()`` that changed nothing turned it to ``False`` while the
+    file on disk, the geometry and the exported STL stayed byte-identical.
+
+    ``None`` means this build does not answer the question, which is treated as
+    "cannot vouch for it", not as "clean".
+    """
+    try:
+        return bool(doc.Saved)
+    except Exception:  # noqa: BLE001 - a missing property is not a clean file
+        return None
 
 
 def _mesh_cache_get(identity: tuple[str, int, int], want_cloud: bool
@@ -1736,7 +1771,15 @@ class MeasurementTools:
                                 "bracket, in the two directions its acceptance was "
                                 "being checked in. mesh takes every part's mesh, "
                                 "one per distinct part rather than per instance, "
-                                "which is exact on curved faces and slower."
+                                "which is exact on curved faces and slower - and "
+                                "cached: the box is keyed to the part FILE, so a "
+                                "second call over an unchanged assembly answers "
+                                "from that cache instead of exporting again "
+                                "(4.2 s of window switching per part per call "
+                                "before 0.3.72). A part with unsaved edits is "
+                                "never answered from the cache. Read 'exact' and "
+                                "'bounds_code' in the reply: 'complete' only says "
+                                "every instance got a box."
                             ),
                         },
                         "component": {
@@ -1787,10 +1830,15 @@ class MeasurementTools:
                                 "assembly. A part that exists only as a component is "
                                 "not in the Documents collection, so it is opened by "
                                 "path here (it stays open; the reply says so). "
-                                "A Product document is accepted as well - its world "
+                                "A Product document is accepted as well: its world "
                                 "box is aggregated from the named document, so no "
-                                "activation is involved (method='mesh' is refused "
-                                "for one, because a mesh box is per part). "
+                                "activation is involved, and method='mesh' works on "
+                                "one - it takes each distinct part's mesh once, not "
+                                "once per instance. (Until 0.3.72 this sentence "
+                                "said mesh was refused for a Product. It had not "
+                                "been since 0.3.45; the text was never updated, and "
+                                "a 2026-11-06 report read it and concluded there was "
+                                "no way to get a precise envelope for an assembly.) "
                                 "Alias: document_name."
                             ),
                         },
@@ -3053,6 +3101,7 @@ class MeasurementTools:
                         "source": "mesh", "mesh_reason": MESH_ASKED_FOR,
                         "mesh_vertices": mesh_vertices,
                         "truncated": mesh_vertices > len(cloud) // 3,
+                        "mesh_cache": self._mesh_last_cache,
                         "copy_note": copy_note or ""}
             # A mesh that yields nothing is not a reason to have no box; it is a
             # reason to say the box came from the weaker route.
@@ -3088,6 +3137,7 @@ class MeasurementTools:
                 "source": "mesh_fallback", "mesh_reason": MESH_NO_VERTEX,
                 "mesh_vertices": mesh_vertices,
                 "truncated": mesh_vertices > len(cloud) // 3,
+                "mesh_cache": self._mesh_last_cache,
                 "copy_note": copy_note or ""}
 
     @staticmethod
@@ -3199,6 +3249,20 @@ class MeasurementTools:
                 "max": None,
                 "components": [],
                 "complete": False,
+                "complete_note": (
+                    "every instance was bounded; this says nothing about how "
+                    "ACCURATE those bounds are - read 'exact' and 'bounds_code' "
+                    "for that"),
+                # Same key set as a measured reply (0.3.72): this branch was the
+                # one that proved the point for the regime fields, and the two
+                # accuracy fields would have reopened it - a caller branching on
+                # `exact` would have found the key missing exactly when there was
+                # nothing to be exact about.
+                "exact": False,
+                # Two different reasons to have no corners: a product that holds
+                # nothing ("empty") and one where every component failed
+                # ("complete_failed"). The branch is shared, the cause is not.
+                "bounds_code": "empty" if empty_product else "complete_failed",
                 "empty_assembly": empty_product,
                 "elapsed_ms": empty_elapsed,
                 "parts_ms": 0.0,
@@ -3360,6 +3424,26 @@ class MeasurementTools:
                       if _from_mesh(cached.get("source")))
         payload["part_boxes_by_vertices"] = by_vertices
         payload["part_boxes_by_mesh"] = by_mesh
+        # 0.3.72: how much of this call the per-part mesh cache paid for. Before
+        # it, every call re-exported every curved part - measured on B30
+        # 2026-11-06: 8.9 s and 9.0 s for the same two-part product, twice in a
+        # row, 4.2 s of it window switching around an export that takes 10 ms. A
+        # caller watching for "this got slow again" needs the counts, and a caller
+        # wondering whether method='mesh' is affordable needs them too.
+        cache_counts: dict[str, int] = {}
+        for cached in local_boxes.values():
+            flag = cached.get("mesh_cache")
+            if flag:
+                cache_counts[flag] = cache_counts.get(flag, 0) + 1
+        if cache_counts:
+            payload["mesh_cache"] = cache_counts
+            payload["mesh_cache_note"] = (
+                "'reused' = answered from the file-keyed cache (no export, no "
+                "document switch); 'kept' = exported now and stored for later; "
+                "'unsaved' = exported but NOT cached, because the live part "
+                "differs from its file. The key is the part file's path, size and "
+                "modified time, and a part with unsaved edits is never answered "
+                "from it.")
         # Per PART, once: the counts and caveats are properties of the part, and
         # repeating them on every instance entry meant 70 entries carried 28
         # distinct values (reported 2026-10-26). The instance entries keep the
@@ -3476,6 +3560,34 @@ class MeasurementTools:
         # learned that 6 of 70 instances were left out and the box is a lower
         # bound in the directions they could have driven (reported 2026-10-25).
         payload["complete"] = not skipped
+        # 0.3.72: `complete` is about COVERAGE - every instance got a box - and it
+        # was read as "these are the exact numbers" when the same reply's `bounds`
+        # said "lower bound: each component's box came from its vertices". The
+        # report that caught it had `complete: true` and 9.65 mm of missing
+        # envelope in the same document (2026-11-06, P1-3). Two fields, two
+        # questions, because a caller asserting on `complete` is not asserting on
+        # accuracy and vice versa.
+        payload["complete_note"] = (
+            "every instance was bounded; this says nothing about how ACCURATE "
+            "those bounds are - read 'exact' and 'bounds_code' for that")
+        swept = len(entries) - len(from_mesh)
+        payload["exact"] = (not skipped) and not swept
+        payload["bounds_code"] = ("complete_failed" if skipped else
+                                  "mesh_chord" if not swept else
+                                  "vertex_sweep" if not from_mesh else "mixed")
+        if not payload["exact"]:
+            payload["exact_note"] = (
+                (f"{swept} of {len(entries)} instance(s) were bounded by a vertex "
+                 "sweep, which cannot see an extremum that sits on a curved face - "
+                 "so these numbers are a LOWER bound in those directions. "
+                 if swept else "")
+                + (" The mesh route is not a mathematical envelope either: it chords "
+                   "curved faces, 0.47-1.5 % short on the parts this was measured "
+                   "on. " if from_mesh else "")
+                + "For the envelope a design check needs, call again with "
+                "method='mesh' - a Product accepts it, one mesh per distinct part, "
+                "and the answer is cached per part file so a repeated call is "
+                "cheap.")
         payload["include_curved"] = include_curved
         payload["mesh_route"] = (
             "every part from its mesh (method='mesh'): accurate on curved faces, "
@@ -3744,6 +3856,14 @@ class MeasurementTools:
                     # honest value of the same field.
                     detail["sweep_route"] = "mesh"
                     detail["mesh_reason"] = cached.get("mesh_reason")
+                    if cached.get("mesh_cache"):
+                        # Per part, not per call: after 0.3.72 one assembly can
+                        # hold both kinds at once - a planar part whose file was
+                        # measured before (reused, 0.6 ms) and a part edited since
+                        # (unsaved, a fresh export).
+                        detail["mesh_cache"] = cached["mesh_cache"]
+                        detail["mesh_cache_note"] = _MESH_CACHE_NOTE.get(
+                            cached["mesh_cache"], "")
                     if cached.get("mesh_reason") == MESH_ASKED_FOR:
                         # Same route, different reason: the caller asked for it.
                         detail["source_note"] = (
@@ -4372,6 +4492,15 @@ class MeasurementTools:
                         # Which reader ran inside the sweep: one script call for
                         # the whole part, or one COM round trip per topology cell.
                         "sweep_route": stats.get("sweep_route"),
+                        # 0.3.72: the same two fields the assembly route now
+                        # publishes, so one question ("are these the envelope?")
+                        # has one answer shape on both routes.
+                        "exact": False,
+                        "bounds_code": "vertex_sweep",
+                        "exact_note": (
+                            "a vertex sweep cannot see an extremum that sits on a "
+                            "curved face, and it cannot know whether this part has "
+                            "one - method='mesh' can, at the cost of an STL export"),
                         **_nls_fields(stats),
                         **regime_fields(TOPOLOGY),
                     },
@@ -4432,6 +4561,16 @@ class MeasurementTools:
                    # this route, and on a 10 mm pad the difference was 25 mm.
                    "box_scope": scope,
                    "geometrical_sets": hybrid_count,
+                   # 0.3.72: this route is a lower bound too, by the chord
+                   # tolerance rather than by a factor. `exact: false` on both
+                   # routes is the honest answer; the CODE says which way.
+                   "exact": False,
+                   "bounds_code": "mesh_chord",
+                   # Whether this answer was reused from the per-part cache. On
+                   # this route the same file can answer in 0.6 ms instead of a
+                   # 4 s export, so a caller seeing 0.6 ms must be told why.
+                   **({"mesh_cache": self._mesh_last_cache}
+                      if self._mesh_last_cache else {}),
                    **regime_fields(MESH_EXPORT)},
         )
         warnings: list[str] = []
@@ -5021,14 +5160,57 @@ class MeasurementTools:
         folder = tempfile.mkdtemp(prefix="catia_bbox_")
         path = os.path.join(folder, "part_%s.stl" % uuid.uuid4().hex[:8])
         try:
+            # 0.3.72: ask the FILE cache BEFORE touching the document.
+            #
+            # Until this release the lookup sat inside `_mesh_from_copy`, i.e.
+            # AFTER `part.Update()` and after `_edited_in_context`. On a part of
+            # an open assembly that is 4.2 s of window switching (measured on
+            # B30: Activate 2.4 s + restore 1.8 s, while the export itself is
+            # 8-10 ms) paid again on a call that then answered from a cache entry
+            # in 0.6 ms - 4 s to avoid 0.6 ms, twice in a row, every time
+            # (reported 2026-11-06, P3-10: 47.3 s for a 25-instance product).
+            #
+            # The gate is `Document.Saved`: True means the live part is exactly
+            # the saved file, so the file key really does describe these numbers.
+            # A part with unsaved edits is NOT answered from the cache - that is
+            # the one case where reusing a file-keyed box would report geometry
+            # the caller has already changed.
+            identity = None
+            clean = None
+            # Reset first: the flag describes THIS part's export, and a stale
+            # "kept" from the previous part would be a lie about this one.
+            self._mesh_last_cache = None
+            try:
+                full = str(doc.FullName)
+                if full and os.path.isabs(full):
+                    identity = _file_identity(full)
+                    clean = _doc_is_saved(doc)
+            except Exception:  # noqa: BLE001 - an unsaved part has no key
+                identity = None
+            if identity is not None and clean and visit is None:
+                # `visit` is how `catia_check_surface` gets the STL itself - it
+                # reads the file, not the box. A cached answer has no file, so a
+                # hit there would hand that tool a path that does not exist.
+                hit = _mesh_cache_get(identity, want_cloud=limit is not None)
+                if hit is not None:
+                    self._mesh_last_cache = "reused"
+                    return (*hit, "")
             # Measured on V5-6R2020 B30, 2026-10-24: ExportData writes a 37-byte
             # EMPTY STL unless the part has been updated first - on a block and on
             # a cylinder alike (37 bytes vs 3244 / 28899 after Update()). That
             # failure mode is what made "mesh" look broken on curved solids.
-            try:
-                part.Update()
-            except Exception:  # noqa: BLE001 - the export reports the real problem
-                pass
+            #
+            # 0.3.72: skipped when the document is clean. A clean document has
+            # nothing pending by definition, and `Update()` would clear `Saved`
+            # and with it the only signal that the next call may reuse this
+            # answer. Verified on B30 the same day: a reopened part exported
+            # 3244 bytes with and without the update, and only the update turned
+            # `Saved` to False.
+            if not clean:
+                try:
+                    part.Update()
+                except Exception:  # noqa: BLE001 - the export reports the real problem
+                    pass
             export_error = None
             in_context = self._edited_in_context(doc)
             if not in_context:
@@ -5039,6 +5221,15 @@ class MeasurementTools:
                     export_error = exc
                 if (os.path.getsize(path) if os.path.exists(path) else 0) >= 128:
                     lo, hi, cloud, seen = _stl_scan(path, limit)
+                    if identity is not None and clean:
+                        # Safe for the same reason the lookup above is: this
+                        # export read the file's own state, and the document was
+                        # clean when it started.
+                        _mesh_cache_put(identity, (lo, hi, cloud, seen),
+                                        want_cloud=limit is not None)
+                        self._mesh_last_cache = "kept"
+                    elif identity is not None:
+                        self._mesh_last_cache = "unsaved"
                     if visit is not None:
                         visit(path)
                     return lo, hi, cloud, seen, ""
@@ -5051,13 +5242,23 @@ class MeasurementTools:
             lo, hi, cloud, seen = self._mesh_from_copy(doc, path, limit)
             if visit is not None:
                 visit(path)
-            cached = (self._mesh_last_cache == "hit")
+            reused = (self._mesh_last_cache == "hit")
+            if reused:
+                self._mesh_last_cache = "reused"
+            unsaved = (_doc_is_saved(doc) is False)
             return lo, hi, cloud, seen, (
                 "; measured from a temporary copy of the saved file, because the "
                 "part is loaded inside the assembly and CATIA refuses to export a "
                 "part edited in context - unsaved edits are not included"
                 + (" (reused: the same file was already measured in this session and "
-                   "its size and modified time have not changed)" if cached else ""))
+                   "its size and modified time have not changed)" if reused else "")
+                # Reuse is the one place where a stale number could look current:
+                # the copy route always reads the file, but a caller who just
+                # edited this part in memory gets the same bytes as last time and
+                # no hint that they did. Say it only when it is true.
+                + (" - and this part has UNSAVED edits, which are not in these "
+                   "numbers: save it (catia_save_document) and measure again"
+                   if unsaved else ""))
         except EmptyMesh:
             # Its own message already names the cause and the fix. Wrapping it in
             # the in-context paragraph below would replace a correct diagnosis

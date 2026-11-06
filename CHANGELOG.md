@@ -2,6 +2,72 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.72] — 2026-11-06 · the assembly envelope, and a cache that ran too late
+
+The 2026-11-06 report's P1-3 and P3-10, both about `catia_get_bounding_box` on a
+Product. One of the three complaints was a **documentation** defect, which is why
+it survived four releases of a working feature.
+
+**`method='mesh'` had not been refused since 0.3.45 — the schema still said it
+was.** The report quotes the sentence, and it is the sentence a caller reads
+before deciding whether to try: `document`'s description ended
+"(method='mesh' is refused for one, because a mesh box is per part)". Nobody
+updated it when the refusal was removed, so the only official route to a precise
+assembly envelope looked non-existent. Verified on B30 before changing the text:
+`document='QA_ASM.CATProduct', method='mesh'` answers the exact envelope
+x [-50, 220], y [-30, 65] — including a rotated instance, whose box exists only
+because every mesh vertex is transformed rather than the local diagonal.
+
+**`complete` and `bounds` answered different questions in the same reply.**
+`complete: true` means "every instance got a box"; `bounds` said "lower bound:
+each component's box came from its vertices". Both were true and together read as
+a contradiction, which is exactly how the report read them. Two new fields say
+what was missing:
+
+| field | values | meaning |
+|---|---|---|
+| `exact` | true / false | no vertex sweep is involved and nothing was skipped |
+| `bounds_code` | `mesh_chord` / `vertex_sweep` / `mixed` / `complete_failed` / `empty` | which way the numbers can be short |
+| `complete_note` | text | `complete` is coverage, not accuracy |
+
+Measured on the same product: `auto` returns x max **205** where the true
+envelope is **220** — 15 mm, in the direction the report was checking — and now
+answers `exact: false` / `bounds_code: "vertex_sweep"` instead of leaving the
+reader to reconcile prose.
+
+**The per-part cache was consulted too late to save anything.** The file-keyed
+mesh cache has existed since 0.3.32, but the lookup sat inside
+`_mesh_from_copy` — i.e. after `part.Update()` and after `_edited_in_context`.
+On a part of an open assembly those two are **4.2 s of window switching**
+(measured: `Activate()` 2.4 s, restore 1.8 s) around an export that takes 8-10 ms,
+so a cache HIT still cost 4 s to avoid 0.6 ms. Every call paid it again:
+8.9 s and 9.0 s for the same two-part product, twice in a row.
+
+The lookup now runs before any COM call, and the gate is `Document.Saved`:
+
+* `Saved: true` → the live part IS the file, so the file key describes the answer
+  → return it with `mesh_cache: "reused"` and no export at all;
+* `Saved: false` → the live part differs from its file → measure it, report
+  `mesh_cache: "unsaved"`, and never answer it from that cache.
+
+`part.Update()` is skipped when the document is clean (a clean document has
+nothing pending, and `Update()` clears `Saved` — measured: it flips a freshly
+reopened part from `True` to `False` while the file and the exported 3244 bytes
+stay identical). An export of a clean part is then stored under its file, so the
+next call over the same assembly is free.
+
+Measured on the same three-instance product, reopened from disk: **32 938 ms →
+184 ms**, both parts `reused` in 16 ms each, identical numbers. A part edited
+without saving answers `unsaved` and reports the edit (x max 105, not the cached
+65).
+
+The `visit` callback — how `catia_check_surface` gets the STL itself — disables
+the hit: it reads the file, and a cached answer has no file to hand it.
+
+`1146 → 1173 tests`. Neither `exact` nor `bounds_code` is new information; the
+numbers never changed. What changed is that the reply now says which of the two
+questions it just answered.
+
 ## [0.3.71] — 2026-11-06 · the last two exemptions, and four replies that lied
 
 Four reports arrived together against 0.3.70. Two are about the envelope; the

@@ -183,14 +183,31 @@ def test_the_cache_is_bounded(tmp_path):
     assert len(M._MESH_CACHE) == M._MESH_CACHE_LIMIT
 
 
-def test_only_the_copy_route_is_cached():
+def test_only_a_clean_document_is_cached():
+    """0.3.72 moved the cache LOOKUP into `_mesh_export` - behind a cleanliness gate.
+
+    The rule this test was written for is still the rule: an in-place export of a
+    document with unsaved edits must not be remembered, because no file identity
+    describes it. What changed is that the lookup can no longer sit only in the
+    copy route: it ran after `part.Update()` and `_edited_in_context`, so on a
+    part of an open assembly a cache HIT still paid 4.2 s of window switching to
+    save a 10 ms export (reported 2026-11-06, P3-10). A source-level `not in` is
+    the wrong instrument for the new rule, so this asserts the gate instead.
+    """
     from catia_mcp.tools.measurement import MeasurementTools
 
     copy = inspect.getsource(MeasurementTools._mesh_from_copy)
     export = inspect.getsource(MeasurementTools._mesh_export)
     assert "_mesh_cache_get" in copy and "_mesh_cache_put" in copy
-    # An in-place export may include unsaved edits - no file identity describes it.
-    assert "_mesh_cache" not in export
+    # The export route may now consult the same cache, but only for a document
+    # that `Document.Saved` calls clean.
+    assert "_mesh_cache_get" in export
+    assert "_doc_is_saved" in export
+    # Both the lookup and the store are behind `clean`.
+    assert export.count("if identity is not None and clean") >= 1
+    assert "if identity is not None and clean:" in export
+    # And a dirty part is labelled as such rather than cached.
+    assert '"unsaved"' in export
 
 
 def test_the_reply_says_whether_the_box_was_reused(tmp_path):
