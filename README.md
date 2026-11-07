@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.78** · [what changed](CHANGELOG.md) ·
+**0.3.79** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -12,7 +12,7 @@ defects that make that loop lie to you. Most of the work since 0.3.0 came from
 people rebuilding real assemblies with it: the changelog is a list of things that
 produced a plausible number, a wrong number, or no explanation at all.
 
-**127 tools** (upstream 98 + 29 added, and nothing dropped any more: knowledge
+**130 tools** (upstream 98 + 32 added, and nothing dropped any more: knowledge
 came back in 0.3.63 and drafting in 0.3.64, each after its tools were measured on
 B30 rather than trusted). Nothing in the COM layer was rewritten — the value of upstream is
 the field-verified knowledge in its comments, so this fork is strictly add /
@@ -69,11 +69,12 @@ two - `catia_delete_body`, `catia_solid_loft`; 0.3.19: one - `catia_copy_compone
 0.3.51: one - `catia_check_surface`; 0.3.53: one - `catia_gsd_boundary`; 0.3.55: one - `catia_gsd_heal`; 0.3.56: two -
 `catia_gsd_fillet_surface`, `catia_gsd_spine`; 0.3.60: two -
 `catia_gsd_rotate`, `catia_gsd_translate`).
-98 + 29 added = 127, where the 27th is `catia_apply_design_table` under
-Knowledgeware below, and 0.3.65 added `catia_drawing_set_sheet` and
-`catia_drawing_add_frame` under Drafting. 0.3.20 added arguments instead of
-tools: a sketch support given as `origin`/`u`/`v`, edges given as coordinates,
-arcs given as their two endpoints, and one plan per several documents.
+98 + 32 added = 130: the 26 below, `catia_apply_design_table` under Knowledgeware,
+`catia_drawing_set_sheet` and `catia_drawing_add_frame` under Drafting (0.3.65),
+and the three colour tools in their own table below (0.3.79). 0.3.20 added
+arguments instead of tools: a sketch support given as `origin`/`u`/`v`, edges
+given as coordinates, arcs given as their two endpoints, and one plan per
+several documents.
 
 | Tool | What it gives you |
 |---|---|
@@ -912,6 +913,40 @@ in the active assembly". `occurrence` there is the ordinal within the part
 (`occurrence_scope: "per_part"`), which is what `{part_number, occurrence}`
 resolves against; `index` is the position in the assembly.
 
+#### Added for looking at the assembly (3 tools)
+
+| Tool | Version | Why it exists |
+|---|---|---|
+| `catia_colorize_assembly` | 0.3.79 | An assembly built from a text description is checked with a screenshot, and until 0.3.79 every part came out the same grey: `catia_set_visibility` drove `Selection.VisProperties` for the show flag and the other half of the interface was never touched. One colour per **part** by default (instances of one part share it - that is what "colour by part" means), one per **instance** on request. Colours never wrap around the palette: past 12 parts they are generated, because two parts of one colour is the one outcome this tool must not produce. Measured on B30 2026-11-08: two instances of one part carried (220, 30, 30) and (30, 120, 220) at once, both survived save + close + reopen, and the .CATPart itself still read its default. The colours are visible on screen, not only in the property - which took a screenshot and a pixel count to establish, twice |
+| `catia_set_color` | 0.3.79 | One target, two meanings, and the reply always says which: in an assembly it is an **instance** colour (stored in the CATProduct, the other instances and the part file untouched), in a part it is a **part** colour (stored in the CATPart, inherited by every feature inside the body). A geometrical set colours its contents too, because a set's colour does not reach them - each element carries its own, exactly like visibility. `Selection.Add(part)` on the Part node is accepted and reads back (0,0,0): the Part node is not a colour target, the body is |
+| `catia_get_color` | 0.3.79 | What `colorize_assembly` produced, and which instance did not take. It reports hex + RGB and flags a value matching this build's uncoloured default, measured (210, 210, 255) - not white. That flag is **evidence, not proof**: the interface reports the DISPLAYED colour, so a part deliberately set to that exact value reads the same way, and the reply says so instead of claiming "not set" |
+
+### Colour: the three signatures that are not the documented ones
+
+Measured on V5-6R2020 B30, 2026-11-08. All three are in `catia_mcp/colours.py`
+once, so `catia_list_components(include_color=true)` and the colour tools cannot
+drift apart:
+
+* `VisProperties.SetRealColor(R, G, B)` is **refused** with 无效的参数数目 ("invalid
+  number of arguments"). The build wants a fourth value, and it is **not a
+  dummy**: it is a status flag whose **even** values (0, 2) store the colour and
+  leave the view untouched, while odd ones (1, 3) apply it. Measured by colouring
+  a component red and sampling the screenshot after each: with 0 the histogram
+  was byte-identical to the uncoloured one, with 1 the solid came out (174, 24,
+  25). `GetRealColor` answers the new value in BOTH cases, so a wrong flag reports
+  success on a gray assembly - which is exactly what this feature's first version
+  did, and why the acceptance script now reads pixels instead of trusting the
+  read-back.
+* `VisProperties.GetRealColor()` returns **four** values with the RGB **last**:
+  after `SetRealColor(220, 30, 30, 0)` it answers `(0, 220, 30, 30)`. Slicing
+  `[0:3]` reports black for every colour - the same trap as `GetShow()` returning
+  a 2-tuple whose flag is at `[1]`, which cost a release in 0.3.73.
+* An untouched part reads `(0, 210, 210, 255)`, i.e. RGB **(210, 210, 255)**, not
+  white. A part-level colour is stored in the **CATPart**; an instance colour in
+  the **CATProduct**. Nothing is saved by these tools - both need
+  `catia_save_document`, and the replies say so.
+
+
 ## Requirements
 
 * Windows (COM automation; `pywin32` is a hard dependency)
@@ -943,7 +978,7 @@ python -m venv .venv
 # offline test suite, no CATIA needed
 .venv/Scripts/python -m pytest tests -q
 
-# the smoke check: 127 tool definitions == 127 routes
+# the smoke check: 130 tool definitions == 130 routes
 .venv/Scripts/python tests/test_server.py
 ```
 
@@ -1137,6 +1172,7 @@ while a reply that only reports success cannot.
 | Part Design | 25 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, solid loft, bodies (create / list / delete)… |
 | Generative Shape Design | 31 | wireframe and surfaces, extract, `boundary`, `heal`, `fillet_surface`, `spine`, `rotate`, `translate`, revolve + close surface; a GSD element or set is removed with `catia_delete_feature` |
 | Assembly | **13** | upstream 9 + get/set component transform, rename, list constraints, copy component |
+| Appearance | **3** | `catia_colorize_assembly`, `catia_set_color`, `catia_get_color` - per-instance colour in an assembly, per-node in a part |
 | Measurement | 7 | inertia, distance, bounding box\*, parameters, `catia_check_surface` |
 | Export | 4 | STEP / STL / IGES hand-off |
 | Knowledge | 6 | parameters, formulas, relations, design tables - upstream's five, measured and corrected, plus `catia_apply_design_table` |

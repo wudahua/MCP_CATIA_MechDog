@@ -10,6 +10,7 @@ import json
 import os
 from typing import Any
 
+from catia_mcp.colours import UNCOLOURED, hex_of, read_rgb
 from catia_mcp.connection import CATIAConnection
 from catia_mcp.results import (
     ArgumentOutOfRange,
@@ -330,7 +331,10 @@ class AssemblyTools:
                     "THE SAME PART (occurrence 2 of P02_motor), which is what "
                     "'{part_number, occurrence}' resolves against; 'index' is the "
                     "position in the assembly and is what a bare index resolves "
-                    "against. The reply also states 'occurrence_scope'."
+                    "against. The reply also states 'occurrence_scope'. "
+                    "'include_color=true' adds each component's colour and whether it "
+                    "matches this build's uncoloured default - one COM read per "
+                    "instance, so it is off by default."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -351,6 +355,19 @@ class AssemblyTools:
                                 "no 'convention' (it describes a rotation that is not "
                                 "in the reply). Use it to confirm that the instances "
                                 "are all there; each placement costs about 70 ms."
+                            ),
+                        },
+                        "include_color": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Add a 'color' field per component ('#RRGGBB') and "
+                                "'color_matches_default' - measured by selecting each "
+                                "component, so it is one COM call per instance and "
+                                "off by default. Read after catia_set_color or "
+                                "catia_colorize_assembly to see which instance did not "
+                                "take. A value matching (210, 210, 255) is this "
+                                "build's uncoloured default: evidence, not proof."
                             ),
                         },
                     },
@@ -563,7 +580,8 @@ class AssemblyTools:
                 return self._rename_component(arguments)
             case "catia_list_components":
                 return self._list_components(arguments.get("part_number"),
-                                             bool(arguments.get("names_only", False)))
+                                             bool(arguments.get("names_only", False)),
+                                             bool(arguments.get("include_color", False)))
             case "catia_copy_component":
                 return self._copy_component(arguments)
             case "catia_list_constraints":
@@ -1569,7 +1587,8 @@ class AssemblyTools:
         )
 
     def _list_components(self, part_number: str | None = None,
-                         names_only: bool = False) -> str:
+                         names_only: bool = False,
+                         include_color: bool = False) -> str:
         """Every component with its placement, surviving broken links.
 
         One dead link used to abort the whole listing (reported 2026-10-24:
@@ -1661,6 +1680,24 @@ class AssemblyTools:
                     (entry.get("name") or "").rsplit(".", 1)[0]
             per_part[group] = per_part.get(group, 0) + 1
             entry["occurrence"] = per_part[group]
+            if include_color:
+                # Opt-in: one Selection + VisProperties read per instance, which a
+                # 70-instance assembly pays 70 times. The primitives are shared
+                # with the colour tools (catia_mcp/colours.py) so the four-value
+                # GetRealColor and its RGB-in-the-last-three layout are stated
+                # once, not twice.
+                try:
+                    selection = self.conn.active_document.Selection
+                    selection.Clear()
+                    selection.Add(comp)
+                    value = read_rgb(selection)
+                    selection.Clear()
+                except Exception as exc:  # noqa: BLE001 - one field, not the list
+                    entry["color"] = None
+                    entry["color_error"] = str(exc).splitlines()[0][:80]
+                else:
+                    entry["color"] = hex_of(value) if value is not None else None
+                    entry["color_matches_default"] = value == UNCOLOURED
             components.append(entry)
 
         # An empty assembly answers with the SAME shape as a full one. Returning

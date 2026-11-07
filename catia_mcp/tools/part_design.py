@@ -5585,65 +5585,9 @@ class PartDesignTools:
         except Exception:  # noqa: BLE001 - the label is a courtesy
             active = "<the active document>"
 
-        def find_in(part):
-            """``(node, where, parent_set)`` for ``name`` in one part."""
-            target, where, parent_set = None, "", ""
-
-            def try_get(collection, label):
-                try:
-                    return collection.Item(name), label
-                except Exception:
-                    return None, ""
-
-            for i in range(1, part.Bodies.Count + 1):
-                body = part.Bodies.Item(i)
-                if str(body.Name) == name:
-                    target, where = body, "body"
-                    break
-                got, lbl = try_get(body.Shapes, "feature")
-                if got is not None:
-                    target, where = got, lbl
-                    break
-                got, lbl = try_get(body.Sketches, "sketch")
-                if got is not None:
-                    target, where = got, lbl
-                    break
-                # 0.3.74: hybrid shapes INSERTED INTO A SOLID BODY. The frame
-                # sketch's datum plane and its three points go in there on
-                # purpose (a plane in a geometrical set poisons the fillet on the
-                # pad built on it), and this walk only covered geometrical sets -
-                # so the tool that hides things by name could not see the very
-                # features this server creates, and answered "No tree node named"
-                # for a name it had picked itself (reported 2026-11-07).
-                try:
-                    hybrids = body.HybridShapes
-                except Exception:      # noqa: BLE001 - body without hybrids
-                    hybrids = None
-                if hybrids is not None:
-                    got, lbl = try_get(hybrids, "datum element")
-                    if got is not None:
-                        target, where = got, lbl
-                        break
-
-            if target is None:
-                for i in range(1, part.HybridBodies.Count + 1):
-                    hb = part.HybridBodies.Item(i)
-                    if str(hb.Name) == name:
-                        target, where = hb, "geometrical set"
-                        break
-                    got, lbl = try_get(hb.HybridShapes, "geometrical element")
-                    if got is not None:
-                        target, where, parent_set = got, lbl, str(hb.Name)
-                        break
-                    got, lbl = try_get(hb.HybridSketches, "sketch")
-                    if got is not None:
-                        target, where, parent_set = got, lbl, str(hb.Name)
-                        break
-            return target, where, parent_set
-
         hits: list[tuple[str, str, int, str]] = []
         for label, part, sel in targets:
-            target, where, parent_set = find_in(part)
+            target, where, parent_set = self._find_tree_node(part, name)
             if target is None:
                 continue
 
@@ -5771,6 +5715,74 @@ class PartDesignTools:
                 if collection == "HybridBodies":
                     done += cls._hide_set_contents(child, apply, depth + 1)
         return done
+
+    @staticmethod
+    def _find_tree_node(part: Any, name: str) -> tuple[Any, str, str]:
+        """``(node, kind, parent_set)`` for a tree node called ``name``, or None.
+
+        Shared by everything that takes a tree name - ``catia_set_visibility``
+        and the colour tools - so the walk exists ONCE: the list of places a
+        feature can live is exactly the kind of thing that goes stale in one copy
+        and not the other, and 0.3.74 already paid for that (the walk did not
+        cover ``body.HybridShapes``, so the tool could not hide the datum plane it
+        had created itself).
+
+        ``Item(name)`` returns the FIRST match and says nothing about the rest;
+        callers that must reach all of them use :meth:`_nodes_named` as well.
+        """
+        target, where, parent_set = None, "", ""
+
+        def try_get(collection, label):
+            try:
+                return collection.Item(name), label
+            except Exception:
+                return None, ""
+
+        for i in range(1, part.Bodies.Count + 1):
+            body = part.Bodies.Item(i)
+            if str(body.Name) == name:
+                target, where = body, "body"
+                break
+            got, lbl = try_get(body.Shapes, "feature")
+            if got is not None:
+                target, where = got, lbl
+                break
+            got, lbl = try_get(body.Sketches, "sketch")
+            if got is not None:
+                target, where = got, lbl
+                break
+            # Hybrid shapes INSERTED INTO A SOLID BODY. The frame sketch's datum
+            # plane and its three points go in there on purpose (a plane in a
+            # geometrical set poisons the fillet on the pad built on it), and
+            # this walk only covered geometrical sets - so the tool that hides
+            # things by name could not see the very features this server creates,
+            # and answered "No tree node named" for a name it had picked itself
+            # (reported 2026-11-07).
+            try:
+                hybrids = body.HybridShapes
+            except Exception:      # noqa: BLE001 - body without hybrids
+                hybrids = None
+            if hybrids is not None:
+                got, lbl = try_get(hybrids, "datum element")
+                if got is not None:
+                    target, where = got, lbl
+                    break
+
+        if target is None:
+            for i in range(1, part.HybridBodies.Count + 1):
+                hb = part.HybridBodies.Item(i)
+                if str(hb.Name) == name:
+                    target, where = hb, "geometrical set"
+                    break
+                got, lbl = try_get(hb.HybridShapes, "geometrical element")
+                if got is not None:
+                    target, where, parent_set = got, lbl, str(hb.Name)
+                    break
+                got, lbl = try_get(hb.HybridSketches, "sketch")
+                if got is not None:
+                    target, where, parent_set = got, lbl, str(hb.Name)
+                    break
+        return target, where, parent_set
 
     @staticmethod
     def _nodes_named(part: Any, name: str) -> list[Any]:

@@ -27,6 +27,7 @@ from catia_mcp.results import (
     reject_validation,
 )
 from catia_mcp.tools.assembly import AssemblyTools
+from catia_mcp.tools.appearance import AppearanceTools
 from catia_mcp.tools.diagnostics import DiagnosticsTools
 from catia_mcp.tools.document import DocumentTools
 from catia_mcp.tools.export import ExportTools
@@ -111,6 +112,7 @@ class CATIAMCPServer:
         self.gsd_tools = GSDTools(self.connection)
         self.diagnostics_tools = DiagnosticsTools(self.connection)
         self.assembly_tools = AssemblyTools(self.connection)
+        self.appearance_tools = AppearanceTools(self.connection)
         self.measurement_tools = MeasurementTools(self.connection)
         self.export_tools = ExportTools(self.connection)
         self.knowledge_tools = KnowledgeTools(self.connection)
@@ -123,6 +125,7 @@ class CATIAMCPServer:
             self.gsd_tools,
             self.diagnostics_tools,
             self.assembly_tools,
+            self.appearance_tools,
             self.measurement_tools,
             self.export_tools,
             self.knowledge_tools,

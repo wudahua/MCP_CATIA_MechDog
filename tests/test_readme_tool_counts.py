@@ -26,6 +26,7 @@ MODULES: dict[str, tuple[str, str]] = {
     "Part Design": ("catia_mcp.tools.part_design", "PartDesignTools"),
     "Generative Shape Design": ("catia_mcp.tools.gsd", "GSDTools"),
     "Assembly": ("catia_mcp.tools.assembly", "AssemblyTools"),
+    "Appearance": ("catia_mcp.tools.appearance", "AppearanceTools"),
     "Measurement": ("catia_mcp.tools.measurement", "MeasurementTools"),
     "Export": ("catia_mcp.tools.export", "ExportTools"),
     "Knowledge": ("catia_mcp.tools.knowledge", "KnowledgeTools"),

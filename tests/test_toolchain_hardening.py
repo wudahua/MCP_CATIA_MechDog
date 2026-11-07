@@ -218,7 +218,15 @@ def test_set_visibility_is_registered_with_the_measured_enum_note():
     # 0 shows, 1 hides - 2 is accepted and does nothing, which is why this was
     # silently broken for a while.
     assert "SetShow(0 if show else 1)" in source
-    assert "HybridShapes" in source          # descend into the set
+    # The by-name walk moved into ONE shared helper in 0.3.79 (the colour tools
+    # need the same list of places a feature can live). The intent is unchanged:
+    # hiding must reach HybridShapes, i.e. the datum plane a frame sketch puts
+    # inside a solid body - so both halves are asserted where they now live.
+    assert "self._find_tree_node(part, name)" in source
+    assert "HybridShapes" in inspect.getsource(PD._find_tree_node)
+    # ... and the descent into a geometrical set is still on the hiding side.
+    assert "self._hide_set_contents(target, apply" in source
+    assert "HybridShapes" in inspect.getsource(PD._hide_set_contents)
 
 
 # ─────────────────────────────────────────── multi-body round trip

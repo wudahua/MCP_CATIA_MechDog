@@ -152,8 +152,12 @@ def test_imports_reach_every_module_file():
 
 
 def test_the_real_server_still_matches_its_router():
-    """127 = 127, through the same function main() calls."""
-    assert _check_tools_match_router() == 127
+    """The count matches, through the same function main() calls.
+
+    130 since 0.3.79 added the three colour tools; the point of the assertion is
+    that the number comes from ONE source, not that it is any particular value.
+    """
+    assert _check_tools_match_router() == 130
 
 
 # ── the two hanging suggestions from the 0.3.60 report ─────────────────────
