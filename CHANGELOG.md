@@ -92,6 +92,23 @@ fails" — does not reproduce through this package either
 fixed in 0.3.71: `catia_new_part` now raises `SAVE_FAILED` instead of returning
 `ok: true` with a sentence inside.
 
+The report came back a second time with "evidence B" for the folder claim, so it
+was measured one more time — `catia_new_part` with an ASCII name, in **their exact
+path** (typo included), in a short Chinese folder, and in an ASCII control
+(`scripts/b30_v0374_their_path.py`): **all three saved**, file on disk. That is
+five controlled attempts against one unexplained observation, so the message no
+longer asserts a cause it cannot reproduce: it states what was measured and tells
+the caller to read the CATIA error it already carries in brackets ("if this name
+IS ASCII, that is what to act on").
+
+Two things the report asked for and got: `catia_new_product` is **aligned** with
+`catia_new_part` — a Chinese file name answers `SAVE_FAILED`, `stage=execute`,
+`modified=true`, and an ASCII name in a Chinese folder saves
+(`scripts/b30_v0374_new_product.py`, 3/3) — and the refusal now quotes CATIA's own
+wording for the case, `上述文件名无效` / "the above file name is invalid", which is
+the same limit seen through the UI (the report's screenshot evidence A, matched by
+this probe's DISP_E_EXCEPTION).
+
 **A name holding an undecoded escape is now flagged.** `\u4e3b\u89c6\u56fe`
 arrived as six literal characters, CATIA created a view with backslashes in its
 name, and every later error echoed them back (reported 2026-11-07, observation 4).
@@ -111,7 +128,7 @@ reordering above addresses the truncation without that. `catia_screenshot`'s
 written" (the round's first observation); a request that differs is ignored, not
 scaled.
 
-`1190 → 1205 tests`.
+`1190 → 1206 tests`.
 
 ## [0.3.73] — 2026-11-07 · the last two open items from 2026-11-06
 

@@ -480,11 +480,14 @@ class DocumentTools:
                     f"'{file_path}' ({str(exc).splitlines()[0][:120]}). The "
                     "document is open and unsaved: it has no path, so it cannot be "
                     "referenced by an assembly. CATIA refuses a first SaveAs when "
-                    "the FILE NAME contains non-ASCII characters. The folder does "
-                    "not matter: measured on B30 2026-11-07, "
-                    "...\\中文目录\\probe_ascii.CATPart saved while "
-                    "...\\ascii_dir\\probe_中文.CATPart was refused, same session, "
-                    "same document type.",
+                    "the FILE NAME contains non-ASCII characters - measured on B30 "
+                    "2026-11-07, same session and document type: "
+                    "...\\中文目录\\probe_ascii.CATPart saved, "
+                    "...\\ascii_dir\\probe_中文.CATPart was refused. The CATIA "
+                    "error is in brackets above: if this name IS ASCII, that is "
+                    "what to act on - a Chinese FOLDER saved fine in five "
+                    "attempts, including one with the exact path of the report "
+                    "that blamed it.",
                     code="SAVE_FAILED",
                     stage="execute",
                     modified=True,

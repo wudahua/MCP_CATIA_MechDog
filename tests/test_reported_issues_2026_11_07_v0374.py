@@ -388,7 +388,14 @@ def test_the_view_tools_say_it_when_a_name_carries_an_escape():
 # ── the save message must not blame the folder ─────────────────────────────
 
 def test_the_save_failure_no_longer_blames_the_folder():
-    """Measured on B30 2026-11-07, four combinations, one variable at a time."""
+    """Measured on B30 2026-11-07, four combinations, one variable at a time.
+
+    The report came back a second time with "evidence B" (a Chinese folder with
+    an ASCII name makes catia_new_part fail). Three attempts through this tool
+    with its exact path saved the file, so the message states what was measured
+    and points at the CATIA error it already carries - rather than asserting a
+    cause that could not be reproduced.
+    """
     import inspect
 
     from catia_mcp import dialogs
@@ -397,10 +404,27 @@ def test_the_save_failure_no_longer_blames_the_folder():
     text = inspect.getsource(document)
     assert "the folder counts" not in text
     assert "the FILE NAME contains non-ASCII" in text
+    # The escape hatch for the opposite observation: read the bracketed error.
+    assert "if this name IS ASCII" in text
     dialog_text = inspect.getsource(dialogs)
     assert "a Chinese folder counts" not in dialog_text
-    # The one measurement that settles it is still in the code that refuses.
     assert "non-ASCII FOLDER" in dialog_text
+    # CATIA's own wording, which the report asked for and a screenshot confirmed.
+    assert "上述文件名无效" in dialog_text
+
+
+def test_new_product_fails_the_same_way_as_new_part():
+    """The report closed with "catia_new_product 是否同样返回 ok:false 尚未测"."""
+    import inspect
+
+    from catia_mcp.tools.document import DocumentTools
+
+    source = inspect.getsource(DocumentTools._new_product)
+    assert 'code="SAVE_FAILED"' in source
+    assert 'stage="execute"' in source
+    assert "modified=True" in source
+    # and it names the document= value the caller should use from then on
+    assert "For every document= argument use" in source
 
 
 def test_the_gap_advice_comes_before_the_coordinate_list():

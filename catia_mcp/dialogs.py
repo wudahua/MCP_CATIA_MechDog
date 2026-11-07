@@ -202,7 +202,10 @@ def save_as(doc, path: str, tries: int = 6, wait: float = 0.6) -> str:
             "  measured on V5-6R2020 B30: the same folder saved "
             "'ascii_probe.CATPart' and failed '中文探针.CATPart' with "
             "DISP_E_EXCEPTION, while a non-ASCII FOLDER ('中文目录\\probe.CATPart') "
-            "saved normally - the limit is the file name, not the path."
+            "saved normally - the limit is the file name, not the path.\n"
+            "  CATIA's own 'Save As' dialog rejects the same name with "
+            "'上述文件名无效' / 'the above file name is invalid' (screenshot "
+            "evidence, 2026-11-07), which is the same limit seen through the UI."
         )
     parent = os.path.dirname(target)
     if parent:
