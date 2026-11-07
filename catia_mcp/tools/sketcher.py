@@ -947,7 +947,19 @@ class SketcherTools:
                               "redrawn from a record")
         try:
             if str(placement.get("base")) == "frame":
-                support_ref = self._resolve_support(part, body, placement, None)[0]
+                # The record stores the frame as ``base: "frame"`` (the form the
+                # GSD side replays), while _resolve_support reads ``type``. It
+                # used to be forwarded as-is, so re-creating a frame sketch
+                # answered "Unknown plane type None" about a sketch whose
+                # creation had just been accepted - the recovery path refusing a
+                # plane type the creating path documents (reported 2026-11-07,
+                # P5, on a 109-step run where the side section was a frame).
+                support_ref = self._resolve_support(part, body, {
+                    "type": "frame",
+                    "origin": placement.get("origin"),
+                    "u": placement.get("u"),
+                    "v": placement.get("v"),
+                }, None)[0]
             else:
                 support_ref = self._resolve_support(
                     part, body, placement["base"], placement.get("distance"))[0]

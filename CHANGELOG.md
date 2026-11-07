@@ -2,6 +2,115 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.77] — 2026-11-07 · eleven items from an 85 m frigate built out of a text file
+
+The report came from a run that built a frigate from a natural-language
+description in ~500 `catia_*` steps. Two items were **silent wrong geometry**,
+and one of them had been carried as an "unreliable, check the bounding box"
+WARNING since 2026-11-02 — a warning is not a fix.
+
+### P3 — `dir1_axis` was one axis off, and now the table is the measurement
+
+`catia_rect_pattern` mapped `x -> PlaneYZ`, `y -> PlaneZX`, `z -> PlaneXY` on
+the assumption that "a datum plane's reference gives its normal". Measured on
+B30 by patterning a 10x10x5 pad 3x1 at 100 mm and reading the body box after
+each call:
+
+```
+PlaneYZ -> +Y      PlaneZX -> +Z      PlaneXY -> +X
+```
+
+A plane reference drives the plane's **own horizontal axis**, one axis past the
+one the table assumed — which is exactly the "`dir1_axis='x'` moved the copies
+along Y" the reporters kept hitting. The table is now `x -> XY, y -> YZ,
+z -> ZX`, the warning is gone, and the reply states the axis instead of
+hedging. The default pair (no axis arguments) is unchanged geometrically
+(PlaneYZ, PlaneZX), but its sentence was wrong too and now says **dir1 = Y,
+dir2 = X**, which is what it has always built. Anyone who wants X first should
+pass `dir1_axis='x'`.
+
+### P2 — a point-count mismatch is named instead of silently twisting the hull
+
+Two closed splines of 59 and 60 points were lofted into a hull whose stern
+bulged +49.8% (min y -10335 mm against a nominal -6900) while the tool answered
+`ok:true`, printed a plausible 4039 m³ and raised no warning: CATIA couples
+sections **by parameter**, so the sections were paired index by index.
+
+`catia_solid_loft` now reads the drawing record (the only place a sketch's
+point count exists — CATIA cannot give it back) and:
+
+* prints each section's shape in every reply: `'草图.3' one closed curve, 180
+  points; '草图.4' 4 curves (1 rectangle(s))`;
+* **warns on a point-count mismatch**, naming both counts and the measured
+  consequence, so a shape that cannot be seen from the volume is at least
+  visible in the reply.
+
+### P5 — the recovery path accepts the plane the creating path documents
+
+A frame sketch could be created and then could not be **re-created**: the
+outline record stores `base: "frame"` (the form the GSD side replays) and the
+resolver reads `type`, so a rollback answered `Unknown plane type None` about a
+plane type `catia_create_sketch` documents and supports. The frame is converted
+on the way in now.
+
+### P6 — `direction: "normal"` is the default side, not a pin
+
+`catia_pocket` only flipped a no-effect cut when the caller had **not** named a
+direction, so naming the default (`direction="normal"`) turned a flip into a
+guaranteed failed round trip: measured on B30, a frame sketch whose material sat
+on the far side answered `NO_MATERIAL` for `normal` and cut for `reverse`.
+`normal` now flips like `catia_pad` always has, and says so
+("the requested side had no material, so the cut was auto-flipped"). `reverse`
+stays literal (0.3.5's rule) — but its `NO_MATERIAL` now carries the way back
+("retry once with `direction='normal'`").
+
+### P8 — hiding a geometrical set now reaches a set inside it
+
+Descending one level was the 0.3.73 fix and it was not enough: a set holding
+another set was skipped, and the reply said "hidden and 12 element(s) inside
+it" while the bounding box still measured the wireframe. The descent is
+recursive (bounded at four levels).
+
+### P9 — a part that cannot be saved is closed again
+
+`catia_new_part` with a non-ASCII file name raised `SAVE_FAILED` and left an
+empty, pathless document open — which no assembly can reference and which a run
+that ignores `ok:false` builds on for hundreds of steps. The empty part is
+closed again, `modified` follows that (nothing is left modified), and the
+`next_actions` say to create it under an ASCII name. Same for
+`catia_new_product`.
+
+### P4 / P10 / P7 / P1 / P11 — what was measured, what was not fixed
+
+* **P4 (`through_all` + `both` removing nothing on a frame sketch) does not
+  reproduce here**: the same combination cut 4000 mm³ from a 40x40x40 block
+  under a frame sketch on B30. Since the reporter's workaround (an explicit
+  depth) is measured to work, the `NO_MATERIAL` reply for a `through_all` cut
+  now names it — "retry the same profile with `depth=..., direction='both'`" —
+  instead of blaming the profile.
+* **P10**: with P2's section facts, a refusal now separates the two cases. If a
+  section holds several curves it says which one and how many; if none does, it
+  says that too ("No section in this call was recorded as multi-element, so look
+  at the second cause instead") rather than repeating a hint that does not fit.
+* **P7** is documented, not added: `catia_pocket` cuts everything it passes
+  through in the active body. The schema now says so and names the way to
+  isolate a cut (own body + `catia_boolean`).
+* **P1 (loft over a multi-element section) is a real limitation and stays one.**
+  Measured: four separate lines are refused; the same four points as a closed
+  spline build. Four ways to merge a sketch into one curve were tried and all
+  failed on this build — a join of the sketch's 2D elements (no usable
+  `AddNewJoin` methods through late binding), the `Sketch` object itself (type
+  mismatch), and an `Extract` of the sketch (update fails). The error now names
+  the offending section and its curve count instead of hinting.
+* **P11 (steps referencing an earlier step's return value)** is not done: it is
+  a new language for `catia_run_plan`, not a defect, and the reporter's 109-step
+  plan ran with hard-coded sketch names.
+
+`1224 → 1244 tests`. `scripts/b30_v0377_audit.py` — 12/12 on B30: `x`/`y`/`z`
+each grow only their own axis by exactly 200 mm, `normal` flips and cuts, the
+59-vs-60 loft warns with both counts, a 4-line section is named as 4 curves, and
+a refused save leaves the session at 32 documents rather than 33.
+
 ## [0.3.76] — 2026-11-07 · the gap list as data, without changing the sentence
 
 The last open item of the 2026-11-06 batch. Its third bullet asked for the full

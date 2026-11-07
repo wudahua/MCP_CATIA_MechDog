@@ -313,6 +313,14 @@ class PartDesignTools:
                     "by extruding a 2D profile into the solid. Give either `depth` or "
                     "`through_all`. This is also the tool for a plain cylindrical hole: "
                     "sketch a circle and cut it."
+                    "SCOPE: a pocket cuts EVERYTHING it passes through in the active "
+                    "body - there is no 'only this object' argument, so a through cut "
+                    "meant for one panel also opens whatever else lies in its path. "
+                    "To isolate a cut, put the target in its own body "
+                    "(catia_new_body, catia_set_active_body), cut there, and combine "
+                    "with catia_boolean; or use a shallow depth that stops inside the "
+                    "panel. Reported 2026-11-07, P7, where a through-all slot opened "
+                    "the hull side behind it."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1926,15 +1934,15 @@ class PartDesignTools:
                 took = True
                 single_sided = True
                 update_error = retry_error
-        if took is False and not explicit_direction:
-            # Nothing was removed and the caller did not pin the side. A
-            # profile sketched on a solid face lands on the air side often
-            # enough that 0.3.3 flipped here automatically, and that is what
-            # makes "pocket from the top face" work on the first call. 0.3.4's
-            # volume gate raised before this block could run, which handed the
-            # choice of direction back to the caller as a guaranteed failed
-            # round trip. Flip, measure again, and only call it a failure when
-            # the other side is air too.
+        if took is False and not symmetric and not reverse:
+            # Nothing was removed on the side that was asked for. `direction:
+            # "normal"` names the DEFAULT side, so it is not a pin and this
+            # flips - that is what the reporter needed: measured 2026-11-07, a
+            # frame sketch whose material sat on the +Y side of a plane with
+            # normal -Y answered NO_MATERIAL for "normal" and cut for "reverse",
+            # so the caller had to find the flip by hand. `reverse` stays
+            # literal ("reverse means reverse", 0.3.5) - asking for the air side
+            # is an error, and the next_actions below name the way back.
             pocket.DirectionOrientation = 0 if reverse else 1
             retry_error = self._try_update(part, pocket)
             after, retook = self._settle(part, body, before, expect="subtract")
@@ -1973,12 +1981,37 @@ class PartDesignTools:
                 "local coordinates do not land on the material - put the sketch "
                 "on a datum plane with an offset instead), or the profile is "
                 "not closed"
+                # `through_all` is a different animal: CATIA works the extent
+                # out itself ("up to last"), and on a sketch whose support is a
+                # datum or frame plane - rather than a face of the solid - that
+                # extent can come back empty while the same profile cuts fine
+                # with an explicit depth (reported 2026-11-07, P4: the reporter's
+                # three other through-cuts all worked once they used depth).
+                # This package cannot reproduce it yet, so it says what was
+                # measured and names the way out instead of blaming the profile.
+                + (" A `through_all` cut lets CATIA work out its own extent, and "
+                   "that is the part that can come back empty when the sketch "
+                   "sits on a datum/frame plane rather than on a face of the "
+                   "solid: retry the SAME profile with an explicit depth "
+                   "(direction='both', depth well past the body) before "
+                   "changing any geometry - that is measured to work on the "
+                   "2026-11-07 case." if through_all else "")
                 + (f". Original error: {update_error}" if update_error else "."),
                 rolled_back=gone,
-                next_actions=[
-                    "Change the profile or the sketch's offset so the cut meets "
-                    "material, then retry: the same call removes nothing again"
-                ],
+                next_actions=(
+                    ["Retry the same profile with an explicit depth instead of "
+                     "through_all - catia_pocket(depth=20000, direction='both') - "
+                     "because a through_all extent can come back empty on a "
+                     "datum/frame sketch while the profile itself is fine"]
+                    if through_all else
+                    (["Retry once with direction='normal': the profile may sit "
+                      "with all its material on the other side of the sketch "
+                      "plane. Measured 2026-11-07 on a frame sketch - 'reverse' "
+                      "removed nothing while 'normal' cut, on the same profile"]
+                     if reverse else
+                     ["Change the profile or the sketch's offset so the cut meets "
+                      "material, then retry: the same call removes nothing again"])
+                ),
             ) from (update_error or None)
 
         self.conn.refresh_display()
@@ -2023,7 +2056,9 @@ class PartDesignTools:
                     + f" (volume stayed {before:.1f} mm3). Check that the "
                     "profile intersects the solid."
                 )
-            flip_note = " (direction auto-flipped to reach material)" if flipped else ""
+            flip_note = (" (the requested side had no material, so the cut was "
+                         "auto-flipped - catia_pad has always behaved this way)"
+                         if flipped else "")
             if single_sided:
                 flip_note = (" (only one side of the sketch plane had material, so "
                              "this is a single-sided cut despite symmetric=true)")
@@ -3711,11 +3746,18 @@ class PartDesignTools:
         reverse1 = bool(args.get("reverse_dir1"))
         reverse2 = bool(args.get("reverse_dir2"))
         if dir1_axis or dir2_axis:
-            # A datum plane's reference gives its NORMAL as the direction, so
-            # x -> PlaneYZ, y -> PlaneZX, z -> PlaneXY. Same mapping the edge
-            # path documents, minus the guesswork about which way an edge runs.
+            # A plane reference drives the plane's OWN HORIZONTAL AXIS, not its
+            # normal. Measured on B30 2026-11-07 by patterning a 10x10x5 pad
+            # 3x1 at 100 mm spacing and reading the body box after each call:
+            #   PlaneYZ -> +Y,  PlaneZX -> +Z,  PlaneXY -> +X
+            # which is exactly one axis past the one the old table assumed. The
+            # mapping used to be {"x": "yz", ...} ("a plane's reference gives
+            # its normal") and that is why dir1_axis='x' moved the copies along
+            # Y - reported 2026-11-07 as a silent wrong geometry after being
+            # carried as an "unreliable" WARNING since 2026-11-02. The table is
+            # now the measurement: the plane whose H axis IS the wanted axis.
             planes = self.conn.get_origin_elements()
-            by_axis = {"x": "yz", "y": "zx", "z": "xy"}
+            by_axis = {"x": "xy", "y": "yz", "z": "zx"}
             # CATIA needs dir1 x dir2 to be RIGHT-handed, or the update fails with
             # a bare "UpdateObject failed". Measured on B30 2026-10-24 with a pad
             # seed: (x,y) ok, (y,z) ok, (z,x) ok, (z,y) failed, (x,z) failed -
@@ -3757,26 +3799,6 @@ class PartDesignTools:
                           f"axis {second}{'-' if reverse2 else '+'} -> dir2")
             if swapped:
                 directions += " (axes swapped internally: CATIA rejects a left-handed pair)"
-            # Measured on B30 2026-11-02 and not yet fixed: a plane reference's
-            # direction depends on its PARTNER here, so the pair above can put
-            # dir1 on the other axis (dir1_axis="x" landed 3 copies on -Y).
-            # Saying so costs one sentence and stops the reply from asserting a
-            # geometry it cannot guarantee - see README "Known limits".
-            directions += (" WARNING: the axis each direction actually takes is "
-                           "measured unreliable for plane references (2026-11-02: "
-                           "dir1_axis='x' moved the copies along -Y). Read the "
-                           "body's bounding box after this call, and correct with "
-                           "reverse_dir1/reverse_dir2 or exchanged spacings.")
-            # Measured on B30 2026-11-02 and not yet fixed: a plane reference's
-            # direction depends on its PARTNER here, so the pair above can put
-            # dir1 on the other axis (dir1_axis="x" landed 3 copies on -Y).
-            # Saying so costs one sentence and stops the reply from asserting a
-            # geometry it cannot guarantee - see README "Known limits".
-            directions += (" WARNING: the axis each direction actually takes is "
-                           "measured unreliable for plane references (2026-11-02: "
-                           "dir1_axis='x' moved the copies along -Y). Read the "
-                           "body's bounding box after this call, and correct with "
-                           "reverse_dir1/reverse_dir2 or exchanged spacings.")
         elif dir1_edge:
             r1, r2 = topology_references(
                 self.conn, body, "Edge",
@@ -3785,13 +3807,19 @@ class PartDesignTools:
             ref1, ref2 = r1.reference, r2.reference
             directions = f"{dir1_edge} -> dir1, {dir2_edge} -> dir2"
         else:
-            # Field-proven default on V5R20 (measured 2x2 boss grid): the
-            # origin planes give deterministic directions, PlaneYZ -> X
-            # and PlaneZX -> Y, through CreateReferenceFromObject.
+            # The default pair is unchanged (PlaneYZ, PlaneZX) so existing
+            # callers keep the geometry they have, but the SENTENCE was wrong
+            # for as long as it existed: measured on B30 2026-11-07, PlaneYZ
+            # drives +Y and PlaneZX drives +X, i.e. dir1 is Y and dir2 is X -
+            # the reply used to promise "dir1 (X), dir2 (Y)". A pattern built
+            # from this default is 3 copies along Y, not along X. Say so, and
+            # name dir1_axis/dir2_axis as the way to be sure.
             planes = self.conn.get_origin_elements()
             ref1 = part.CreateReferenceFromObject(planes["yz"])
             ref2 = part.CreateReferenceFromObject(planes["zx"])
-            directions = "origin PlaneYZ -> dir1 (X), PlaneZX -> dir2 (Y)"
+            directions = ("origin PlaneYZ -> dir1 (Y), PlaneZX -> dir2 (X) - pass "
+                          "dir1_axis/dir2_axis to choose the axes instead of "
+                          "relying on this default")
 
         before = self._body_volume_mm3(part, body)
         part.InWorkObject = body
@@ -4915,6 +4943,22 @@ class PartDesignTools:
 
         refs = [self._section_reference(name) for name in sections]
 
+        # What this session knows about each section, from the sketch record -
+        # the only source: a sketch's points cannot be read back through
+        # automation. Two facts matter before the build, and neither was
+        # reported before 0.3.77:
+        #   * a section that is several curves is why AddSectionToLoft/Update
+        #     fails (reported 2026-11-07, P1: a 3-line + 4-arc deck outline was
+        #     refused with a generic "not ONE curve" hint);
+        #   * two closed splines with DIFFERENT point counts couple by parameter,
+        #     and CATIA then twists the surface: 59 points against 60 gave a
+        #     +49.8% bulge at the stern (min y -10335 mm against a nominal
+        #     -6900) while answering ok:true, a volume that looked sane and no
+        #     warning at all (P2, the worst item in that report). The counts are
+        #     in the record, so the mismatch can be named instead of discovered.
+        facts = [(name, self._section_facts(name)) for name in sections]
+        facts_dict = {name: fact for name, fact in facts if fact}
+
         before, volume_note = self._volume_probe(part, body)
         if before is None and self._body_is_empty(body):
             # An empty body has no volume to measure, which is not a failure:
@@ -4957,17 +5001,36 @@ class PartDesignTools:
             part.Update()
         except Exception as error:
             gone = self._remove_feature(part, feature, body)
+            multi = [name for name, fact in facts
+                     if fact and fact["curves"] > 1]
             raise FeatureRejected(
                 f"CATIA rejected the solid loft"
                 + (" and it was removed from the tree again (rolled_back: true)"
                    if gone else " and it could NOT be removed (rolled_back: false)")
                 + ". Sections: " + ", ".join(sections)
-                + ". The usual cause is a section that is not ONE curve - a polygon "
-                "of separate sketch lines is several curves, and an Extract of it is "
-                "still several; use a closed catia_sketch_spline or catia_gsd_spline. "
-                "Second cause, seen with the surface loft on the same build: the "
-                "loft is session-sensitive, so retry once in a fresh session before "
-                f"rebuilding the sections. Original error: {error}",
+                + (". THIS loft has the cause the generic hint describes: "
+                   + ", ".join(f"'{name}' holds "
+                               f"{facts_dict[name]['curves']} separate curve(s) "
+                               f"({facts_dict[name]['curves']} from "
+                               f"{facts_dict[name]['elements']} drawing call(s))"
+                               for name in multi)
+                   + " - several curves, and an Extract of several is still "
+                   "several. Redraw that section as ONE closed "
+                   f"catia_sketch_spline (measured 2026-11-07 on B30: a 4-line "
+                   "rectangle section is refused, the same four points as a "
+                   "closed spline build)." if multi else
+                   ". The usual cause is a section that is not ONE curve - a "
+                   "polygon of separate sketch lines is several curves, and an "
+                   "Extract of it is still several; use a closed "
+                   "catia_sketch_spline or catia_gsd_spline. No section in this "
+                   "call was recorded as multi-element, so look at the second "
+                   "cause instead")
+                + ". Second cause, seen with the surface loft on the same build: "
+                "the loft is session-sensitive, so retry once in a fresh session "
+                "before rebuilding the sections."
+                + (f" Recorded sections: {self._describe_facts(facts)}."
+                   if any(fact for _name, fact in facts) else "")
+                + f" Original error: {error}",
                 rolled_back=gone,
             ) from error
 
@@ -4978,13 +5041,102 @@ class PartDesignTools:
             detail = f" Volume {before:.1f} -> {after:.1f} mm3."
         elif after_note or volume_note:
             detail = f" Volume not verified ({after_note or volume_note})."
+        section_note = (f" Sections: {self._describe_facts(facts)}."
+                        if facts_dict else "")
+        twist = self._coupling_warning(facts_dict)
         return (
             f"Solid loft created through {len(sections)} section(s)"
             + (f" ({'; '.join(tangency)})" if tangency else "")
             + f". Feature: '{feature.Name}' in '{body.Name}', a Part Design solid, "
             "not a surface - no thickening step is needed."
             + detail
+            + section_note
+            + twist
         )
+
+    @staticmethod
+    def _coupling_warning(facts: dict[str, dict[str, Any]]) -> str:
+        """Name the one thing a caller cannot see: a right volume, a wrong shape.
+
+        CATIA pairs loft sections by PARAMETER, so two closed splines sampled
+        differently are lofted index-by-index, not geometry-by-geometry: 59
+        points against 60 put min y at -10335 mm where the sections' own -6900
+        was meant, and the call still answered ok:true with a plausible volume
+        (reported 2026-11-07, P2). The point counts come from the sketch record,
+        so the mismatch is knowable before anyone opens a screenshot.
+        """
+        counts = {name: fact["points"] for name, fact in facts.items()
+                  if fact.get("points")}
+        if len(counts) < 2 or len(set(counts.values())) == 1:
+            return ""
+        listed = ", ".join(f"'{name}' {count}" for name, count in counts.items())
+        return (f" WARNING: the sections do not hold the same number of points "
+                f"({listed}). CATIA pairs sections by PARAMETER, so the surface "
+                "twists between them even when the volume looks plausible - "
+                "measured on B30 2026-11-07: 59 against 60 points bulged the "
+                "stern by +49.8% (min y -10335 mm against a nominal -6900) and "
+                "this tool answered ok:true. Sample both sections the same way - "
+                "same segment counts, same start point, same direction - and "
+                "rebuild before trusting the shape.")
+
+    # How many CURVES each recorded drawing call leaves in the sketch. A
+    # rectangle is one entry in the record and four curves in the sketch, and
+    # that difference is the whole question a loft section asks - counting
+    # record entries called a 4-line rectangle "one element" and let the
+    # generic error through on exactly the case the reporter hit (2026-11-07,
+    # P1). A closed spline is ONE curve: it repeats its first point rather than
+    # closing with a line.
+    _CURVES_PER_KIND = {"line": 1, "rectangle": 4, "arc": 1, "circle": 1,
+                        "ellipse": 1, "spline": 1, "point": 0}
+
+    def _section_facts(self, name: str) -> dict[str, Any] | None:
+        """What the sketch record says about one loft section, or None.
+
+        Only sketches drawn in THIS session have a record, and only they can be
+        described: ``Sketch`` gives no readable geometry back. ``None`` is
+        therefore "not known", never "single curve".
+        """
+        outlines = getattr(self.conn, "sketch_outlines", None) or {}
+        try:
+            document = str(self.conn.active_document.Name)
+        except Exception:  # noqa: BLE001 - no record under a guessed key
+            return None
+        record = outlines.get(f"{document}::{name}")
+        if not record:
+            return None
+        elements = record.get("elements") or []
+        kinds: dict[str, int] = {}
+        curves = 0
+        points = 0
+        for element in elements:
+            kind = str(element.get("kind"))
+            kinds[kind] = kinds.get(kind, 0) + 1
+            curves += self._CURVES_PER_KIND.get(kind, 1)
+            count = element.get("points")
+            if isinstance(count, int) and not isinstance(count, bool):
+                points += count
+        return {"elements": len(elements), "curves": curves,
+                "kinds": kinds, "points": points}
+
+    @staticmethod
+    def _describe_facts(facts: list[tuple[str, dict[str, Any] | None]]) -> str:
+        """One line per section that has a record; unknown ones are left out."""
+        parts = []
+        for name, fact in facts:
+            if not fact:
+                continue
+            kinds = ", ".join(f"{count} {kind}(s)"
+                              for kind, count in sorted(fact["kinds"].items()))
+            curves = fact["curves"]
+            if curves == 1 and set(fact["kinds"]) == {"spline"}:
+                curve = "one closed curve"
+            elif curves == 1:
+                curve = f"one curve ({kinds})"
+            else:
+                curve = f"{curves} curves ({kinds})"
+            points = f", {fact['points']} points" if fact["points"] else ""
+            parts.append(f"'{name}' {curve}{points}")
+        return "; ".join(parts) if parts else "no drawing record for any section"
 
     def _section_reference(self, name: str) -> Any:
         """A Reference for a loft section: sketch, GSD curve, or Edge.N / Face.N."""
@@ -5436,19 +5588,13 @@ class PartDesignTools:
                         continue
                 # Hiding a geometrical set does not hide what is inside it: each
                 # element keeps its own visibility, so the surfaces stay on screen
-                # and keep poisoning STL exports. Descend one level.
-                if where == "geometrical set":
-                    for collection in ("HybridShapes", "HybridSketches"):
-                        try:
-                            items = getattr(target, collection)
-                        except Exception:
-                            continue
-                        for i in range(1, items.Count + 1):
-                            try:
-                                apply(items.Item(i))
-                                children += 1
-                            except Exception:
-                                pass
+                # and keep poisoning STL exports. One level of descent was not
+                # enough - a set inside a set was skipped, and the bounding box
+                # then still measured the wireframe while this tool answered
+                # "hidden" (reported 2026-11-07, P8: the reply said 12 element(s)
+                # and the export warning still counted the set as shown).
+                if where in ("geometrical set", "hybrid body"):
+                    children += self._hide_set_contents(target, apply, depth=0)
             finally:
                 try:
                     sel.Clear()
@@ -5505,6 +5651,41 @@ class PartDesignTools:
             if (show and parents) else "")
         return (f"'{name}' ({where}) is now {state} in {len(hits)} of "
                 f"{len(targets)} part(s) of '{active}': {labels}{extra}.{note}")
+
+    @classmethod
+    def _hide_set_contents(cls, node: Any, apply: Any, depth: int) -> int:
+        """Set the visibility of everything inside a geometrical set, at any depth.
+
+        A set's own visibility does not reach its contents: every element carries
+        its own flag, so hiding the set leaves the surfaces on screen and in
+        every STL export. Descending one level was the 0.3.73 fix and it was not
+        enough - a set holding another set was skipped, which is the worst shape
+        of bug for this tool: the reply says "hidden and N element(s) inside it"
+        while the bounding box still measures the wireframe (reported 2026-11-07,
+        P8). Recursion is bounded at four levels: deeper than that it is not a
+        modelling tree, it is a cycle.
+        """
+        if depth > 4:
+            return 0
+        done = 0
+        for collection in ("HybridShapes", "HybridSketches", "HybridBodies"):
+            try:
+                items = getattr(node, collection)
+            except Exception:  # noqa: BLE001 - the set does not hold this kind
+                continue
+            for i in range(1, items.Count + 1):
+                try:
+                    child = items.Item(i)
+                except Exception:  # noqa: BLE001 - one item, not the rest
+                    continue
+                try:
+                    apply(child)
+                    done += 1
+                except Exception:  # noqa: BLE001 - one item, not the rest
+                    continue
+                if collection == "HybridBodies":
+                    done += cls._hide_set_contents(child, apply, depth + 1)
+        return done
 
     @staticmethod
     def _nodes_named(part: Any, name: str) -> list[Any]:

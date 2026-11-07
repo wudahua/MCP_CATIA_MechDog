@@ -422,7 +422,10 @@ def test_new_product_fails_the_same_way_as_new_part():
     source = inspect.getsource(DocumentTools._new_product)
     assert 'code="SAVE_FAILED"' in source
     assert 'stage="execute"' in source
-    assert "modified=True" in source
+    # 0.3.77 changed the claim: the empty product is closed again, so the call
+    # did not leave a modified document behind - `modified` now follows that.
+    assert "modified=not discarded" in source
+    assert "_discard_unsaved_document" in source
     # and it names the document= value the caller should use from then on
     assert "For every document= argument use" in source
 

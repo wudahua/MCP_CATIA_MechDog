@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.76** · [what changed](CHANGELOG.md) ·
+**0.3.77** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1179,6 +1179,21 @@ hand-dimensioned at all - its curves are not addressable through automation, onl
 `GenerateDimensions` reaches them - and **`Face.N` is session-scoped**. The same
 plate gave its hole's cylinder at `Face.1` in one build and at `Face.7` in another,
 so list faces and use the index immediately.
+
+**0.3.77: `dir1_axis` was one axis off, and a loft that twists now says so.**
+An 85 m frigate built from a text description turned up two silent geometry
+defects. `catia_rect_pattern` mapped `x` to `PlaneYZ` on the assumption that a
+plane reference gives its normal; measured on B30, a plane reference drives the
+plane's **own horizontal axis**, so `dir1_axis='x'` moved the copies along Y —
+and the `ok:true` came with a WARNING that had been standing in for a fix since
+2026-11-02. The table is the measurement now. And two loft sections holding 59
+and 60 points were paired by CATIA **by parameter**, bulging the stern +49.8%
+while the volume looked reasonable: `catia_solid_loft` reads the drawing record,
+prints every section's curve count, and warns when they disagree. Also: a frame
+sketch can be re-created after a rollback (the record said `base`, the resolver
+read `type`), `pocket(direction='normal')` flips like `pad` instead of failing,
+hiding a geometrical set reaches a set inside it, and a part that cannot be
+saved is closed again rather than left pathless.
 
 **0.3.76: the full gap list, as data.** `catia_close_sketch` takes an optional
 `structured=true` and answers `data.breaks[]` — every loose endpoint pair with

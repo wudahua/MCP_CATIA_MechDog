@@ -476,25 +476,35 @@ class DocumentTools:
                 # save - after dozens of steps of modelling (reported 2026-11-06,
                 # P0-1: a Chinese file name, and the parent folder was Chinese
                 # too, which CATIA refuses even when the file name is ASCII).
+                # 0.3.77: the empty part is CLOSED again. It holds nothing, so
+                # nothing is lost, and leaving it open costs the caller every
+                # later step: it has no path, so catia_add_component cannot use
+                # it, and a run that ignores ok:false finishes a model it can
+                # never save (reported 2026-11-07, P9 - the reporter had to
+                # restart on an ASCII path).
+                discarded = self._discard_unsaved_document(doc)
                 raise CodedError(
                     f"Part '{part_name}' was created but COULD NOT BE SAVED to "
-                    f"'{file_path}' ({str(exc).splitlines()[0][:120]}). The "
-                    "document is open and unsaved: it has no path, so it cannot be "
-                    "referenced by an assembly. CATIA refuses a first SaveAs when "
-                    "the FILE NAME contains non-ASCII characters - measured on B30 "
-                    "2026-11-07, same session and document type: "
-                    "...\\中文目录\\probe_ascii.CATPart saved, "
-                    "...\\ascii_dir\\probe_中文.CATPart was refused. The CATIA "
-                    "error is in brackets above: if this name IS ASCII, that is "
-                    "what to act on - a Chinese FOLDER saved fine in five "
+                    f"'{file_path}' ({str(exc).splitlines()[0][:120]}). "
+                    + ("The empty part was closed again, so no unsaved document is "
+                       "left behind and no later step can build on it. "
+                       if discarded else
+                       "The document is open and unsaved: it has no path, so it "
+                       "cannot be referenced by an assembly. ")
+                    + "CATIA refuses a first SaveAs when the FILE NAME contains non-ASCII characters"
+                    " - measured on B30 2026-11-07, same "
+                    "session and document type: ...\\中文目录\\probe_ascii.CATPart "
+                    "saved, ...\\ascii_dir\\probe_中文.CATPart was refused. The "
+                    "CATIA error is in brackets above: if this name IS ASCII, that "
+                    "is what to act on - a Chinese FOLDER saved fine in five "
                     "attempts, including one with the exact path of the report "
                     "that blamed it.",
                     code="SAVE_FAILED",
                     stage="execute",
-                    modified=True,
+                    modified=not discarded,
                     next_actions=[
-                        "Save it to an ASCII FILE NAME now - "
-                        "catia_save_document(file_path='C:/temp/part.CATPart'). "
+                        "Create it again under an ASCII FILE NAME - "
+                        "catia_new_part(name='...', file_path='C:/temp/part.CATPart'). "
                         "Do NOT rename it to a Chinese name afterwards: on this "
                         "build CATIA cannot OPEN such a file either (measured "
                         "2026-11-07 - a Chinese name in an ASCII folder is "
@@ -502,9 +512,11 @@ class DocumentTools:
                         "modal error dialog). Put the Chinese wording in the "
                         "part number instead (catia_set_part_number) - that is "
                         "what the tree and the BOM show",
-                        "The part in memory is complete: nothing else needs to be "
-                        "rebuilt",
-                    ],
+                    ]
+                    + ([] if discarded else
+                       ["The part in memory is complete: save it before anything "
+                        "else, or every later step builds on a document that "
+                        "cannot be saved"]),
                 ) from exc
         hint = (" Save it now - catia_save_document(file_path='...') - because a "
                 "part that has geometry but no path cannot be saved later."
@@ -604,21 +616,27 @@ class DocumentTools:
             except Exception as exc:  # noqa: BLE001 - the product itself exists
                 # Same defect as _new_part's, measured on B32 2026-11-06: the
                 # Chinese path failed and the reply still began with "Created"
-                # (reported 2026-11-06, §2 / §5.3).
+                # (reported 2026-11-06, §2 / §5.3). And, like _new_part since
+                # 0.3.77, the empty product is closed again rather than left
+                # behind with no path (reported 2026-11-07, P9).
+                discarded = self._discard_unsaved_document(doc)
                 raise CodedError(
                     f"Product '{doc_name}' was created but COULD NOT BE SAVED to "
-                    f"'{file_path}' ({str(exc).splitlines()[0][:200]}). The "
-                    "assembly is open and unsaved: it has no path, so no component "
-                    "can reference it. CATIA refuses a first SaveAs when the FILE "
-                    "NAME contains non-ASCII characters (the folder does not "
+                    f"'{file_path}' ({str(exc).splitlines()[0][:200]}). "
+                    + ("The empty assembly was closed again, so no unsaved "
+                       "document is left behind. " if discarded else
+                       "The assembly is open and unsaved: it has no path, so no "
+                       "component can reference it. ")
+                    + "CATIA refuses a first SaveAs when the FILE NAME contains non-ASCII characters"
+                    " (the folder does not "
                     "matter - measured on B30 2026-11-07) - and it is the FIRST "
                     "save of this document that fails, not later ones.",
                     code="SAVE_FAILED",
                     stage="execute",
-                    modified=True,
+                    modified=not discarded,
                     next_actions=[
-                        "Save it to an ASCII FILE NAME now - "
-                        "catia_save_document(file_path='C:/temp/asm.CATProduct'). "
+                        "Create it again under an ASCII FILE NAME - "
+                        "catia_new_product(name='...', file_path='C:/temp/asm.CATProduct'). "
                         "Renaming it to a Chinese name afterwards does not help: "
                         "CATIA cannot open such a file on this build either "
                         "(measured 2026-11-07). The Chinese wording belongs in "
@@ -705,6 +723,32 @@ class DocumentTools:
         except Exception:  # noqa: BLE001 - unsaved docs may have no FullName
             return False
         return bool(full) and os.path.isabs(full)
+
+    def _discard_unsaved_document(self, doc: Any) -> bool:
+        """Close a document this call created and could not save.
+
+        Only for a document that was made a moment ago and holds nothing: the
+        alternative is a windowless part with no path, which no assembly can
+        reference and no later SaveAs can rescue into a non-ASCII name (reported
+        2026-11-07, P9). Returns True only when the document is really gone -
+        a Close that raised, or a document still in the list, is reported as
+        False so the caller is told the truth about what is left open.
+        """
+        try:
+            name = str(doc.Name)
+        except Exception:  # noqa: BLE001 - nothing to close by
+            return False
+        try:
+            doc.Close()
+        except Exception:  # noqa: BLE001 - a dialog refused it
+            return False
+        try:
+            for i in range(1, int(getattr(self.conn.documents, "Count", 0)) + 1):
+                if str(self.conn.documents.Item(i).Name) == name:
+                    return False
+        except Exception:  # noqa: BLE001 - cannot verify, do not claim it
+            return False
+        return True
 
     def _document_at_path(self, path: str) -> Any:
         """The open document whose file is ``path`` (None when nothing holds it)."""
