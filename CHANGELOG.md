@@ -2,6 +2,59 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.76] — 2026-11-07 · the gap list as data, without changing the sentence
+
+The last open item of the 2026-11-06 batch. Its third bullet asked for the full
+loose-endpoint list in a structured field "rather than truncated in natural
+language": on a six-arc outline the reply had been cut to `... (1242 chars)`,
+so the coordinates needed to repair the profile were exactly the part that
+disappeared. 0.3.71 had already moved the summary and the advice to the front
+of the sentence (so a truncated reply keeps the actionable part) and 0.3.74 put
+the coordinates last, but neither made the complete list *reachable*.
+
+The pairing that used to build the sentence is now computed once in
+`SketcherTools._profile_breaks()` and the sentence is derived from it, so the
+text reply is character-for-character what it was. `catia_close_sketch` takes a
+new **optional** `structured` argument:
+
+```
+catia_close_sketch {"structured": true}
+  -> ok / code=SKETCH_CLOSED / message (the same sentence)
+     data.breaks = {
+       "closed": false, "endpoints": 8, "endpoints_loose": 2,
+       "breaks": [{"from": [0.0, 0.0], "to": [0.0, 0.0002],
+                   "gap_mm": 0.0002}],
+       "unpaired": [], "smallest_gap_mm": 0.0002,
+       "widest_gap_mm": 0.0002, "within_tolerance": 1,
+       "tolerance_mm": 0.05, "endpoint_tolerance_mm": 0.0001,
+       "measured_from": "..."}
+```
+
+`closed` has three states, not two: `true` (every endpoint matched), `false`
+(the list says where), and **`null`** — no coordinates were recorded in this
+session, i.e. a sketch reopened from disk whose points cannot be read back.
+The last one matters: an empty echo is not a closed sketch, and a Boolean could
+only have said `true` and quietly lied about a sketch nobody looked at. A gap
+of 12 mm is still reported in the data but still does not raise the sentence's
+WARNING: an intentionally open profile (a sweep guide) is not a defect, and
+that distinction was settled in 0.3.71.
+
+`effects.modified` follows whether this session actually drew geometry: a
+reopen-and-close wrote nothing and does not claim it did.
+
+**Default `false`.** Making the envelope the default would change the reply of
+every existing caller from text to JSON, which is exactly the kind of
+compatibility break this batch of reports kept finding. The schema documents
+the flag, the description says how to ask for it, and an existing caller needs
+to change nothing.
+
+`1213 → 1224 tests` (11 new). `scripts/b30_v0376_breaks.py` measured on
+V5-6R2020 B30: 14/14 — an open profile returns the full break with its
+0.0002 mm gap, a closed one answers `closed: true` with no warning, the default
+reply is still the plain sentence, and the pad on the closed profile still
+gives 4000.0 mm³. The 19 documents that were open before the run were left
+untouched and the active one put back in front.
+
 ## [0.3.75] — 2026-11-07 · the file name is refused in both directions
 
 A measurement made while answering "should we build the ASCII-staging fallback

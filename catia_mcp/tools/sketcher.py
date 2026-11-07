@@ -15,6 +15,7 @@ from catia_mcp.results import (
     ArgumentOutOfRange,
     ArgumentRejected,
     PreconditionRejected,
+    operation_result,
 )
 from catia_mcp.topo_search import topology_reference
 
@@ -195,10 +196,29 @@ class SketcherTools:
                     "of 0.0007 mm is enough to kill the pad - make the shared "
                     "coordinate literally identical."
                     "SCOPE OF THE ECHO: the Profile line counts what THIS session drew in THIS document. After reopening a file it cannot report the sketch's contents (the coordinates are not readable back), so an empty echo is not an empty sketch - and catia_gsd_spline(element=...) refuses the same sketches for the same reason."
+                    "Set structured=true to get the same information as data instead of as a sentence - data.breaks[] holds every loose pair with its gap in mm, and it cannot be truncated (see that argument's description). Default false returns the text, unchanged."
                 ),
                 "inputSchema": {
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "structured": {
+                            "type": "boolean",
+                            "description": (
+                                "Return a machine-readable envelope instead of "
+                                "the sentence. data.breaks[] lists every loose "
+                                "endpoint pair with its gap in mm, in full - the "
+                                "sentence is what a client cuts off (1242 chars "
+                                "on a six-arc outline, 2026-11-06), so the list "
+                                "was unreadable exactly when it mattered. "
+                                "data.breaks.closed is true (nothing loose), "
+                                "false (see the list), or null (no coordinates "
+                                "were recorded in this session - a sketch "
+                                "reopened from disk - which says nothing about "
+                                "the sketch). Default false keeps the text reply, "
+                                "so existing callers are unaffected."
+                            ),
+                        },
+                    },
                 },
             },
             {
@@ -529,14 +549,14 @@ class SketcherTools:
             },
         ]
 
-    def execute(self, tool_name: str, arguments: dict[str, Any]) -> str:
+    def execute(self, tool_name: str, arguments: dict[str, Any]) -> str | dict[str, Any]:
         match tool_name:
             case "catia_create_sketch":
                 return self._create_sketch(
                     arguments.get("plane", "xy"), arguments.get("offset")
                 )
             case "catia_close_sketch":
-                return self._close_sketch()
+                return self._close_sketch(bool(arguments.get("structured", False)))
             case "catia_sketch_line":
                 return self._draw_line(
                     arguments["x1"], arguments["y1"],
@@ -1255,25 +1275,48 @@ class SketcherTools:
             "rectangular frame is four LINES, not two rectangle calls."
         ) + notes
 
-    def _profile_warning(self) -> str:
-        """Name every breakpoint that will make pad/pocket fail.
+    def _profile_breaks(self) -> dict[str, Any]:
+        """The loose endpoints and the gap at each one, as data.
 
-        The gap itself is invisible in CATIA's error ("open polyline or an arc
-        chain with a gap"), and the coordinates cannot be read back afterwards,
-        so this is computed from the numbers the sketch tools were given.
+        The same computation ``_profile_warning`` turns into a sentence, kept
+        separate because the sentence is what a client cuts off: the 2026-11-06
+        report saw the gap list truncated to ``... (1242 chars)`` on a part with
+        six-arc outlines, which left nothing to check against and no way to ask
+        for the rest (P1-2, third bullet: "put the full gap list in a structured
+        field").
 
-        It reports ALL loose endpoints, not just the closest pair (reported
-        2026-10-25: point lists rounded to 0.001 mm produce 0.0002-0.0005 mm
-        gaps at several joints at once, and a message that names one pair sends
-        the caller round the loop once per joint). Where the loose point sits is
-        the useful part: two points a few microns apart is a typo, two points
-        12 mm apart is a profile that is open on purpose.
+        ``closed`` answers three different questions and the difference is the
+        point: ``True`` - every endpoint was matched, nothing to fix;
+        ``False`` - at least one is loose and ``breaks`` / ``unpaired`` say
+        where; ``None`` - no coordinates were recorded in this session (a sketch
+        reopened from disk, whose points cannot be read back through
+        automation), so this says nothing about the sketch at all and must not
+        be mistaken for a clean bill of health.
         """
         import math
 
-        ends = self._profile_ends
+        ends = list(self._profile_ends)
+        breaks: list[dict[str, Any]] = []
+        unpaired: list[list[float]] = []
+        report: dict[str, Any] = {
+            "closed": None,
+            "endpoints": len(ends),
+            "endpoints_loose": 0,
+            "breaks": breaks,
+            "unpaired": unpaired,
+            "smallest_gap_mm": None,
+            "widest_gap_mm": None,
+            "within_tolerance": 0,
+            "tolerance_mm": self._NEAR_TOL,
+            "endpoint_tolerance_mm": self._END_TOL,
+            "measured_from": (
+                "coordinates passed to the sketch tools in this session; "
+                "CATIA's own points cannot be read back, so a constraint may "
+                "have moved them"),
+        }
         if len(ends) < 2:
-            return ""
+            return report
+
         used = [False] * len(ends)
         loose: list[tuple[float, float]] = []
         for i, (x, y) in enumerate(ends):
@@ -1288,11 +1331,17 @@ class SketcherTools:
             else:
                 used[i] = True
                 loose.append((x, y))
+        report["endpoints_loose"] = len(loose)
         if not loose:
-            return ""
+            report["closed"] = True
+            return report
+        report["closed"] = False
 
         # Greedy nearest pairing among the leftovers: each pair is one
-        # breakpoint, and the interesting number is the gap.
+        # breakpoint, and the interesting number is the gap. The pairing is
+        # arbitrary once three endpoints are loose, so it is kept exactly as the
+        # sentence computed it - the 2026-11-06 report quotes these numbers, and
+        # re-pairing them would contradict a measurement for no gain.
         remaining = list(range(len(loose)))
         pairs: list[tuple[float, int, int]] = []
         while len(remaining) > 1:
@@ -1308,25 +1357,61 @@ class SketcherTools:
                 break
             pairs.append(best)
             remaining = [r for r in remaining if r not in (best[1], best[2])]
-        dangling = [loose[i] for i in remaining]
+        for gap, a, b in sorted(pairs):
+            breaks.append({
+                "from": [round(loose[a][0], 6), round(loose[a][1], 6)],
+                "to": [round(loose[b][0], 6), round(loose[b][1], 6)],
+                "gap_mm": round(gap, 6),
+            })
+        unpaired.extend([round(loose[i][0], 6), round(loose[i][1], 6)]
+                        for i in remaining)
+        if pairs:
+            gaps = [gap for gap, _, _ in pairs]
+            report["smallest_gap_mm"] = round(min(gaps), 6)
+            report["widest_gap_mm"] = round(max(gaps), 6)
+            report["within_tolerance"] = sum(
+                1 for gap in gaps if gap <= self._NEAR_TOL)
+        return report
+
+    def _profile_warning(self) -> str:
+        """Name every breakpoint that will make pad/pocket fail.
+
+        The gap itself is invisible in CATIA's error ("open polyline or an arc
+        chain with a gap"), and the coordinates cannot be read back afterwards,
+        so this is computed from the numbers the sketch tools were given.
+
+        It reports ALL loose endpoints, not just the closest pair (reported
+        2026-10-25: point lists rounded to 0.001 mm produce 0.0002-0.0005 mm
+        gaps at several joints at once, and a message that names one pair sends
+        the caller round the loop once per joint). Where the loose point sits is
+        the useful part: two points a few microns apart is a typo, two points
+        12 mm apart is a profile that is open on purpose.
+        """
+        breaks = self._profile_breaks()
+        if breaks["closed"] is not False:
+            # True: every endpoint was matched, nothing to say. None: nothing
+            # was recorded in this session (a sketch reopened from disk), which
+            # is not the same as a closed sketch and must not be sold as one.
+            return ""
+        smallest = breaks["smallest_gap_mm"]
+        widest = breaks["widest_gap_mm"]
         # A profile that is open on purpose (a sweep guide, say) must not be
         # nagged about, so the warning only fires when at least one gap is small
         # enough to be a rounding artefact - but then it names EVERY gap, not
         # just that one.
-        if not pairs or min(gap for gap, _, _ in pairs) > self._NEAR_TOL:
+        if smallest is None or smallest > self._NEAR_TOL:
             return ""
 
         lines = [
-            f"({loose[a][0]:.4f}, {loose[a][1]:.4f}) <-> "
-            f"({loose[b][0]:.4f}, {loose[b][1]:.4f}) = {gap:.4f} mm"
-            for gap, a, b in sorted(pairs)
+            f"({item['from'][0]:.4f}, {item['from'][1]:.4f}) <-> "
+            f"({item['to'][0]:.4f}, {item['to'][1]:.4f}) = {item['gap_mm']:.4f} mm"
+            for item in breaks["breaks"]
         ]
-        if dangling:
+        if breaks["unpaired"]:
             lines.append("unpaired at " + ", ".join(
-                f"({x:.4f}, {y:.4f})" for x, y in dangling))
-        tiny = [p for p in pairs if p[0] <= self._NEAR_TOL]
-        widest = max(gap for gap, _, _ in pairs)
-        smallest = min(gap for gap, _, _ in pairs)
+                f"({x:.4f}, {y:.4f})" for x, y in breaks["unpaired"]))
+        loose_count = breaks["endpoints_loose"]
+        break_count = len(breaks["breaks"]) + (1 if breaks["unpaired"] else 0)
         # The summary and the advice come FIRST, the coordinate list last. The
         # list is what makes this message long enough to be cut off by a client
         # (1242 chars in the 2026-11-06 report), and cutting the tail used to
@@ -1334,11 +1419,11 @@ class SketcherTools:
         # artefacts - leaving a wall of coordinates that "cannot be worked
         # with" (reported 2026-11-06, P1-2, third bullet).
         text = (
-            f" WARNING: the profile is not closed - {len(loose)} loose "
-            f"endpoint(s) in {len(pairs) + (1 if dangling else 0)} break(s); "
+            f" WARNING: the profile is not closed - {loose_count} loose "
+            f"endpoint(s) in {break_count} break(s); "
             f"smallest gap {smallest:.4f} mm, widest {widest:.4f} mm."
         )
-        if tiny:
+        if breaks["within_tolerance"]:
             # It used to say "CATIA still refuses the feature" as a fact. It is
             # not one: this server cannot know whether the update closes a gap of
             # 0.0002 mm, and on the runs measured so far (2026-11-06, three parts
@@ -1365,7 +1450,7 @@ class SketcherTools:
         )
         return text
 
-    def _close_sketch(self) -> str:
+    def _close_sketch(self, structured: bool = False) -> str | dict[str, Any]:
         if self._active_sketch is None:
             # The cached handle does not survive a server restart while CATIA
             # keeps the sketch open in edition. Re-adopt the document's
@@ -1401,13 +1486,36 @@ class SketcherTools:
             self._active_factory = None
         self.conn.refresh_display()
         summary = self._profile_summary(name)
+        # Read the breaks BEFORE the cache is cleared - and before anything
+        # below could raise, so a structured reply still carries them.
+        breaks = self._profile_breaks()
         warning = self._profile_warning()
         loops = self._loop_warning(name)
+        drawn = self._drawn.get(self._sketch_key(name), [])
         self._profile_ends = []
-        return (
+        message = (
             f"Sketch '{name}' closed. You can now apply Part Design features "
             "(pad, pocket, user pattern on its points, etc.)."
             + summary + warning + loops
+        )
+        if not structured:
+            return message
+        # `modified` is about the SKETCH, and it is knowable: geometry drawn in
+        # this session changed it, a reopen-and-close did not. Claiming True
+        # unconditionally would report a write for the second case, and False
+        # unconditionally would hide the first.
+        return operation_result(
+            tool="catia_close_sketch",
+            ok=True,
+            code="SKETCH_CLOSED",
+            message=message,
+            data={
+                "sketch": name,
+                "breaks": breaks,
+                "loops_warning": loops.strip() or None,
+                "elements_drawn": len(drawn),
+            },
+            modified=bool(drawn),
         )
 
     def _draw_line(self, x1: float, y1: float, x2: float, y2: float,

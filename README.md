@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.75** · [what changed](CHANGELOG.md) ·
+**0.3.76** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1179,6 +1179,24 @@ hand-dimensioned at all - its curves are not addressable through automation, onl
 `GenerateDimensions` reaches them - and **`Face.N` is session-scoped**. The same
 plate gave its hole's cylinder at `Face.1` in one build and at `Face.7` in another,
 so list faces and use the index immediately.
+
+**0.3.76: the full gap list, as data.** `catia_close_sketch` takes an optional
+`structured=true` and answers `data.breaks[]` — every loose endpoint pair with
+its gap in mm — because the sentence carrying them was truncated by clients
+(1242 chars on a six-arc outline in the 2026-11-06 report). The default is still
+the unchanged text reply, so no caller has to change. `data.breaks.closed` is
+`true`, `false`, or `null` (no coordinates were recorded in this session — a
+sketch reopened from disk, which is not a closed sketch). Measured on B30:
+14/14, the 0.0002 mm break came back intact and the pad still gives 4000.0 mm³.
+
+**0.3.75: a non-ASCII file name is refused in both directions.** `catia_save_as_copy`
+can write `副本.CATPart`, but `Documents.Open` cannot read it — so the
+"save ASCII, rename afterwards" advice this package had given since 0.3.71
+produced files CATIA will never open. It is gone from all five places; the reply
+now says keep the file name ASCII (the folder may be Chinese) and put the
+Chinese wording in the part number. `catia_open_document` refuses such a name
+before CATIA sees it, because the failed Open leaves a modal incident-report
+window on the automation thread.
 
 **0.3.74: "already open - activated it" was a guess.** `catia_open_document`
 called `Activate()` and reported success. `Activate()` also returns for a document
