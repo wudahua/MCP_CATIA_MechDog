@@ -2,6 +2,50 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.73] — 2026-11-07 · the last two open items from 2026-11-06
+
+Both were left open on purpose in 0.3.71/0.3.72 and recorded as such; this closes
+them. Nothing else in those four reports is still open.
+
+**`matches_request` was a bit-equality test pretending to be a verification.**
+The check was `deviation < 1e-6`, so a placement whose unit vectors came from a
+spec table rounded to 4 decimals - deviation 1e-5…1e-4 **by construction** -
+answered `ok: true` beside `matches_request: false`, 13 times in 25 correct
+placements, with no threshold to compare against (reported 2026-11-06, P2-4).
+
+`catia_set_component_transform` now takes `tolerance` (default **0.001 mm = 1
+micron**, must be > 0) and publishes it in `verified.tolerance`. A batch hands
+the same threshold to every entry and republishes it once, so one verdict rule
+covers all 25 rows. Measured on B30 with a 30-degree row set rounded to 4
+decimals: deviation **1.9052629e-05**, `matches_request: true`, no warning; the
+same call with `tolerance: 1e-6` still answers `false` and says
+"did not store the requested placement within 1e-06 mm (off by 1.91e-05 mm)".
+The deviation is unchanged either way - only the verdict the caller asked for.
+
+**`catia_set_visibility` refused a Product, so cleaning an assembly took a call
+per part.** It began with `get_active_part()`, so on `ASM.CATProduct` it answered
+`PRECONDITION_FAILED` "exposes no 'Part'" - the report's 11-part cleanup was 33
+calls of activate / hide / save, each one moving the active document (reported
+2026-11-06, P2-6).
+
+On a Product it now walks the component tree (sub-assemblies included, depth 6),
+takes **one entry per part** - a 70-instance assembly repeats a handful of
+documents - and applies the change through **that part's own `Selection`**, so
+the active document never moves. `kind=` and `name=` both work there; the reply
+says how many of how many parts it touched and names them, and a name that exists
+in no part is refused with that scope ("in any of the 2 part(s) of …") instead of
+the part-only message. The single-part wording is unchanged.
+
+Measured on B30 (2 parts, `GetShow` read back per part): `kind='construction'`
+hides 2 sketches and 6 datum planes in 2 of 2 parts with the assembly still
+active, both sketches read `1` (hidden); the same call with `show=true` reads
+`0`; `name='RA_ONLY'`, a body in one part, answers "in 1 of 2 part(s)".
+`GetShow()` answers a 2-tuple on this build and the flag is **[1]** - worth
+knowing, because reading `[0]` returns 0 in both states and makes any check of
+this look like it passed when it has not.
+
+`1173 → 1190 tests`.
+
 ## [0.3.72] — 2026-11-06 · the assembly envelope, and a cache that ran too late
 
 The 2026-11-06 report's P1-3 and P3-10, both about `catia_get_bounding_box` on a

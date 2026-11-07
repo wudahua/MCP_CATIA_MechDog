@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.72** · [what changed](CHANGELOG.md) ·
+**0.3.73** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1179,6 +1179,19 @@ hand-dimensioned at all - its curves are not addressable through automation, onl
 `GenerateDimensions` reaches them - and **`Face.N` is session-scoped**. The same
 plate gave its hole's cylinder at `Face.1` in one build and at `Face.7` in another,
 so list faces and use the index immediately.
+
+**0.3.73 closed the last two items of the 2026-11-06 batch.** `matches_request`
+was `deviation < 1e-6`, which is a bit-equality test: a placement built from
+4-decimal unit vectors deviates 1e-5…1e-4 **by construction**, so 13 of 25 correct
+placements answered `ok: true` beside `matches_request: false`. It is a tolerance
+now (`tolerance`, default 1 micron, published in the reply, inherited by every
+entry of a batch), and a tighter value still reports the same deviation honestly.
+
+`catia_set_visibility` answered `PRECONDITION_FAILED` on a Product — "exposes no
+'Part'" — so cleaning 11 parts before a screenshot took 33 calls. It walks the
+component tree now (sub-assemblies included, one entry per part) and applies the
+change through each part's own `Selection`, so the assembly stays in front; the
+reply says how many of how many parts it touched.
 
 **0.3.72 made the assembly envelope usable, and made its cache arrive in time.**
 `method='mesh'` on a Product has worked since 0.3.45; the schema entry for

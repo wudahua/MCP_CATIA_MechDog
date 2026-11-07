@@ -1172,7 +1172,13 @@ class PartDesignTools:
                     "error rather than the drawing-bookkeeping it is. Hide the "
                     "geometrical set before taking a screenshot or exporting an STL; "
                     "catia_get_bounding_box's mesh method and any STL export include "
-                    "visible surfaces, so leftovers also corrupt the measured envelope."
+                    "visible surfaces, so leftovers also corrupt the measured envelope. "
+                    "On a PRODUCT document it applies to every part under it (one "
+                    "entry per part, sub-assemblies included) and the active document "
+                    "does not move - so cleaning a finished assembly before a "
+                    "screenshot is one call, not one call per part. Visibility is "
+                    "session state in each part document: save the parts if it has to "
+                    "survive the session."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1194,7 +1200,9 @@ class PartDesignTools:
                                 "planes), or 'construction' (both). These are the "
                                 "white frames that clutter a screenshot - a sketch "
                                 "outline is not solid geometry, but it is drawn on top "
-                                "of the solid and reads as a defect."
+                                "of the solid and reads as a defect. On a Product this "
+                                "walks every part under it and reports how many of how "
+                                "many it touched."
                             ),
                             "enum": ["sketch", "datum_plane", "construction"],
                         },
@@ -5239,8 +5247,88 @@ class PartDesignTools:
                 "catia_measure_topology and catia_list_faces - the counts agree.")
         return json.dumps(payload, indent=2)
 
+    _VISIBILITY_MAX_DEPTH = 6
+
+    def _visibility_parts(self) -> list[tuple[str, Any, Any]]:
+        """``(label, part, selection)`` for the document visibility applies to.
+
+        A Part document answers for itself. A **Product** answers for every part
+        under it, and that is not a convenience: hiding the construction geometry
+        of a finished assembly is the job, and until 0.3.73 this tool refused it
+        with "Active document 'ASM.CATProduct' exposes no 'Part'" - which left the
+        reporter 33 calls (11 parts x activate / hide / save) to clean up a
+        screenshot, and each of those calls moves the active document
+        (reported 2026-11-06, P2-6).
+
+        The parts are reached through the component tree, not through
+        ``Documents``: a component that has no window of its own is still in
+        ``Documents``, but a sub-assembly's parts only appear by walking. Each part
+        is touched through ITS OWN Selection, so the active document never moves
+        and the assembly stays in front.
+        """
+        doc = self.conn.active_document
+        try:
+            return [(str(doc.Name), self.conn.part_of(doc), doc.Selection)]
+        except Exception:  # noqa: BLE001 - not a part; try the product tree
+            pass
+        try:
+            product = self.conn.product_of(doc)
+        except Exception as error:  # noqa: BLE001
+            raise PreconditionRejected(
+                f"'{getattr(doc, 'Name', '?')}' is neither a Part nor a Product, "
+                "so there is no tree to walk for visibility. Open a part or an "
+                "assembly first (the call changed nothing)."
+            ) from error
+        found: list[tuple[str, Any, Any]] = []
+        self._collect_component_parts(product, 1, found, set())
+        if not found:
+            raise PreconditionRejected(
+                f"'{getattr(doc, 'Name', '?')}' is a Product but no part under it "
+                "could be read, so there is nothing to show or hide. An empty "
+                "product has no geometry: insert a component first "
+                "(catia_add_component) - nothing was changed."
+            )
+        return found
+
+    def _collect_component_parts(self, product: Any, depth: int,
+                                 out: list[tuple[str, Any, Any]],
+                                 seen: set[str]) -> None:
+        """One level of the component tree, recursing into sub-assemblies."""
+        try:
+            count = int(product.Products.Count)
+        except Exception:  # noqa: BLE001 - an unreadable level is not fatal
+            return
+        for index in range(1, count + 1):
+            try:
+                child = product.Products.Item(index)
+                child_doc = child.ReferenceProduct.Parent
+            except Exception:  # noqa: BLE001 - a dead link
+                continue
+            try:
+                child_part = self.conn.part_of(child_doc)
+            except Exception:  # noqa: BLE001 - a sub-assembly, not a part
+                child_part = None
+            if child_part is not None:
+                # One entry per PART, not per instance: hiding a part's sketches
+                # twice is the same work, and the 70-instance assembly would
+                # otherwise walk the same document 70 times.
+                key = str(getattr(child_doc, "Name", "")).casefold()
+                if key and key in seen:
+                    continue
+                seen.add(key)
+                out.append((str(getattr(child_doc, "Name", key)),
+                            child_part, child_doc.Selection))
+                continue
+            if depth >= self._VISIBILITY_MAX_DEPTH:
+                continue
+            try:
+                nested = self.conn.product_of(child_doc)
+            except Exception:  # noqa: BLE001 - neither part nor product
+                continue
+            self._collect_component_parts(nested, depth + 1, out, seen)
+
     def _set_visibility(self, name: str, show: bool) -> str:
-        """Show or hide a tree node by name, searching the whole part.
+        """Show or hide a tree node BY NAME, in one part or in a whole assembly.
 
         Visibility is not cosmetic here: a GSD surface left visible after
         CloseSurface overlays the solid, and an STL export or the mesh bounding
@@ -5248,101 +5336,141 @@ class PartDesignTools:
         out wrong. Field case: a two-blade propeller looked like one blade had an
         extra lobe, the envelope read 45.6 mm wide instead of 30.1, and nothing
         was actually wrong with the geometry.
+
+        0.3.73: a Product walks every part under it instead of refusing. Each part
+        is touched through its OWN Selection, so the active document never moves -
+        which is the point, because the assembly is what the caller is looking at.
         """
         self.conn.ensure_connected()
-        part = self.conn.get_active_part()
-        target = None
-        where = ""
-        parent_set = ""
+        targets = self._visibility_parts()
+        try:
+            active = str(self.conn.active_document.Name)
+        except Exception:  # noqa: BLE001 - the label is a courtesy
+            active = "<the active document>"
 
-        def try_get(collection, label):
+        def find_in(part):
+            """``(node, where, parent_set)`` for ``name`` in one part."""
+            target, where, parent_set = None, "", ""
+
+            def try_get(collection, label):
+                try:
+                    return collection.Item(name), label
+                except Exception:
+                    return None, ""
+
+            for i in range(1, part.Bodies.Count + 1):
+                body = part.Bodies.Item(i)
+                if str(body.Name) == name:
+                    target, where = body, "body"
+                    break
+                got, lbl = try_get(body.Shapes, "feature")
+                if got is not None:
+                    target, where = got, lbl
+                    break
+                got, lbl = try_get(body.Sketches, "sketch")
+                if got is not None:
+                    target, where = got, lbl
+                    break
+
+            if target is None:
+                for i in range(1, part.HybridBodies.Count + 1):
+                    hb = part.HybridBodies.Item(i)
+                    if str(hb.Name) == name:
+                        target, where = hb, "geometrical set"
+                        break
+                    got, lbl = try_get(hb.HybridShapes, "geometrical element")
+                    if got is not None:
+                        target, where, parent_set = got, lbl, str(hb.Name)
+                        break
+                    got, lbl = try_get(hb.HybridSketches, "sketch")
+                    if got is not None:
+                        target, where, parent_set = got, lbl, str(hb.Name)
+                        break
+            return target, where, parent_set
+
+        hits: list[tuple[str, str, int, str]] = []
+        for label, part, sel in targets:
+            target, where, parent_set = find_in(part)
+            if target is None:
+                continue
+
+            def apply(node, sel=sel):
+                sel.Clear()
+                sel.Add(node)
+                # Field-measured on V5-6R2020 B30, and not what the reference
+                # suggests: 0 shows, 1 hides, 2 is accepted and does nothing.
+                # Using 2 for "hide" is silently ignored, which is how a set of
+                # GSD surfaces stayed on screen (and in every STL export) while
+                # the tool reported it had hidden them.
+                sel.VisProperties.SetShow(0 if show else 1)
+
+            children = 0
             try:
-                return collection.Item(name), label
-            except Exception:
-                return None, ""
+                apply(target)
+                # Hiding a geometrical set does not hide what is inside it: each
+                # element keeps its own visibility, so the surfaces stay on screen
+                # and keep poisoning STL exports. Descend one level.
+                if where == "geometrical set":
+                    for collection in ("HybridShapes", "HybridSketches"):
+                        try:
+                            items = getattr(target, collection)
+                        except Exception:
+                            continue
+                        for i in range(1, items.Count + 1):
+                            try:
+                                apply(items.Item(i))
+                                children += 1
+                            except Exception:
+                                pass
+            finally:
+                try:
+                    sel.Clear()
+                except Exception:  # noqa: BLE001 - a selection left behind
+                    pass
+            hits.append((label, where, children, parent_set))
 
-        for i in range(1, part.Bodies.Count + 1):
-            body = part.Bodies.Item(i)
-            if str(body.Name) == name:
-                target, where = body, "body"
-                break
-            got, lbl = try_get(body.Shapes, "feature")
-            if got is not None:
-                target, where = got, lbl
-                break
-            got, lbl = try_get(body.Sketches, "sketch")
-            if got is not None:
-                target, where = got, lbl
-                break
-
-        if target is None:
-            for i in range(1, part.HybridBodies.Count + 1):
-                hb = part.HybridBodies.Item(i)
-                if str(hb.Name) == name:
-                    target, where = hb, "geometrical set"
-                    break
-                got, lbl = try_get(hb.HybridShapes, "geometrical element")
-                if got is not None:
-                    target, where, parent_set = got, lbl, str(hb.Name)
-                    break
-                got, lbl = try_get(hb.HybridSketches, "sketch")
-                if got is not None:
-                    target, where, parent_set = got, lbl, str(hb.Name)
-                    break
-
-        if target is None:
+        if not hits:
+            where = ("in '" + active + "'" if len(targets) == 1
+                     else f"in any of the {len(targets)} part(s) of '{active}'")
             raise ArgumentRejected(
-                f"No tree node named '{name}'. Use catia_list_bodies, "
+                f"No tree node named '{name}' {where}. Use catia_list_bodies, "
                 "catia_list_features or catia_gsd_list_elements to see names."
             )
 
-        sel = self.conn.active_document.Selection
-
-        def apply(node):
-            sel.Clear()
-            sel.Add(node)
-            # Field-measured on V5-6R2020 B30, and not what the reference
-            # suggests: 0 shows, 1 hides, 2 is accepted and does nothing. Using
-            # 2 for "hide" is silently ignored, which is how a set of GSD
-            # surfaces stayed on screen (and in every STL export) while the tool
-            # reported it had hidden them.
-            sel.VisProperties.SetShow(0 if show else 1)
-
-        try:
-            apply(target)
-            # Hiding a geometrical set does not hide what is inside it: each
-            # element keeps its own visibility, so the surfaces stay on screen
-            # and keep poisoning STL exports. Descend one level.
-            children = 0
-            if where == "geometrical set":
-                for collection in ("HybridShapes", "HybridSketches"):
-                    try:
-                        items = getattr(target, collection)
-                    except Exception:
-                        continue
-                    for i in range(1, items.Count + 1):
-                        try:
-                            apply(items.Item(i))
-                            children += 1
-                        except Exception:
-                            pass
-        finally:
-            self._clear_selection()
         self.conn.refresh_display()
-        extra = f" and {children} element(s) inside it" if children else ""
-        # An element inside a HIDDEN set stays invisible however it is set: the
-        # UI greys the lightbulb and CATIA keeps the parent's visibility. The
-        # reply used to say "is now shown" and leave it at that (reported
-        # 2026-11-06, twice). The parent's own state cannot be read cheaply
-        # (`HybridShape.Visible` raises), so the note names the parent instead
-        # of guessing its state.
-        parent_note = (
-            f" Note: it lives in geometrical set '{parent_set}', and a hidden set "
-            f"hides its contents - if it is still not on screen, show the set "
-            f"first (catia_set_visibility(name='{parent_set}', show=true))."
-            if (show and parent_set) else "")
-        return (f"'{name}' ({where}) is now {'shown' if show else 'hidden'}"
-                f"{extra}.{parent_note}")
+        state = "shown" if show else "hidden"
+        if len(targets) == 1:
+            _label, where, children, parent_set = hits[0]
+            extra = f" and {children} element(s) inside it" if children else ""
+            # An element inside a HIDDEN set stays invisible however it is set:
+            # the UI greys the lightbulb and CATIA keeps the parent's visibility.
+            # The reply used to say "is now shown" and leave it at that (reported
+            # 2026-11-06, twice). The parent's own state cannot be read cheaply
+            # (`HybridShape.Visible` raises), so the note names the parent instead
+            # of guessing its state.
+            parent_note = (
+                f" Note: it lives in geometrical set '{parent_set}', and a hidden "
+                f"set hides its contents - if it is still not on screen, show the "
+                f"set first (catia_set_visibility(name='{parent_set}', "
+                f"show=true))."
+                if (show and parent_set) else "")
+            return (f"'{name}' ({where}) is now {state}{extra}.{parent_note}")
+
+        where = hits[0][1]
+        children = sum(hit[2] for hit in hits)
+        labels = ", ".join(hit[0] for hit in hits[:8])
+        if len(hits) > 8:
+            labels += f", ... ({len(hits) - 8} more)"
+        extra = (f", plus {children} element(s) inside the set(s)" if children
+                 else "")
+        parents = sorted({hit[3] for hit in hits if hit[3]})
+        note = (
+            f" Note: {len(parents)} geometrical set(s) hold them "
+            f"({', '.join(parents[:4])}): a hidden set hides its contents, so show "
+            "the set as well when you want them back."
+            if (show and parents) else "")
+        return (f"'{name}' ({where}) is now {state} in {len(hits)} of "
+                f"{len(targets)} part(s) of '{active}': {labels}{extra}.{note}")
 
     def _set_visibility_kind(self, kind: str, show: bool) -> str:
         """Show or hide a whole class of tree bookkeeping at once.
@@ -5357,62 +5485,94 @@ class PartDesignTools:
         CATIA has no "hide all sketches" switch in the automation API, and the
         sketches are not selectable by name through the HSO, so this walks the
         tree the way the UI's Ctrl+F search would.
+
+        0.3.73: a Product walks every part under it, through each part's own
+        Selection. That is the case this was asked for - cleaning 11 parts took 33
+        manual calls (activate / hide / save each), and the product-level call
+        answered PRECONDITION_FAILED (reported 2026-11-06, P2-6).
         """
         self.conn.ensure_connected()
-        part = self.conn.get_active_part()
-        sel = self.conn.active_document.Selection
-        counts = {"sketch": 0, "datum_plane": 0}
-
-        def apply(node) -> None:
-            sel.Clear()
-            sel.Add(node)
-            sel.VisProperties.SetShow(0 if show else 1)
+        targets = self._visibility_parts()
+        try:
+            active = str(self.conn.active_document.Name)
+        except Exception:  # noqa: BLE001 - the label is a courtesy
+            active = "<the active document>"
+        total = {"sketch": 0, "datum_plane": 0}
+        touched: list[str] = []
 
         want_sketch = kind in ("sketch", "construction")
         want_plane = kind in ("datum_plane", "construction")
 
-        try:
-            if want_sketch:
-                for i in range(1, part.Bodies.Count + 1):
-                    sketches = part.Bodies.Item(i).Sketches
-                    for j in range(1, sketches.Count + 1):
+        for label, part, sel in targets:
+            counts = {"sketch": 0, "datum_plane": 0}
+
+            def apply(node, sel=sel) -> None:
+                sel.Clear()
+                sel.Add(node)
+                sel.VisProperties.SetShow(0 if show else 1)
+
+            try:
+                if want_sketch:
+                    for i in range(1, part.Bodies.Count + 1):
+                        sketches = part.Bodies.Item(i).Sketches
+                        for j in range(1, sketches.Count + 1):
+                            try:
+                                apply(sketches.Item(j))
+                                counts["sketch"] += 1
+                            except Exception:      # noqa: BLE001 - per sketch
+                                pass
+                    for i in range(1, part.HybridBodies.Count + 1):
+                        sketches = part.HybridBodies.Item(i).HybridSketches
+                        for j in range(1, sketches.Count + 1):
+                            try:
+                                apply(sketches.Item(j))
+                                counts["sketch"] += 1
+                            except Exception:      # noqa: BLE001 - per sketch
+                                pass
+                if want_plane:
+                    origin = part.OriginElements
+                    for name in ("PlaneXY", "PlaneYZ", "PlaneZX"):
                         try:
-                            apply(sketches.Item(j))
-                            counts["sketch"] += 1
-                        except Exception:      # noqa: BLE001 - per sketch
+                            apply(getattr(origin, name))
+                            counts["datum_plane"] += 1
+                        except Exception:          # noqa: BLE001 - per plane
                             pass
-                for i in range(1, part.HybridBodies.Count + 1):
-                    sketches = part.HybridBodies.Item(i).HybridSketches
-                    for j in range(1, sketches.Count + 1):
-                        try:
-                            apply(sketches.Item(j))
-                            counts["sketch"] += 1
-                        except Exception:      # noqa: BLE001 - per sketch
-                            pass
-            if want_plane:
-                origin = part.OriginElements
-                for name in ("PlaneXY", "PlaneYZ", "PlaneZX"):
-                    try:
-                        apply(getattr(origin, name))
-                        counts["datum_plane"] += 1
-                    except Exception:          # noqa: BLE001 - per plane
-                        pass
-        finally:
-            self._clear_selection()
+            finally:
+                try:
+                    sel.Clear()
+                except Exception:  # noqa: BLE001 - a selection left behind
+                    pass
+            if counts["sketch"] or counts["datum_plane"]:
+                touched.append(label)
+                total["sketch"] += counts["sketch"]
+                total["datum_plane"] += counts["datum_plane"]
+
         self.conn.refresh_display()
 
-        if not counts["sketch"] and not counts["datum_plane"]:
+        if not total["sketch"] and not total["datum_plane"]:
+            where = ("the part has no sketches"
+                     if len(targets) == 1 else
+                     f"none of the {len(targets)} part(s) of '{active}' has any")
             raise PreconditionRejected(
                 f"Nothing of kind '{kind}' found to {'show' if show else 'hide'}: "
-                "the part has no sketches (or no datum planes). Use "
-                "catia_list_features to see what the tree holds."
+                f"{where} (or no datum planes). Use catia_list_features to see "
+                "what the tree holds."
             )
-        parts = []
-        if counts["sketch"]:
-            parts.append(f"{counts['sketch']} sketch(es)")
-        if counts["datum_plane"]:
-            parts.append(f"{counts['datum_plane']} datum plane(s)")
-        return "%s now %s." % (" and ".join(parts), "shown" if show else "hidden")
+        counted = []
+        if total["sketch"]:
+            counted.append(f"{total['sketch']} sketch(es)")
+        if total["datum_plane"]:
+            counted.append(f"{total['datum_plane']} datum plane(s)")
+        body = " and ".join(counted)
+        if len(targets) == 1:
+            return f"{body} now {'shown' if show else 'hidden'}."
+        return (f"{body} now {'shown' if show else 'hidden'} in {len(touched)} of "
+                f"{len(targets)} part(s) of '{active}': "
+                + ", ".join(touched[:8])
+                + (f", ... ({len(touched) - 8} more)" if len(touched) > 8 else "")
+                + ". Nothing was saved: this is each part document's session "
+                "state - save the parts (catia_save_document) if you need it "
+                "persisted.")
 
     def _boolean(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()

@@ -512,6 +512,26 @@ class AssemblyTools:
                             "description": "Read the placement back and report the deviation",
                             "default": True,
                         },
+                        "tolerance": {
+                            "type": "number",
+                            "default": 0.001,
+                            "exclusiveMinimum": 0,
+                            "description": (
+                                "How close the read-back has to be, in mm, for "
+                                "`verified.matches_request` to be true. Default "
+                                "0.001 mm (1 micron), NOT bit-for-bit: a caller "
+                                "who feeds unit vectors rounded to 4 decimals - a "
+                                "spec table, a spreadsheet, this server's own "
+                                "`basis_rows` - gets 1e-5…1e-4 mm of deviation "
+                                "from the rounding alone, and 13 of 25 correct "
+                                "placements answered `matches_request: false` "
+                                "because the test was `< 1e-6` (reported "
+                                "2026-11-06, P2-4). Raise it to tolerate a sloppier "
+                                "input table. It cannot be 0: `verified.max_deviation` "
+                                "and `verified.tolerance` are both published, so "
+                                "the number is never a guess."
+                            ),
+                        },
                     },
                     # Either a single placement or the batch form - never neither.
                     "anyOf": [
@@ -1160,6 +1180,31 @@ class AssemblyTools:
         }
         return json.dumps(report, indent=2, ensure_ascii=False)
 
+    #: How far a read-back placement may sit from the request, in mm, before it
+    #: counts as "CATIA stored something else". 1 micron: below anything a
+    #: placement table means, above the 1e-5…1e-4 mm that rounding a unit vector
+    #: to 4 decimals produces (measured on the 2026-11-06 report's 25 instances).
+    _PLACEMENT_TOLERANCE = 0.001
+
+    def _placement_tolerance(self, value: Any) -> float:
+        """Validate the tolerance, so a typo cannot silence verification."""
+        if value is None:
+            return self._PLACEMENT_TOLERANCE
+        try:
+            tolerance = float(value)
+        except (TypeError, ValueError):
+            raise ArgumentRejected(
+                f"tolerance must be a number of millimetres, got {value!r}"
+            ) from None
+        if not tolerance > 0:
+            raise ArgumentRejected(
+                "tolerance must be greater than 0 mm - use a small one (0.001) "
+                "rather than zero: 'exactly equal' is not a property a COM "
+                "read-back can promise, and a zero tolerance would report every "
+                "placement as failed"
+            )
+        return tolerance
+
     def _set_component_transform(self, args: dict[str, Any]) -> str:
         # Read and check the convention BEFORE the batch branch. It used to be
         # read inside the rotation_rows branch only, so `placements=[...]` plus
@@ -1176,11 +1221,13 @@ class AssemblyTools:
                 "default) or 'basis' (row i = where local axis i points in global)"
             )
         placements = args.get("placements")
+        tolerance = self._placement_tolerance(args.get("tolerance"))
         if placements:
             return self._apply_placements(placements,
                                           verify=args.get("verify", True),
                                           convention=convention,
-                                          top_level=args)
+                                          top_level=args,
+                                          tolerance=tolerance)
         product = self.conn.get_active_product()
         component = self._resolve_component(product, args["component_name"])
 
@@ -1236,7 +1283,14 @@ class AssemblyTools:
             report["verified"] = {
                 "position_components": [round(v, 9) for v in actual],
                 "max_deviation": round(deviation, 12),
-                "matches_request": deviation < 1e-6,
+                # 0.3.73: a tolerance, not bit equality. The old test was
+                # `deviation < 1e-6`, which answers a question nobody asked: a
+                # placement whose input vectors were rounded to 4 decimals comes
+                # back 1e-5…1e-4 mm off BY CONSTRUCTION, and 13 of 25 correct
+                # placements were reported as not matching (reported 2026-11-06,
+                # P2-4). `max_deviation` was 4.10e-05 in each of them.
+                "tolerance": tolerance,
+                "matches_request": deviation <= tolerance,
                 **self._matrix_report(actual[:9]),
             }
             if not report["verified"]["checks"]["right_handed"]:
@@ -1244,16 +1298,18 @@ class AssemblyTools:
                     "det R != +1: the matrix mirrors the part. Check for a transposed or "
                     "sign-flipped row before trusting this placement."
                 )
-            elif deviation >= 1e-6:
+            elif deviation > tolerance:
                 report["warning"] = (
-                    "CATIA did not store the requested placement verbatim; inspect "
+                    f"CATIA did not store the requested placement within "
+                    f"{tolerance:g} mm (off by {deviation:.3g} mm); inspect "
                     "verified.position_components before continuing."
                 )
         return json.dumps(report, indent=2, ensure_ascii=False)
 
     def _apply_placements(self, placements: list[Any], verify: bool = True,
                           convention: str | None = None,
-                          top_level: dict[str, Any] | None = None) -> str:
+                          top_level: dict[str, Any] | None = None,
+                          tolerance: float | None = None) -> str:
         """Place many components in one call, and report each one's deviation.
 
         Reported 2026-10-25: seventy instances meant seventy calls that each
@@ -1286,6 +1342,10 @@ class AssemblyTools:
                     inherited += 1
                 else:
                     overridden += 1
+            # The batch tolerance is the DEFAULT for every entry; an entry that
+            # carries its own keeps it (setdefault, not assignment).
+            if tolerance is not None:
+                entry.setdefault("tolerance", tolerance)
             try:
                 raw = self._set_component_transform(
                     {**entry, "verify": verify, "refresh": False})
@@ -1326,6 +1386,16 @@ class AssemblyTools:
                 "inherited_by": inherited,
                 "overridden_by": overridden,
             }
+        if verify:
+            # The threshold every entry was judged against, published once. A
+            # batch of 25 that says "worst_max_deviation: 4.9e-05" and nothing
+            # else leaves the reader to guess whether that is good.
+            reply["tolerance"] = (tolerance if tolerance is not None
+                                  else self._PLACEMENT_TOLERANCE)
+            reply["tolerance_note"] = (
+                "an entry's 'matches_request' is max_deviation <= tolerance; the "
+                "default is 1 micron, because a spec table rounded to 4 decimals "
+                "cannot do better than 1e-5…1e-4 mm")
         ignored = [key for key in ("component_name", "rotation_rows",
                                    "position_components", "translation")
                    if (top_level or {}).get(key) not in (None, [], [0.0, 0.0, 0.0])]
