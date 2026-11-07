@@ -26,11 +26,20 @@ class FeatureRejected(RuntimeError):
     """
 
     def __init__(self, message: str, rolled_back: bool,
-                 next_actions: list[str] | None = None) -> None:
+                 next_actions: list[str] | None = None,
+                 code: str | None = None) -> None:
         super().__init__(message)
         self.rolled_back = bool(rolled_back)
         if next_actions:
             self.next_actions = list(next_actions)
+        # A raise site that knows what CATIA refused can name the code, so the
+        # envelope stops depending on the wording of the message. Without this,
+        # one sentence edited in 0.3.77 turned the solid loft's failure from
+        # STEP_EXCEPTION into COM_ERROR - a silent change for anyone branching on
+        # the code (reported 2026-11-08). No default is set here on purpose: the
+        # phrase table still classifies the failures nobody named.
+        if code:
+            self.code = code
 
 
 class CodedError(RuntimeError):

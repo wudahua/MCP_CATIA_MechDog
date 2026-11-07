@@ -524,7 +524,18 @@ class PlannerTools:
                     if raw.get("ok") is not True:
                         entry["error"] = raw.get("message")
                 else:
-                    entry.update(ok=True, result=self._trim(raw))
+                    text_value = str(raw)
+                    entry.update(ok=True, result=self._trim(text_value))
+                    # Detect the warning on the FULL text, and keep the warning
+                    # itself untrimmed. MAX_RESULT_CHARS used to be applied
+                    # first, so a 735-char loft reply lost its "WARNING: ..."
+                    # tail entirely: the step then looked clean to
+                    # `_step_has_warning`, and `step_warnings` - the machine-
+                    # readable channel - was never written (reported 2026-11-08,
+                    # N3, whose whole point was the sentence AFTER the cut).
+                    found = self._warning_text(text_value)
+                    if found:
+                        entry["warnings"] = found
             if entry["ok"] and step.get("measure"):
                 # Opt-in per step: measuring costs an inertia call, but it is the
                 # only way one plan can report one volume per part it built.
@@ -645,17 +656,22 @@ class PlannerTools:
             # summary to see it (reported 2026-11-01, P3).
             warned = [
                 {"index": entry["index"], "tool": entry["tool"],
-                 "message": self._trim(str(entry.get("result") or ""))}
+                 "message": " ".join(entry.get("warnings")
+                                     or [self._trim(str(entry.get("result") or ""))])}
                 for entry in report
-                if entry["ok"] and self._step_has_warning(entry.get("result"))
+                if entry["ok"] and (entry.get("warnings")
+                                    or self._step_has_warning(entry.get("result")))
             ]
-            if warned:
-                data["step_warnings"] = warned
+            # Always present under summary=true, empty or not: the note below
+            # promises this field, and a caller that has to distinguish "absent"
+            # from "none" cannot use it (reported 2026-11-08, N3).
+            data["step_warnings"] = warned
             data["summary_note"] = (
                 f"summary=true: data.steps lists ONLY the {len(failures)} step(s) "
                 f"that failed. The other {len(report) - len(failures)} succeeded "
                 "and are counted in 'executed'; any successful step whose reply "
-                "carried a WARNING line is kept in 'step_warnings', because it is "
+                "carried a WARNING is kept in 'step_warnings' (always present, "
+                "possibly empty) with the warning text untruncated, because it is "
                 "usually the reason a later step failed. Re-run without summary "
                 "for every step record.")
         return {
@@ -758,6 +774,32 @@ class PlannerTools:
         "stored before that has to be re-baselined before it is used as an "
         "acceptance criterion."
     )
+
+    @staticmethod
+    def _warning_text(text: str) -> list[str]:
+        """The warning part of a reply, untrimmed enough to stay actionable.
+
+        The actionable half of a warning is its END ("sample both sections the
+        same way ... and rebuild"), which is exactly what a plain truncation
+        removes: the 2026-11-08 report got "and this tool answered ok:t... (735
+        chars)" and could not read the advice. Capped at 1500 characters so a
+        pathological reply cannot flood the plan summary.
+        """
+        marker = text.upper().find("WARNING")
+        try:
+            payload = json.loads(text)
+        except Exception:  # noqa: BLE001 - a plain-text reply
+            payload = None
+        if isinstance(payload, dict):
+            # A structured reply answers this question itself, and an EMPTY
+            # warnings list must not be mistaken for a warning: the key spells
+            # the word, which is exactly the false positive 0.3.x fixed once
+            # already on the text side.
+            return [str(item) for item in payload.get("warnings") or []][:5]
+        if marker < 0:
+            return []
+        segment = text[marker:].strip()
+        return [segment[:1500] + ("..." if len(segment) > 1500 else "")]
 
     @staticmethod
     def _trim(value: Any) -> str:

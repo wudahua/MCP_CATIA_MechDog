@@ -43,19 +43,23 @@ def test_the_axis_table_matches_what_was_measured():
     grew Y by exactly 200 mm - the reported defect.
     """
     source = inspect.getsource(PartDesignTools._rect_pattern)
-    assert 'by_axis = {"x": "xy", "y": "yz", "z": "zx"}' in source
+    # 0.3.78 split this into two tables: slot 1 takes the plane's H axis, slot 2
+    # its V axis, and both run backwards - measured on the box ENDPOINTS, which
+    # is what 0.3.77's audit failed to do.
+    assert 'by_h = {"x": "xy", "y": "yz", "z": "zx"}' in source
+    assert 'by_v = {"x": "zx", "y": "xy", "z": "yz"}' in source
     # The old warning is gone; the comment still records what the old table
     # said, which is the only place that mistake should survive.
     # The warning the caller used to get is gone (the comment that explains why
     # may still quote it; the reply may not).
     assert "WARNING: the axis each direction actually takes" not in source
-    assert "one axis past the one the old table assumed" in source
+    assert "slot 1 -> the plane's H axis, negated" in source
 
 
 def test_the_default_pair_no_longer_promises_the_wrong_axes():
-    """No arguments gives dir1 = Y, dir2 = X - measured, not assumed."""
+    """No arguments gives dir1 = -Y, dir2 = -X - measured on the endpoints."""
     source = inspect.getsource(PartDesignTools._rect_pattern)
-    assert "PlaneYZ -> dir1 (Y), PlaneZX -> dir2 (X)" in source
+    assert "PlaneYZ -> dir1 (-Y), PlaneZX -> dir2 (-X)" in source
     assert "PlaneYZ -> dir1 (X), PlaneZX -> dir2 (Y)" not in source
 
 

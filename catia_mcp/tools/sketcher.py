@@ -1047,6 +1047,7 @@ class SketcherTools:
         # Create the sketch on the plane
         sketches = body.Sketches
         sketch = sketches.Add(ref)
+        rename_note = self._make_sketch_name_unique(part, sketch)
 
         # Open the sketch for editing
         self._active_sketch = sketch
@@ -1069,7 +1070,88 @@ class SketcherTools:
         self._profile_ends = []
 
         return (f"Sketch '{sketch.Name}' created on {where}. "
-                f"{self._axis_note(plane)}. Ready for geometry.")
+                f"{self._axis_note(plane)}. Ready for geometry." + rename_note)
+
+    @classmethod
+    def _all_sketch_names(cls, part: Any) -> list[str]:
+        """Every sketch name in the PART: all bodies, and nested geometrical sets."""
+        names: list[str] = []
+
+        def collect(holder: Any, depth: int = 0) -> None:
+            if depth > 4:
+                return
+            for collection in ("Sketches", "HybridSketches"):
+                try:
+                    items = getattr(holder, collection)
+                except Exception:  # noqa: BLE001 - the holder has no such list
+                    continue
+                for i in range(1, items.Count + 1):
+                    try:
+                        names.append(str(items.Item(i).Name))
+                    except Exception:  # noqa: BLE001 - one item, not the rest
+                        continue
+            try:
+                sets = holder.HybridBodies
+            except Exception:  # noqa: BLE001 - no nested sets here
+                return
+            for i in range(1, sets.Count + 1):
+                try:
+                    collect(sets.Item(i), depth + 1)
+                except Exception:  # noqa: BLE001 - one set, not the rest
+                    continue
+
+        try:
+            for i in range(1, part.Bodies.Count + 1):
+                collect(part.Bodies.Item(i))
+            for i in range(1, part.HybridBodies.Count + 1):
+                collect(part.HybridBodies.Item(i))
+        except Exception:  # noqa: BLE001 - an unreadable tree answers "unknown"
+            return names
+        return names
+
+    def _make_sketch_name_unique(self, part: Any, sketch: Any) -> str:
+        """Rename a new sketch whose name the PART already uses, and say so.
+
+        CATIA numbers a new sketch from its own counter and does not check for a
+        conflict: after rollbacks, body switches and document changes one part
+        can end up holding two ``草图.1`` and two ``草图.2`` (reported 2026-11-08,
+        N2 - six sketches listed as 草图.1 / 草图.3 / 草图.2 / 草图.4 / 草图.1 /
+        草图.2). Everything downstream is BY NAME - loft sections, pad's
+        ``feature_name``, delete_feature, sketch_edit - so a duplicate silently
+        re-points at the other object mid-session, and the drawing record keyed
+        by ``document::name`` merges the two profiles, which is why
+        ``catia_sketch_get_geometry`` then described a 4-line rectangle as a
+        7-point spline.
+
+        The rename is measured to work on B30 (``Sketch.Name`` is settable, and
+        CATIA goes on numbering from its own counter, so this check has to run
+        every time rather than once).
+        """
+        try:
+            names = self._all_sketch_names(part)
+            current = str(sketch.Name)
+        except Exception:  # noqa: BLE001 - nothing to rename by
+            return ""
+        if names.count(current) <= 1:
+            return ""
+        suffix = 2
+        while f"{current}#{suffix}" in names:
+            suffix += 1
+        renamed = f"{current}#{suffix}"
+        try:
+            sketch.Name = renamed
+            try:
+                part.UpdateObject(sketch)
+            except Exception:  # noqa: BLE001 - the rename already took
+                pass
+        except Exception:  # noqa: BLE001 - read-only on some builds
+            return (f" WARNING: '{current}' is also the name of another node in "
+                    "this part and renaming this one failed - every by-name tool "
+                    "may reach either of them, so refer to it by index or rename "
+                    "it by hand before building on it")
+        return (f" It was renamed to '{renamed}': the part already held a "
+                f"'{current}', and every by-name tool would otherwise reach one "
+                "of the two at random")
 
     # What counts as "the same endpoint" and what counts as a gap that will
     # still break a pad. A 3.5 um gap did (reported 2026-10-23), so the second
@@ -2051,6 +2133,25 @@ class SketcherTools:
         drawn = self._drawn.get(self._sketch_key(str(sketch.Name)))
         if drawn:
             payload["drawn_this_session"] = drawn
+            # Say WHICH sketch this record belongs to. The record is keyed by
+            # document::name, so when two sketches share a name it describes
+            # whichever was drawn last - and the reply then presented one
+            # sketch's profile next to another sketch's geometry ("drawn_this_
+            # session 8 points" beside a 4-line rectangle, reported 2026-11-08,
+            # N2). The key cannot tell them apart; naming it lets the caller see
+            # that the record is shared instead of believing it belongs here.
+            payload["drawn_this_session_key"] = self._sketch_key(str(sketch.Name))
+            duplicates = sum(
+                1 for name in self._all_sketch_names(self.conn.get_active_part())
+                if name == str(sketch.Name))
+            if duplicates > 1:
+                payload["drawn_this_session_note"] = (
+                    f"{duplicates} sketches in this part are called "
+                    f"'{sketch.Name}', and this session's drawing record is keyed "
+                    "by that name - so 'drawn_this_session' may describe a "
+                    "different sketch with the same name. The geometry above was "
+                    "read from THIS sketch; the record was not. Rename one of them "
+                    "(catia_list_features now reports the conflict).")
         return json.dumps(payload, indent=2)
 
     def _edit_sketch(self, sketch_name: str | None = None) -> str:

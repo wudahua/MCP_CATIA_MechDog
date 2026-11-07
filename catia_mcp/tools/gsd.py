@@ -19,7 +19,8 @@ import re
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
-from catia_mcp.results import ArgumentOutOfRange, ArgumentRejected, CodedError
+from catia_mcp.results import (ArgumentOutOfRange, ArgumentRejected,
+                               CodedError, PreconditionRejected)
 from catia_mcp.topo_search import search_topology
 
 # Origin plane aliases (same convention as sketcher.py)
@@ -156,7 +157,11 @@ class GSDTools:
                 "name": "catia_gsd_create_geoset",
                 "description": (
                     "Create a new Geometrical Set (HybridBody) in the active Part and "
-                    "make it the active target for subsequent GSD elements."
+                    "make it the active target for subsequent GSD elements. Pass "
+                    "'parent' to create it INSIDE another set: without that, a set "
+                    "created while another was active still landed at the root, so "
+                    "no caller could build the nested tree that "
+                    "catia_set_visibility descends into (reported 2026-11-08)."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -165,6 +170,13 @@ class GSDTools:
                             "type": "string",
                             "description": "Name for the new geometrical set",
                             "default": "GSD_Set",
+                        },
+                        "parent": {
+                            "type": "string",
+                            "description": (
+                                "Name of an existing geometrical set to create "
+                                "this one inside. Omit for the root of the part."
+                            ),
                         },
                     },
                 },
@@ -1830,8 +1842,36 @@ class GSDTools:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
         name = args.get("name", self.DEFAULT_GEOSET)
+        parent_name = (args.get("parent") or "").strip() or None
 
-        hb = part.HybridBodies.Add()
+        if parent_name:
+            # Nested sets: without this, "create a set while another is active"
+            # always landed at the root, so a set inside a set could not be
+            # built at all - which made catia_set_visibility's recursive descent
+            # (0.3.77) unreachable and untestable by any caller (reported
+            # 2026-11-08, N5).
+            parent = None
+            for hb in self._iter_geosets(part.HybridBodies):
+                if str(hb.Name) == parent_name:
+                    parent = hb
+                    break
+            if parent is None:
+                available = [str(hb.Name) for hb in self._iter_geosets(part.HybridBodies)]
+                raise ArgumentRejected(
+                    f"No geometrical set named '{parent_name}' to create '{name}' "
+                    f"inside. Available: {available or 'none'}"
+                )
+            try:
+                hb = parent.HybridBodies.Add()
+            except Exception as error:  # noqa: BLE001 - the nesting is refused
+                raise PreconditionRejected(
+                    f"CATIA refused to create a geometrical set inside "
+                    f"'{parent_name}' ({str(error).splitlines()[0][:120]}). The "
+                    "set was not created; the tree holds no nesting support on "
+                    "this build for that parent."
+                ) from error
+        else:
+            hb = part.HybridBodies.Add()
         hb.Name = name
         self._active_geoset_name = hb.Name
         self._active_geoset_doc = self._doc_name()
@@ -1839,7 +1879,13 @@ class GSDTools:
             part.Update()
         except Exception:
             pass
-        return f"Geometrical set '{hb.Name}' created and set as active."
+        where = f" inside '{parent_name}'" if parent_name else " at the root of the part"
+        return (f"Geometrical set '{hb.Name}' created{where} and set as active."
+                + (" A set inside a set is what catia_set_visibility recurses "
+                   "into; a set holding only curves will NOT show up in a mesh "
+                   "bounding box, because a curve cannot be triangulated - use a "
+                   "surface to test visibility in the envelope."
+                   if parent_name else ""))
 
     def _set_active_geoset(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()

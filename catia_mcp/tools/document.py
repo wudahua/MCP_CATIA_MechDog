@@ -704,6 +704,46 @@ class DocumentTools:
         # CATIA's Documents.Open rejects forward-slash paths (E_FAIL);
         # normalize to native Windows separators first.
         doc = docs.Open(os.path.normpath(file_path))
+        # Read back WHICH FILE this is. Open returns the session's copy when the
+        # file has the same identity as one already loaded, and CATIA then puts a
+        # modal on the automation thread ("会话中已存在具有相同标识的文件") - so the
+        # reply announced the requested path while that path had not been opened
+        # at all, and every later call worked on the other file (reported
+        # 2026-11-08, N4: the ASCII copy under F:\WB_CATIA was what stayed open,
+        # and `list_documents` proved it). Compare paths instead of trusting the
+        # call, and clear the dialog so the next call is not blocked by it.
+        requested = os.path.normcase(os.path.abspath(str(file_path)))
+        opened_path = ""
+        try:
+            opened_path = str(doc.FullName)
+        except Exception:  # noqa: BLE001 - unsaved or unreadable
+            opened_path = ""
+        if opened_path:
+            actual = os.path.normcase(os.path.abspath(opened_path))
+            if actual != requested:
+                dialogs.dismiss(rounds=2, wait=0.3)
+                raise CodedError(
+                    f"'{file_path}' was NOT opened: the document CATIA handed back "
+                    f"is '{opened_path}'. This build refuses a file whose identity "
+                    "is already loaded in the session - it says so in a modal "
+                    "('会话中已存在具有相同标识的文件' / 'a file with the same "
+                    "identifier already exists in the session') and returns the "
+                    "loaded copy instead, so the only thing that happened is a "
+                    "dialog on the automation thread. Nothing was reloaded and "
+                    "nothing was discarded. Close the loaded copy first "
+                    "(catia_close_document), or work on the one that is open.",
+                    code="DOCUMENT_IDENTITY_CONFLICT",
+                    stage="execute",
+                    modified=False,
+                    next_actions=[
+                        f"Use the document that is already open ('{opened_path}')"
+                        " - it is the same model, so measuring or editing it gives "
+                        "the same geometry",
+                        "To open the other file instead, close the loaded copy "
+                        "first: catia_close_document(name='"
+                        + os.path.basename(opened_path) + "', save=False)",
+                    ],
+                )
         # Whatever sketch belonged to the previously active document does not
         # belong to this one.
         self.conn.last_sketch = None

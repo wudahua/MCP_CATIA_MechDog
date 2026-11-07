@@ -2,6 +2,99 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.78] — 2026-11-08 · the sign my own audit could not see
+
+Two reports: the B32 acceptance of 0.3.77 (a documentation item) and the B30
+acceptance, which found six things — one of them in 0.3.77's own verification.
+
+### N1 — `dir1_axis` was still wrong, and my audit was how it stayed wrong
+
+0.3.77 fixed the AXIS and verified it by comparing `dimensions` before and after:
+"x/y/z each grow only their own axis by exactly 200 mm". A **length delta cannot
+see a sign** — a pattern that mirrors by 200 mm grows the same length — so a
+reversed pattern passed 12/12. The acceptance measured the box ENDPOINTS and
+found every label inverted: `axis x+` moved the copies to −X.
+
+Measured again here, on endpoints, and the model is different from what 0.3.77
+assumed (`scripts/b30_v0378_sign.py`):
+
+```
+slot 1 -> the plane's H axis, NEGATED     PlaneXY -> -X, PlaneYZ -> -Y, PlaneZX -> -Z
+slot 2 -> the plane's V axis, NEGATED     PlaneXY -> -Y, PlaneYZ -> -Z, PlaneZX -> -X
+```
+
+So the two slots need different tables (`by_h` / `by_v`), and both need the
+reverse flags flipped before `AddNewRectPattern` — the reply now says `axis x+`
+and the copies really do go to +X. The default pair (no axis arguments) keeps
+its geometry, and its sentence states the measured dirs: `dir1 (-Y), dir2 (-X)`.
+The schema said `PlaneYZ -> X and PlaneZX -> Y` — two errors in one sentence, and
+the third time that line has been rewritten (N6).
+
+### N2 — two sketches with one name made every by-name tool ambiguous
+
+A part ended up holding `草图.1 / 草图.3 / 草图.2 / 草图.4 / 草图.1 / 草图.2`.
+CATIA numbers a new sketch from its own counter and does not check for a
+conflict, and every downstream tool resolves BY NAME — loft sections, pad's
+`feature_name`, `delete_feature`, `sketch_edit` — so a duplicate silently
+re-points at the other object mid-session, and the drawing record (keyed
+`document::name`) merged the two profiles, which is how a 4-line rectangle got
+described as a 7-point spline.
+
+* a new sketch whose name the PART already uses is renamed at creation
+  (`草图.1#2`), and the reply says so. `Sketch.Name` is settable on B30 and
+  CATIA keeps numbering from its own counter, so the check runs every time.
+* `catia_list_features` reports `name_shared_by` per entry, plus
+  `sketch_name_conflicts` and a note, for trees that already hold one.
+* `catia_sketch_get_geometry` publishes `drawn_this_session_key` and, when the
+  name is shared, a note that the record may describe the other sketch.
+
+### N3 — the warning was cut off exactly where the advice was
+
+`catia_run_plan` trimmed each step's result to 600 chars BEFORE deciding whether
+it carried a warning, so a 735-char loft reply lost its `WARNING: ...` tail
+entirely: the step looked clean and `step_warnings` — the machine-readable
+channel the `summary_note` promises — was never written.
+
+* warnings are detected on the **untrimmed** reply, and the warning text is kept
+  (capped at 1500 chars) instead of the truncated head;
+* `step_warnings` is **always present** under `summary=true`, empty or not.
+
+### N4 — `catia_open_document` announced a password it did not open
+
+CATIA can hand back the session's copy of a file whose identity is already
+loaded, while showing a modal ("会话中已存在具有相同标识的文件"), and the reply
+announced the requested path anyway. The opened document's `FullName` is now read
+back and compared: a different file is a `DOCUMENT_IDENTITY_CONFLICT` (nothing
+reloaded, nothing discarded), and the modal is dismissed so the next call is not
+blocked. **Not reproduced on B30 with a byte-identical copy** — that opens
+normally — so what this release verifies is the invariant (the reply names a file
+that really is open at that path), not the conflict branch itself.
+
+### N5 — P8's recursive descent was unreachable
+
+`catia_gsd_create_geoset` had no `parent`, so no caller could build a set inside
+a set — and 0.3.77's recursive visibility descent therefore could never run in
+practice. `parent` now creates it inside the named set, and refuses by name when
+the parent is missing.
+
+### Also
+
+* the solid loft's failure now carries `code="LOFT_REJECTED"`: it answered
+  `STEP_EXCEPTION` before 0.3.77 and `COM_ERROR` after it, purely because the
+  message was rewritten — a silent change for a caller branching on the code.
+* **the B32 documentation item**: the README Requirements lists **two** known
+  build differences now (the multi-section surface *and* the threaded hole), and
+  `catia_hole`'s `threaded` description carries the same limit at the call site,
+  which is where 0.3.59's rule puts it. Registering a limitation in the CHANGELOG
+  is not a fix, and the README no longer claims the rest is build-agnostic.
+
+`1244 → 1266 tests`. `scripts/b30_v0378_audit.py` — 17/17 on B30, and every
+direction check now records which **endpoint** moved: x/y/z each move towards
+their own positive axis, `reverse_dir1` moves the other way, `dir2_axis='y'`
+lands on Y, a duplicate sketch name is renamed, `INNER` sits inside `OUTER`, a
+plan's `step_warnings` carries the untruncated advice, and a rejected loft
+answers `LOFT_REJECTED`.
+
 ## [0.3.77] — 2026-11-07 · eleven items from an 85 m frigate built out of a text file
 
 The report came from a run that built a frigate from a natural-language

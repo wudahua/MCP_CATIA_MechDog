@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.77** · [what changed](CHANGELOG.md) ·
+**0.3.78** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -916,9 +916,19 @@ resolves against; `index` is the position in the assembly.
 
 * Windows (COM automation; `pywin32` is a hard dependency)
 * CATIA V5 installed and licensed — verified on **V5-6R2020 (B30)**, Simplified
-  Chinese build. One known build difference: `catia_gsd_multi_section_surface`
-  fails on **V5-6R2022 (B32)** for every configuration (reported 2026-10-23),
-  while the rest of GSD — including `catia_gsd_blend` on the same curves — works.
+  Chinese build. **Two** known build differences:
+  1. `catia_gsd_multi_section_surface` fails on **V5-6R2022 (B32)** for every
+     configuration (reported 2026-10-23), while the rest of GSD — including
+     `catia_gsd_blend` on the same curves — works.
+  2. **A threaded hole cannot be cut on B32.** `catia_hole(threaded=true)` sets
+     `ThreadingMode` alone, which threads on B30 and does not on B32: there the
+     update fails, the feature is removed again and the call answers
+     `FEATURE_INCOMPLETE` / `execute` with `rolled_back` and the measured
+     `modified` (reported on B32, 2026-11-05/06; also stated at the `threaded`
+     argument itself). B30 reports `NO_MATERIAL` before the write instead, so
+     the author's machine cannot reproduce it. Registering the limitation is not
+     a fix — a real one needs `ThreadStandard`/`Pitch` probing on a B32 seat.
+
   Everything else in the tool list is B30/B32-agnostic as far as is known.
 * Python 3.10+
 
@@ -1179,6 +1189,20 @@ hand-dimensioned at all - its curves are not addressable through automation, onl
 `GenerateDimensions` reaches them - and **`Face.N` is session-scoped**. The same
 plate gave its hole's cylinder at `Face.1` in one build and at `Face.7` in another,
 so list faces and use the index immediately.
+
+**0.3.78: the sign my own audit could not see.** 0.3.77 fixed `dir1_axis` and
+verified it by comparing `dimensions` — which cannot see a sign, so a mirrored
+pattern grew the same 200 mm and passed 12/12. The acceptance read the box
+**endpoints** and found every label inverted. Measured again on endpoints, the
+two slots are different: slot 1 takes the plane's H axis, slot 2 its V axis, and
+both run backwards — so `axis x+` now really goes to +X. Also from that report:
+a new sketch whose name the part already uses is **renamed** (CATIA's numbering
+does not check, and every by-name tool then picks one of two), `run_plan` keeps a
+warning **untruncated** in `step_warnings` and always publishes that field,
+`catia_open_document` reads back which file it actually opened, and
+`catia_gsd_create_geoset` gained **`parent`**, without which 0.3.77's recursive
+visibility descent could never run. The loft's failure also stopped drifting
+between codes: it answers `LOFT_REJECTED`.
 
 **0.3.77: `dir1_axis` was one axis off, and a loft that twists now says so.**
 An 85 m frigate built from a text description turned up two silent geometry

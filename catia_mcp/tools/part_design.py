@@ -601,7 +601,15 @@ class PartDesignTools:
                                 "thread is whatever CATIA defaults to for this "
                                 "diameter, so a drawing that calls out a specific "
                                 "pitch still needs the thread definition edited in "
-                                "CATIA."
+                                "CATIA. "
+                                "BUILD LIMIT: on V5-6R2022 (B32) this build cannot "
+                                "thread a hole through ThreadingMode alone - the "
+                                "update fails, the feature is removed again and the "
+                                "call answers FEATURE_INCOMPLETE / execute with "
+                                "rolled_back, so a plan that needs threads will stop "
+                                "there (reported on B32 2026-11-05/06; B30 is the "
+                                "verified build, and it reports NO_MATERIAL before "
+                                "the write instead)."
                             ),
                             "default": False,
                         },
@@ -623,8 +631,11 @@ class PartDesignTools:
                     "two edges of equal length give opposite directions and the only "
                     "way to tell which you got is the volume delta (reported "
                     "2026-10-24, with 3 attempts and 2 wasted features). Omit all "
-                    "four to use CATIA's defaults, which are PlaneYZ -> X and "
-                    "PlaneZX -> Y regardless of what the spec meant."
+                    "four to use CATIA's origin planes, which drive dir1 along -Y "
+                    "and dir2 along -X on this build (measured 2026-11-08 by "
+                    "reading the body's box ENDPOINTS - a length delta cannot see "
+                    "a sign). The explicit dir1_axis/dir2_axis form builds exactly "
+                    "what it says: 'axis x+' moves the copies to +X."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -3746,18 +3757,17 @@ class PartDesignTools:
         reverse1 = bool(args.get("reverse_dir1"))
         reverse2 = bool(args.get("reverse_dir2"))
         if dir1_axis or dir2_axis:
-            # A plane reference drives the plane's OWN HORIZONTAL AXIS, not its
-            # normal. Measured on B30 2026-11-07 by patterning a 10x10x5 pad
-            # 3x1 at 100 mm spacing and reading the body box after each call:
-            #   PlaneYZ -> +Y,  PlaneZX -> +Z,  PlaneXY -> +X
-            # which is exactly one axis past the one the old table assumed. The
-            # mapping used to be {"x": "yz", ...} ("a plane's reference gives
-            # its normal") and that is why dir1_axis='x' moved the copies along
-            # Y - reported 2026-11-07 as a silent wrong geometry after being
-            # carried as an "unreliable" WARNING since 2026-11-02. The table is
-            # now the measurement: the plane whose H axis IS the wanted axis.
+            # A plane reference drives a DIFFERENT axis in each slot, both
+            # backwards. Measured on B30 2026-11-08 by reading the body's box
+            # ENDPOINTS after each call (a `dimensions` delta cannot see a sign,
+            # which is why 0.3.77's audit passed a mirrored pattern):
+            #   slot 1 -> the plane's H axis, negated   (PlaneXY -> -X)
+            #   slot 2 -> the plane's V axis, negated   (PlaneXY -> -Y)
+            # so dir1_axis='x' needs PlaneXY and dir2_axis='y' needs PlaneXY too,
+            # while 'z' in slot 2 needs PlaneYZ. The two tables are not the same.
             planes = self.conn.get_origin_elements()
-            by_axis = {"x": "xy", "y": "yz", "z": "zx"}
+            by_h = {"x": "xy", "y": "yz", "z": "zx"}
+            by_v = {"x": "zx", "y": "xy", "z": "yz"}
             # CATIA needs dir1 x dir2 to be RIGHT-handed, or the update fails with
             # a bare "UpdateObject failed". Measured on B30 2026-10-24 with a pad
             # seed: (x,y) ok, (y,z) ok, (z,x) ok, (z,y) failed, (x,z) failed -
@@ -3793,12 +3803,17 @@ class PartDesignTools:
                 d1_count, d2_count = d2_count, d1_count
                 d1_spacing, d2_spacing = d2_spacing, d1_spacing
                 swapped = True
-            ref1 = part.CreateReferenceFromObject(planes[by_axis[first]])
-            ref2 = part.CreateReferenceFromObject(planes[by_axis[second]])
+            ref1 = part.CreateReferenceFromObject(planes[by_h[first]])
+            ref2 = part.CreateReferenceFromObject(planes[by_v[second]])
             directions = (f"axis {first}{'-' if reverse1 else '+'} -> dir1, "
                           f"axis {second}{'-' if reverse2 else '+'} -> dir2")
             if swapped:
                 directions += " (axes swapped internally: CATIA rejects a left-handed pair)"
+            # Both slots run the NEGATIVE of the reference's axis on this build,
+            # so 'axis x+' put the copies at -X until this line existed (reported
+            # 2026-11-08, N1). Flipping the flags keeps the label honest: the
+            # caller asked for a sign, and the sign is now what the geometry does.
+            reverse1, reverse2 = not reverse1, not reverse2
         elif dir1_edge:
             r1, r2 = topology_references(
                 self.conn, body, "Edge",
@@ -3807,19 +3822,18 @@ class PartDesignTools:
             ref1, ref2 = r1.reference, r2.reference
             directions = f"{dir1_edge} -> dir1, {dir2_edge} -> dir2"
         else:
-            # The default pair is unchanged (PlaneYZ, PlaneZX) so existing
-            # callers keep the geometry they have, but the SENTENCE was wrong
-            # for as long as it existed: measured on B30 2026-11-07, PlaneYZ
-            # drives +Y and PlaneZX drives +X, i.e. dir1 is Y and dir2 is X -
-            # the reply used to promise "dir1 (X), dir2 (Y)". A pattern built
-            # from this default is 3 copies along Y, not along X. Say so, and
-            # name dir1_axis/dir2_axis as the way to be sure.
+            # The default pair keeps its geometry (PlaneYZ, PlaneZX) so nothing
+            # an existing caller depends on moves, but the sentence now states
+            # the MEASURED directions: slot 1 takes PlaneYZ's H axis negated =
+            # -Y, slot 2 takes PlaneZX's V axis negated = -X (B30 2026-11-08,
+            # endpoints). It used to promise "dir1 (X), dir2 (Y)" - two errors in
+            # one sentence, and the third time this line has been rewritten.
             planes = self.conn.get_origin_elements()
             ref1 = part.CreateReferenceFromObject(planes["yz"])
             ref2 = part.CreateReferenceFromObject(planes["zx"])
-            directions = ("origin PlaneYZ -> dir1 (Y), PlaneZX -> dir2 (X) - pass "
-                          "dir1_axis/dir2_axis to choose the axes instead of "
-                          "relying on this default")
+            directions = ("origin PlaneYZ -> dir1 (-Y), PlaneZX -> dir2 (-X) - "
+                          "measured; pass dir1_axis/dir2_axis to choose the axes "
+                          "AND their signs instead of relying on this default")
 
         before = self._body_volume_mm3(part, body)
         part.InWorkObject = body
@@ -4877,6 +4891,28 @@ class PartDesignTools:
             sketches = []
         payload["sketches"] = sketches
         payload["sketch_count"] = len(sketches)
+        # A name shared by two sketches makes every by-name tool ambiguous -
+        # loft sections, pad's feature_name, delete_feature, sketch_edit all
+        # resolve by name, and CATIA's own numbering does not check for
+        # conflicts (reported 2026-11-08, N2: one part held two 草图.1 and two
+        # 草图.2, and a section resolved to the other object mid-session).
+        shared = self._shared_sketch_names(part)
+        if shared:
+            for entry in sketches:
+                count = shared.get(entry["name"], 0)
+                if count > 1:
+                    entry["name_shared_by"] = count
+            payload["sketch_name_conflicts"] = [
+                {"name": name, "count": count}
+                for name, count in sorted(shared.items()) if count > 1]
+            payload["sketch_name_conflict_note"] = (
+                "Two or more sketches in this part answer to the same name, so "
+                "every by-name argument ('sections', 'feature_name', "
+                "'sketch_name') may reach either of them. Rename one by hand, or "
+                "address the feature by index. New sketches created by this "
+                "server are given a free name from 0.3.78 on, so a conflict that "
+                "is still here came from an older session or from CATIA's own "
+                "numbering.")
         if sketches:
             payload["sketches_note"] = (
                 "sketches live in the body alongside the features (a sketch "
@@ -4893,6 +4929,50 @@ class PartDesignTools:
         if notes:
             payload["note"] = " ".join(notes)
         return json.dumps(payload, indent=2)
+
+    @staticmethod
+    def _shared_sketch_names(part: Any) -> dict[str, int]:
+        """How many sketches in the whole part answer to each name.
+
+        All bodies, and geometrical sets nested up to four deep - the same tree
+        ``_hide_set_contents`` walks. Used only for reporting: a duplicate is a
+        fact about the document, and saying so is the difference between "my
+        sketch is there" and "my sketch is there twice".
+        """
+        counts: dict[str, int] = {}
+
+        def collect(holder: Any, depth: int = 0) -> None:
+            if depth > 4:
+                return
+            for collection in ("Sketches", "HybridSketches"):
+                try:
+                    items = getattr(holder, collection)
+                except Exception:  # noqa: BLE001 - no such list here
+                    continue
+                for i in range(1, items.Count + 1):
+                    try:
+                        name = str(items.Item(i).Name)
+                    except Exception:  # noqa: BLE001 - one item
+                        continue
+                    counts[name] = counts.get(name, 0) + 1
+            try:
+                sets = holder.HybridBodies
+            except Exception:  # noqa: BLE001 - nothing nested here
+                return
+            for i in range(1, sets.Count + 1):
+                try:
+                    collect(sets.Item(i), depth + 1)
+                except Exception:  # noqa: BLE001 - one set
+                    continue
+
+        try:
+            for i in range(1, part.Bodies.Count + 1):
+                collect(part.Bodies.Item(i))
+            for i in range(1, part.HybridBodies.Count + 1):
+                collect(part.HybridBodies.Item(i))
+        except Exception:  # noqa: BLE001 - an unreadable tree reports nothing
+            return counts
+        return counts
 
     def _pattern_geoset_inventory(self, part: Any) -> list[dict[str, Any]]:
         """Every geometrical set and how many elements it holds."""
@@ -5032,6 +5112,11 @@ class PartDesignTools:
                    if any(fact for _name, fact in facts) else "")
                 + f" Original error: {error}",
                 rolled_back=gone,
+                # Named, not inferred: this failure answered STEP_EXCEPTION
+                # before 0.3.77 and COM_ERROR after it, purely because the
+                # message was rewritten - a silent change for a caller that
+                # branches on the code (reported 2026-11-08).
+                code="LOFT_REJECTED",
             ) from error
 
         self.conn.refresh_display()
