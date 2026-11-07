@@ -232,10 +232,11 @@ def save_as(doc, path: str, tries: int = 6, wait: float = 0.6) -> str:
         code="SAVE_FAILED",
         stage="execute",
         next_actions=[
-            "If this document has NEVER been saved and the target path contains "
-            "non-ASCII characters (a Chinese folder counts, not only the file "
-            "name), save to an ASCII path first and rename the file afterwards - "
-            "that is the one workaround measured to work",
+            "A non-ASCII file NAME never reaches CATIA: it is refused above as "
+            "PATH_NOT_ASCII before the first attempt, so this failure is "
+            "something else - a locked or read-only target, or a dialog nobody "
+            "answered. Save to a different path, or close whatever holds this "
+            "file, and check whether a partial file was left",
             "Otherwise the file is probably locked or read-only: the document is "
             "still open and unsaved, and whether a partial file exists was not "
             "verified",
@@ -261,9 +262,11 @@ def save(doc, tries: int = 3) -> str:
         code="SAVE_FAILED",
         stage="execute",
         next_actions=[
-            "If this document has never been saved and its path contains "
-            "non-ASCII characters, this is the build's limit, not a dialog: save "
-            "to an ASCII path (catia_save_as_copy) and rename the file afterwards",
+            "This document already has a file, so the path is not the problem: "
+            "the file is most likely read-only or held by another program. Free "
+            "it and retry, or write a copy elsewhere (catia_save_as_copy)",
+            "If its file NAME is non-ASCII, this build cannot write it at all - "
+            "copy to an ASCII name (catia_save_as_copy) and rename afterwards",
             "The document is still open and unsaved either way - nothing was lost",
         ],
     )

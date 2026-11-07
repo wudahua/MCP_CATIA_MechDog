@@ -5371,6 +5371,22 @@ class PartDesignTools:
                 if got is not None:
                     target, where = got, lbl
                     break
+                # 0.3.74: hybrid shapes INSERTED INTO A SOLID BODY. The frame
+                # sketch's datum plane and its three points go in there on
+                # purpose (a plane in a geometrical set poisons the fillet on the
+                # pad built on it), and this walk only covered geometrical sets -
+                # so the tool that hides things by name could not see the very
+                # features this server creates, and answered "No tree node named"
+                # for a name it had picked itself (reported 2026-11-07).
+                try:
+                    hybrids = body.HybridShapes
+                except Exception:      # noqa: BLE001 - body without hybrids
+                    hybrids = None
+                if hybrids is not None:
+                    got, lbl = try_get(hybrids, "datum element")
+                    if got is not None:
+                        target, where = got, lbl
+                        break
 
             if target is None:
                 for i in range(1, part.HybridBodies.Count + 1):
@@ -5405,8 +5421,19 @@ class PartDesignTools:
                 sel.VisProperties.SetShow(0 if show else 1)
 
             children = 0
+            # EVERY node with this name, not the one Item() returns. P04 of the
+            # 2026-11-06 build holds four features called 'Datum_frame' (this
+            # server created all four before 0.3.74), and hiding one of them
+            # answered "is now hidden" while three white diamonds stayed on the
+            # solid - measured on B30 2026-11-07 with exactly that part.
+            nodes = self._nodes_named(part, name) or [target]
+            same_name = max(0, len(nodes) - 1)
             try:
-                apply(target)
+                for node in nodes:
+                    try:
+                        apply(node)
+                    except Exception:  # noqa: BLE001 - one node, not the rest
+                        continue
                 # Hiding a geometrical set does not hide what is inside it: each
                 # element keeps its own visibility, so the surfaces stay on screen
                 # and keep poisoning STL exports. Descend one level.
@@ -5427,7 +5454,7 @@ class PartDesignTools:
                     sel.Clear()
                 except Exception:  # noqa: BLE001 - a selection left behind
                     pass
-            hits.append((label, where, children, parent_set))
+            hits.append((label, where, children, parent_set, same_name))
 
         if not hits:
             where = ("in '" + active + "'" if len(targets) == 1
@@ -5440,8 +5467,11 @@ class PartDesignTools:
         self.conn.refresh_display()
         state = "shown" if show else "hidden"
         if len(targets) == 1:
-            _label, where, children, parent_set = hits[0]
+            _label, where, children, parent_set, same_name = hits[0]
             extra = f" and {children} element(s) inside it" if children else ""
+            if same_name:
+                extra += (f", and {same_name} other tree node(s) that carry the "
+                          "same name - all of them were set")
             # An element inside a HIDDEN set stays invisible however it is set:
             # the UI greys the lightbulb and CATIA keeps the parent's visibility.
             # The reply used to say "is now shown" and leave it at that (reported
@@ -5458,11 +5488,15 @@ class PartDesignTools:
 
         where = hits[0][1]
         children = sum(hit[2] for hit in hits)
+        same_name = sum(hit[4] for hit in hits)
         labels = ", ".join(hit[0] for hit in hits[:8])
         if len(hits) > 8:
             labels += f", ... ({len(hits) - 8} more)"
         extra = (f", plus {children} element(s) inside the set(s)" if children
                  else "")
+        if same_name:
+            extra += (f", plus {same_name} other tree node(s) carrying the same "
+                      "name")
         parents = sorted({hit[3] for hit in hits if hit[3]})
         note = (
             f" Note: {len(parents)} geometrical set(s) hold them "
@@ -5471,6 +5505,74 @@ class PartDesignTools:
             if (show and parents) else "")
         return (f"'{name}' ({where}) is now {state} in {len(hits)} of "
                 f"{len(targets)} part(s) of '{active}': {labels}{extra}.{note}")
+
+    @staticmethod
+    def _nodes_named(part: Any, name: str) -> list[Any]:
+        """EVERY tree node in one part called ``name``, in tree order.
+
+        Not what the by-name walk does, and the difference is the whole point:
+        ``Collection.Item(name)`` hands back the first match and stays silent
+        about the rest. A part can hold several nodes with one name - a body's
+        features, the hybrid shapes a frame sketch puts in it, two sketches
+        after a rebuild - and "hidden" while three others are still on screen is
+        the kind of success report this server keeps having to withdraw.
+        """
+        found: list[Any] = []
+
+        def scan(collection) -> None:
+            try:
+                count = int(getattr(collection, "Count", 0))
+            except Exception:  # noqa: BLE001 - an unreadable collection
+                return
+            for index in range(1, count + 1):
+                try:
+                    node = collection.Item(index)
+                    if str(node.Name) == name:
+                        found.append(node)
+                except Exception:  # noqa: BLE001 - one unreadable member
+                    continue
+
+        try:
+            bodies = part.Bodies
+        except Exception:  # noqa: BLE001 - no bodies at all
+            bodies = None
+        if bodies is not None:
+            for index in range(1, int(getattr(bodies, "Count", 0)) + 1):
+                try:
+                    body = bodies.Item(index)
+                except Exception:  # noqa: BLE001
+                    continue
+                try:
+                    if str(body.Name) == name:
+                        found.append(body)
+                except Exception:  # noqa: BLE001
+                    pass
+                for collection in ("Shapes", "Sketches", "HybridShapes"):
+                    try:
+                        scan(getattr(body, collection))
+                    except Exception:  # noqa: BLE001 - not on this build
+                        continue
+        try:
+            sets = part.HybridBodies
+        except Exception:  # noqa: BLE001
+            sets = None
+        if sets is not None:
+            for index in range(1, int(getattr(sets, "Count", 0)) + 1):
+                try:
+                    group = sets.Item(index)
+                except Exception:  # noqa: BLE001
+                    continue
+                try:
+                    if str(group.Name) == name:
+                        found.append(group)
+                except Exception:  # noqa: BLE001
+                    pass
+                for collection in ("HybridShapes", "HybridSketches"):
+                    try:
+                        scan(getattr(group, collection))
+                    except Exception:  # noqa: BLE001
+                        continue
+        return found
 
     def _set_visibility_kind(self, kind: str, show: bool) -> str:
         """Show or hide a whole class of tree bookkeeping at once.

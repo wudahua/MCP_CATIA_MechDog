@@ -480,8 +480,11 @@ class DocumentTools:
                     f"'{file_path}' ({str(exc).splitlines()[0][:120]}). The "
                     "document is open and unsaved: it has no path, so it cannot be "
                     "referenced by an assembly. CATIA refuses a first SaveAs when "
-                    "the TARGET PATH contains non-ASCII characters (the folder "
-                    "counts, not only the file name).",
+                    "the FILE NAME contains non-ASCII characters. The folder does "
+                    "not matter: measured on B30 2026-11-07, "
+                    "...\\中文目录\\probe_ascii.CATPart saved while "
+                    "...\\ascii_dir\\probe_中文.CATPart was refused, same session, "
+                    "same document type.",
                     code="SAVE_FAILED",
                     stage="execute",
                     modified=True,
@@ -597,17 +600,18 @@ class DocumentTools:
                     f"Product '{doc_name}' was created but COULD NOT BE SAVED to "
                     f"'{file_path}' ({str(exc).splitlines()[0][:200]}). The "
                     "assembly is open and unsaved: it has no path, so no component "
-                    "can reference it. CATIA refuses a first SaveAs when the "
-                    "TARGET PATH contains non-ASCII characters - and it is the "
-                    "FIRST save of this document that fails, not later ones.",
+                    "can reference it. CATIA refuses a first SaveAs when the FILE "
+                    "NAME contains non-ASCII characters (the folder does not "
+                    "matter - measured on B30 2026-11-07) - and it is the FIRST "
+                    "save of this document that fails, not later ones.",
                     code="SAVE_FAILED",
                     stage="execute",
                     modified=True,
                     next_actions=[
-                        "Save it to an ASCII path now - "
+                        "Save it to an ASCII FILE NAME now - "
                         "catia_save_document(file_path='C:/temp/asm.CATProduct') - "
-                        "then rename the file; a product that already has a path "
-                        "can be re-saved to a non-ASCII one",
+                        "then rename the file with the file system; a non-ASCII "
+                        "name is refused on this build, so do not retry one",
                     ],
                 ) from exc
         return (
@@ -629,12 +633,23 @@ class DocumentTools:
         # call on an open assembly sat there until the caller was killed).
         existing = self._document_at_path(file_path)
         if existing is not None:
-            existing.Activate()
             self.conn.last_sketch = None
             self.conn.active_body = None
-            return (f"Document '{existing.Name}' is already open - activated it "
-                    "instead of opening it again (CATIA would ask whether to reload "
-                    "it, and a reload discards unsaved edits).")
+            # 0.3.74: this branch used to read "activated it" out of the fact that
+            # Activate() returned. It returns for a document that has no window of
+            # its own too - a part being edited in context as a component of an
+            # open product - and leaves ActiveDocument on whatever was in front.
+            # So the tool reported success, the next call answered "Active
+            # document 'Drawing1.CATDrawing' exposes no 'Part'", and the two
+            # tools disagreed about the same state: catia_activate_document
+            # refused that exact part with ACTIVATION_FAILED while
+            # catia_open_document claimed it had switched (reported 2026-11-07,
+            # 70-1: four follow-up calls were rejected, all pointing back at this
+            # sentence). Same post-check, same envelope, one implementation.
+            self._activate_or_refuse(existing)
+            return (f"Document '{existing.Name}' is already open and is now the "
+                    "active document - not reopened (CATIA would ask whether to "
+                    "reload it, and a reload discards unsaved edits).")
         # CATIA's Documents.Open rejects forward-slash paths (E_FAIL);
         # normalize to native Windows separators first.
         doc = docs.Open(os.path.normpath(file_path))
@@ -936,7 +951,17 @@ class DocumentTools:
                     self.conn.product_of(doc)
                     doc_info["type"] = "CATProduct"
                 except Exception:
-                    doc_info["type"] = "Other"
+                    # A CATDrawing is neither, and until 0.3.74 it fell through to
+                    # "Other" - the same label this listing uses for a .CATfct
+                    # catalogue, so a caller filtering by type could not tell a
+                    # drawing from a feature catalogue (reported 2026-11-07,
+                    # 70-2). `Sheets` is what a DrawingDocument exposes and the
+                    # other two do not.
+                    try:
+                        self.conn.drawing_of(doc)
+                        doc_info["type"] = "CATDrawing"
+                    except Exception:
+                        doc_info["type"] = "Other"
             # Notes are COLLECTED and joined, not appended to whatever was there:
             # 0.3.37 concatenated the two with a single space, so a document that
             # is both a component and a duplicate read "... (or measure it by name
@@ -951,13 +976,23 @@ class DocumentTools:
                 # by name with document=" is exactly what the shared-name note
                 # below forbids, and for a document that is both, only the path
                 # works (reported 2026-10-29, §6.4 on the second report).
+                #
+                # It also has to be a route that WORKS. This note used to say
+                # "open it with catia_open_document", which cannot: with the
+                # product still open, that call takes its "already open" branch
+                # and returns without giving the part a window. The reporter
+                # followed it and collected four PRECONDITION_FAILED calls
+                # (reported 2026-11-07, 70-1).
                 notes.append(
                     "used by an open assembly, so it may have no window of its "
-                    "own; if catia_activate_document refuses it, open it with "
-                    "catia_open_document"
-                    + ("" if shared_count > 1
-                       else " (or measure it by name with document=)")
-                    + ".")
+                    "own; if catia_activate_document refuses it, "
+                    + ("pass this entry's PATH (the name is shared - see below) "
+                       if shared_count > 1
+                       else "measure it by name with document= ")
+                    + "- or close that assembly and open the part, because "
+                    "catia_open_document cannot give it a window while the "
+                    "assembly is open (it takes its 'already open' branch and "
+                    "stays there).")
             if shared_count > 1:
                 doc_info["name_shared_by"] = shared_count
                 notes.append(
@@ -1036,9 +1071,11 @@ class DocumentTools:
                     "Pass a name from catia_list_documents (the 'name' field, with "
                     "its extension), or open the file first with "
                     "catia_open_document - this call changed nothing",
-                    "A document that is only a component of an open assembly is "
-                    "not in this list: open it with catia_open_document, or "
-                    "measure it by name with document=",
+                    "A name that is not in this list is not open: if the part is "
+                    "only a component of an open assembly, measure it by name "
+                    "with document=, or close that assembly and open the part - "
+                    "catia_open_document cannot add a window to a part while the "
+                    "assembly that holds it is open",
                 ],
                 stage="validate",
             )
@@ -1046,66 +1083,97 @@ class DocumentTools:
         # cannot see either: the reply would name the document, and both answer to
         # that name. Say so - and say how many (reported 2026-10-28, P1).
         twins = self._twin_documents(target)
-        target.Activate()
-        # Read the state back. Activate() returning without an exception means
-        # "the call was accepted", not "the document is now active": a part that
-        # exists only as a component of an open assembly is reachable as a
-        # document object, accepts Activate(), and leaves ActiveDocument on the
-        # product - so every later call silently measured the ASSEMBLY instead of
-        # the part (reported 2026-10-24 on B32, twice, with get_inertia returning
-        # 16000 mm3 for an 8000 mm3 part as the proof).
-        self.conn.refresh_display()
-        try:
-            active = str(self.conn.app.ActiveDocument.Name)
-        except Exception:  # noqa: BLE001 - nothing active at all
-            active = ""
-        if active and active != str(target.Name):
-            window = self._window_state(str(target.Name))
-            routes = (
-                f" Two routes that work: (a) measure it by name without activating "
-                f"anything - catia_get_inertia(document='{target.Name}') or "
-                f"catia_get_bounding_box(document='{target.Name}', method='mesh'); "
-                f"(b) open the part as its own document with catia_open_document, "
-                "then activate it."
-            )
-            if window is True:
-                # It HAS its own window - so this is a focus problem, not a
-                # "component with no window" one. 0.3.19 wrote the latter here
-                # unconditionally, and 0.3.22 was still asserting it about a part
-                # the caller had just opened and closed by name (reported
-                # 2026-10-26), which sends them off to re-open a document that is
-                # already open.
-                raise CodedError(
-                    f"CATIA did not switch to '{target.Name}': ActiveDocument is "
-                    f"still '{active}'. '{target.Name}' HAS a window of its own "
-                    "(CATIA lists it), so this is a foreground/focus refusal - most "
-                    "often because an open assembly still references it, and CATIA "
-                    "refused the close that was asked for just before."
-                    + routes
-                , code="ACTIVATION_FAILED", stage="execute", modified=False)
-            if window is False:
-                raise CodedError(
-                    f"CATIA did not switch to '{target.Name}': ActiveDocument is "
-                    f"still '{active}'. '{target.Name}' has no window of its own - "
-                    "it is being edited in context as a component of an open "
-                    "product." + routes
-                , code="ACTIVATION_FAILED", stage="execute", modified=False)
-            # None: no usable window list (not exposed, or no windows at all), so
-            # neither cause can be ruled out - say both instead of picking one.
-            raise CodedError(
-                f"CATIA did not switch to '{target.Name}': ActiveDocument is "
-                f"still '{active}'. CATIA reported no usable window list, so the "
-                "cause cannot be told apart: either the part has no window of its "
-                "own (a component of an open assembly, edited in context), or "
-                "CATIA refused it the foreground while the assembly still "
-                "references it." + routes
-            , code="ACTIVATION_FAILED", stage="execute", modified=False)
+        self._activate_or_refuse(target)
         return (f"Activated document: '{target.Name}'"
                 + (f" - but {len(twins) + 1} open documents carry that name, and "
                    "this activated the first match, which may not be the one you "
                    f"mean. Tell them apart with catia_list_documents (a saved copy "
                    "shows its path) and measure by full path, or close one."
                    if twins else ""))
+
+    def _activate_or_refuse(self, target: Any) -> None:
+        """``target.Activate()``, then read the state back and refuse if it did not.
+
+        Activate() returning without an exception means "the call was accepted",
+        not "the document is now active": a part that exists only as a component
+        of an open assembly is reachable as a document object, accepts
+        Activate(), and leaves ActiveDocument on the product - so every later
+        call silently measured the ASSEMBLY instead of the part (reported
+        2026-10-24 on B32, twice, with get_inertia returning 16000 mm3 for an
+        8000 mm3 part as the proof).
+
+        One implementation because there are two entry points now: 0.3.74 put
+        catia_open_document's "already open" branch behind the same check after a
+        report where the two tools answered the same state in opposite ways
+        (2026-11-07, 70-1).
+        """
+        target.Activate()
+        self.conn.refresh_display()
+        try:
+            active = str(self.conn.app.ActiveDocument.Name)
+        except Exception:  # noqa: BLE001 - nothing active at all
+            active = ""
+        if active and active != str(target.Name):
+            raise self._activation_refusal(target, active)
+
+    def _activation_refusal(self, target: Any, active: str) -> CodedError:
+        """The ACTIVATION_FAILED envelope for a document that is not in front.
+
+        Three variants, because the cause decides the fix and CATIA does not
+        report it: a window that exists (a focus refusal) is repaired by finding
+        the window, a document with NO window is repaired by closing the product
+        that holds it first - and when the window list cannot be read, both are
+        said instead of one being picked.
+        """
+        window = self._window_state(str(target.Name))
+        # 0.3.74: route (b) used to say "open the part as its own document with
+        # catia_open_document, then activate it" - on a path that CANNOT work
+        # while the product is open, because catia_open_document takes the
+        # "already open" branch and cannot give the part a second window. The
+        # reporter followed it, got the same refusal, and the advice was the only
+        # thing they had (2026-11-07, 70-1).
+        routes = (
+            f" Two routes that work: (a) measure it by name without activating "
+            f"anything - catia_get_inertia(document='{target.Name}') or "
+            f"catia_get_bounding_box(document='{target.Name}', method='mesh'); "
+            f"(b) close what holds it, then open it again - "
+            f"catia_close_document on the product that references "
+            f"'{target.Name}', then catia_open_document with its path. A product "
+            f"that is open keeps its parts windowless, so opening the part while "
+            f"it is open changes nothing."
+        )
+        if window is True:
+            # It HAS its own window - so this is a focus problem, not a
+            # "component with no window" one. 0.3.19 wrote the latter here
+            # unconditionally, and 0.3.22 was still asserting it about a part
+            # the caller had just opened and closed by name (reported
+            # 2026-10-26), which sends them off to re-open a document that is
+            # already open.
+            return CodedError(
+                f"CATIA did not switch to '{target.Name}': ActiveDocument is "
+                f"still '{active}'. '{target.Name}' HAS a window of its own "
+                "(CATIA lists it), so this is a foreground/focus refusal - most "
+                "often because an open assembly still references it, and CATIA "
+                "refused the close that was asked for just before."
+                + routes,
+                code="ACTIVATION_FAILED", stage="execute", modified=False)
+        if window is False:
+            return CodedError(
+                f"CATIA did not switch to '{target.Name}': ActiveDocument is "
+                f"still '{active}'. '{target.Name}' has no window of its own - "
+                "it is being edited in context as a component of an open "
+                "product." + routes,
+                code="ACTIVATION_FAILED", stage="execute", modified=False)
+        # None: no usable window list (not exposed, or no windows at all), so
+        # neither cause can be ruled out - say both instead of picking one.
+        return CodedError(
+            f"CATIA did not switch to '{target.Name}': ActiveDocument is "
+            f"still '{active}'. CATIA reported no usable window list, so the "
+            "cause cannot be told apart: either the part has no window of its "
+            "own (a component of an open assembly, edited in context), or "
+            "CATIA refused it the foreground while the assembly still "
+            "references it." + routes,
+            code="ACTIVATION_FAILED", stage="execute", modified=False)
 
     def _window_state(self, name: str) -> bool | None:
         """True/False when this build can tell whether ``name`` has a window.

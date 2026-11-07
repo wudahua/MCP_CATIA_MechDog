@@ -36,6 +36,7 @@ import re
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
+from catia_mcp.names import unescaped_name_note
 from catia_mcp.results import (
     ArgumentOutOfRange,
     ArgumentRejected,
@@ -1130,6 +1131,7 @@ class DraftingTools:
         return (
             f"View '{view.Name}' of '{source}' added to sheet "
             f"'{sheet.Name}' ({projection}) and updated."
+            + unescaped_name_note(str(view.Name))
         )
 
     # CatDimType is 0-based in R20 (enum_CatDimType, 21 values, verified
@@ -1554,6 +1556,7 @@ class DraftingTools:
         return (
             f"Projection view '{view.Name}' ({direction}) of '{parent.Name}' "
             f"added to sheet '{sheet.Name}' ({method} layout) and updated."
+            + unescaped_name_note(str(view.Name))
         )
 
     def _section_view(self, args: dict[str, Any]) -> str:
@@ -1589,6 +1592,7 @@ class DraftingTools:
         return (
             f"{section_type} '{view.Name}' from '{parent.Name}' added to sheet "
             f"'{sheet.Name}' ({profile_type}, {len(profile) // 2} profile points) and updated."
+            + unescaped_name_note(str(view.Name))
         )
 
     def _detail_view(self, args: dict[str, Any]) -> str:
@@ -1613,6 +1617,7 @@ class DraftingTools:
         return (
             f"Detail view '{view.Name}' of '{parent.Name}' (r={radius} mm at "
             f"({cx}, {cy}), {scale_note}) added."
+            + unescaped_name_note(str(view.Name))
         )
 
     def _add_text(self, args: dict[str, Any]) -> str:

@@ -2,6 +2,117 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.74] — 2026-11-07 · "activated it" was a guess, and a datum plane nobody could turn off
+
+Two reports this round: a new one against 0.3.70 (two defects), and the re-check
+appended to the 0.3.73 one, which had left three items at "未确认，仍需复现".
+Every item below was reproduced on B30 before it was changed, except the one
+described as not reproducing.
+
+**`catia_open_document` reported an activation it never got.** For a file CATIA
+already holds, the tool calls `Activate()` and answered "already open - **activated
+it**". `Activate()` also returns without an error for a document that has **no
+window of its own** — a part being edited in context as a component of an open
+product — and leaves `ActiveDocument` where it was. So the caller was told the
+switch had happened, the next tool answered `ActiveDocument 'Drawing1.CATDrawing'
+exposes no 'Part'`, and `catia_activate_document` **refused the same part** with
+`ACTIVATION_FAILED` in the same state: two tools, one fact, opposite answers
+(reported 2026-11-07, 70-1 — four follow-up calls were rejected, all pointing back
+at that sentence).
+
+The read-back moved into one place (`_activate_or_refuse` / `_activation_refusal`)
+that both tools now use, so the "already open" branch cannot succeed where the
+other refuses.
+
+**And the advice those tools printed could not work.** Both `ACTIVATION_FAILED`
+route (b) and the `catia_list_documents` note said *"open it with
+catia_open_document"* — which, while the product is open, takes the "already open"
+branch and cannot give the part a window. The route now says what actually works:
+measure it by name (`document=`), or close the product and open the part again.
+The `DOCUMENT_NOT_FOUND` next action carried the same dead end and says the same
+thing now.
+
+**A CATDrawing was typed `Other`.** `catia_list_documents` decided the type by
+trying `Part`, then `Product`, then giving up — and a drawing has neither, so it
+landed on `Other`, the label this listing also uses for a `.CATfct` catalogue. A
+drawing now answers `CATDrawing` (`DrawingDocument.Sheets` is the probe, and the
+other two document types do not expose it) and the two can be told apart
+(reported 2026-11-07, 70-2).
+
+**The frame sketch's datum plane: visible, four of them with one name, and not
+findable by name at all.** `create_sketch(plane={'type':'frame', …})` builds a
+plane from three points and inserts all four **into the solid body** (a plane in a
+geometrical set poisons the fillet on the pad built on it). Nothing hid them, so a
+finished part carried a white diamond plus three crosses drawn over the solid —
+the 2026-11-06 report read them as geometry defects and could not remove them:
+
+* `set_visibility(kind='construction'/'sketch'/'datum_plane', show=false)`
+  returned success and left the picture byte-identical — that walk covers sketches
+  and the three origin planes, and these live in `body.HybridShapes`;
+* hiding by name answered `ARGUMENT_REJECTED: No tree node named '平面.1'` —
+  the by-name walk did not look in `body.HybridShapes` either, so the tool could
+  not see features **this server had created**;
+* and the name it would have needed was the wrong one anyway: every frame plane was
+  called `Datum_frame`, so P04 of that build holds **four** features with one
+  name, and `Collection.Item(name)` returns the first and says nothing about the
+  rest.
+
+Now: the plane gets a free name (`Datum_frame`, `Datum_frame.2`, …), the plane and
+its three points are **hidden where they are created**, and the sketch reply names
+them so `catia_set_visibility(name='Datum_frame', show=true)` brings one back. The
+by-name walk covers hybrid shapes inside solid bodies, and `set_visibility` sets
+**every** node that answers to the name and says how many others there were.
+
+Measured on B30 (`scripts/b30_v0374_audit.py`, 15/15): after `create_sketch`
+`GetShow()[1]` reads **1** for all four features; a 40×20 pad on that hidden plane
+still builds **4000.0 mm3**; `set_visibility(name='Datum_frame', show=true)` reads
+back **0**. On the reporter's own P04 (four same-named planes, read back one by
+one): hide → `[1,1,1,1]`, show → `[0,0,0,0]`, reply "and 3 other tree node(s) that
+carry the same name - all of them were set".
+
+**The SaveAs message blamed the folder, and the folder is innocent.** 0.3.71 wrote
+"the folder counts, not only the file name" from the 2026-11-06 report; the
+package's own `PathNotSupported` docstring has said the opposite since
+2026-10-31, so two messages disagreed about one limit. Measured on B30 in all four
+combinations (`scripts/b30_v0374_paths.py`, same session, same document type):
+
+| folder | file name | result |
+|---|---|---|
+| ASCII | ASCII | saved |
+| ASCII | 中文 | **REFUSED** (DISP_E_EXCEPTION) |
+| 中文 | ASCII | **saved** |
+| 中文 | 中文 | **REFUSED** |
+
+So the limit is the **file name**, exactly as the first measurement said; the
+message in `tools/document.py` and the two `dialogs.py` next-actions were corrected
+to match. The reporter's second step — "an ASCII name in the Chinese folder also
+fails" — does not reproduce through this package either
+(`scripts/b30_v0374_zh_save.py`: the same call answers "Document saved as:
+…\中文目录\probe_ascii.CATPart"). Their first step, the silent one, was already
+fixed in 0.3.71: `catia_new_part` now raises `SAVE_FAILED` instead of returning
+`ok: true` with a sentence inside.
+
+**A name holding an undecoded escape is now flagged.** `\u4e3b\u89c6\u56fe`
+arrived as six literal characters, CATIA created a view with backslashes in its
+name, and every later error echoed them back (reported 2026-11-07, observation 4).
+The four view-creating tools now add a note naming the characters those codes
+spell. Ordinary Windows paths (`F:\Users\…`) are not flagged — the match requires
+the full `\uXXXX` shape.
+
+**`close_sketch`'s gap warning was truncated where it mattered.** The coordinate
+list came first, so a client cutting the message at ~1200 characters threw away
+the only actionable part (the rounding-artefact advice). The summary and the
+advice now come first, the coordinates last.
+
+**Not done, and why.** `data.breaks[]` (the report's third suggestion) would change
+`catia_close_sketch`'s reply from text to a JSON envelope for every caller — the
+reordering above addresses the truncation without that. `catia_screenshot`'s
+`width`/`height` descriptions already say ADVISORY and "the reply reports what was
+written" (the round's first observation); a request that differs is ignored, not
+scaled.
+
+`1190 → 1205 tests`.
+
 ## [0.3.73] — 2026-11-07 · the last two open items from 2026-11-06
 
 Both were left open on purpose in 0.3.71/0.3.72 and recorded as such; this closes

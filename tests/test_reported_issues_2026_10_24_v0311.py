@@ -67,13 +67,22 @@ def test_activate_document_reads_the_state_back():
     On B32 a part that exists only as a component of an open product accepted the
     call and left ActiveDocument on the product, so the next get_inertia returned
     the ASSEMBLY volume (16000 for an 8000 mm3 part) with no error (2026-10-24).
+
+    0.3.74 moved the read-back into ``_activate_or_refuse`` so that
+    catia_open_document's "already open" branch can use the same check - the
+    report of 2026-11-07 was exactly that branch claiming "activated it" for a
+    document the other tool refused to activate.
     """
     from catia_mcp.tools.document import DocumentTools
 
-    source = inspect.getsource(DocumentTools._activate_document)
+    source = inspect.getsource(DocumentTools._activate_or_refuse)
     assert "ActiveDocument" in source
-    assert "did not switch" in source
-    assert "get_inertia(document=" in source
+    assert "_activation_refusal" in source
+    refusal = inspect.getsource(DocumentTools._activation_refusal)
+    assert "did not switch" in refusal
+    assert "get_inertia(document=" in refusal
+    # and the tool that reports "already open" goes through it
+    assert "_activate_or_refuse" in inspect.getsource(DocumentTools._open_document)
 
 
 # ---------------------------------------------- document= resolves a component

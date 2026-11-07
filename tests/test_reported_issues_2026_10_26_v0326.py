@@ -273,7 +273,9 @@ def test_opening_an_already_open_document_activates_it_instead(tmp_path):
 
     tools = DocumentTools(connection=None)
     tools.conn = SimpleNamespace(ensure_connected=lambda: None, documents=_Docs(),
-                                 last_sketch="stale", active_body="stale")
+                                 last_sketch="stale", active_body="stale",
+                                 refresh_display=lambda: None,
+                                 app=SimpleNamespace(ActiveDocument=doc))
     reply = tools._open_document(str(path))
 
     assert opened["count"] == 0, "must not call Documents.Open on an open file"

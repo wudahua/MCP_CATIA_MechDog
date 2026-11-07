@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.73** · [what changed](CHANGELOG.md) ·
+**0.3.74** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1179,6 +1179,24 @@ hand-dimensioned at all - its curves are not addressable through automation, onl
 `GenerateDimensions` reaches them - and **`Face.N` is session-scoped**. The same
 plate gave its hole's cylinder at `Face.1` in one build and at `Face.7` in another,
 so list faces and use the index immediately.
+
+**0.3.74: "already open - activated it" was a guess.** `catia_open_document`
+called `Activate()` and reported success. `Activate()` also returns for a document
+with **no window of its own** — a part edited in context as a component of an open
+product — and leaves `ActiveDocument` where it was, so the next tool answered
+"ActiveDocument 'Drawing1.CATDrawing' exposes no 'Part'" while
+`catia_activate_document` refused the very same part. Both tools now share one
+read-back, and the advice they print says what works (close the product, or
+measure by `document=`) instead of pointing at the call that cannot help.
+
+The frame sketch's datum plane is no longer a white diamond over the solid: it
+gets a free name, is hidden when created, and `catia_set_visibility` can find it
+afterwards — the by-name walk used to skip `body.HybridShapes`, where these
+features live, and every frame plane was called `Datum_frame` (the reporter's P04
+holds four). `set_visibility` sets every node answering to the name and says how
+many others there were. A `CATDrawing` also stopped being typed `Other` in
+`catia_list_documents`, and the SaveAs message stopped blaming the folder: only
+the **file name** matters, measured in all four combinations.
 
 **0.3.73 closed the last two items of the 2026-11-06 batch.** `matches_request`
 was `deviation < 1e-6`, which is a bit-equality test: a placement built from

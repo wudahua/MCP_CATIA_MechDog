@@ -221,6 +221,21 @@ class PathNotSupported(CodedError):
     is told "could not be saved", which reads like a lock or a permission problem
     and invites a retry that cannot work. ``stage`` is validate: nothing was
     written, and CATIA was not asked to try.
+
+    Re-measured on B30 2026-11-07 in all four combinations, because a 2026-11-06
+    report concluded the opposite ("父目录含中文同样失败") and the message in
+    ``tools/document.py`` had been changed to agree with it
+    (``scripts/b30_v0374_paths.py``):
+
+        ascii dir   / ascii name    -> saved
+        ascii dir   / CHINESE name  -> REFUSED (DISP_E_EXCEPTION)
+        CHINESE dir / ascii name    -> saved
+        CHINESE dir / CHINESE name  -> REFUSED (DISP_E_EXCEPTION)
+
+    The reporter's step "ASCII name in the Chinese folder also failed" does not
+    reproduce through this package either (``scripts/b30_v0374_zh_save.py``: the
+    same call answers "Document saved as: ...\\中文目录\\probe_ascii.CATPart").
+    Two variables, one of them cleared - the folder is not one of the causes.
     """
 
     code = "PATH_NOT_ASCII"

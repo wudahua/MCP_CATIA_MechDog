@@ -705,17 +705,96 @@ class SketcherTools:
         # report of a frame pad that creates and never updates is the same fault
         # one step earlier.
         part.InWorkObject = body
+        features = []
         points = []
         for coords in corners:
             point = factory.AddNewPointCoord(*coords)
             body.InsertHybridShape(point)
             part.UpdateObject(point)
+            features.append(point)
             points.append(part.CreateReferenceFromObject(point))
         plane_feature = factory.AddNewPlane3Points(points[0], points[1], points[2])
-        plane_feature.Name = "Datum_frame"
+        # A name of its own, not the same string for every frame in the body. On
+        # B30, P04 of the 2026-11-06 build held FOUR features called
+        # 'Datum_frame': the name is the only handle a caller has, and
+        # Collection.Item(name) cannot tell four identical names apart.
+        plane_name = self._free_feature_name(body, "Datum_frame")
+        plane_feature.Name = plane_name
         body.InsertHybridShape(plane_feature)
         part.UpdateObject(plane_feature)
-        return part.CreateReferenceFromObject(plane_feature)
+        features.append(plane_feature)
+        # Hide the scaffolding. A datum plane and its three points are drawn as a
+        # white diamond and three crosses ON TOP of the solid, and a finished
+        # part's screenshot then reads as if it had geometry defects. The
+        # 2026-11-07 report could not get rid of them at all: kind='construction'
+        # /'sketch'/'datum_plane' returned success and left the picture
+        # byte-identical, because that walk covers sketches and the three origin
+        # planes and this plane lives in the body's HybridShapes; hiding by name
+        # answered ARGUMENT_REJECTED for '平面.1' (its name, on a Chinese build,
+        # is the one this server set - and there were four of them). So the
+        # features are hidden where they are created, and the reply names them so
+        # catia_set_visibility can bring one back.
+        hidden = self._hide_datum(part, features)
+        note = (f"; its datum plane '{plane_name}' and the 3 construction points "
+                "behind it are hidden (show one again with "
+                f"catia_set_visibility(name='{plane_name}', show=true))"
+                if hidden else
+                "; its datum plane and the 3 construction points behind it stayed "
+                "VISIBLE - this build refused the visibility call, so hide them "
+                f"with the CATIA UI (catia_set_visibility(name='{plane_name}') "
+                "may work once the part has been saved and reopened)")
+        return part.CreateReferenceFromObject(plane_feature), note
+
+    @staticmethod
+    def _free_feature_name(body: Any, base: str) -> str:
+        """``base``, or the first free ``base.N``, inside one body."""
+        taken: set[str] = set()
+        for collection in ("Shapes", "Sketches", "HybridShapes"):
+            try:
+                items = getattr(body, collection)
+            except Exception:     # noqa: BLE001 - a body without that collection
+                continue
+            for index in range(1, int(getattr(items, "Count", 0)) + 1):
+                try:
+                    taken.add(str(items.Item(index).Name).casefold())
+                except Exception:  # noqa: BLE001 - one unreadable member
+                    continue
+        if base.casefold() not in taken:
+            return base
+        suffix = 2
+        while f"{base}.{suffix}".casefold() in taken:
+            suffix += 1
+        return f"{base}.{suffix}"
+
+    def _hide_datum(self, part: Any, features: list[Any]) -> bool:
+        """Hide datum features in the part's own document; True when it took.
+
+        ``SetShow`` is 0 = show / 1 = hide on B30 (2 is accepted and does
+        nothing, which is how a set of GSD surfaces once stayed on screen while
+        the tool reported hiding them). The selection is the DOCUMENT's, so this
+        works whoever is in front.
+        """
+        try:
+            selection = self.conn.active_document.Selection
+        except Exception:  # noqa: BLE001 - no selection, nothing to hide with
+            return False
+        done = 0
+        try:
+            for feature in features:
+                try:
+                    selection.Clear()
+                    selection.Add(feature)
+                    selection.VisProperties.SetShow(1)
+                    done += 1
+                except Exception:  # noqa: BLE001 - one feature, not the rest
+                    continue
+        finally:
+            try:
+                selection.Clear()
+            except Exception:  # noqa: BLE001 - a selection left behind
+                pass
+        self.conn.refresh_display()
+        return done > 0
 
     @staticmethod
     def _describe_frame(plane: dict[str, Any]) -> str:
@@ -757,8 +836,8 @@ class SketcherTools:
         kind = str(plane.get("type", "")).strip().lower()
 
         if kind == "frame":
-            return (self._frame_plane(part, body, plane),
-                    self._describe_frame(plane))
+            reference, datum_note = self._frame_plane(part, body, plane)
+            return reference, self._describe_frame(plane) + datum_note
 
         if kind == "face":
             index = plane.get("index")
@@ -1246,10 +1325,18 @@ class SketcherTools:
             lines.append("unpaired at " + ", ".join(
                 f"({x:.4f}, {y:.4f})" for x, y in dangling))
         tiny = [p for p in pairs if p[0] <= self._NEAR_TOL]
+        widest = max(gap for gap, _, _ in pairs)
+        smallest = min(gap for gap, _, _ in pairs)
+        # The summary and the advice come FIRST, the coordinate list last. The
+        # list is what makes this message long enough to be cut off by a client
+        # (1242 chars in the 2026-11-06 report), and cutting the tail used to
+        # throw away the only actionable part - the sentence about rounding
+        # artefacts - leaving a wall of coordinates that "cannot be worked
+        # with" (reported 2026-11-06, P1-2, third bullet).
         text = (
             f" WARNING: the profile is not closed - {len(loose)} loose "
-            f"endpoint(s) in {len(pairs) + (1 if dangling else 0)} break(s): "
-            + "; ".join(lines) + "."
+            f"endpoint(s) in {len(pairs) + (1 if dangling else 0)} break(s); "
+            f"smallest gap {smallest:.4f} mm, widest {widest:.4f} mm."
         )
         if tiny:
             # It used to say "CATIA still refuses the feature" as a fact. It is
@@ -1268,6 +1355,9 @@ class SketcherTools:
                 "exact circle-circle intersection at a junction, and a line end "
                 "projected onto the arc rather than recomputed)."
             )
+        text += (
+            " The gaps: " + "; ".join(lines) + "."
+        )
         text += (
             " (Computed from the coordinates passed to the sketch tools; "
             "CATIA's own points cannot be read back through automation, so a "

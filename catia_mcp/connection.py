@@ -603,13 +603,11 @@ class CATIAConnection:
                 return getattr(candidate, name)
             except Exception:
                 continue
+        noun = {"Part": "Part", "Product": "Assembly (Product)",
+                "Sheets": "Drawing"}.get(name, name)
         raise PreconditionRejected(
             f"Active document '{getattr(doc, 'Name', '?')}' exposes no '{name}'. "
-            + (
-                "Open or create a Part document first."
-                if name == "Part"
-                else "Open or create an Assembly (Product) document first."
-            )
+            f"Open or create a {noun} document first."
         )
 
     def part_of(self, doc: Any) -> Any:
@@ -619,6 +617,19 @@ class CATIAConnection:
     def product_of(self, doc: Any) -> Any:
         """The Product behind a ProductDocument, robust to the gen_py cache state."""
         return self._interface(doc, "Product")
+
+    def drawing_of(self, doc: Any) -> Any:
+        """``doc`` itself if it is a DrawingDocument, a refusal otherwise.
+
+        The probe for "is this a drawing": a DrawingDocument exposes ``Sheets``
+        and neither a PartDocument nor a ProductDocument does (a
+        DrawingDocument is the one document type with no ``Part`` and no
+        ``Product``, which is why ``catia_list_documents`` labelled every
+        drawing "Other" - the same value it uses for a .CATfct catalogue - until
+        0.3.74, reported 2026-11-07, 70-2).
+        """
+        self._interface(doc, "Sheets")
+        return doc
 
     def get_active_part_body(self) -> Any:
         """Get the solid body new features should go into.
