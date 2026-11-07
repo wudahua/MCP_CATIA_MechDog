@@ -197,12 +197,16 @@ def save_as(doc, path: str, tries: int = 6, wait: float = 0.6) -> str:
     if not name.isascii():
         raise PathNotSupported(
             "CATIA cannot SaveAs a non-ASCII file name on this build - use an "
-            "ASCII name and rename the file afterwards.\n"
+            "ASCII name.\n"
             f"  path: {target}\n"
             "  measured on V5-6R2020 B30: the same folder saved "
             "'ascii_probe.CATPart' and failed '中文探针.CATPart' with "
             "DISP_E_EXCEPTION, while a non-ASCII FOLDER ('中文目录\\probe.CATPart') "
             "saved normally - the limit is the file name, not the path.\n"
+            "  Renaming an ASCII save to a Chinese name is NOT a way out: this "
+            "build cannot OPEN such a name either (Documents.Open refuses it and "
+            "leaves a modal error dialog, measured 2026-11-07). Use an ASCII file "
+            "name and put the Chinese wording in the part number.\n"
             "  CATIA's own 'Save As' dialog rejects the same name with "
             "'上述文件名无效' / 'the above file name is invalid' (screenshot "
             "evidence, 2026-11-07), which is the same limit seen through the UI."
@@ -268,8 +272,9 @@ def save(doc, tries: int = 3) -> str:
             "This document already has a file, so the path is not the problem: "
             "the file is most likely read-only or held by another program. Free "
             "it and retry, or write a copy elsewhere (catia_save_as_copy)",
-            "If its file NAME is non-ASCII, this build cannot write it at all - "
-            "copy to an ASCII name (catia_save_as_copy) and rename afterwards",
+            "If its file NAME is non-ASCII, this build cannot write it at all, "
+            "and it cannot open such a name either - write a copy under an ASCII "
+            "name (catia_save_as_copy) and keep that one",
             "The document is still open and unsaved either way - nothing was lost",
         ],
     )

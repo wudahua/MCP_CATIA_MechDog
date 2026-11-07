@@ -2,6 +2,50 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.75] — 2026-11-07 · the file name is refused in both directions
+
+A measurement made while answering "should we build the ASCII-staging fallback
+the 2026-11-07 report suggested". The answer is no, and the reason corrects
+advice this package has been giving since 0.3.71.
+
+**A non-ASCII file NAME cannot be opened either, only saved.** Measured on B30
+(`scripts/b30_v0374_zh_copy.py`, plus an isolating run):
+
+| step | result |
+|---|---|
+| `catia_save_as_copy` → `F:\…\中文目录\副本.CATPart` | the copy is written, 57 022 B |
+| `Documents.Open` on that file | **REFUSED**, `DISP_E_EXCEPTION` |
+| `Documents.Open` on an ASCII name, same folder | opened |
+
+So this build's document layer is ANSI in **both** directions, and the copy the
+fallback would produce is a file CATIA cannot read back. What makes the refusal
+worse than an error message: it pops a modal **突发事件报告** window on the
+automation thread, so the call does not just fail - the next tool call finds a
+dialog in front (the reporter photographed exactly that, at
+`F:\catia_probe_v0374\副本.CATPart`).
+
+Which means four messages were telling callers to produce an unusable file:
+
+    "save it to an ASCII path, then rename the file afterwards -
+     the .CATPart does not care what it is called, only CATIA's SaveAs does"
+
+That sentence is gone from `results.PathNotSupported`, `dialogs.save_as`,
+`dialogs.save`, `catia_new_part` and `catia_new_product`. They now say: keep the
+**file name** ASCII (the folder may be Chinese, that half still holds), and put
+the Chinese wording in the **part number** - which is what the tree and the BOM
+show - or in a parameter. A test scans the package for the old phrasing and fails
+if it comes back.
+
+**`catia_open_document` refuses a non-ASCII file name before CATIA sees it**, for
+the same reason `save_as` refuses one: prevention is the only way to keep the
+modal dialog off the worker thread. Verified on B30 - the call answers
+`PATH_NOT_ASCII`, no document is opened, no dialog is left behind, and the
+session still holds its 12 documents afterwards. The message names the
+measurement and says the check is what to remove if a build ever accepts such a
+name.
+
+`1206 → 1213 tests`.
+
 ## [0.3.74] — 2026-11-07 · "activated it" was a guess, and a datum plane nobody could turn off
 
 Two reports this round: a new one against 0.3.70 (two defects), and the re-check

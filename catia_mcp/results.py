@@ -236,15 +236,33 @@ class PathNotSupported(CodedError):
     reproduce through this package either (``scripts/b30_v0374_zh_save.py``: the
     same call answers "Document saved as: ...\\中文目录\\probe_ascii.CATPart").
     Two variables, one of them cleared - the folder is not one of the causes.
+
+    And the name is refused in BOTH directions, which is why the advice below
+    does not say "rename it afterwards" any more (measured 2026-11-07,
+    ``scripts/b30_v0374_zh_copy.py``):
+
+        copy of a saved part -> F:\\...\\副本.CATPart   file exists, 57 022 B
+        Documents.Open(that file)                     REFUSED, DISP_E_EXCEPTION
+        Documents.Open(ASCII control, same folder)    opened
+
+    So a Chinese-named .CATPart is a file this build cannot open - renaming an
+    ASCII save is not a workaround, it produces an unopenable file and every
+    attempt to open it leaves a modal "突发事件报告" dialog on the automation
+    thread. That is also why the "stage ASCII, copy back at the end" fallback a
+    report proposed is not implemented: it would deliver exactly those files.
     """
 
     code = "PATH_NOT_ASCII"
     modified = False
     stage = "validate"
     next_actions = [
-        "Save under an ASCII file name in the folder you want, then rename the "
-        "file afterwards - the .CATPart does not care what it is called, only "
-        "CATIA's own SaveAs does",
+        "Save under an ASCII FILE NAME in the folder you want. Renaming it "
+        "afterwards does NOT work: this build cannot open a non-ASCII name "
+        "either, so the renamed file would be unusable (and opening it leaves "
+        "a modal error dialog)",
+        "Put the Chinese wording where CATIA stores text properly - the part "
+        "number (catia_set_part_number) or a parameter/description - because "
+        "the file name, the tree caption and the BOM are three different things",
     ]
 
 

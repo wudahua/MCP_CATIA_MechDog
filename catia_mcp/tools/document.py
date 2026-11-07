@@ -15,6 +15,7 @@ from catia_mcp.results import (
     ArgumentRejected,
     CodedError,
     ComponentNotFound,
+    PathNotSupported,
     PreconditionRejected,
 )
 
@@ -492,10 +493,15 @@ class DocumentTools:
                     stage="execute",
                     modified=True,
                     next_actions=[
-                        "Save it to an ASCII path now - "
-                        "catia_save_document(file_path='C:/temp/part.CATPart') - "
-                        "then rename the file afterwards; the .CATPart does not "
-                        "care what it is called, only CATIA's SaveAs does",
+                        "Save it to an ASCII FILE NAME now - "
+                        "catia_save_document(file_path='C:/temp/part.CATPart'). "
+                        "Do NOT rename it to a Chinese name afterwards: on this "
+                        "build CATIA cannot OPEN such a file either (measured "
+                        "2026-11-07 - a Chinese name in an ASCII folder is "
+                        "refused by Documents.Open, and the attempt leaves a "
+                        "modal error dialog). Put the Chinese wording in the "
+                        "part number instead (catia_set_part_number) - that is "
+                        "what the tree and the BOM show",
                         "The part in memory is complete: nothing else needs to be "
                         "rebuilt",
                     ],
@@ -612,9 +618,12 @@ class DocumentTools:
                     modified=True,
                     next_actions=[
                         "Save it to an ASCII FILE NAME now - "
-                        "catia_save_document(file_path='C:/temp/asm.CATProduct') - "
-                        "then rename the file with the file system; a non-ASCII "
-                        "name is refused on this build, so do not retry one",
+                        "catia_save_document(file_path='C:/temp/asm.CATProduct'). "
+                        "Renaming it to a Chinese name afterwards does not help: "
+                        "CATIA cannot open such a file on this build either "
+                        "(measured 2026-11-07). The Chinese wording belongs in "
+                        "the root product's part number, which is what the BOM "
+                        "and the tree show",
                     ],
                 ) from exc
         return (
@@ -629,6 +638,27 @@ class DocumentTools:
     def _open_document(self, file_path: str) -> str:
         self.conn.ensure_connected()
         docs = self.conn.documents
+        # Refuse a non-ASCII FILE NAME before CATIA sees it. Measured on B30
+        # 2026-11-07 (scripts/b30_v0374_zh_copy.py): Documents.Open on
+        # '...\副本.CATPart' raises DISP_E_EXCEPTION - and pops a modal "突发事件
+        # 报告" window on the automation thread, so the failure costs more than
+        # the error: the next tool call finds a dialog in front. The same file
+        # with an ASCII name in the same folder opens. This build's document
+        # layer is ANSI in BOTH directions, which is also why the "rename it
+        # afterwards" advice was wrong.
+        name = os.path.basename(str(file_path))
+        if name and not name.isascii():
+            raise PathNotSupported(
+                f"CATIA cannot open a document whose FILE NAME is non-ASCII: "
+                f"'{name}'. Measured on B30 2026-11-07 - the same file with an "
+                "ASCII name in the same folder opens normally, and the non-ASCII "
+                "name is refused by Documents.Open with a modal error dialog on "
+                "top. Nothing was opened. Keep .CATPart/.CATProduct file names "
+                "ASCII (the FOLDER may be Chinese) and put the Chinese wording "
+                "in the part number - that is what the tree and the BOM show. If "
+                "a build ever accepts such a name, this check is the thing to "
+                "remove - report it rather than working around it."
+            )
         # Opening a file CATIA already holds raises "the document is already open,
         # reopen?" - a modal on the automation thread, and its Yes answer RELOADS
         # the document, discarding unsaved edits. Answering it is not our call, so

@@ -401,6 +401,11 @@ def test_a_non_ascii_file_name_is_refused_before_catia_is_asked():
         ascii_probe.CATPart        -> saved
         中文探针.CATPart           -> DISP_E_EXCEPTION, six attempts, modal dialog
         中文目录\probe.CATPart     -> saved
+
+    0.3.75: the message no longer ends with "rename the file afterwards". That
+    advice was measured wrong on 2026-11-07 - CATIA cannot OPEN a non-ASCII name
+    either (Documents.Open refuses it and leaves a modal dialog), so a renamed
+    file is unusable. It says where the Chinese wording belongs instead.
     """
     from catia_mcp.dialogs import save_as
     from catia_mcp.results import PathNotSupported
@@ -410,7 +415,8 @@ def test_a_non_ascii_file_name_is_refused_before_catia_is_asked():
     assert caught.value.code == "PATH_NOT_ASCII"
     assert caught.value.stage == "validate"
     assert caught.value.modified is False
-    assert "rename the file afterwards" in str(caught.value)
+    assert "cannot OPEN such a name either" in str(caught.value)
+    assert "rename the file afterwards" not in str(caught.value)
 
 
 def test_a_non_ascii_folder_is_not_refused():
