@@ -527,11 +527,20 @@ class AppearanceTools:
                 + (f", {generated} generated" if generated else "")
                 + "):")
         notes = []
+        # The count is taken once per GROUP, and a group is one instance when
+        # per_instance=true and one part otherwise - so the label has to follow
+        # the mode. 0.3.80 wrote "part(s)" unconditionally, which said
+        # "25 part(s) were at the assembly default" about 11 parts / 25
+        # instances in the same sentence that had just declared "one per
+        # INSTANCE" (reported 2026-11-08, P3-3).
+        unit = "instance(s)" if per_instance else "part(s)"
         if at_default:
-            notes.append(f"{at_default} part(s) were at the assembly default "
-                         f"{hex_of(UNCOLOURED_INSTANCE)} (no colour set)")
+            notes.append(f"{at_default} {unit} were at the assembly default "
+                         f"({hex_of(UNCOLOURED)} or {hex_of(UNCOLOURED_INSTANCE)} "
+                         "- no colour of their own)")
         if already:
-            notes.append(f"{already} already carried a colour, which was overwritten")
+            notes.append(f"{already} {unit} already carried a colour, which was "
+                         "overwritten")
         if failures:
             notes.append("did NOT take: " + "; ".join(failures[:8])
                          + (f" and {len(failures) - 8} more"
@@ -559,6 +568,12 @@ class AppearanceTools:
                 "were_coloured": already,
                 "failed": failures,
                 "default_colour": hex_of(UNCOLOURED_INSTANCE),
+                # Both values count as "no colour of their own" - see
+                # catia_mcp.colours.is_default. A caller that wants to test its
+                # own read-back should compare against this list, not against
+                # default_colour alone.
+                "default_appearances": [hex_of(UNCOLOURED),
+                                        hex_of(UNCOLOURED_INSTANCE)],
                 "mapping": mapping,
             },
             modified=True,

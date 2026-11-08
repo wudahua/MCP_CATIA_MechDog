@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.80** · [what changed](CHANGELOG.md) ·
+**0.3.81** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1631,13 +1631,15 @@ Place the result with `catia_get_component_transform`.
   with the set shown and 10 hidden. Since 0.3.50 the reply carries `box_scope`
   (no sets / all hidden / some shown) and warns only when a set is actually shown;
   hide the sets (or use `method='vertices'`) before trusting the numbers.
-* **`rect_pattern`'s axis arguments are unreliable** — measured 2026-11-02:
-  `dir1_axis="x"` with 3 copies at 20 mm puts them along -Y, and `dir2_axis="y"`
-  puts them along -X; the reply's "axis x+ -> dir1" is not what happens. The
-  direction a plane reference produces depends on its partner, so no table of
-  plane names fixes it. Read the body's bounding box after the call and correct
-  with `reverse_dir1` / `reverse_dir2`, or exchange the spacings. `circ_pattern`
-  and `user_pattern` were both measured on the same day and are exact.
+* **`rect_pattern`'s directions are measured, and they are not the obvious
+  ones.** Omit all four axis arguments and this build drives dir1 along **−Y** and
+  dir2 along **−X** (the origin planes are PlaneYZ and PlaneZX). `dir1_axis='x'`
+  does move the copies to +X, and `reverse_dir1` / `reverse_dir2` flip exactly the
+  slot they name. Measured 2026-11-08 by reading the body's box **endpoints** -
+  0.3.77's audit measured the box SIZE, which cannot see a sign, and so passed a
+  wrong table for four releases. If you need to confirm a direction yourself,
+  record min and max, not the difference. `circ_pattern` and `user_pattern` were
+  measured the same way and are exact.
 * No lump-count check (upstream has none either) — the only reliable detector for
   an isolated floating boss.
 * Assembly **inertia tensors** are not aggregated (volumes, areas and centroids
@@ -1668,6 +1670,18 @@ Place the result with `catia_get_component_transform`.
   happened anyway. `CATIA_MCP_GUARD=0` turns the isolation off. Killing the child
   frees the *server*; if CATIA itself is wedged behind a native dialog that no
   button answers, a human still has to look at it.
+* **`catia_replace_component` cannot re-point an instance at a byte copy of a
+  document that is OPEN in the session.** This build identifies a document by an
+  internal id, not by its path, so the insert answers with the already-loaded
+  document: the count grows, the pose matches, and the instance still points at
+  the original (measured on B30 2026-11-08 - asked for `B\PZ81A.CATPart` with
+  `A\PZ81A.CATPart` open, the instance resolved to `A\PZ81A.CATPart`). The tool
+  reads `ReferenceProduct.Parent.FullName` back and refuses with
+  `REPLACE_REFERENCE_MISMATCH` rather than reporting success, and it removes the
+  instance it just added so the assembly is left as it was. Making an assembly
+  self-contained is therefore TWO steps: copy the files, **close the originals**
+  (`catia_close_document(document=<full path>)`), then replace. A copy that is
+  not open in the session resolves to its own path and works in one step.
 * The watchdog answers `#32770` message boxes only; CATIA's own `CATDlgDialog`
   panels are left alone so a human working alongside the agent is not interrupted.
 

@@ -941,10 +941,21 @@ class SketcherTools:
             return None, ("it was drawn on a support that is not a datum plane, and "
                           "whose frame this server cannot reproduce")
         for element in elements:
-            if str(element.get("kind")) not in ("line", "rectangle", "circle",
-                                                "point"):
-                return None, (f"it held a {element.get('kind')}, which cannot be "
-                              "redrawn from a record")
+            kind = str(element.get("kind"))
+            if kind == "spline":
+                # Replayable only from 0.3.81 on, when the record started keeping
+                # the control points. An older record says how many points the
+                # spline had and nothing about where they were, and guessing a
+                # profile is worse than saying it cannot be done.
+                if len(element.get("pts") or []) < 2:
+                    return None, ("it held a spline whose record kept the point "
+                                  "COUNT but not the coordinates (records written "
+                                  "before 0.3.81), so there is nothing to redraw it "
+                                  "from")
+                continue
+            if kind not in ("line", "rectangle", "circle", "point"):
+                return None, (f"it held a {kind}, which cannot be redrawn from a "
+                              "record")
         try:
             if str(placement.get("base")) == "frame":
                 # The record stores the frame as ``base: "frame"`` (the form the
@@ -987,6 +998,15 @@ class SketcherTools:
         if fresh is not None:
             fresh["placement"] = placement
             fresh["elements"] = [dict(element) for element in elements]
+        # `_drawn` is a SECOND store, and it is the one catia_sketch_get_geometry
+        # reads for drawn_this_session. It was not migrated, so after a rebuild
+        # the record stayed under the dead name: the read tool found nothing, the
+        # loft's per-section point count (which can only come from this record -
+        # CATIA cannot read a spline's points back) silently stopped comparing,
+        # and the 0.3.77 safeguard was off exactly on the sections that had been
+        # through a rollback (reported 2026-11-08, M6).
+        self._drawn[self._sketch_key(new_name)] = [dict(element)
+                                                   for element in elements]
         # One writer, one rule: every name that pointed at the sketch CATIA just
         # deleted is re-pointed at the rebuild, so a caller that still holds
         # 草图.2 keeps resolving however many rebuilds happen (reported 2026-10-27:
@@ -1036,6 +1056,19 @@ class SketcherTools:
                 point.Construction = bool(element.get("construction", False))
             except Exception:  # noqa: BLE001 - construction is the default
                 pass
+        elif kind == "spline":
+            control = [[float(x), float(y)] for x, y in element.get("pts") or []]
+            if len(control) < 2:
+                raise PreconditionRejected(
+                    "the record holds no control points for this spline, so it "
+                    "cannot be redrawn")
+            # Same closure rule as the drawing call: repeating the first point
+            # keeps it ONE curve. Appending a line back to the start makes two
+            # entities, and a loft section has to be a single curve.
+            if element.get("closed") and len(control) >= 3:
+                control.append(list(control[0]))
+            points = [factory.CreatePoint(x, y) for x, y in control]
+            factory.CreateSpline(points)
 
     def _create_sketch(self, plane: Any = "xy", offset: float | None = None) -> str:
         self.conn.ensure_connected()
@@ -1828,7 +1861,15 @@ class SketcherTools:
         chord = sum(math.hypot(points[i + 1][0] - points[i][0],
                                points[i + 1][1] - points[i][1])
                     for i in range(len(points) - 1))
-        self._note_element("spline", points=len(points), chord=chord)
+        # The control points themselves, not just how many there were. Without
+        # them a spline is the ONE closed profile the rebuild path cannot replay -
+        # and since 0.3.77 makes "one closed spline" the shape a loft section has
+        # to be, the most common pad/pocket mistake (wrong direction) cost the
+        # caller the whole section: CATIA takes the sketch with the rollback and
+        # nothing could put it back (reported 2026-11-08, M3).
+        self._note_element("spline", points=len(points), chord=chord,
+                           pts=[[float(p[0]), float(p[1])] for p in points],
+                           closed=bool(closed))
         pts_str = ", ".join(f"({p[0]}, {p[1]})" for p in points)
         closed_note = ""
         if closed and len(control) > len(points):
@@ -2001,7 +2042,13 @@ class SketcherTools:
                 alias = self._sketch_alias(sketch_name)
                 if alias is not None:
                     try:
-                        return body.Sketches.Item(alias), f"by alias '{alias}'"
+                        # `alias` is the name it was rebuilt AS; the caller asked
+                        # for `sketch_name`. Printing the target twice answered
+                        # "by alias '草图.4'" to a request for 草图.3, which reads
+                        # as "found 草图.4 by the alias 草图.4" (reported
+                        # 2026-11-08, M5).
+                        return (body.Sketches.Item(alias),
+                                f"by alias '{sketch_name}' -> '{alias}'")
                     except Exception:  # noqa: BLE001 - fall through to the error
                         pass
                 names = self._sketch_names(body)

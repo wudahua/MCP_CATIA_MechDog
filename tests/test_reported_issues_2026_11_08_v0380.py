@@ -114,11 +114,21 @@ def _colour_of(doc, node):
 
 # ── P1-1 ─────────────────────────────────────────────────────────────────
 def test_two_contexts_have_two_defaults():
-    """A body reads (210,210,255); an instance reads (255,255,255). Measured."""
+    """A body reads (210,210,255); an instance reads (255,255,255). Measured.
+
+    0.3.81 adds the case that made this defect recur through another door: an
+    instance whose colour was explicitly set to (210, 210, 255) reads THAT back,
+    not the (255, 255, 255) sentinel, because (210,210,255) is CATIA's uncoloured
+    APPEARANCE rather than an instance-only default. The 2026-11-08 reporter reset
+    all 11 parts to #D2D2FF and was told "11 already carried a colour" again.
+    White on a BODY stays a real colour: it renders white, not the default
+    lavender, so it is not folded into "uncoloured" there.
+    """
     assert is_default((210, 210, 255), instance=False)
-    assert not is_default((210, 210, 255), instance=True)
+    assert is_default((210, 210, 255), instance=True)     # False in 0.3.80
     assert is_default((255, 255, 255), instance=True)
     assert not is_default((255, 255, 255), instance=False)
+    assert not is_default((228, 87, 46), instance=True)
 
 
 def test_an_uncoloured_assembly_is_not_reported_as_already_coloured():
@@ -145,7 +155,9 @@ def test_a_colour_that_was_there_is_still_reported():
     doc.Selection.Clear()
 
     reply = AppearanceTools(conn).execute("catia_colorize_assembly", {})
-    assert "1 already carried a colour" in reply
+    # 0.3.81 put the unit in front of the count, because the same sentence said
+    # "25 part(s)" about 25 instance(s) when per_instance was on (P3-3).
+    assert "1 part(s) already carried a colour" in reply
     assert "0 part(s) were at the assembly default" not in reply
 
 

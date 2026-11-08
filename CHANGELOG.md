@@ -2,6 +2,177 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.81] — 2026-11-08 · the reply described something the model did not do
+
+Two reports landed on release day. The first is a modelling report with seven
+findings; the second reads the same release at source level and adds three. They
+agree on the one that matters most:
+
+**`catia_replace_component` announced "the new instance references the file at
+that path" without ever reading it.** The only evidence behind that sentence was
+"the component count grew by one" and "the twelve pose numbers match" - and on
+B30 both are satisfied by an instance that resolved to a completely different
+file. Measured 2026-11-08, in the reporter's exact shape: with
+`A\PZ81A.CATPart` open, adding `B\PZ81A.CATPart` (a byte copy) produced an
+instance whose `ReferenceProduct.Parent.FullName` was **`A\PZ81A.CATPart`**. Same
+internal document id, so CATIA answered with the loaded one and ignored the path.
+That is the tool's whole reason to exist, and it was the one thing not checked.
+
+### P0 — the reference is read back, and a mismatch undoes the insert
+
+`replace_component` now reads `ReferenceProduct.Parent.FullName` after the insert
+and compares it with the path it was given (the same call
+`catia_list_components` already used to detect dead links). A mismatch answers
+`REPLACE_REFERENCE_MISMATCH`, **removes the instance it just added**, and leaves
+the old one exactly as it was - no "free rename" for the caller to absorb:
+
+```
+'PZ81R.2' was inserted from '...\B\PZ81R.CATPart' but the instance references
+'...\A\PZ81R.CATPart' instead, so 'PZ81R.1' was NOT replaced and nothing was
+deleted (the instance this call inserted was removed again). This build
+identifies a document by an INTERNAL id, not by its path, so a byte copy of a
+file that is already open in the session is silently answered with the loaded
+document ...
+```
+
+When the path cannot be read at all (a dead link, an unsaved document) the reply
+degrades to "the POSE was verified but the REFERENCE was not" instead of claiming
+success. On the honest path it states the path it read back. New
+`catia_list_components(include_reference=true)` publishes `reference_path` per
+instance, so "is this assembly self-contained" is now a question a caller can ask
+about an assembly it did not just build.
+
+### M3 — a spline sketch is no longer lost for good, and the message stops contradicting itself
+
+`catia_sketch_spline` recorded how many points it drew and how long the chord
+was, but **not where the points were** - so when a failed pad/pocket took the
+sketch with the rollback, the rebuild path refused it. Since 0.3.77 forces a loft
+section to be "one closed spline", the most ordinary mistake (wrong direction)
+cost the entire section. The record now keeps the control points and whether the
+profile was closed, and `rebuild_lost_sketch` replays them - repeating the first
+point so the result stays ONE curve.
+
+The old reply also said both things at once: "catia_create_sketch + the same
+drawing calls + catia_close_sketch rebuilds it" and "It could NOT be re-created".
+The failure branch no longer borrows the success advice, and the envelope's
+`next_actions` no longer says "retry once with direction='normal'" when there is
+no sketch left to retry with - `_recover_lost_sketch` returns
+`(sentence, a_retry_can_work)` and all four raise sites use it.
+
+### M6 — the drawing record follows the rebuilt sketch
+
+Two stores hold the same elements: `conn.sketch_outlines` (which the rebuild
+migrated) and `self._drawn` (which `catia_sketch_get_geometry` reads, and which
+nothing migrated). After a rebuild the record stayed under the dead name, so
+`drawn_this_session` vanished, and `catia_solid_loft`'s per-section point count -
+which can only come from this record, CATIA cannot read a spline's points back -
+silently stopped comparing. The guard was off precisely on the sections that had
+been through a rollback. Both stores are now written.
+
+### M1 — a duplicate geometric set is renamed; an ambiguous name is refused
+
+`catia_gsd_create_geoset` assigned `hb.Name` and never looked. Two sets called
+`OUTER` were therefore possible, and the three tools disagreed about them:
+`set_visibility` hid BOTH, `gsd_spline` drew into one, `set_active_geoset`
+answered "Active geometrical set: 'OUTER'" about the first match. A duplicate is
+now named `OUTER#2` and the reply says why; `parent=` and `set_active_geoset`
+refuse an ambiguous name with `GEOSET_AMBIGUOUS` and list the candidates
+(`#1`, `#2`, in `catia_gsd_list_elements` order - two same-named sets at the same
+depth are otherwise indistinguishable in prose).
+
+### M2 — the tree can be read back
+
+`catia_gsd_list_elements` walked recursively and printed every set flat, so the
+one thing `parent=` promises could not be verified. Each entry now carries
+`parent` (null at the root), `depth` and `index`, and the session line in a
+failure message separates the two counts: `geometrical_sets=2 at the root, 3
+including nested`.
+
+### M4 — closing the document the advice names
+
+`open_document`'s `DOCUMENT_IDENTITY_CONFLICT` told the caller to run
+`catia_close_document(name='...')`, and `catia_close_document` had no such
+parameter - it closed whatever was active. The parameter now exists
+(`document=`, matched by full path first, then by name), an ambiguous name is
+refused with the candidates rather than picked, and the advice names the full
+path. It does NOT activate first: `Activate()` returns success on a document with
+no window of its own and moves nothing (measured 0.3.74), so "activate, then
+close the active one" can close the wrong document.
+
+### M5 — `by alias` names the name that found it
+
+`{"sketch": "草图.4", "found": "by alias '草图.4'"}` after asking for 草图.3 read
+as "found 草图.4 by the alias 草图.4". It is now
+`by alias '草图.3' -> '草图.4'`.
+
+### //n — two user-visible messages, fifteen versions
+
+`assembly.py` carried the literal `//n` in `_CONSTRAINT_EXPLAIN` (since
+2026-10-23) and in the new `replace_component` success text. 1352 tests did not
+look, so a mechanical guard does now: any string constant in `catia_mcp/**`
+containing `//n`, `//r`, `//t` or a doubled backslash-escape fails the suite.
+The class is machine-detectable, which makes not checking it a choice.
+
+### P3 — the count label follows the mode
+
+`colorize_assembly` said "25 part(s) were at the assembly default" about 25
+instances in the same sentence that had just declared "one per INSTANCE". The
+unit now follows `per_instance`.
+
+### P1-1 again — a colour reset to the default is not "already carried a colour"
+
+0.3.80 separated the two defaults but still tested `== (255,255,255)`, so a caller
+who reset all 11 parts to `#D2D2FF` was told "11 already carried a colour" a
+second time. Measured on B30, one body, four states - never coloured, explicitly
+set to (210,210,255) with the displaying flag, set with the non-displaying flag,
+set to (228,87,46):
+
+```
+(0, 210, 210, 255)  (0, 210, 210, 255)  (0, 210, 210, 255)  (0, 228, 87, 46)
+```
+
+The tuple's first element is 0 in every state, so nothing can distinguish "never
+set" from "set to the appearance of never set". `is_default` now accepts
+(210,210,255) in both contexts, and (255,255,255) on INSTANCES only - white on a
+body is a colour somebody chose and it renders white. `structured=true` also
+publishes `default_appearances`.
+
+### The pocket reply bounds the cut
+
+A removed volume cannot be predicted from `depth` alone: depth is how far the
+cutter travels, not how thick the wall is. Measured on B30: profile 30 mm²,
+depth 400, one 40 mm wall → 1200 mm³, not 12000. So the reply publishes the
+BOUND it can defend - profile area, travel, and the product - for a single
+rectangle or circle profile, and says a thinner wall removes less.
+
+### M7 — not reproduced, and the arithmetic says why
+
+The report's three runs of one pocket call, rebuilt here in the same geometry:
+
+| the report | measured on B30 2026-11-08 |
+|---|---|
+| A: one block, profile x 10..20 / z 1..4, depth 400 → 1200 mm³ | **1200 mm³** (8000 → 6800) ✅ same |
+| B: TWO disconnected blocks → "NO_MATERIAL twice, UpdateObject failed" | **succeeded, 1200 mm³** (16000 → 14800) - two lumps are not a problem |
+| C: nine blocks, profile 30×30 → auto-flipped, 29 747.4 mm³ | **12000 mm³**, no auto-flip - and 12000 is exactly what the arithmetic gives (6000 for the y 0..40 lump + 6000 for y −60..−100, which the report's own 6000 ignored) |
+
+So this build cuts frame-sketch pockets on multi-lump bodies correctly, and the
+one number that "did not match any direction hypothesis" matches the plain
+arithmetic once both lumps in the cutter's path are counted. **Not reproduced**;
+if it reproduces on B32 the missing ingredient is in the report's own recipe
+(its blocks came out of a rollback-rebuilt pad, not from clean pads).
+
+### About `.damaged-082006`
+
+The second report asks whether that suffix comes from this server. It does not.
+It is the backup **the author** left while repairing an assembly that a
+verification script of theirs had modified and saved on 2026-11-08 08:20 - a
+mistake on this side, documented in the project notes. The server has no
+`.damaged-<HHMMSS>` naming anywhere: nothing in `catia_mcp/` writes such a file.
+
+### Numbers
+
+1352 tests (was 1332), 131 tools, `scripts/b30_v0381_audit.py` **14/14** on B30.
+
 ## [0.3.80] — 2026-11-08 · two defaults, one missing capability
 
 The 0.3.79 acceptance report, in one line: the colour work succeeded (11 parts,

@@ -109,7 +109,9 @@ def test_the_pad_raises_a_rejection_that_carries_the_rollback():
 
     source = inspect.getsource(PartDesignTools._pad)
     assert "raise FeatureRejected(" in source
-    assert "next_actions=[" in source
+    # 0.3.81 moved this list from [...] to (...) so it can be chosen by whether a
+    # retry can work at all; the requirement is the envelope, not the bracket.
+    assert "next_actions=(" in source or "next_actions=[" in source
     assert "requested=requested_name" in source
 
 
@@ -445,11 +447,11 @@ def test_a_rebuild_in_the_callers_vocabulary_names_the_callers_name():
     original = S.SketcherTools
     try:
         S.SketcherTools = lambda conn: _Sketcher()
-        text = tools._recover_lost_sketch(None, None, "草图.3", False,
-                                         requested="草图.2")
+        text, can_retry = tools._recover_lost_sketch(None, None, "草图.3", False, requested="草图.2")
     finally:
         S.SketcherTools = original
     assert text.startswith(" ('草图.2' resolves to '草图.3'")
+    assert can_retry is True
     assert "re-created from its recorded definition as '草图.4'" in text
 
 

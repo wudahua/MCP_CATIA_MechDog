@@ -306,11 +306,13 @@ def test_a_rollback_that_took_the_sketch_says_it_was_put_back():
     original = sketcher_module.SketcherTools
     sketcher_module.SketcherTools = _Sketcher
     try:
-        text = tools._recover_lost_sketch(object(), object(), "草图.2", False)
+        text, can_retry = tools._recover_lost_sketch(object(), object(), "草图.2",
+                                                     False)
     finally:
         sketcher_module.SketcherTools = original
     assert "has been re-created from its recorded definition as '草图.3'" in text
     assert "'草图.2' now resolves to it" in text
+    assert can_retry is True
 
 
 def test_the_tool_resolves_a_rebuilt_sketch_by_its_old_name():

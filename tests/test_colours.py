@@ -501,7 +501,10 @@ def test_get_color_flags_the_uncoloured_default_as_evidence_not_proof():
 
     assert "#D2D2FF" in reply          # (210, 210, 255)
     assert "evidence, not proof" in reply
-    assert "uncoloured default" in reply
+    # 0.3.81 renamed this from "uncoloured default" because the sentence now also
+    # covers the other half of the fact: a body explicitly painted this exact
+    # value reads back identically (measured on B30 2026-11-08).
+    assert "uncoloured appearance" in reply
 
 
 def test_get_color_reads_one_component_by_part_and_occurrence():

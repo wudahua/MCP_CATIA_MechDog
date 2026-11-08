@@ -192,14 +192,39 @@ def uncoloured_note(rgb: tuple[int, int, int] | None,
     (255, 255, 255), a body in its part document (210, 210, 255). Comparing an
     instance against the body default is what produced 0.3.79's P1-1.
     """
-    default = UNCOLOURED_INSTANCE if instance else UNCOLOURED
-    if rgb != default:
+    if rgb is None or not is_default(rgb, instance):
         return ""
-    where = "uncoloured INSTANCE default" if instance else "uncoloured default"
-    return (f"  (matches this build's {where} {hex_of(default)} - "
-            "evidence, not proof: a colour set to that exact value reads the same)")
+    if instance and rgb == UNCOLOURED_INSTANCE:
+        caption = f"uncoloured INSTANCE default {hex_of(UNCOLOURED_INSTANCE)}"
+    else:
+        caption = (f"uncoloured appearance {hex_of(UNCOLOURED)} - this build's own "
+                   "default, and what an explicit set to that value reads back as")
+    return (f"  (matches {caption} - evidence, not proof: a colour set to that "
+            "exact value reads the same)")
 
 
 def is_default(rgb: tuple[int, int, int] | None, instance: bool = False) -> bool:
-    """True when ``rgb`` is the measured uncoloured default for that context."""
-    return rgb == (UNCOLOURED_INSTANCE if instance else UNCOLOURED)
+    """True when ``rgb`` means "no colour of the caller's own".
+
+    Two values qualify, and only one of them is context-dependent.
+
+    ``(210, 210, 255)`` is CATIA's uncoloured appearance. Measured on B30
+    2026-11-08, one body, four states: never coloured, explicitly set to
+    (210, 210, 255), explicitly set to that value with the non-displaying flag,
+    and explicitly set to (228, 87, 46) read back ``(0, 210, 210, 255)``,
+    ``(0, 210, 210, 255)``, ``(0, 210, 210, 255)`` and ``(0, 228, 87, 46)``.
+    The tuple's FIRST element is 0 in every state, so nothing in the read-back
+    distinguishes "never set" from "set to the default" - and a caller who paints
+    every part #D2D2FF has not changed what anyone sees. 0.3.80 compared the
+    instances against (255, 255, 255) only, so exactly that caller was told
+    "11 already carried a colour, which was overwritten" (reported 2026-11-08,
+    the same P1-1 recurring through a different door).
+
+    ``(255, 255, 255)`` is the sentinel a component reads back when no instance
+    colour was ever set. Instance-only on purpose: on a part body white is a
+    colour somebody chose, and it renders white rather than the pale lavender of
+    the default, so it must not be folded into "uncoloured" there.
+    """
+    if rgb == UNCOLOURED:
+        return True
+    return bool(instance) and rgb == UNCOLOURED_INSTANCE

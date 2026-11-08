@@ -1435,6 +1435,56 @@ class GSDTools:
             except Exception:
                 pass
 
+    def _geoset_index(self, part: Any) -> list[tuple[Any, str | None, int]]:
+        """(set, parent name, depth) for every set, nested ones included.
+
+        ``_iter_geosets`` yields the same sets but loses WHERE each one sits, and
+        that omission is the reported defect: 0.3.78 added ``parent`` to
+        catia_gsd_create_geoset and the reading side never caught up, so a set
+        created inside another came back flat next to it, with no field a caller
+        could check (reported 2026-11-08, M2). Depth is 0 at the root.
+        """
+        found: list[tuple[Any, str | None, int]] = []
+
+        def walk(collection: Any, parent: str | None, depth: int) -> None:
+            try:
+                count = int(collection.Count)
+            except Exception:  # noqa: BLE001 - an empty body has none
+                return
+            for index in range(1, count + 1):
+                hb = collection.Item(index)
+                found.append((hb, parent, depth))
+                try:
+                    walk(hb.HybridBodies, str(hb.Name), depth + 1)
+                except Exception:  # noqa: BLE001 - leaves have no collection
+                    continue
+
+        walk(part.HybridBodies, None, 0)
+        return found
+
+    @staticmethod
+    def _unique_geoset_name(taken: list[str], wanted: str) -> tuple[str, str]:
+        """(name to use, note when it had to change).
+
+        Same rule the sketcher applies to a duplicate sketch name, because it is
+        the same problem: ``Collection.Item(name)`` answers the FIRST match, so a
+        second set called 'OUTER' made every later lookup by that name point at
+        the wrong branch of the tree while catia_set_visibility happily hid both
+        (reported 2026-11-08, M1 - N2 in a different namespace).
+        """
+        lowered = {str(name).casefold() for name in taken}
+        if str(wanted).casefold() not in lowered:
+            return wanted, ""
+        for suffix in range(2, 1000):
+            candidate = f"{wanted}#{suffix}"
+            if candidate.casefold() not in lowered:
+                return candidate, (
+                    f" A geometrical set named '{wanted}' already exists in this "
+                    f"part, so this one was named '{candidate}' instead - "
+                    "Collection.Item(name) answers the first match, and two sets "
+                    "with one name make every later lookup by name ambiguous.")
+        return wanted, ""
+
     def _get_geoset(self) -> Any:
         """Get the active geometrical set, falling back to the first existing
         one, or creating a default one if the part has none."""
@@ -1841,8 +1891,9 @@ class GSDTools:
     def _create_geoset(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
-        name = args.get("name", self.DEFAULT_GEOSET)
+        name = str(args.get("name", self.DEFAULT_GEOSET))
         parent_name = (args.get("parent") or "").strip() or None
+        index = self._geoset_index(part)
 
         if parent_name:
             # Nested sets: without this, "create a set while another is active"
@@ -1850,17 +1901,39 @@ class GSDTools:
             # built at all - which made catia_set_visibility's recursive descent
             # (0.3.77) unreachable and untestable by any caller (reported
             # 2026-11-08, N5).
-            parent = None
-            for hb in self._iter_geosets(part.HybridBodies):
-                if str(hb.Name) == parent_name:
-                    parent = hb
-                    break
-            if parent is None:
-                available = [str(hb.Name) for hb in self._iter_geosets(part.HybridBodies)]
+            matches = [item for item in index if str(item[0].Name) == parent_name]
+            if not matches:
+                available = [str(item[0].Name) for item in index]
                 raise ArgumentRejected(
                     f"No geometrical set named '{parent_name}' to create '{name}' "
                     f"inside. Available: {available or 'none'}"
                 )
+            if len(matches) > 1:
+                # Two sets can carry one name - this build does not enforce
+                # uniqueness - and the old loop silently took the first, so
+                # "create X inside OUTER" landed in an arbitrary branch of the
+                # tree with no way to tell which (reported 2026-11-08, M1).
+                # Numbered in catia_gsd_list_elements order, because two sets
+                # with one name at the same depth are otherwise indistinguishable
+                # in prose - the caller needs something to point at.
+                where = ", ".join(
+                    f"#{position} (depth {depth}"
+                    + (f", inside '{parent}')" if parent else ", at the root)")
+                    for position, (_hb, parent, depth)
+                    in enumerate(matches, 1))
+                raise CodedError(
+                    f"'{parent_name}' is ambiguous: {len(matches)} geometrical sets "
+                    f"carry that name ({where}). Nothing was created. Rename one of "
+                    "them (there is no rename tool for a geometrical set - delete and "
+                    "re-create the empty one), then repeat.",
+                    code="GEOSET_AMBIGUOUS",
+                    stage="validate",
+                    modified=False,
+                    data={"name": parent_name, "matches": [
+                        {"parent": parent, "depth": depth}
+                        for _hb, parent, depth in matches]},
+                )
+            parent = matches[0][0]
             try:
                 hb = parent.HybridBodies.Add()
             except Exception as error:  # noqa: BLE001 - the nesting is refused
@@ -1872,8 +1945,15 @@ class GSDTools:
                 ) from error
         else:
             hb = part.HybridBodies.Add()
+        # Checked across the WHOLE part, nested sets included: a duplicate name
+        # is what makes a later Item(name) silent-wrong, and the tree does not
+        # stop a caller from creating one (measured in the 2026-11-08 report:
+        # two sets called OUTER, and set_visibility hid both while gsd_spline
+        # drew into one of them).
+        name, rename_note = self._unique_geoset_name(
+            [str(item[0].Name) for item in index], name)
         hb.Name = name
-        self._active_geoset_name = hb.Name
+        self._active_geoset_name = str(hb.Name)
         self._active_geoset_doc = self._doc_name()
         try:
             part.Update()
@@ -1881,6 +1961,7 @@ class GSDTools:
             pass
         where = f" inside '{parent_name}'" if parent_name else " at the root of the part"
         return (f"Geometrical set '{hb.Name}' created{where} and set as active."
+                + rename_note
                 + (" A set inside a set is what catia_set_visibility recurses "
                    "into; a set holding only curves will NOT show up in a mesh "
                    "bounding box, because a curve cannot be triangulated - use a "
@@ -1891,14 +1972,39 @@ class GSDTools:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
         name = args["name"]
+        index = self._geoset_index(part)
 
-        for hb in self._iter_geosets(part.HybridBodies):
-            if hb.Name == name:
-                self._active_geoset_name = name
-                self._active_geoset_doc = self._doc_name()
-                return f"Active geometrical set: '{name}'"
+        matches = [item for item in index if str(item[0].Name) == name]
+        if len(matches) == 1:
+            _hb, parent, depth = matches[0]
+            self._active_geoset_name = name
+            self._active_geoset_doc = self._doc_name()
+            where = (f"depth {depth}" if depth else "at the root of the part")
+            if parent:
+                where += f", inside '{parent}'"
+            return f"Active geometrical set: '{name}' ({where})."
+        if len(matches) > 1:
+            # Answering "Active geometrical set: 'OUTER'" while silently picking
+            # the first of two was the reported half of M1: catia_set_visibility
+            # hid BOTH, so the caller had every reason to think one set was meant.
+            where = ", ".join(
+                f"#{position} (depth {depth}"
+                + (f", inside '{parent}')" if parent else ", at the root)")
+                for position, (_hb, parent, depth) in enumerate(matches, 1))
+            raise CodedError(
+                f"Cannot make '{name}' active: {len(matches)} geometrical sets carry "
+                f"that name ({where}), and Collection.Item(name) would answer the "
+                "first one without saying so. Nothing was changed. Delete the empty "
+                "duplicate (or use the set that is already active) and repeat.",
+                code="GEOSET_AMBIGUOUS",
+                stage="validate",
+                modified=False,
+                data={"name": name, "matches": [
+                    {"parent": parent, "depth": depth}
+                    for _hb, parent, depth in matches]},
+            )
 
-        available = [hb.Name for hb in self._iter_geosets(part.HybridBodies)]
+        available = [str(item[0].Name) for item in index]
         raise ArgumentRejected(
             f"Geometrical set '{name}' not found. Available: {available or 'none'}"
         )
@@ -1913,7 +2019,7 @@ class GSDTools:
             "body_sketches": [],
         }
 
-        for hb in self._iter_geosets(part.HybridBodies):
+        for position, (hb, parent, depth) in enumerate(self._geoset_index(part), 1):
             shapes = []
             try:
                 hs = hb.HybridShapes
@@ -1928,8 +2034,14 @@ class GSDTools:
                     sketches.append(sk.Item(i).Name)
             except Exception:
                 pass
+            # parent/depth: without them a set created inside another came back
+            # flat beside it, so the ONE thing catia_gsd_create_geoset(parent=)
+            # promises could not be verified by the caller - and two sets with
+            # the same name could not be told apart at all (reported 2026-11-08,
+            # M2).
             result["geometrical_sets"].append(
-                {"name": hb.Name, "elements": shapes, "sketches": sketches}
+                {"index": position, "name": str(hb.Name), "parent": parent,
+                 "depth": depth, "elements": shapes, "sketches": sketches}
             )
 
         bodies = part.Bodies

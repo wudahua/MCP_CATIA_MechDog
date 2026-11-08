@@ -10,7 +10,7 @@ import json
 import os
 from typing import Any
 
-from catia_mcp.colours import UNCOLOURED_INSTANCE, hex_of, read_rgb
+from catia_mcp.colours import hex_of, is_default, read_rgb
 from catia_mcp.connection import CATIAConnection
 from catia_mcp.results import (
     ArgumentOutOfRange,
@@ -366,8 +366,28 @@ class AssemblyTools:
                                 "component, so it is one COM call per instance and "
                                 "off by default. Read after catia_set_color or "
                                 "catia_colorize_assembly to see which instance did not "
-                                "take. A value matching (210, 210, 255) is this "
-                                "build's uncoloured default: evidence, not proof."
+                                "take. True means the instance shows CATIA's own "
+                                "uncoloured appearance: a never-set instance reads "
+                                "(255, 255, 255), and (210, 210, 255) is the same "
+                                "appearance - a part explicitly painted that exact "
+                                "value reads back identically, because "
+                                "GetRealColor's first element is 0 in every state "
+                                "(measured on B30 2026-11-08)."
+                            ),
+                        },
+                        "include_reference": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Add 'reference_path' (the FullName of the file the "
+                                "instance ACTUALLY references, read from "
+                                "ReferenceProduct.Parent) and 'reference_error' when "
+                                "it cannot be read (a dead link). This is the only "
+                                "way to ask whether an assembly is self-contained: "
+                                "compare each reference_path with the folder you "
+                                "expect. catia_replace_component checks the same "
+                                "fact itself, so use this to audit an assembly you "
+                                "did not just build."
                             ),
                         },
                     },
@@ -387,6 +407,18 @@ class AssemblyTools:
                     "placement numbers onto it, READ THE POSE BACK, and only then "
                     "remove the old instance. A pose that does not match leaves BOTH "
                     "instances in place and says so - nothing is removed on a guess.\n"
+                    "IT ALSO READS BACK THE REFERENCE: after the insert it compares "
+                    "the new instance's ReferenceProduct.Parent.FullName with the "
+                    "path you gave, and if they differ it removes the instance it "
+                    "just added and answers REPLACE_REFERENCE_MISMATCH. That check "
+                    "is not pedantry: this build identifies a document by an "
+                    "internal id, so inserting a BYTE COPY of a file that is "
+                    "already open silently hands back the loaded document - the "
+                    "count grows, the pose matches, and the assembly is still "
+                    "linked to the original (measured on B30 2026-11-08). Close the "
+                    "duplicated document first if that is what you hit; "
+                    "catia_list_components(include_reference=true) asks the same "
+                    "question for an assembly you did not just build.\n"
                     "WHAT IS LOST: the constraints that referenced the old instance "
                     "(CATIA stores them on the component) and its occurrence name. "
                     "The colour is carried over when the old instance had a "
@@ -622,7 +654,9 @@ class AssemblyTools:
             case "catia_list_components":
                 return self._list_components(arguments.get("part_number"),
                                              bool(arguments.get("names_only", False)),
-                                             bool(arguments.get("include_color", False)))
+                                             bool(arguments.get("include_color", False)),
+                                             bool(arguments.get("include_reference",
+                                                                False)))
             case "catia_copy_component":
                 return self._copy_component(arguments)
             case "catia_replace_component":
@@ -986,7 +1020,7 @@ class AssemblyTools:
 
     _CONSTRAINT_EXPLAIN = (
         "CATIA refused the constraint. Measured on V5-6R2020 B30 (2026-10-23), "
-        "constraints cannot be created through this automation surface at all://n"
+        "constraints cannot be created through this automation surface at all:\n"
         "  · AddMonoEltCst (Fix) returns E_FAIL for a component whether it came "
         "from AddComponentsFromFiles or from add_new_part, and whether or not it "
         "is put in the selection first - five argument forms tried, including "
@@ -1521,11 +1555,47 @@ class AssemblyTools:
             f"R=({args.get('rx', 0)}, {args.get('ry', 0)}, {args.get('rz', 0)})°"
         )
 
+    @staticmethod
+    def _reference_path(component: Any) -> tuple[str | None, str]:
+        """(the file this instance really references, why not when unreadable).
+
+        ``ReferenceProduct`` is a Product and its ``Parent`` is the document that
+        owns it, so ``FullName`` is the answer the insert cannot give: measured on
+        B30 2026-11-08, the same call on a freshly inserted instance answered the
+        full path of the part's own document. Returns ``(None, reason)``
+        instead of raising, because "the reference is a dead link" is a fact the
+        reply should carry, not an error that hides the rest of the work.
+        """
+        try:
+            parent = component.ReferenceProduct.Parent
+        except Exception as error:  # noqa: BLE001 - a broken link is data
+            return None, (f"its ReferenceProduct.Parent could not be read "
+                          f"({str(error).splitlines()[0][:60]})")
+        try:
+            full = str(parent.FullName or "")
+        except Exception as error:  # noqa: BLE001
+            return None, (f"its ReferenceProduct.Parent has no readable FullName "
+                          f"({str(error).splitlines()[0][:60]})")
+        if not full:
+            return None, ("its ReferenceProduct.Parent has no FullName - a dead "
+                          "link, or a document that was never saved")
+        return full, ""
+
+    @staticmethod
+    def _undo_insert(products: Any, component: Any) -> str:
+        """Remove an instance this call just added. Returns what happened."""
+        try:
+            products.Remove(component)
+        except Exception as error:  # noqa: BLE001 - the report says so
+            return ("the instance this call inserted could NOT be removed again "
+                    f"({str(error).splitlines()[0][:70]}) - it is still in the tree")
+        return "the instance this call inserted was removed again"
+
     def _replace_component(self, args: dict[str, Any]) -> str:
         """Re-point an instance by rebuilding it at the same pose.
 
         The 2026-11-08 report (P1-2) is the reason: an assembly whose components
-        pointed at ``F:////WB_CATIA_Gripper`` could not be made self-contained after
+        pointed at ``F:\\WB_CATIA_Gripper`` could not be made self-contained after
         the files were byte-copied elsewhere, because ``Documents.Open`` on the copy
         answers DOCUMENT_IDENTITY_CONFLICT (CATIA identifies a document by an
         internal id, not by its path) and no tool could change what an instance
@@ -1613,8 +1683,54 @@ class AssemblyTools:
                 ],
             )
 
+        # A matching pose and a growing count say nothing about WHICH FILE the new
+        # instance points at. When the target is a byte copy of a document that is
+        # already loaded, CATIA answers the insert with the loaded document: on
+        # B30 2026-11-08, asked for B\PZ81A.CATPart while A\PZ81A.CATPart was
+        # open, the new instance resolved to A\PZ81A.CATPart - with count+1 and
+        # drift 0.00e+00 both satisfied. That is the tool's whole reason to exist,
+        # so the reference is read back before anything is removed (reported
+        # 2026-11-08: "announces the path, never reads it").
+        resolved, reference_note = self._reference_path(new)
+        if resolved is not None and (
+                os.path.normcase(os.path.abspath(resolved))
+                != os.path.normcase(os.path.abspath(path))):
+            undone = self._undo_insert(products, new)
+            same_file = (os.path.basename(resolved).lower()
+                         == os.path.basename(path).lower())
+            raise CodedError(
+                f"'{new_name}' was inserted from '{path}' but the instance "
+                f"references '{resolved}' instead, so '{old_name}' was NOT "
+                f"replaced and nothing was deleted ({undone}). "
+                + ("This build identifies a document by an INTERNAL id, not by its "
+                   "path, so a byte copy of a file that is already open in the "
+                   "session is silently answered with the loaded document - the "
+                   "same mechanism that makes catia_open_document answer "
+                   "DOCUMENT_IDENTITY_CONFLICT. "
+                   if same_file else "")
+                + "The pose alone cannot detect this, which is why the reference is "
+                "read back.",
+                code="REPLACE_REFERENCE_MISMATCH",
+                stage="execute",
+                modified=False,
+                data={"requested_path": path, "resolved_path": resolved,
+                      "same_file_name": same_file, "rolled_back": bool(undone)},
+                next_actions=(
+                    ["Close the document the copy duplicates "
+                     f"(catia_close_document(document='{os.path.basename(resolved)}', "
+                     "save=True) if you have unsaved work in it), then run this "
+                     "replace again: with nothing loaded, the insert resolves to "
+                     "the path you ask for"]
+                    if same_file else
+                    ["Check the path itself: the insert produced an instance that "
+                     "points somewhere else, so the file it opened is not the file "
+                     "you named (a short name, a mapped drive, or a copy with a "
+                     "different identity)"]
+                ),
+            )
+
         colour_note = "no colour to carry over"
-        if old_colour is not None and old_colour != UNCOLOURED_INSTANCE:
+        if old_colour is not None and not is_default(old_colour, instance=True):
             try:
                 doc.Selection.Clear()
                 doc.Selection.Add(new)
@@ -1647,16 +1763,27 @@ class AssemblyTools:
             ) from error
 
         self.conn.refresh_display()
+        if resolved is not None:
+            reference_sentence = (
+                f"  - read back, not assumed: the new instance references "
+                f"'{resolved}', which is the file you named; the assembly is "
+                "self-contained only once every component has been replaced this "
+                "way.\n")
+        else:
+            reference_sentence = (
+                "  - the POSE was verified but the REFERENCE was not: "
+                f"{reference_note}. Treat the assembly as still linked to the old "
+                "file until catia_list_components(include_reference=true) shows "
+                "otherwise.\n")
         return (
             f"Component '{old_name}' replaced by '{new_name}' from '{path}' "
             f"(pose copied exactly, largest difference {drift:.2e} mm; {colour_note}).\n"
-            "Two things to know://n"
+            "Two things to know:\n"
             "  - any CONSTRAINT that referenced the old instance went with it: this "
             "is a rebuild, not a re-point (this build exposes no replace member). "
             "Re-create the constraints against the new instance.\n"
-            "  - the new instance references the file at that path; the assembly is "
-            "self-contained only once every component has been replaced this way. "
-            "Not saved yet: call catia_save_document."
+            + reference_sentence
+            + "Not saved yet: call catia_save_document."
         )
 
     def _copy_component(self, args: dict[str, Any]) -> str:
@@ -1769,7 +1896,8 @@ class AssemblyTools:
 
     def _list_components(self, part_number: str | None = None,
                          names_only: bool = False,
-                         include_color: bool = False) -> str:
+                         include_color: bool = False,
+                         include_reference: bool = False) -> str:
         """Every component with its placement, surviving broken links.
 
         One dead link used to abort the whole listing (reported 2026-10-24:
@@ -1846,6 +1974,16 @@ class AssemblyTools:
                 # described something that was not in the reply (reported
                 # 2026-10-26).
                 entry["convention"] = "matrix"
+            if include_reference:
+                # The file the instance ACTUALLY points at. Nothing else answers
+                # "is this assembly self-contained": the count and the pose are
+                # both satisfied by an instance that silently resolved to a
+                # different document (measured on B30 2026-11-08, see
+                # catia_replace_component).
+                ref_path, ref_why = self._reference_path(comp)
+                entry["reference_path"] = ref_path
+                if ref_why:
+                    entry["reference_error"] = ref_why
             if problems:
                 entry["broken"] = True
                 entry["error"] = "; ".join(problems)
@@ -1878,7 +2016,7 @@ class AssemblyTools:
                     entry["color_error"] = str(exc).splitlines()[0][:80]
                 else:
                     entry["color"] = hex_of(value) if value is not None else None
-                    entry["color_matches_default"] = value == UNCOLOURED_INSTANCE
+                    entry["color_matches_default"] = is_default(value, instance=True)
             components.append(entry)
 
         # An empty assembly answers with the SAME shape as a full one. Returning

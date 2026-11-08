@@ -672,6 +672,26 @@ class CATIAConnection:
 # at an empty place (reported 2026-10-27). One reader, two presentations.
 
 
+def _geoset_total(count: int, owner: Any) -> int:
+    """Every geometrical set under ``owner``, nested ones included.
+
+    ``HybridBodies.Count`` counts one level only, so a part holding OUTER, INNER
+    and a second root set answered 2 while the tree showed 3.
+    """
+    total = 0
+    for index in range(1, max(0, int(count)) + 1):
+        try:
+            child = owner.HybridBodies.Item(index)
+        except Exception:  # noqa: BLE001 - a missing index is not a failure
+            continue
+        total += 1
+        try:
+            total += _geoset_total(int(child.HybridBodies.Count), child)
+        except Exception:  # noqa: BLE001 - a leaf has no collection
+            continue
+    return total
+
+
 def session_snapshot(conn: Any) -> dict[str, Any]:
     """The document state that explains a bare "method failed", as fields.
 
@@ -689,6 +709,7 @@ def session_snapshot(conn: Any) -> dict[str, Any]:
         "shape_count": None,
         "selected": None,
         "geometrical_sets": None,
+        "geometrical_sets_total": None,
         "note": None,
     }
     try:
@@ -731,6 +752,12 @@ def session_snapshot(conn: Any) -> dict[str, Any]:
         ("body", lambda: str(conn.get_active_part_body().Name)),
         ("shape_count", lambda: int(conn.get_active_part_body().Shapes.Count)),
         ("geometrical_sets", lambda: int(part.HybridBodies.Count)),
+        # Root count and total are DIFFERENT numbers once a set holds a set, and
+        # reporting only the root one made a three-set part (two at the root, one
+        # nested) say "geometrical_sets=2" - the reporter checked the tree and
+        # counted three (reported 2026-11-08, M2). Both are published, labelled.
+        ("geometrical_sets_total",
+         lambda: _geoset_total(int(part.HybridBodies.Count), part)),
     ):
         try:
             snapshot[key] = reader()
@@ -765,5 +792,10 @@ def session_line(conn: Any) -> str:
     if snap["selected"] is not None:
         bits.append("selected=%d" % snap["selected"])
     if snap["geometrical_sets"] is not None:
-        bits.append("geometrical_sets=%d" % snap["geometrical_sets"])
+        total = snap.get("geometrical_sets_total")
+        if total is not None and total != snap["geometrical_sets"]:
+            bits.append("geometrical_sets=%d at the root, %d including nested"
+                        % (snap["geometrical_sets"], total))
+        else:
+            bits.append("geometrical_sets=%d" % snap["geometrical_sets"])
     return " | ".join(bits)

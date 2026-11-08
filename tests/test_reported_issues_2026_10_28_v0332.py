@@ -118,7 +118,11 @@ def test_the_sketch_tools_resolve_the_alias_too():
     tools = _sketch_tools(alias_to="草图.3")
     sketch, how = tools._locate_sketch("草图.2")
     assert sketch.Name == "草图.3"
-    assert how == "by alias '草图.3'"
+    # 0.3.81: the field names the name that FOUND it first, then the target.
+    # Printing the target twice answered "by alias '草图.3'" to a request for
+    # 草图.2, which reads as "found 草图.3 by the alias 草图.3" (reported
+    # 2026-11-08, M5).
+    assert how == "by alias '草图.2' -> '草图.3'"
 
 
 def test_the_sketch_tools_error_names_the_alias():
@@ -163,8 +167,9 @@ def test_the_rebuilt_sketch_says_what_it_holds(monkeypatch):
             "placement": {"base": "xy", "distance": 0.0},
             "elements": [{"kind": "rectangle", "x1": -10.0, "y1": -5.0,
                           "x2": 10.0, "y2": 5.0}]}})
-    said = tools._recover_lost_sketch(object(), object(), "草图.2", False)
+    said, can_retry = tools._recover_lost_sketch(object(), object(), "草图.2", False)
     assert "re-created from its recorded definition as '草图.3'" in said
+    assert can_retry is True
     assert "It held:" in said
     assert "rectangle (-10, -5) .. (10, 5)" in said
     # Already rebuilt: do not tell the caller to rebuild it again.

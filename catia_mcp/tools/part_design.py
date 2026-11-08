@@ -1790,6 +1790,8 @@ class PartDesignTools:
             survived = self._sketch_present(part, sketch)
             stayed = (f"Volume stayed {before:.1f} mm3." if before is not None
                       else f"The volume could not be measured ({volume_note}).")
+            recovery, sketch_usable = self._recover_lost_sketch(
+                part, body, sketch_name, survived, requested=requested_name)
             raise FeatureRejected(
                 "CATIA built no material for this pad in EITHER direction, so it "
                 "was rolled back"
@@ -1799,8 +1801,7 @@ class PartDesignTools:
                 + f" {stayed} Both directions were MEASURED, not assumed: the same "
                 "pad node was flipped and re-updated, and neither orientation grew "
                 "the body."
-                + self._recover_lost_sketch(part, body, sketch_name, survived,
-                                            requested=requested_name)
+                + recovery
                 + " Four things do this:\n"
                 "  · the sketch plane sits ON the material boundary and the sweep "
                 "runs INTO the body, so the whole sweep is absorbed - move the "
@@ -1821,13 +1822,17 @@ class PartDesignTools:
                 # retry IS the call that failed. Say what the four causes above
                 # imply (reported 2026-10-28, where the envelope contradicted the
                 # message this very reply already contained).
-                next_actions=[
-                    "Change the sketch's offset or profile, then retry: both "
-                    "directions were measured and neither grew the body, so the "
-                    "same call builds nothing again"
-                    + ("; the sketch was rebuilt, so the name still resolves"
-                       if sketch_name and not survived else "")
-                ],
+                next_actions=(
+                    ["Draw the sketch again before retrying: CATIA took it with the "
+                     "rollback and it could not be rebuilt from its record - its "
+                     "old definition is echoed in the message above"]
+                    if not sketch_usable else
+                    ["Change the sketch's offset or profile, then retry: both "
+                     "directions were measured and neither grew the body, so the "
+                     "same call builds nothing again"
+                     + ("; the sketch was rebuilt, so the name still resolves"
+                        if sketch_name and not survived else "")]
+                ),
             )
         self.conn.refresh_display()
         span = "total %.3f mm, %0.3f each side" % (height, height / 2.0) if symmetric \
@@ -1984,14 +1989,15 @@ class PartDesignTools:
             survived = self._sketch_present(part, sketch)
             side = ("the requested direction" if explicit_direction
                     else "either direction")
+            recovery, sketch_usable = self._recover_lost_sketch(
+                part, body, sketch_name, survived, requested=requested_name)
             raise FeatureRejected(
                 f"The pocket removed no material in {side}, so it was "
                 + ("rolled back" if gone else
                    "left in the tree (the dead feature could NOT be deleted - "
                    "close the document without saving)")
                 + f" (volume stayed {before:.1f} mm3)."
-                + self._recover_lost_sketch(part, body, sketch_name, survived,
-                                            requested=requested_name)
+                + recovery
                 + " Two usual causes: the "
                 "profile does not intersect the solid (a face sketch whose "
                 "local coordinates do not land on the material - put the sketch "
@@ -2015,6 +2021,14 @@ class PartDesignTools:
                 + (f". Original error: {update_error}" if update_error else "."),
                 rolled_back=gone,
                 next_actions=(
+                    # A retry is only worth suggesting while there is a sketch to
+                    # retry with. The report's M3 hit exactly this: the message
+                    # said the sketch could not be rebuilt and the envelope still
+                    # said "retry once with direction='normal'".
+                    ["Draw the sketch again before retrying: CATIA took it with the "
+                     "rollback and it could not be rebuilt from its record - its "
+                     "old definition is echoed above"]
+                    if not sketch_usable else
                     ["Retry the same profile with an explicit depth instead of "
                      "through_all - catia_pocket(depth=20000, direction='both') - "
                      "because a through_all extent can come back empty on a "
@@ -2087,6 +2101,8 @@ class PartDesignTools:
             return (
                 f"Pocket {names} created: {extent}{flip_note}. "
                 f"Removed {removed:.1f} mm3 ({before:.1f} -> {after:.1f})."
+                + self._pocket_area_note(sketch, depth, through_all, symmetric,
+                                         single_sided)
             )
         # No volume, no verdict: say which measurement failed rather than
         # blaming "this installation" for a cut the same session may verify on
@@ -2101,6 +2117,59 @@ class PartDesignTools:
             f"reported on CATIA's return alone - check the geometry before "
             f"relying on it.{raised}"
         )
+
+    def _pocket_area_note(self, sketch: Any, depth: float | None,
+                          through_all: bool, symmetric: bool,
+                          single_sided: bool) -> str:
+        """The arithmetic a caller can check a cut against, when it is exact.
+
+        A pocket's removed volume CANNOT be predicted from depth alone: depth is
+        how far the cutter travels, not how thick the material is, so a 400 mm cut
+        through a 40 mm wall removes a tenth of profile x 400 (measured on B30
+        2026-11-08: profile 30 mm2, depth 400, one 40 mm wall -> 1200 mm3, not
+        12000). What can be stated without guessing is the BOUND, and it is worth
+        publishing because "the volume looks plausible while the shape is wrong"
+        is a class only arithmetic catches (reported 2026-11-08, M7 - where the
+        reporter's own 6000 mm3 estimate was this same product done the other way
+        round).
+
+        Silent unless the profile is ONE rectangle or ONE circle: with several
+        loops, or an open outline, there is no single area and a number here
+        would be invention.
+        """
+        try:
+            name = str(sketch.Name)
+            document = str(self.conn.active_document.Name)
+        except Exception:  # noqa: BLE001 - a note, not a measurement
+            return ""
+        record = (getattr(self.conn, "sketch_outlines", None) or {}).get(
+            f"{document}::{name}") or {}
+        elements = record.get("elements") or []
+        if len(elements) != 1:
+            return ""
+        element = elements[0]
+        kind = str(element.get("kind"))
+        if kind == "rectangle":
+            width = abs(float(element.get("x2", 0.0)) - float(element.get("x1", 0.0)))
+            height = abs(float(element.get("y2", 0.0)) - float(element.get("y1", 0.0)))
+            area = width * height
+            shape = f"{width:g} x {height:g}"
+        elif kind == "circle":
+            radius = float(element.get("radius", 0.0) or 0.0)
+            area = math.pi * radius * radius
+            shape = f"circle D{2 * radius:g}"
+        else:
+            return ""
+        if area <= 0:
+            return ""
+        if through_all or not depth:
+            return (f" Profile: {shape} = {area:.3f} mm2. The cut goes through, so "
+                    "it has no fixed bound - a wall thinner than the body removes "
+                    "less than profile x any distance.")
+        travel = float(depth) * (2 if (symmetric and not single_sided) else 1)
+        return (f" Profile: {shape} = {area:.3f} mm2, cutter travel {travel:g} mm, "
+                f"so at most {area * travel:.1f} mm3 could be removed - a wall "
+                "thinner than the travel removes less.")
 
     @staticmethod
     def _pocket_extent(through_all: bool, depth: float, symmetric: bool) -> str:
@@ -2327,7 +2396,7 @@ class PartDesignTools:
     def _recover_lost_sketch(self, part: Any, body: Any,
                              sketch_name: str | None,
                              survived: bool | None,
-                             requested: str | None = None) -> str:
+                             requested: str | None = None) -> tuple[str, bool]:
         """The sentence about the input sketch after a rollback - and the repair.
 
         0.3.30 learned to READ whether the sketch survived, which ended the false
@@ -2338,9 +2407,14 @@ class PartDesignTools:
         code from the same failure. Redrawing it from the record makes the state
         AFTER the error constant: the sketch is there, either because CATIA kept
         it or because this server put it back.
+
+        Returns ``(sentence, a retry_can_work)``. The flag exists because the
+        envelope's next_actions used to say "retry once with direction='normal'"
+        after a rebuild had FAILED - telling the caller to retry against a sketch
+        that no longer existed (reported 2026-11-08, M3).
         """
         if survived is not False or not sketch_name:
-            return self._sketch_after_rollback(sketch_name, survived)
+            return self._sketch_after_rollback(sketch_name, survived), True
         from catia_mcp.tools.sketcher import SketcherTools  # noqa: PLC0415 - cycle
 
         new_name, problem = SketcherTools(self.conn).rebuild_lost_sketch(
@@ -2357,7 +2431,7 @@ class PartDesignTools:
         else:
             lead = ""
         if new_name:
-            return lead + (
+            return (lead + (
                 f" CATIA removed the sketch '{sketch_name}' with the rollback - a "
                 "sketch is consumed by the feature built on it, and whether it goes "
                 "with the node depends on the document's history, not on anything "
@@ -2371,9 +2445,21 @@ class PartDesignTools:
                 # listing that only printed live names left the caller with no
                 # way to see the profile (reported 2026-10-27).
                 + self._sketch_rebuild_hint(
-                    sketch_name, tail="the rebuilt sketch holds the same elements."))
-        return (lead + self._sketch_after_rollback(sketch_name, survived)
-                + f" It could NOT be re-created: {problem}.")
+                    sketch_name, tail="the rebuilt sketch holds the same elements.")),
+                True)
+        # The rebuild failed. Do NOT go through _sketch_after_rollback here: its
+        # closing advice is "catia_create_sketch + the same drawing calls rebuilds
+        # it", and this reply is about to say the opposite - one message that
+        # claimed both was the reported M3.
+        return (lead
+                + f" CATIA removed the sketch '{sketch_name}' with the rollback, and "
+                "it could NOT be re-created: " + problem + "."
+                + self._sketch_rebuild_hint(
+                    sketch_name,
+                    tail="that record is not enough to redraw it, so the sketch has "
+                         "to be drawn again by hand before this feature can be "
+                         "retried."),
+                False)
 
     def _sketch_after_rollback(self, sketch_name: str | None,
                                survived: bool | None) -> str:
@@ -3274,14 +3360,16 @@ class PartDesignTools:
         if took is False:
             gone = self._remove_feature(part, hole, body)
             survived = self._sketch_present(part, sketch)
+            recovery, sketch_usable = self._recover_lost_sketch(
+                part, body, sketch_name, survived,
+                requested=args.get("sketch_name"))
             raise FeatureRejected(
                 "The hole removed no material, so it was "
                 + ("rolled back" if gone else
                    "left in the tree (the dead feature could NOT be deleted - "
                    "close the document without saving)")
                 + f" (volume stayed {before:.1f} mm3)."
-                + self._recover_lost_sketch(part, body, sketch_name, survived,
-                                            requested=args.get("sketch_name"))
+                + recovery
                 + self._bore_axis_sentence(target, placement)
                 + " The sketch has to hold a "
                 "closed CIRCLE: the bore's axis comes from a POINT in the "
@@ -3293,11 +3381,15 @@ class PartDesignTools:
                    "pass through_all for that case.")
                 + (f" Original error: {update_error}" if update_error else ""),
                 rolled_back=gone,
-                next_actions=[
-                    "Put a closed circle in the sketch at the bore's centre, or "
-                    "pass through_all if the bore has to cross the whole wall; "
-                    "these were already checked before the feature was built"
-                ],
+                next_actions=(
+                    ["Draw the sketch again before retrying: CATIA took it with the "
+                     "rollback and it could not be rebuilt from its record - its "
+                     "old definition is echoed above"]
+                    if not sketch_usable else
+                    ["Put a closed circle in the sketch at the bore's centre, or "
+                     "pass through_all if the bore has to cross the whole wall; "
+                     "these were already checked before the feature was built"]
+                ),
             ) from (update_error or None)
         if before is not None and after is not None:
             removed = before - after
@@ -3315,7 +3407,10 @@ class PartDesignTools:
                        "left in the tree (it could NOT be deleted - close the "
                        "document without saving)")
                     + f". {wrong_at}"
-                    + self._recover_lost_sketch(part, body, sketch_name, survived)
+                    # Only the sentence: this refusal has no retry list, so the
+                    # "can a retry work" flag has nowhere to go - and the sentence
+                    # itself already says whether the sketch came back.
+                    + self._recover_lost_sketch(part, body, sketch_name, survived)[0]
                 , code="FEATURE_REJECTED", stage="execute") from None
             note = ""
             if update_error is not None:

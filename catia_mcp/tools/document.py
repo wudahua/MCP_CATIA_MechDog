@@ -194,7 +194,20 @@ class DocumentTools:
             },
             {
                 "name": "catia_close_document",
-                "description": "Close the active CATIA document.",
+                "description": (
+                    "Close a CATIA document - the ACTIVE one by default, or the one "
+                    "named by 'document'.\n"
+                    "'document' exists because the recovery advice for "
+                    "DOCUMENT_IDENTITY_CONFLICT ('close the loaded copy first') used "
+                    "to name this tool with a parameter it did not have, so following "
+                    "the advice closed whatever happened to be active (reported "
+                    "2026-11-08, M4). A name that matches more than one open document "
+                    "is refused with the candidates listed, not resolved silently.\n"
+                    "CATIA KEEPS a part that an open assembly references and defers "
+                    "the close; that is reported as closed: false with the holders "
+                    "named, because it is CATIA's ordinary behaviour rather than a "
+                    "failure."
+                ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -202,6 +215,15 @@ class DocumentTools:
                             "type": "boolean",
                             "description": "Whether to save before closing (default: false)",
                             "default": False,
+                        },
+                        "document": {
+                            "type": "string",
+                            "description": (
+                                "Name ('P05.CATPart') or full path of the document to "
+                                "close. Omit to close the active one. A part held by "
+                                "an open assembly or an unsaved document still needs "
+                                "the active-document route."
+                            ),
                         },
                     },
                 },
@@ -313,7 +335,8 @@ class DocumentTools:
                 return self._save_as_copy(
                     arguments["file_path"], bool(arguments.get("overwrite", True)))
             case "catia_close_document":
-                return self._close_document(arguments.get("save", False))
+                return self._close_document(arguments.get("save", False),
+                                            arguments.get("document"))
             case "catia_list_documents":
                 return self._list_documents()
             case "catia_get_active_document_info":
@@ -748,8 +771,10 @@ class DocumentTools:
                         " - it is the same model, so measuring or editing it gives "
                         "the same geometry",
                         "To open the other file instead, close the loaded copy "
-                        "first: catia_close_document(name='"
-                        + os.path.basename(opened_path) + "', save=False)",
+                        "first: catia_close_document(document='"
+                        + str(opened_path) + "', save=False)"
+                        " - by full path, because a bare name can match more than "
+                        "one open document",
                     ],
                 )
         # Whatever sketch belonged to the previously active document does not
@@ -965,8 +990,76 @@ class DocumentTools:
         except Exception:  # noqa: BLE001 - diagnostics only
             return []
 
-    def _close_document(self, save: bool = False) -> str:
-        """Close the active document, and check that it actually closed.
+    def _locate_document(self, wanted: str) -> Any:
+        """The one open document called ``wanted`` - full path first, then name.
+
+        Full path wins because a name is not an identity: several documents can
+        answer to 'P05.CATPart' (a copy opened by hand, the same part opened twice),
+        and ``Collection.Item(name)``-style resolution is exactly what turned
+        "close the loaded copy" into "close something else" in the 2026-11-08
+        report (M4). Anything ambiguous is refused with the candidates, so the
+        caller can retry with a path instead of guessing which one died.
+        """
+        wanted = str(wanted).strip()
+        if not wanted:
+            raise ArgumentRejected(
+                "'document' was given but is empty - name the document to close, or "
+                "omit the parameter to close the active one.")
+        key = os.path.normcase(os.path.abspath(wanted))
+        exact: list[Any] = []
+        by_name: list[Any] = []
+        every: list[str] = []
+        for index in range(1, int(self.conn.documents.Count) + 1):
+            doc = self.conn.documents.Item(index)
+            try:
+                name = str(doc.Name)
+            except Exception:  # noqa: BLE001 - a half-dead document
+                continue
+            try:
+                full = str(doc.FullName or "")
+            except Exception:  # noqa: BLE001
+                full = ""
+            every.append(full or name)
+            if full and os.path.normcase(os.path.abspath(full)) == key:
+                exact.append(doc)
+            elif name.casefold() == wanted.casefold():
+                by_name.append(doc)
+        if len(exact) == 1:
+            return exact[0]
+        matches = exact or by_name
+        if not matches:
+            raise CodedError(
+                f"No open document matches '{wanted}'. Open: "
+                + ("; ".join(f"'{name}'" for name in every) or "none")
+                + ". Nothing was closed.",
+                code="DOCUMENT_NOT_FOUND",
+                stage="validate",
+                modified=False,
+                next_actions=[
+                    "catia_list_documents shows every open document with its path "
+                    "and which assemblies use it",
+                ],
+            )
+        if len(matches) > 1:
+            raise CodedError(
+                f"'{wanted}' matches {len(matches)} open documents, so nothing was "
+                "closed: "
+                + "; ".join(
+                    "'%s'" % (str(getattr(doc, "FullName", "") or doc.Name))
+                    for doc in matches)
+                + ". Retry with the full path of the one you mean.",
+                code="DOCUMENT_AMBIGUOUS",
+                stage="validate",
+                modified=False,
+                data={"requested": wanted, "matches": [
+                    str(getattr(doc, "FullName", "") or doc.Name)
+                    for doc in matches]},
+            )
+        return matches[0]
+
+    def _close_document(self, save: bool = False,
+                        document: str | None = None) -> str:
+        """Close the active document, or the one named by ``document``.
 
         ``doc.Close()`` returning without an exception is not evidence: CATIA
         silently keeps a document that another open document still references,
@@ -974,7 +1067,17 @@ class DocumentTools:
         locked part again on the next SaveAs and spent a long time on it
         (2026-10-24). The count before/after is the only honest check.
         """
-        doc = self.conn.active_document
+        if document:
+            doc = self._locate_document(document)
+            # Deliberately NOT activated first: Activate() on a document without
+            # its own window returns success and moves nothing (measured 0.3.74),
+            # so a "close by name" implemented as "activate, then close the
+            # active one" can close the wrong document - the exact failure this
+            # parameter exists to prevent. Close() works on a background document.
+            named = str(getattr(doc, "FullName", "") or doc.Name)
+        else:
+            doc = self.conn.active_document
+            named = ""
         name = doc.Name
         if save:
             dialogs.save(doc)
@@ -1031,7 +1134,8 @@ class DocumentTools:
                 "(a save prompt, or 'document modified'). Answer or cancel it, "
                 "then retry."
             , code="CLOSE_NOT_CONFIRMED", stage="execute")
-        return f"Document '{name}' closed" + (" (saved)" if save else "")
+        return (f"Document '{named or name}' closed"
+                + (" (saved)" if save else ""))
 
     def _list_documents(self) -> str:
         """Every document in the session, and which assemblies use it.
