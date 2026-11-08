@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.81** · [what changed](CHANGELOG.md) ·
+**0.3.82** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -12,7 +12,7 @@ defects that make that loop lie to you. Most of the work since 0.3.0 came from
 people rebuilding real assemblies with it: the changelog is a list of things that
 produced a plausible number, a wrong number, or no explanation at all.
 
-**131 tools** (upstream 98 + 33 added, and nothing dropped any more: knowledge
+**134 tools** (upstream 98 + 36 added, and nothing dropped any more: knowledge
 came back in 0.3.63 and drafting in 0.3.64, each after its tools were measured on
 B30 rather than trusted). Nothing in the COM layer was rewritten — the value of upstream is
 the field-verified knowledge in its comments, so this fork is strictly add /
@@ -61,15 +61,16 @@ but the claim that it worked.
 same reason they always did: domain-neutral and cheap. See `FORK.md` §8 if you
 want to cut further.
 
-### Added (26 tools over upstream)
+### Added (29 tools over upstream)
 
 Five of them came with the fork, twenty-one were added while building parts
 from a spec (0.3.1: three, 0.3.2: four, 0.3.4: one, 0.3.5: one, 0.3.8: two, 0.3.17:
 two - `catia_delete_body`, `catia_solid_loft`; 0.3.19: one - `catia_copy_component`;
 0.3.51: one - `catia_check_surface`; 0.3.53: one - `catia_gsd_boundary`; 0.3.55: one - `catia_gsd_heal`; 0.3.56: two -
 `catia_gsd_fillet_surface`, `catia_gsd_spine`; 0.3.60: two -
-`catia_gsd_rotate`, `catia_gsd_translate`).
-98 + 33 added = 131: the 26 below, `catia_apply_design_table` under Knowledgeware,
+`catia_gsd_rotate`, `catia_gsd_translate`; 0.3.82: three - `catia_sketch_copy`,
+`catia_gsd_circ_pattern`, `catia_gsd_plane_normal_to_curve`).
+98 + 36 added = 134: the 29 below, `catia_apply_design_table` under Knowledgeware,
 `catia_drawing_set_sheet` and `catia_drawing_add_frame` under Drafting (0.3.65),
 the three colour tools in their own table below (0.3.79), and
 `catia_replace_component` (0.3.80). 0.3.20 added
@@ -84,6 +85,9 @@ several documents.
 | `catia_set_component_transform` | Absolute placement from a 3×3 in either convention (`matrix` = `P = A·p + T`, `basis` = row i is where local axis i points) or CATIA's native 12 numbers; reads back and reports deviation, det, orthogonality **and where each local axis ended up** |
 | `catia_get_component_transform` | The same placement in both conventions, plus where local X/Y/Z point in the assembly |
 | `catia_rename_component` | A readable assembly tree. `Part.Name` is read-only on V5-6R2020, so every part arrives as `Part1.1 / Part2.1 / …`; the instance name is writable |
+| `catia_sketch_copy` | The "copy the profile, paste it on the next plane" step. Replays a sketch's recorded geometry into a new sketch on another plane, coordinates unchanged - redrawing by hand is what leaves two copies that are not coordinate-identical, and a loft section is sensitive to that. Refused for a sketch reopened from disk, because the record is the only source of coordinates |
+| `catia_gsd_circ_pattern` | Repeats one surface/curve N times around an axis and joins the copies in one call. **Not a CATIA GSD pattern**: this build's `HybridShapeFactory` declares 160 members and none contains "Pattern" (measured 2026-11-08), so the tree gets N-1 rotations plus a join, and the reply says so |
+| `catia_gsd_plane_normal_to_curve` | Plane normal to a curve with its origin ON that curve at a fraction of its length - the tutorial's "Normal to Curve + Set Origin on Curve". A tree element, unlike the frame sketch that used to be the only way; the point's measured coordinates are reported back |
 
 #### Added while building parts from a spec (21 tools)
 
@@ -979,7 +983,7 @@ python -m venv .venv
 # offline test suite, no CATIA needed
 .venv/Scripts/python -m pytest tests -q
 
-# the smoke check: 131 tool definitions == 131 routes
+# the smoke check: 134 tool definitions == 134 routes
 .venv/Scripts/python tests/test_server.py
 ```
 
@@ -1169,9 +1173,9 @@ while a reply that only reports success cannot.
 | Group | Tools | Notes |
 |---|---|---|
 | Document | 12 | new/open/save/close/list + `catia_save_as_copy`; `catia_save_document` retries around dialogs |
-| Sketcher | 13 | lines, rectangles, circles, constraints; reopen a closed sketch and delete one element |
+| Sketcher | 14 | lines, rectangles, circles, constraints; reopen a closed sketch and delete one element; `catia_sketch_copy` replays a profile onto another plane |
 | Part Design | 25 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, solid loft, bodies (create / list / delete)… |
-| Generative Shape Design | 31 | wireframe and surfaces, extract, `boundary`, `heal`, `fillet_surface`, `spine`, `rotate`, `translate`, revolve + close surface; a GSD element or set is removed with `catia_delete_feature` |
+| Generative Shape Design | 33 | wireframe and surfaces, extract, `boundary`, `heal`, `fillet_surface`, `spine`, `rotate`, `translate`, `circ_pattern` (rotate+join), `plane_normal_to_curve`, revolve + close surface; a GSD element or set is removed with `catia_delete_feature` |
 | Assembly | **14** | upstream 9 + get/set component transform, rename, list constraints, copy component, replace component |
 | Appearance | **3** | `catia_colorize_assembly`, `catia_set_color`, `catia_get_color` - per-instance colour in an assembly, per-node in a part |
 | Measurement | 7 | inertia, distance, bounding box\*, parameters, `catia_check_surface` |

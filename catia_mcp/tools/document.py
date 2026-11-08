@@ -496,16 +496,30 @@ class DocumentTools:
                 # 0.3.71: this used to be a sentence glued into a SUCCESSFUL
                 # reply ("ok" absent, first word "Created"), so catia_run_plan
                 # marked the step done and the failure only surfaced at the last
-                # save - after dozens of steps of modelling (reported 2026-11-06,
-                # P0-1: a Chinese file name, and the parent folder was Chinese
-                # too, which CATIA refuses even when the file name is ASCII).
+                # save - after dozens of steps of modelling (reported 2026-11-06).
+                # That report blamed the Chinese PARENT FOLDER as well as the file
+                # name; 0.3.74 measured five combinations on B30 and only the NAME
+                # triggered it, 0.3.82 measured four more and saw the same, so the
+                # sentence that used to assert the folder here is gone - and the
+                # reply no longer states which one it is until it knows.
                 # 0.3.77: the empty part is CLOSED again. It holds nothing, so
                 # nothing is lost, and leaving it open costs the caller every
                 # later step: it has no path, so catia_add_component cannot use
                 # it, and a run that ignores ok:false finishes a model it can
                 # never save (reported 2026-11-07, P9 - the reporter had to
                 # restart on an ASCII path).
+                # 0.3.82: the staging attempt lives in _save_document, so every
+                # first save gets it (new_part, new_product, save_document) and
+                # this branch only runs when that failed too.
                 discarded = self._discard_unsaved_document(doc)
+                if isinstance(exc, CodedError):
+                    # A refusal this server made itself keeps its own code and
+                    # its own next_actions: dressing "that file exists, pass
+                    # overwrite=true" up as SAVE_FAILED (and then claiming a
+                    # staging attempt that never happened) sends the caller to
+                    # the wrong problem. Re-raised unchanged, after closing the
+                    # empty part, so nothing is left behind either way.
+                    raise
                 raise CodedError(
                     f"Part '{part_name}' was created but COULD NOT BE SAVED to "
                     f"'{file_path}' ({str(exc).splitlines()[0][:120]}). "
@@ -514,33 +528,48 @@ class DocumentTools:
                        if discarded else
                        "The document is open and unsaved: it has no path, so it "
                        "cannot be referenced by an assembly. ")
-                    + "CATIA refuses a first SaveAs when the FILE NAME contains non-ASCII characters"
-                    " - the FOLDER is fine, and every LATER save is fine too: a document "
-                    "that already has a path saves normally, Chinese folder and all "
-                    " (a CATProduct in ...\\WokrBuddy Catia Space\\...\\out\\ saved in "
-                    "200 ms on B30 and its colours were on disk after reopening). Only "
-                    "the first SaveAs to a NEW non-ASCII NAME is refused."
-                    " - measured on B30 2026-11-07, same "
-                    "session and document type: ...\\中文目录\\probe_ascii.CATPart "
-                    "saved, ...\\ascii_dir\\probe_中文.CATPart was refused. The "
-                    "CATIA error is in brackets above: if this name IS ASCII, that "
-                    "is what to act on - a Chinese FOLDER saved fine in five "
-                    "attempts, including one with the exact path of the report "
-                    "that blamed it.",
+                    + ("An ASCII staging file was already tried: this document was "
+                       "saved to %TEMP% first and then moved to the path asked for, "
+                       "and THAT move was refused too - so this is not the "
+                       "'first SaveAs' limitation of this build."
+                       if getattr(self, "_staging_attempted", False) else
+                       "The refusal came before any staging attempt, so the ASCII "
+                       "route this fork has for a first SaveAs was not the problem "
+                       "and was not tried.")
+                    + (" The file NAME is not ASCII, which this build refuses on "
+                       "every SaveAs (measured on B30 2026-11-07: "
+                       "...\\中文目录\\probe_ascii.CATPart saved, "
+                       "...\\ascii_dir\\probe_中文.CATPart was refused). Use an "
+                       "ASCII name and put the Chinese wording in the part number."
+                       if not os.path.basename(str(file_path)).isascii() else
+                       " The file NAME is ASCII. A non-ASCII FOLDER saved in nine "
+                       "attempts on B30 (2026-11-07 with five combinations, "
+                       "2026-11-08 with four), so a Chinese folder is not by itself a "
+                       "reason - although the 2026-11-08 report did hit this on "
+                       "one, which is why the staging route above exists. What is "
+                       "left to check: the folder's permissions, a read-only or "
+                       "locked target, a path deeper than CATIA accepts, or a modal "
+                       "dialog nobody answered on the CATIA thread. The error in "
+                       "brackets above is CATIA's own."),
                     code="SAVE_FAILED",
                     stage="execute",
                     modified=not discarded,
-                    next_actions=[
-                        "Create it again under an ASCII FILE NAME - "
-                        "catia_new_part(name='...', file_path='C:/temp/part.CATPart'). "
-                        "Do NOT rename it to a Chinese name afterwards: on this "
-                        "build CATIA cannot OPEN such a file either (measured "
-                        "2026-11-07 - a Chinese name in an ASCII folder is "
-                        "refused by Documents.Open, and the attempt leaves a "
-                        "modal error dialog). Put the Chinese wording in the "
-                        "part number instead (catia_set_part_number) - that is "
-                        "what the tree and the BOM show",
-                    ]
+                    next_actions=(
+                        ["Use an ASCII FILE NAME and put the Chinese wording in the "
+                         "part number (catia_set_part_number) - that is what the "
+                         "tree and the BOM show. Do NOT rename an ASCII save to a "
+                         "Chinese name afterwards: on this build CATIA cannot OPEN "
+                         "such a file either (measured 2026-11-07 - a Chinese name "
+                         "in an ASCII folder is refused by Documents.Open, and the "
+                         "attempt leaves a modal error dialog)"]
+                        if not os.path.basename(str(file_path)).isascii() else
+                        ["The name is ASCII, so this is not the naming limit: "
+                         "write to a different folder (catia_new_part("
+                         "file_path='C:/temp/part.CATPart')) to confirm the tool "
+                         "works there, then move the file with "
+                         "catia_save_document - a document that already has a path "
+                         "saves into a Chinese folder in nine measured attempts"]
+                    )
                     + ([] if discarded else
                        ["The part in memory is complete: save it before anything "
                         "else, or every later step builds on a document that "
@@ -840,9 +869,53 @@ class DocumentTools:
                 continue
         return None
 
+    def _save_via_ascii_staging(self, doc: Any, file_path: str) -> str:
+        """First SaveAs into an ASCII temp file, then SaveAs onto ``file_path``.
+
+        2026-11-08 report, P0: `catia_new_part(file_path='...\\饮料瓶瓶底曲面建模\\
+        PET_Bottle_Bottom.CATPart')` answered SAVE_FAILED twice while the same
+        folder accepted `catia_save_document` on a part that already had a path,
+        and `catia_export` to it. Their control is what this uses: whatever
+        refuses the FIRST SaveAs into that folder does not refuse the second, so
+        an ASCII staging file gets the document a path and the move follows.
+
+        NOT reproduced on B30 - the same four combinations saved and failed here
+        exactly as this package documented (see the message in the caller). It is
+        kept anyway because it costs one extra SaveAs only on the path that
+        already failed, and it turns "your folder does not work" into "the file
+        you asked for exists".
+        """
+        import tempfile
+
+        base = os.path.basename(file_path)
+        if not base.isascii():
+            # The name is the problem and staging cannot help: `save_as` refuses
+            # it before CATIA sees it, both times.
+            raise PreconditionRejected(
+                "the file NAME is not ASCII, which this build refuses on every "
+                "SaveAs - an ASCII staging file cannot carry it")
+        staging_dir = os.path.join(tempfile.gettempdir(), "mechdog")
+        os.makedirs(staging_dir, exist_ok=True)
+        staging = os.path.join(staging_dir, base)
+        dialogs.save_as(doc, staging)
+        try:
+            return dialogs.save_as(doc, file_path)
+        finally:
+            try:
+                if os.path.isfile(staging):
+                    os.remove(staging)
+            except OSError:  # noqa: BLE001 - a leftover temp file is not a failure
+                pass
+
     def _save_document(self, file_path: str | None = None,
                        overwrite: bool = False) -> str:
         doc = self.conn.active_document
+        # Whether THIS call reached the ASCII staging route. The caller's failure
+        # message says "a staging file was already tried" - a sentence that is
+        # only true when it is, and that was being printed unconditionally
+        # (found 2026-11-08 re-running the audit: the refusal was "that file
+        # exists", and the reply talked about non-ASCII folders).
+        self._staging_attempted = False
         if file_path:
             # SaveAs onto the file of a document that is already open (very often
             # a part loaded as a component of an open assembly) cannot work: the
@@ -888,7 +961,37 @@ class DocumentTools:
                 )
             # CATIA's SaveAs rejects forward-slash paths (E_FAIL) and pops a
             # modal prompt when the target exists, which freezes the STA worker.
-            target = dialogs.save_as(doc, file_path)
+            try:
+                target = dialogs.save_as(doc, file_path)
+            except Exception as first_error:  # noqa: BLE001 - one other route
+                # 0.3.82: a document that has NEVER been saved gets one more try
+                # through an ASCII staging file. The 2026-11-08 report's control
+                # is the reason: its Chinese folder refused the first SaveAs and
+                # accepted the second (from a document that already had a path).
+                # Not reproduced on B30 - four combinations saved here - so this
+                # costs an extra SaveAs only on a path that has already failed.
+                #
+                # NOT for a refusal this server makes itself: a CodedError here
+                # means "that file exists and overwrite is false" or "that name
+                # is not ASCII", and retrying it through a staging file would
+                # both misdescribe the cause and (because save_as removes an
+                # existing target) OVERWRITE a file the caller was told would not
+                # be touched. Found while re-running the audit script, whose
+                # second run hit exactly that path.
+                if isinstance(first_error, CodedError):
+                    raise
+                if self._document_has_path(doc):
+                    raise
+                try:
+                    self._staging_attempted = True
+                    target = self._save_via_ascii_staging(doc, str(file_path))
+                except Exception:  # noqa: BLE001 - the FIRST failure is the report
+                    raise first_error from None
+                return (
+                    f"Document saved as: {target} (moved here from an ASCII staging "
+                    "file: the first SaveAs to this path was refused - "
+                    f"{str(first_error).splitlines()[0][:90]} - and the move, from "
+                    "a document that already had a path, was not)")
             # Always say whether the path was free. A caller in a finished-parts
             # directory should never have to check the folder afterwards to know
             # whether it just replaced something (reported 2026-10-25).

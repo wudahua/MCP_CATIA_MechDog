@@ -435,9 +435,15 @@ def test_the_screenshot_description_names_the_spec_tree_and_the_frozen_command()
 
 def test_the_save_failure_message_separates_first_saveas_from_save():
     """7-2: "非 ASCII 路径不能保存" was read as "the whole Chinese workspace is
-    unusable". Save() on a document that already has a path works."""
+    unusable". Save() on a document that already has a path works.
+
+    0.3.82 rewrote the sentence around the three facts it now acts on: a first
+    SaveAs can be refused, an ASCII staging file is tried before giving up, and
+    what is left to check depends on whether the NAME is ASCII.
+    """
     from catia_mcp.tools import document
 
     text = inspect.getsource(document)
-    assert "only the FIRST save" in text
-    assert "every LATER save is fine" in text
+    assert "'first SaveAs' limitation" in text
+    assert "An ASCII staging file was already tried" in text
+    assert "_save_via_ascii_staging" in text

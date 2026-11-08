@@ -403,9 +403,17 @@ def test_the_save_failure_no_longer_blames_the_folder():
 
     text = inspect.getsource(document)
     assert "the folder counts" not in text
-    assert "the FILE NAME contains non-ASCII" in text
-    # The escape hatch for the opposite observation: read the bracketed error.
-    assert "if this name IS ASCII" in text
+    # 0.3.82: the sentence asserts only what was measured - a non-ASCII folder
+    # saved in nine attempts - and then still names the report that hit it,
+    # because that report reproduced it while this machine did not.
+    assert "not by itself a " in text and "reason" in text
+    assert "The file NAME is ASCII" in text
+    assert "The file NAME is not ASCII" in text
+    # 0.3.82: the old message ended with "if this name IS ASCII, that is what to
+    # act on" - it asked the caller to do the classification. The two branches
+    # above now do it, so the deferral must not come back.
+    assert "if this name IS ASCII" not in text
+    assert 'os.path.basename(str(file_path)).isascii()' in text
     dialog_text = inspect.getsource(dialogs)
     assert "a Chinese folder counts" not in dialog_text
     assert "non-ASCII FOLDER" in dialog_text

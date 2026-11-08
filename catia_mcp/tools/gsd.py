@@ -284,6 +284,41 @@ class GSDTools:
                 },
             },
             {
+                "name": "catia_gsd_plane_normal_to_curve",
+                "description": (
+                    "Create a datum plane NORMAL to a curve, with its origin ON that "
+                    "curve at a given fraction of its length - the tutorial's "
+                    "'Normal to Curve + Set Origin on Curve'. 'position' is 0..1 "
+                    "(0 start, 1 end, 0.5 middle) and it IS a fraction: measured on "
+                    "B30 2026-11-08, a point at 0.5 on a 100 mm line put the plane "
+                    "0.000 mm from a datum point at z=50. The reply states the "
+                    "curve's measured length and the distance along it, because the "
+                    "point's own coordinates cannot be read back on this build. Both "
+                    "halves are real type-library members (AddNewPlaneNormal(iCurve, "
+                    "iPt) and AddNewPointOnCurveFromPercent(iCrv, iLong, "
+                    "iOrientation) - note the THREE arguments, a two-argument call "
+                    "answers 'invalid number of arguments'), and the plane this "
+                    "produces is a TREE ELEMENT: unlike the frame sketch that used "
+                    "to be the only way, later features can reference it."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "curve": {
+                            "type": "string",
+                            "description": "Name of the curve (line, spline, circle, edge) the plane is normal to",
+                        },
+                        "position": {
+                            "type": "number",
+                            "description": "Fraction of the curve's length for the plane's origin (0..1, default 0.5)",
+                            "default": 0.5,
+                        },
+                        "name": {"type": "string", "description": "Optional name for the plane"},
+                    },
+                    "required": ["curve"],
+                },
+            },
+            {
                 "name": "catia_gsd_spline",
                 "description": (
                     "Create a 3D spline through a list of points. Each point is an "
@@ -823,7 +858,13 @@ class GSDTools:
                     "(SolidWorks 'maintain tangency, factor 1.0'), and CATIA's GSM "
                     "loft has no such control: the two end conditions it does have "
                     "are support-surface tangency, which needs a surface touching "
-                    "the section. The way through is to model the bulge instead of "
+                    "the section. The same gap shows up as SolidWorks' 'Normal to "
+                    "Profile' with a strength/tangent factor (1.5, say): there is no "
+                    "1:1 equivalent, so following the tutorial produces a different "
+                    "end curvature and a different bulge - a caller abandoned that "
+                    "route for exactly this (reported 2026-11-08); it is not a "
+                    "parameter under another name. "
+                    "The way through is to model the bulge instead of "
                     "asking the loft for it - add sections where the source is "
                     "thickest, with area and span read off measured cross-sections "
                     "of the source part. Worked example, a propeller blade whose "
@@ -1223,6 +1264,73 @@ class GSDTools:
                 },
             },
             {
+                "name": "catia_gsd_circ_pattern",
+                "description": (
+                    "Repeat one surface/curve N times around an axis and join the "
+                    "copies into a single element - the GSD pattern the tutorial "
+                    "route needs, in one call instead of count-1 rotations plus a "
+                    "join. 'total_angle' (default 360) is the span; the step is "
+                    "total_angle / count, so count=5 total_angle=360 gives 72 "
+                    "degrees, which is what a five-lobe base needs. "
+                    "WHAT THIS IS NOT: this build's HybridShapeFactory declares no "
+                    "GSD pattern member at all - measured on B30 2026-11-08, the "
+                    "factory has 160 members and NONE contains 'Pattern' (the "
+                    "2026-11-08 report said AddNewGSDCircPattern was declared and "
+                    "merely unexposed; it is not declared here). So this is "
+                    "rotate-and-join under one name: the tree gets count-1 rotate "
+                    "features plus one join, not a single pattern node, and editing "
+                    "'count' afterwards means calling again. Each copy is a real "
+                    "element with its own name, so the rotation angles are readable "
+                    "in the tree. The copies are NOT removed on failure: a join "
+                    "that fails leaves the rotations in place and says so, because "
+                    "deleting them would also delete whatever the caller built on "
+                    "them."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "element": {
+                            "type": "string",
+                            "description": "Surface or curve to repeat",
+                        },
+                        "count": {
+                            "type": "integer",
+                            "description": "Total number of instances, including the "
+                                           "original (count=5 makes 4 rotated copies)",
+                            "minimum": 2,
+                        },
+                        "axis": {
+                            "type": "string",
+                            "description": "'x', 'y', 'z' (origin axis, built as a line on "
+                                           "first use) or the name of a line element",
+                            "default": "z",
+                        },
+                        "total_angle": {
+                            "type": "number",
+                            "description": "Angular span to fill, in degrees (default 360)",
+                            "default": 360,
+                        },
+                        "join": {
+                            "type": "boolean",
+                            "description": (
+                                "Join the copies into one element (default true). Set "
+                                "false to get the rotations alone - the way out when the "
+                                "join is refused because the copies do not share edges "
+                                "pairwise (measured 2026-11-08: three coplanar patches "
+                                "all touching the SAME axis line cannot be joined - one "
+                                "edge, three faces)"
+                            ),
+                            "default": True,
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Name for the joined result",
+                        },
+                    },
+                    "required": ["element", "count"],
+                },
+            },
+            {
                 "name": "catia_gsd_translate",
                 "description": (
                     "Copy an element and move the copy along a direction. "
@@ -1367,6 +1475,8 @@ class GSDTools:
                 return self._plane_offset(arguments)
             case "catia_gsd_plane_3points":
                 return self._plane_3points(arguments)
+            case "catia_gsd_plane_normal_to_curve":
+                return self._plane_normal_to_curve(arguments)
             case "catia_gsd_spline":
                 return self._spline(arguments)
             case "catia_gsd_circle":
@@ -1409,6 +1519,8 @@ class GSDTools:
                 return self._symmetry(arguments)
             case "catia_gsd_rotate":
                 return self._rotate(arguments)
+            case "catia_gsd_circ_pattern":
+                return self._circ_pattern(arguments)
             case "catia_gsd_translate":
                 return self._translate(arguments)
             case "catia_gsd_thick_surface":
@@ -3340,6 +3452,177 @@ class GSDTools:
             f"'{element}' copied and rotated {angle:g}° about '{args['axis']}'."
             f"{axis_note}",
         )
+
+    def _circ_pattern(self, args: dict[str, Any]) -> str:
+        """Repeat an element N times around an axis and join the copies.
+
+        This is rotate+join behind one call, not a CATIA GSD pattern: measured on
+        B30 2026-11-08 the HybridShapeFactory declares 160 members and none of
+        them contains "Pattern", so there is nothing to wrap. The 2026-11-08
+        report asserted AddNewGSDCircPattern was declared and merely unexposed;
+        it is not declared on this build, which is why the tool says in its own
+        description what the tree will look like.
+        """
+        self.conn.ensure_connected()
+        element = args["element"]
+        count = int(args["count"])
+        total = float(args.get("total_angle", 360.0))
+        if count < 2:
+            raise ArgumentOutOfRange(
+                f"count must be at least 2 - one instance is the original alone, "
+                f"and nothing would be joined. Got {count}.",
+                code="PATTERN_COUNT_OUT_OF_RANGE", stage="validate")
+        if not 0 < abs(total) <= 360:
+            raise ArgumentOutOfRange(
+                "total_angle must be greater than 0 and at most 360 degrees "
+                f"(got {total}). For a five-lobe base pass total_angle=360, "
+                "count=5 - the step is derived, not passed.",
+                code="PATTERN_ANGLE_OUT_OF_RANGE", stage="validate")
+        # Resolve before anything is built: a typo must not leave four rotations.
+        self._ref(element)
+
+        part = self.conn.get_active_part()
+        factory = self._factory()
+        geoset = self._get_geoset()
+        axis_ref, axis_note = self._axis_ref(args.get("axis", "z"), element)
+        step = total / count
+
+        copies: list[str] = []
+        for index in range(1, count):
+            angle = index * step
+            rotate = factory.AddNewRotate(self._ref(element), axis_ref, angle)
+            geoset.AppendHybridShape(rotate)
+            wanted, _ = self._free_name(part, f"{element}_r{angle:g}")
+            rotate.Name = wanted
+            try:
+                part.UpdateObject(rotate)
+            except Exception as error:  # noqa: BLE001 - the rotation is the report
+                raise PreconditionRejected(
+                    f"CATIA refused to build rotation #{index} "
+                    f"({angle:g} degrees) of '{element}' "
+                    f"({str(error).splitlines()[0][:120]}). "
+                    + (f"{len(copies)} rotation(s) were already in the tree: "
+                       f"{', '.join(copies)}. " if copies else "")
+                    + "Nothing was joined and nothing was deleted.",
+                    code="PATTERN_ROTATE_FAILED", stage="execute",
+                ) from error
+            copies.append(wanted)
+
+        if args.get("join", True) is False:
+            return (
+                f"Repeated '{element}' {count} times over {total:g} degrees "
+                f"(step {step:g} degrees) about '{args.get('axis', 'z')}' - "
+                f"{len(copies)} rotated element(s): {', '.join(copies)}.{axis_note} "
+                "They were NOT joined (join=false); catia_gsd_join takes them by "
+                "name. A join needs a shared edge, and it has to be shared by TWO "
+                "faces: copies that all touch one common line are refused."
+            )
+
+        join = factory.AddNewJoin(self._ref(element), self._ref(copies[0]))
+        for name in copies[1:]:
+            join.AddElement(self._ref(name))
+        try:
+            return self._finish(
+                join, args.get("name") or f"{element}_pattern",
+                f"Repeated '{element}' {count} times over {total:g} degrees "
+                f"(step {step:g} degrees) about '{args.get('axis', 'z')}' and "
+                f"joined the copies.{axis_note} "
+                f"The tree holds the original plus {len(copies)} rotated "
+                f"elements ({', '.join(copies)}) and this join - there is no "
+                "single pattern node on this build, so changing count means "
+                "running this again rather than editing one number.",
+            )
+        except Exception as error:  # noqa: BLE001 - the rotations stay
+            raise PreconditionRejected(
+                f"The {len(copies)} rotations were built but CATIA refused the "
+                f"join ({str(error).splitlines()[0][:140]}). The rotations are "
+                "still in the tree. A join needs an edge shared by TWO faces, so "
+                "copies that all touch one common line (every patch meeting the "
+                "same axis, measured on B30 2026-11-08) cannot be joined - call "
+                "this again with join=false to keep just the rotations, then join "
+                "the pieces that do touch with catia_gsd_join.",
+                code="PATTERN_JOIN_FAILED", stage="execute",
+            ) from error
+
+    def _plane_normal_to_curve(self, args: dict[str, Any]) -> str:
+        """A datum plane normal to a curve, with its origin ON that curve.
+
+        The 2026-11-08 report needed the tutorial's "Normal to Curve + Set Origin
+        on Curve" and had to fake it with a frame sketch, which gives a sketch but
+        no plane element for later features to reference. Both halves exist in the
+        type library and were read out of it on B30 (2026-11-08):
+        ``AddNewPlaneNormal(iCurve, iPt)`` and
+        ``AddNewPointOnCurveFromPercent(iCurve, ...)``, so nothing is guessed
+        here except the point's parameter convention - and that one is reported
+        back from the measurement rather than asserted.
+        """
+        self.conn.ensure_connected()
+        curve = args["curve"]
+        position = float(args.get("position", 0.5))
+        if not 0.0 <= position <= 1.0:
+            raise ArgumentOutOfRange(
+                "position is a FRACTION of the curve's length: 0 is its start, 1 "
+                f"its end, 0.5 the middle. Got {position}. Compose with a curve "
+                "whose direction you know (catia_gsd_line or catia_gsd_spline).",
+                code="POSITION_OUT_OF_RANGE", stage="validate")
+
+        part = self.conn.get_active_part()
+        factory = self._factory()
+        geoset = self._get_geoset()
+        curve_ref = self._ref(curve)
+
+        # Three arguments, not two: the type library names them
+        # (iCrv, iLong, iOrientation) and a two-argument call answers
+        # "无效的参数数目 / invalid number of arguments" - measured on B30
+        # 2026-11-08, after the same two-argument guess had been reported as if
+        # the plane call were the one refusing.
+        point = factory.AddNewPointOnCurveFromPercent(curve_ref, position, 0)
+        geoset.AppendHybridShape(point)
+        point_name, _ = self._free_name(part, f"{curve}_at{position:g}")
+        point.Name = point_name
+        try:
+            part.UpdateObject(point)
+        except Exception as error:  # noqa: BLE001 - the point is the blocker
+            raise PreconditionRejected(
+                f"CATIA refused a point at {position:g} along '{curve}' "
+                f"({str(error).splitlines()[0][:120]}). A plane normal to a curve "
+                "needs a point ON that curve, so the plane was not attempted. "
+                "'" + curve + "' may not be a curve - a surface or a plane cannot "
+                "carry a parameter.",
+                code="POINT_ON_CURVE_FAILED", stage="execute",
+            ) from error
+
+        where = self._on_curve_note(part, curve_ref, position)
+        plane = factory.AddNewPlaneNormal(curve_ref,
+                                         part.CreateReferenceFromObject(point))
+        return self._finish(
+            plane, args.get("name"),
+            f"Plane normal to '{curve}' at {position:g} of its length "
+            f"(origin '{point_name}'{where}). This is the 'Normal to Curve, origin "
+            "on curve' plane - unlike a frame sketch it is a tree element, so "
+            "later features can reference it directly.",
+        )
+
+    def _on_curve_note(self, part: Any, curve_ref: Any, position: float) -> str:
+        """``" on a 100.000 mm curve, 50.000 mm along it"`` - measured.
+
+        The point's own coordinates cannot be read back (`GetPoint` answers
+        「方法 GetPoint 失败」 on this build: it wants a by-ref array), so the
+        position is reported from the curve's measured LENGTH instead - and that
+        length is what makes ``position`` mean something specific. Measured on B30
+        2026-11-08: the parameter is a FRACTION, not a length in mm - a point at
+        0.5 on a 100 mm line put the plane 0.000 mm from a datum point at z=50,
+        and 49.5 mm would be what a length would have given.
+        """
+        try:
+            spa = self.conn.active_document.GetWorkbench("SPAWorkbench")
+            length = float(spa.GetMeasurable(curve_ref).Length)
+        except Exception:  # noqa: BLE001 - a curve with no length reports nothing
+            return ""
+        if not length:
+            return ""
+        return (f" - which is {position * length:.3f} mm along a {length:.3f} mm "
+                "curve, because position is a fraction of the length")
 
     def _translate(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()

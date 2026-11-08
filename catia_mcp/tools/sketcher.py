@@ -547,6 +547,55 @@ class SketcherTools:
                     "required": ["index"],
                 },
             },
+            {
+                "name": "catia_sketch_copy",
+                "description": (
+                    "Re-create a sketch's geometry on ANOTHER plane - the "
+                    "'Ctrl+C the profile, Ctrl+V on the next plane' step, which this "
+                    "server had no way to do: the alternative was redrawing the "
+                    "profile point by point, and two hand-typed copies are never "
+                    "coordinate-identical (a loft section is sensitive to that). "
+                    "The 2D coordinates are carried over unchanged and reinterpreted "
+                    "on the new plane, exactly as a paste onto a different face "
+                    "does; 'offset' moves them within that plane. "
+                    "WHERE THE COORDINATES COME FROM: this session's record of what "
+                    "the sketch tools drew - the sketch itself cannot hand them back "
+                    "(a Point2D exposes no readable X/Y on this build). So a sketch "
+                    "that was reopened from a file, or built outside these tools, "
+                    "cannot be copied and is refused rather than approximated. "
+                    "A CONSTRAINT THAT MOVED A POINT is also not reproduced: the "
+                    "copy holds the coordinates that were passed in, not the ones "
+                    "CATIA solved to. If the source is fully constrained and was "
+                    "edited afterwards, check the copy with catia_sketch_get_geometry "
+                    "before making it a loft section."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "source": {
+                            "type": "string",
+                            "description": "Existing sketch to copy (must have been drawn by these tools in this session)",
+                        },
+                        "plane": {
+                            "description": "Plane for the copy: 'xy'/'yz'/'zx', or a frame "
+                                           "{type:'frame', origin:[x,y,z], u:[..], v:[..]}, or "
+                                           "the name of a datum plane",
+                        },
+                        "offset": {
+                            "type": "array",
+                            "items": {"type": "number"},
+                            "minItems": 2,
+                            "maxItems": 2,
+                            "description": "[dx, dy] shift of the 2D coordinates within the new plane (default [0, 0])",
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Name for the new sketch (default: a unique 草图.N)",
+                        },
+                    },
+                    "required": ["source", "plane"],
+                },
+            },
         ]
 
     def execute(self, tool_name: str, arguments: dict[str, Any]) -> str | dict[str, Any]:
@@ -603,6 +652,8 @@ class SketcherTools:
             case "catia_sketch_delete_element":
                 return self._delete_element(arguments["index"],
                                             arguments.get("sketch_name"))
+            case "catia_sketch_copy":
+                return self._copy_sketch(arguments)
             case _:
                 raise ArgumentRejected(f"Unknown sketcher tool: {tool_name}")
 
@@ -1070,6 +1121,112 @@ class SketcherTools:
             points = [factory.CreatePoint(x, y) for x, y in control]
             factory.CreateSpline(points)
 
+    @staticmethod
+    def _shift_element(element: dict[str, Any], dx: float, dy: float) -> dict[str, Any]:
+        """A copy of a recorded element moved by (dx, dy) in the sketch plane."""
+        moved = dict(element)
+        if dx == 0 and dy == 0:
+            return moved
+        kind = str(moved.get("kind"))
+        if kind in ("line", "rectangle"):
+            moved["x1"] = float(moved["x1"]) + dx
+            moved["y1"] = float(moved["y1"]) + dy
+            moved["x2"] = float(moved["x2"]) + dx
+            moved["y2"] = float(moved["y2"]) + dy
+        elif kind == "circle":
+            moved["cx"] = float(moved["cx"]) + dx
+            moved["cy"] = float(moved["cy"]) + dy
+        elif kind == "point":
+            moved["x"] = float(moved["x"]) + dx
+            moved["y"] = float(moved["y"]) + dy
+        elif kind == "spline":
+            moved["pts"] = [[float(x) + dx, float(y) + dy]
+                            for x, y in moved.get("pts") or []]
+        return moved
+
+    def _copy_sketch(self, args: dict[str, Any]) -> str:
+        """Replay one sketch's recorded geometry into a new sketch on a plane.
+
+        The tutorial step this exists for is "copy the profile, paste it on the
+        next plane, 72 degrees round". The coordinates have to come from the
+        RECORD: a Point2D exposes no readable X/Y on this build, so the sketch
+        cannot be interrogated, only replayed. That is also why the limits are
+        stated in the reply instead of being discovered later - a reopened sketch
+        has no record, and a constraint that moved a point is not reproduced.
+        """
+        self.conn.ensure_connected()
+        source = str(args["source"])
+        plane = args["plane"]
+        raw_offset = args.get("offset") or [0, 0]
+        dx, dy = float(raw_offset[0]), float(raw_offset[1])
+
+        elements = self._drawn.get(self._sketch_key(source))
+        if not elements:
+            recorded = sorted({key.split("::", 1)[-1] for key in self._drawn
+                               if self._drawn.get(key)})
+            raise ArgumentRejected(
+                f"No drawn geometry is recorded for '{source}', so there is nothing "
+                "to replay. The record only covers sketches drawn by these tools in "
+                "THIS session: a sketch reopened from disk cannot be read back (a "
+                "Point2D has no readable coordinates on this build), and copying it "
+                "would mean inventing the geometry. "
+                f"Sketches with a record now: {recorded or 'none'}.",
+                code="SKETCH_NOT_RECORDED", stage="validate",
+            )
+
+        # A sketch still open for editing has to be closed first: creating the
+        # copy opens a new edition, and two simultaneous OpenEdition sessions in
+        # one body are not something this server tracks (the second would take
+        # over _active_sketch and the first would be left open).
+        source_note = ""
+        active = getattr(self, "_active_sketch", None)
+        if active is not None:
+            try:
+                if str(active.Name) == source:
+                    self._close_sketch()
+                    source_note = (" (the source was open for editing and was "
+                                   "closed first)")
+            except Exception:  # noqa: BLE001 - the copy is still worth trying
+                source_note = ""
+
+        self._create_sketch(plane=plane)
+        target = str(self._active_sketch.Name)
+        rename_note = ""
+        wanted = args.get("name")
+        if wanted:
+            try:
+                self._active_sketch.Name = str(wanted)
+                target = str(self._active_sketch.Name)
+                rename_note = self._make_sketch_name_unique(
+                    self.conn.get_active_part(), self._active_sketch)
+                target = str(self._active_sketch.Name)
+            except Exception as error:  # noqa: BLE001 - the copy keeps its name
+                rename_note = (f" Could not rename it to '{wanted}' "
+                               f"({str(error).splitlines()[0][:60]}).")
+
+        factory = self._active_factory
+        count = 0
+        for element in elements:
+            moved = self._shift_element(dict(element), dx, dy)
+            self._replay_element(factory, moved)
+            # Record it again, so the copy can itself be copied and used as a
+            # loft section - a record that stops at the original makes the second
+            # copy impossible for no reason.
+            self._note_element(**moved)
+            count += 1
+
+        closed = self._close_sketch()
+        where = f"offset by ({dx:g}, {dy:g}) mm" if (dx or dy) else "unchanged"
+        return (
+            f"Sketch '{target}' created as a copy of '{source}' "
+            f"({count} element(s), 2D coordinates {where}) on the new plane"
+            f"{source_note}{rename_note}. " + str(closed)
+            + " The copy holds the coordinates that were PASSED IN, not the ones "
+            "CATIA solved to: constraints on the original are not carried over, so "
+            "if the source was constrained after drawing, check the copy with "
+            "catia_sketch_get_geometry before using it as a loft section."
+        )
+
     def _create_sketch(self, plane: Any = "xy", offset: float | None = None) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
@@ -1101,6 +1258,13 @@ class SketcherTools:
         # features land on the intended profile in a multi-sketch part.
         self.conn.last_sketch = sketch
         self._profile_ends = []
+        # How many CLOSED curves were drawn (a circle, or a spline closed on
+        # itself). They have no free end, so they contribute nothing to the
+        # pairing - which is why a sketch holding only one circle answered
+        # closed:null ("nothing recorded") instead of "closed". Reported
+        # 2026-11-08, P1-1, as the same "the pairing does not see this kind of
+        # element" problem.
+        self._profile_closed_curves = 0
 
         return (f"Sketch '{sketch.Name}' created on {where}. "
                 f"{self._axis_note(plane)}. Ready for geometry." + rename_note)
@@ -1441,6 +1605,13 @@ class SketcherTools:
                 "CATIA's own points cannot be read back, so a constraint may "
                 "have moved them"),
         }
+        if not ends:
+            if getattr(self, "_profile_closed_curves", 0):
+                report["closed"] = True
+                report["basis"] = ("every element drawn is a closed curve (a circle "
+                                   "or a spline closed on itself), so there is no "
+                                   "free end to pair")
+            return report
         if len(ends) < 2:
             return report
 
@@ -1620,6 +1791,7 @@ class SketcherTools:
         loops = self._loop_warning(name)
         drawn = self._drawn.get(self._sketch_key(name), [])
         self._profile_ends = []
+        self._profile_closed_curves = 0
         message = (
             f"Sketch '{name}' closed. You can now apply Part Design features "
             "(pad, pocket, user pattern on its points, etc.)."
@@ -1688,6 +1860,8 @@ class SketcherTools:
         factory = self._active_factory
         factory.CreateClosedCircle(cx, cy, radius)
         import math
+        self._profile_closed_curves = getattr(
+            self, "_profile_closed_curves", 0) + 1
         self._note_element("circle", cx=cx, cy=cy, radius=radius,
                            sweep_rad=2 * math.pi)
         return f"Circle created at ({cx}, {cy}) with radius {radius} mm"
@@ -1788,17 +1962,6 @@ class SketcherTools:
         while end_rad <= start_rad:
             end_rad += 2 * math.pi
         factory.CreateCircle(cx, cy, radius, start_rad, end_rad)
-        # Remember the arc's own ends, computed from the numbers we were given.
-        # Automation cannot read a Point2D's coordinates back on this build
-        # (GetCoordinates needs a by-ref array it never fills), so this is the
-        # only place the exact endpoint survives - and it is the number that
-        # explains a pad failure caused by a 3.5 um gap.
-        self._note_ends(
-            (cx + radius * math.cos(start_rad), cy + radius * math.sin(start_rad)),
-            (cx + radius * math.cos(end_rad), cy + radius * math.sin(end_rad)),
-        )
-        self._note_element("arc", cx=cx, cy=cy, radius=radius,
-                           sweep_rad=end_rad - start_rad)
         sweep = math.degrees(end_rad - start_rad)
         swept = (f"{sweep:.0f}deg MAJOR arc (more than a half circle)"
                  if sweep > 180.5 else
@@ -1818,26 +1981,30 @@ class SketcherTools:
         else:
             span = (f"from {start_angle:.4f}° to {end_angle:.4f}° - swept "
                     f"{sweep:.4f}° counter-clockwise")
-        return (
-            f"Arc created at ({cx}, {cy}), radius={radius} mm, "
-            f"{span} ({swept}), arc length "
-            f"{radius * math.radians(abs(sweep)):.4f} mm"
-            + "".join(notes)
-        )
         # Remember the arc's own ends, computed from the numbers we were given.
         # Automation cannot read a Point2D's coordinates back on this build
         # (GetCoordinates needs a by-ref array it never fills), so this is the
         # only place the exact endpoint survives - and it is the number that
         # explains a pad failure caused by a 3.5 um gap.
+        #
+        # BEFORE the return, and that is the fix: these two calls used to sit
+        # AFTER it, so they had not run once since they were written. An arc
+        # therefore entered no drawing record at all - its ends were missing from
+        # the endpoint pairing (a six-arc outline paired only its lines), the
+        # profile echo counted 0 arcs, and the rebuild path had nothing to
+        # replay. Found while fixing the spline ends the 2026-11-08 report called
+        # missing (P1-1); same class, one function away, and no test looked.
         self._note_ends(
             (cx + radius * math.cos(start_rad), cy + radius * math.sin(start_rad)),
             (cx + radius * math.cos(end_rad), cy + radius * math.sin(end_rad)),
         )
         self._note_element("arc", cx=cx, cy=cy, radius=radius,
-                           sweep_rad=end_rad - start_rad)
+                           start_rad=start_rad, sweep_rad=end_rad - start_rad)
         return (
             f"Arc created at ({cx}, {cy}), radius={radius} mm, "
-            f"from {start_angle}° to {end_angle}°"
+            f"{span} ({swept}), arc length "
+            f"{radius * math.radians(abs(sweep)):.4f} mm"
+            + "".join(notes)
         )
 
     def _draw_spline(self, points: list[list[float]], closed: bool = False) -> str:
@@ -1852,7 +2019,6 @@ class SketcherTools:
         control = [list(p) for p in points]
         if closed and len(control) >= 3:
             control.append(list(control[0]))
-
         # Factory2D.CreateSpline expects an array of 2D points.
         spline_pts = [factory.CreatePoint(p[0], p[1]) for p in control]
         spline = factory.CreateSpline(spline_pts)
@@ -1870,6 +2036,19 @@ class SketcherTools:
         self._note_element("spline", points=len(points), chord=chord,
                            pts=[[float(p[0]), float(p[1])] for p in points],
                            closed=bool(closed))
+        # The two ends of the curve, for the endpoint pairing at close time. They
+        # were never recorded, so a profile made of one spline plus lines was
+        # paired only among the LINES: the spline's own ends stayed unmatched and
+        # catia_close_sketch called a closed outline open, with a 29 mm "gap"
+        # between two points that were the same numbers (reported 2026-11-08,
+        # P1-1: "structured=true 的 breaks[] 恰恰是最可信的判据"). A closed
+        # spline repeats its first point, so both ends are the same coordinate
+        # and pair with each other - which is also correct: it has no free end.
+        if closed and len(control) > len(points):
+            self._profile_closed_curves = getattr(
+                self, "_profile_closed_curves", 0) + 1
+        self._note_ends((float(control[0][0]), float(control[0][1])),
+                        (float(control[-1][0]), float(control[-1][1])))
         pts_str = ", ".join(f"({p[0]}, {p[1]})" for p in points)
         closed_note = ""
         if closed and len(control) > len(points):
@@ -2219,6 +2398,10 @@ class SketcherTools:
         self._sketch_part = self.conn.get_active_part()
         self.conn.last_sketch = sketch
         self._profile_ends = []
+        # Reopening a sketch wipes the coordinates (CATIA cannot read them back),
+        # so the closed-curve count goes with them - a circle drawn from here on
+        # is the only thing this session can vouch for.
+        self._profile_closed_curves = 0
         count = 0
         try:
             count = sketch.GeometricElements.Count

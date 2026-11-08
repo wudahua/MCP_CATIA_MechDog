@@ -2,6 +2,89 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.82] — 2026-11-09 · the endpoints the record never kept
+
+A bottle-base report from a caller who built the whole model through this server
+and counted what it cost him. Two of its four "capability gaps" were mine to fix,
+one turned out not to exist on this build, and the P0 that led the report did not
+reproduce here - but checking it turned up a defect introduced an hour earlier in
+the same file.
+
+**`catia_close_sketch` called a closed profile open (P1-1).** The reported sketch
+was one 6-point spline plus four lines whose ends coincide to the digit, and the
+reply said `closed: false` with a 29.39 mm gap between an end and itself. The
+cause was two recorders that never ran: `_draw_arc` called `_note_ends` and
+`_note_element` AFTER its `return`, so an arc had never entered the drawing
+record since the code was written, and `_draw_spline` never called them at all.
+Both are recorded now, and a sketch whose every element is a closed curve answers
+`closed: true` with the reason in `basis` instead of `closed: null` ("nothing
+recorded") for a plain circle. Measured on B30: the report's profile now answers
+`closed: true, endpoints: 10, endpoints_loose: 0, breaks: []`.
+*The first version of this fix recorded the arc twice - four endpoints per arc -
+and a test written against the drawing helpers caught it.*
+
+**`catia_new_part` into a Chinese FOLDER (P0) did not reproduce.** Nine measured
+attempts on B30 (five on 2026-11-07, four today) save an ASCII name in a Chinese
+folder, including the report's exact path; only a non-ASCII FILE NAME is refused.
+The report's own message says `方法 Save 失败` and `Save failed after 3 attempts` -
+that prefix belongs to a bare `Save()` (3 attempts), while a first `SaveAs` says
+"SaveAs failed after 6 attempts", and none of the four bare-`Save` sites is
+reachable from `catia_new_part(file_path=...)`. So the mechanism in that call
+could not be confirmed from the message, and the folder theory is not supported.
+What IS done: the message now branches on `isascii()` of the name instead of
+telling the caller to work it out ("if this name IS ASCII, that is what to act
+on"), and a failed FIRST `SaveAs` gets one more route - save to `%TEMP%`, then
+move to the path asked for - because the report's control shows a document that
+already has a path saving where a first SaveAs failed.
+
+**Both of those were wrong once.** Re-running the audit hit `overwrite` on an
+existing file: the refusal came back as `SAVE_FAILED` with a paragraph about
+non-ASCII folders, and the staging fallback then *deleted* the existing target
+(`save_as` removes an existing file) - exactly what `overwrite=false` promises
+not to do. The fallback now only runs for a raw COM failure, a refusal this
+server makes itself keeps its own code and advice, and the "a staging file was
+already tried" sentence is printed only when one was.
+
+**`catia_gsd_circ_pattern` (P1-5).** The report said
+`AddNewGSDCircPattern` is "in the typeinfo, only not exposed". On B30 it is not
+there at all: the `HybridShapeFactory` declares 160 members and NONE contains
+"Pattern" (dumped 2026-11-08). So this is rotate-and-join behind one call, the
+reply says the tree will hold N-1 rotations plus a join rather than a pattern
+node, and `join=false` is the way out when the copies cannot be joined - a join
+needs an edge shared by TWO faces, and three coplanar patches meeting the same
+axis line are refused (measured; the refusal answers `PATTERN_JOIN_FAILED` and
+leaves the rotations).
+
+**`catia_gsd_plane_normal_to_curve` (P1-4).** The tutorial's "Normal to Curve +
+Set Origin on Curve", which the report had to fake with a frame sketch. Both
+type-library members are real: `AddNewPlaneNormal(iCurve, iPt)` and
+`AddNewPointOnCurveFromPercent(iCrv, iLong, iOrientation)` - THREE arguments, and
+a two-argument call answers `无效的参数数目` (the first version did, and the audit's
+error attribution made it look like the plane call). `iLong` is a FRACTION, not a
+length: measured, a point at 0.5 on a 100 mm line put the plane 0.000 mm from a
+datum point at z=50. The reply reports the curve's measured length and the
+distance along it, because the point's own coordinates cannot be read back
+(`GetPoint` answers `方法 GetPoint 失败` - it wants a by-ref array).
+
+**`catia_sketch_copy` (P1-3).** "Copy the profile, paste it on the next plane."
+Replays a sketch's recorded geometry into a new sketch: same 2D coordinates
+reinterpreted on the new plane, optional in-plane `offset`. Refused when there is
+no record (a sketch reopened from disk cannot hand its coordinates back), and the
+reply says the copy holds the coordinates that were PASSED IN, not the ones CATIA
+solved to after constraints.
+
+**P1-2 named where it is looked for.** The loft description already carried a
+paragraph about SolidWorks "maintain tangency, factor 1.0"; it now also names
+"Normal to Profile with a strength of 1.5", because the report's reader did not
+find the fact under the name he was searching for.
+
+P2-1 (screenshot resolution and the spec tree in frame) was already documented in
+0.3.80 and is unchanged: the size is the 3D window's, and `width`/`height` are
+advisory, which the schema says. P2-3 (keep the failed part in memory) stays as
+it is: 0.3.77's P9 asked for the opposite, and the empty part is closed.
+
+134 tools (+3), 1366 tests (+14), `scripts/b30_v0382_audit.py` 9/9 on B30.
+
 ## [0.3.81] — 2026-11-08 · the reply described something the model did not do
 
 Two reports landed on release day. The first is a modelling report with seven
