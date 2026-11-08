@@ -101,7 +101,24 @@ class DiagnosticsTools:
                     "in the session and how many of them CATIA loaded itself: a "
                     "report measured 2-3x slower calls in a session whose owner "
                     "thought one document was open while 18 sample catalogs were "
-                    "(2026-11-04), and nothing in the old block showed them."
+                    "(2026-11-04), and nothing in the old block showed them. "
+                    "THE FACTORY PROBE IS THE ANSWER TO 'can this CATIA do X'. "
+                    "For each factory it emits the object's own type-library "
+                    "method table: 'typeinfo_addnew' lists EVERY AddNew* member "
+                    "with its parameter names, and 'typeinfo_members' the whole "
+                    "member count, so 'is there a pattern/angle-plane/boundary "
+                    "member here' is a lookup rather than a guess and not a "
+                    "matter of what this server happens to have wrapped. Read "
+                    "it that way on both factories before concluding anything: "
+                    "a GSD member can be declared on ShapeFactory instead of "
+                    "HybridShapeFactory, which is exactly what two reports in a "
+                    "row got wrong in opposite directions (resolved 2026-11-09: "
+                    "AddNewGSDCircPattern IS on ShapeFactory). The 'checked' "
+                    "list beside it is a licence and regression sample, NOT the "
+                    "capability list, and a member listed under "
+                    "typeinfo_addnew is DECLARED - whether it can be updated "
+                    "has to be measured separately (that same member returns an "
+                    "object and then refuses UpdateObject on B30)."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -463,6 +480,11 @@ class DiagnosticsTools:
         # solid from two circles). So the probe now also reads the object's own
         # type library, which cannot miss a method.
         probe["typeinfo_addnew"] = self._typeinfo_methods(factory)
+        # Both numbers, because they answer different questions and a report
+        # spent a round comparing "160 members" with "131 AddNew*" as if they
+        # disagreed (2026-11-09). 'count' is every member of the object's type
+        # library, 'addnew' is how many start with AddNew.
+        probe["typeinfo_members"] = self._typeinfo_member_count(factory)
         exposed: list[str] = []
         missing: list[str] = []
         errored: dict[str, str] = {}
@@ -504,6 +526,32 @@ class DiagnosticsTools:
                 names.add(name)
         return sorted(names)
 
+    @staticmethod
+    def _typeinfo_member_count(obj: Any,
+                               prefix: str = "AddNew") -> dict[str, int] | None:
+        """``{"count": all members, "addnew": members starting with prefix}``.
+
+        Two numbers, because they are routinely compared against each other by
+        accident: this server's own description said HybridShapeFactory "has 160
+        members" while catia_diagnose reported 131, and a report took that for a
+        contradiction (2026-11-09). 160 is the typelib's whole member table, 131
+        is the AddNew* subset. Reporting both, side by side, ends the question.
+        """
+        try:
+            info = obj._oleobj_.GetTypeInfo()
+            count = info.GetTypeAttr().cFuncs
+        except Exception:  # noqa: BLE001 - reported as unavailable
+            return None
+        matching = 0
+        for index in range(count):
+            try:
+                name = info.GetNames(info.GetFuncDesc(index).memid)[0]
+            except Exception:  # noqa: BLE001 - skip the undocumented ones
+                continue
+            if name.startswith(prefix):
+                matching += 1
+        return {"count": int(count), "addnew": matching}
+
     def _notes(self, report: dict[str, Any]) -> list[str]:
         notes: list[str] = []
         # Say which list is which, once. A caller read "missing_methods" as the
@@ -516,10 +564,15 @@ class DiagnosticsTools:
             notes.append(
                 "typeinfo_addnew is the object's own method table ("
                 + ", ".join(f"{k}: {v}" for k, v in sorted(typed.items()))
-                + " AddNew* methods). The checked list is a licence and "
-                "regression sample, NOT the capability list - a method absent "
-                "from it can still exist and work, so read typeinfo_addnew "
-                "before concluding CATIA cannot do something."
+                + " AddNew* methods). typeinfo_members gives both counts for "
+                "the same object - 'count' is every member in its type library "
+                "and 'addnew' is the AddNew* subset - so 'has 160 members' and "
+                "'131 AddNew*' are not two answers to one question. The checked "
+                "list is a licence and regression sample, NOT the capability list "
+                "- a method absent from it can still exist and work, so "
+                "read typeinfo_addnew before concluding CATIA cannot do "
+                "something. Remember that a tool's own factory is not the only "
+                "candidate: a GSD pattern lives on ShapeFactory."
             )
         factories = report.get("factories", {})
         labels = {

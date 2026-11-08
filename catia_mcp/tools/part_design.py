@@ -5729,7 +5729,15 @@ class PartDesignTools:
                     sel.Clear()
                 except Exception:  # noqa: BLE001 - a selection left behind
                     pass
-            hits.append((label, where, children, parent_set, same_name))
+            # Whether this set CARRIES the solid. A GSD solid (ThickSurface,
+            # CloseSurface) lives inside its geometrical set, not in the body, so
+            # hiding the set hides the part - and showing the body back does
+            # nothing, because the body is empty. The 2026-11-09 report hit
+            # exactly that, followed this tool's own advice to hide the set
+            # before a screenshot, and then had to guess feature names
+            # ("加厚曲面.10", "凸台.1") to get the model back.
+            solids = ([] if show else self._solid_carriers(target))
+            hits.append((label, where, children, parent_set, same_name, solids))
 
         if not hits:
             where = ("in '" + active + "'" if len(targets) == 1
@@ -5742,11 +5750,40 @@ class PartDesignTools:
         self.conn.refresh_display()
         state = "shown" if show else "hidden"
         if len(targets) == 1:
-            _label, where, children, parent_set, same_name = hits[0]
+            _label, where, children, parent_set, same_name, solids = hits[0]
             extra = f" and {children} element(s) inside it" if children else ""
             if same_name:
                 extra += (f", and {same_name} other tree node(s) that carry the "
                           "same name - all of them were set")
+            # The one thing this reply has to say about hiding a SET: where the
+            # model lives. Measured on B30 2026-11-09 (scripts/
+            # b30_v0384_visibility.py): with a pad solid in the body and one
+            # surface in the set, hiding the set left the solid alone - the
+            # exported STL went 3778 B -> 3244 B (the surface's triangles out,
+            # the solid's kept). So the failure mode the 2026-11-09 report hit is
+            # NOT "a set hides the body"; it is "the element I was looking at was
+            # inside that set", and the recovery is to show the SET, not the body.
+            solid_note = ""
+            if not show and where in ("geometrical set", "hybrid body"):
+                if solids:
+                    solid_note = (
+                        " WARNING: this set holds what looks like the SOLID itself ("
+                        + ", ".join(f"'{name}'" for name in solids[:4])
+                        + (" ..." if len(solids) > 4 else "")
+                        + "). If the view goes empty, show the SET again - a solid "
+                        "kept inside a geometrical set is not reachable through "
+                        "'零件几何体'.")
+                else:
+                    solid_note = (
+                        " Note: a geometrical set is a separate branch from the body, "
+                        "so this does not hide a solid built in the body - "
+                        "measured on B30 2026-11-09: hiding the set took the "
+                        "surface's triangles out of the STL (3778 -> 3244 B) and "
+                        "left the solid's in place. If the view DOES go empty, the "
+                        "geometry you were looking at is an element INSIDE this set; "
+                        "show the set again with this same call and show=true, "
+                        "rather than showing '零件几何体', which holds none of it.")
+
             # An element inside a HIDDEN set stays invisible however it is set:
             # the UI greys the lightbulb and CATIA keeps the parent's visibility.
             # The reply used to say "is now shown" and leave it at that (reported
@@ -5759,11 +5796,13 @@ class PartDesignTools:
                 f"set first (catia_set_visibility(name='{parent_set}', "
                 f"show=true))."
                 if (show and parent_set) else "")
-            return (f"'{name}' ({where}) is now {state}{extra}.{parent_note}")
+            return (f"'{name}' ({where}) is now {state}{extra}.{solid_note}"
+                    f"{parent_note}")
 
         where = hits[0][1]
         children = sum(hit[2] for hit in hits)
         same_name = sum(hit[4] for hit in hits)
+        solids = [name for hit in hits for name in hit[5]]
         labels = ", ".join(hit[0] for hit in hits[:8])
         if len(hits) > 8:
             labels += f", ... ({len(hits) - 8} more)"
@@ -5778,8 +5817,56 @@ class PartDesignTools:
             f"({', '.join(parents[:4])}): a hidden set hides its contents, so show "
             "the set as well when you want them back."
             if (show and parents) else "")
+        if solids:
+            note += (" WARNING: the set(s) being hidden hold the SOLID itself ("
+                     + ", ".join(f"'{name}'" for name in solids[:4])
+                     + (" ..." if len(solids) > 4 else "")
+                     + "): a surface-generated solid lives in the geometrical set, "
+                     "not in the body, so the body has nothing to show back - "
+                     "re-show the set instead.")
         return (f"'{name}' ({where}) is now {state} in {len(hits)} of "
                 f"{len(targets)} part(s) of '{active}': {labels}{extra}.{note}")
+
+    # A solid made BY a surface operation is a GSD element, and it lives in the
+    # geometrical set that owns it - not in the body. Hiding that set therefore
+    # hides the part, which is what the 2026-11-09 report walked into while
+    # following this tool's own advice. Neither the type name nor the localised
+    # element name is reliable on its own (a typelib may answer "IDispatch"), so
+    # both are consulted and a hit from either counts.
+    _SOLID_TYPE_HINTS = ("ThickSurface", "CloseSurface", "Solid")
+    _SOLID_NAME_HINTS = ("加厚曲面", "封闭曲面", "ThickSurface", "CloseSurface")
+
+    @classmethod
+    def _solid_carriers(cls, node: Any, depth: int = 0) -> list[str]:
+        """Names of elements INSIDE ``node`` that are the solid, not decoration."""
+        if depth > 4:
+            return []
+        found: list[str] = []
+        for collection in ("HybridShapes", "HybridBodies"):
+            try:
+                items = getattr(node, collection)
+            except Exception:  # noqa: BLE001 - the set does not hold this kind
+                continue
+            for index in range(1, items.Count + 1):
+                try:
+                    child = items.Item(index)
+                except Exception:  # noqa: BLE001 - one item, not the rest
+                    continue
+                try:
+                    name = str(getattr(child, "Name", "") or "")
+                except Exception:  # noqa: BLE001 - a half-dead node
+                    name = ""
+                try:
+                    kind = str(child._oleobj_.GetTypeInfo()
+                               .GetDocumentation(-1)[0])
+                except Exception:  # noqa: BLE001 - no type information
+                    kind = ""
+                if (any(hint in kind for hint in cls._SOLID_TYPE_HINTS)
+                        or any(hint in name for hint in cls._SOLID_NAME_HINTS)):
+                    found.append(name or kind or "<unnamed>")
+                elif collection == "HybridBodies":
+                    found.extend(cls._solid_carriers(child, depth + 1))
+        return found
 
     @classmethod
     def _hide_set_contents(cls, node: Any, apply: Any, depth: int) -> int:

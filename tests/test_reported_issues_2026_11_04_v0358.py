@@ -142,7 +142,9 @@ def test_a_failed_thickness_reports_the_radius_and_where(monkeypatch, tmp_path):
     tools.conn = _Conn(part=object())
     message = tools._offset_blocker(object(), 20.0)
     assert "MEASURED" in message
-    assert "less than the 20.000 mm" in message
+    # One side is what is compared against the radius (0.3.84): with no side
+    # given, the total stands in for it.
+    assert "largest SINGLE offset is 20.000 mm" in message
     assert "theta=" in message and "z=" in message
     assert "Widen that feature" in message
 

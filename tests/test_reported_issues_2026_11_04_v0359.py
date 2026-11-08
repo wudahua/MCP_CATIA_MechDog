@@ -192,7 +192,9 @@ def test_the_failure_message_does_not_offer_to_widen_a_duplicated_sheet(
 def test_the_failure_message_still_names_a_real_radius(monkeypatch, tmp_path):
     path = _write(tmp_path / "tube.stl", _cylinder_faces())
     tight = _blocker(monkeypatch, path, 20.0)
-    assert "Widen" in tight and "less than the 20.000 mm" in tight
+    # 0.3.84: the number compared against the radius is ONE side's offset, so
+    # the message names that number instead of calling the total "the offset".
+    assert "Widen" in tight and "largest SINGLE offset is 20.000 mm" in tight
     assert "OPEN BORDER" in tight, (
         "this tube's edges end on a border, and the message has to say so: it is "
         "the one thing that distinguishes a real bend there from the mesh ending")

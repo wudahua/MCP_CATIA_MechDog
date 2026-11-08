@@ -2,6 +2,77 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.84] — 2026-11-09 · ten members away from the answer
+
+Two reports arrived the same evening and they disagree with each other about one
+method. Both were partly right, which is the interesting part.
+
+**The GSD pattern member is on ShapeFactory, and it still does not work.**
+0.3.82's description said `AddNewGSDCircPattern` was not declared anywhere; that
+came from measuring `HybridShapeFactory` (160 members, 131 AddNew*, none with
+"Pattern") and stepping from "not in A" to "not anywhere". The 2026-11-09 report
+read the diagnosis output and found the member ten members away, on the Part
+Design factory. It is there, with 14 arguments, and it returns an object. What
+that object then does is refuse `part.UpdateObject` in all seven shapes tried:
+`iType` 0/1/2, `completeCrown` on and off, a GSD surface and a Part Design pad as
+the source, and the body set as the in-work object. So the rotation path is not a
+preference, it is what this build can do — but the description says that now,
+instead of saying the member does not exist. The two factory counts are quoted
+together with the reason they differ (whole table vs AddNew* subset), and
+`catia_diagnose` gained `typeinfo_members` plus a description that points at the
+method tables as the answer to "can this CATIA do X". That capability was already
+there and nobody could find it.
+
+**`catia_gsd_plane_angle`** closes the one gap the tutorial route still had: a
+datum plane rotated a given angle about an axis, which is how one 1/N sector is
+taken. `AddNewPlaneAngle(plane, axis, angle, orientation)`. Two measured rules,
+one of which cost eight call shapes to find: THE AXIS HAS TO LIE IN THE REFERENCE
+PLANE, because rotating a plane about its own normal leaves it where it was and
+CATIA answers with a generic E_FAIL that reads like a bad argument; and the angle
+is in DEGREES (72 landed 0.0000 mm from a point at 72°; 1.2566, the same angle in
+radians, was read as 1.2566°). The refusal now names both, and names a
+combination that works.
+
+**Capping a hole** — the report's Step 6, where both of its routes failed — has a
+third route, and it is the tutorial's own: split, fill, join. `AddNewBoundaryOfSurface`
+returns ONE curve carrying every loop, so filling it rebuilds the whole face
+(their 1714 non-manifold edges); a precise circle has no edge in common with a
+wavy hole border, so the join refused. After `catia_gsd_split` with that circle,
+the outer piece's inner border IS the circle, and the fill shares it by
+construction. Measured end to end on B30: 1600.000 → 1486.903 → 113.097 →
+1600.000 mm², thickness 0.5 → 800.0 mm³. Written into `catia_gsd_split`,
+`catia_gsd_fill` and `catia_gsd_boundary` at the point of use, and into README's
+Known limits, because a capability nobody can find is a missing capability.
+
+**The thickening's blocker is ONE SIDE, not the total.** Four measurements agree:
+0.5/0 refused at a 0.355 mm radius, 0.25/0.25 built a 0.500 mm wall, 2.54/0
+refused on a 2.30 mm section, 1.27/1.27 refused there too. The old advice —
+"keep the total below the radius" — reads as "this wall can never be 0.5 mm" and
+is what sent the reporter to abandon the thickness the design needed. It now says
+to split the same total across both sides, with those numbers. When the caller has
+already split it and it still fails, curvature stops being the explanation
+instead of being repeated.
+
+**Hiding a geometrical set** now says where the solid actually is. Measured: a
+set and the body are separate branches, so hiding the set took the surface's
+triangles out of the STL (3778 → 3244 B) and left the body's solid alone. The
+report's empty view was therefore not this tool hiding the body — the thing they
+were looking at was inside the set, and the recovery is to show the SET, not
+'零件几何体'. That sentence was missing and they had to guess feature names.
+
+**The Chinese-folder regression did not reproduce.** Four path shapes in one
+session with several documents open — plain ASCII, spaces, Chinese, spaces+Chinese
+(the report's exact shape) — all saved, and `catia_save_document` into the same
+folder saved too. Their message is "Save failed after 3 attempts: <document name>",
+which is a bare `doc.Save()` (3 tries, name only); a first SaveAs says "SaveAs
+failed after 6 attempts" with the full path. No bare-Save site is reachable from
+`new_part(file_path=...)`, and 0.3.82's ASCII staging route would have made a
+second SaveAs work anyway. Recorded as not reproduced with the measurements,
+rather than "fixed" on a guess — the same call that was wrong about the folder in
+0.3.74, and the reason that report's cause is not being adopted on faith.
+
+1388 tests, 135 tools, scripts/b30_v0384_audit.py 5/5 on B30.
+
 ## [0.3.83] — 2026-11-09 · the tools that did not meet
 
 The acceptance report on 0.3.82 is the best kind: it confirmed the fixes with

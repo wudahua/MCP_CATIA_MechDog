@@ -319,6 +319,62 @@ class GSDTools:
                 },
             },
             {
+                "name": "catia_gsd_plane_angle",
+                "description": (
+                    "Create a datum plane rotated a given angle about an axis - "
+                    "the tutorial's Step 3 ('以轴线为参考，新建 36.00° 的基准面'), "
+                    "and the general way to take one 1/N sector of a revolved "
+                    "part. 'plane' is 'xy'/'yz'/'zx' or the name of any planar "
+                    "element in the tree; 'axis' is 'x'/'y'/'z' (a line on the "
+                    "origin axis is built for you) or the name of a line. The "
+                    "result is a TREE ELEMENT: visible, named, editable and "
+                    "referenceable - which is what the frame-sketch workaround "
+                    "could never be. "
+                    "TWO MEASURED RULES. (1) THE AXIS HAS TO LIE IN THE "
+                    "REFERENCE PLANE. Rotating a plane about its own normal "
+                    "leaves it where it was, and CATIA answers with a generic "
+                    "E_FAIL that looks like a bad argument - measured on B30 "
+                    "2026-11-09, eight argument shapes were refused before the "
+                    "geometry was blamed: plane='xy' with axis='z' can never "
+                    "work, plane='yz' with axis='z' does. (2) The angle is in "
+                    "DEGREES: 72 put the plane 0.0000 mm from a point at 72 "
+                    "degrees, while 1.2566 (the same angle in radians) was read "
+                    "as 1.2566 degrees."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "plane": {
+                            "type": "string",
+                            "description": "Reference plane: 'xy', 'yz', 'zx', or "
+                                           "the name of a planar element in the tree",
+                        },
+                        "axis": {
+                            "type": "string",
+                            "description": "Rotation axis: 'x', 'y', 'z', or the "
+                                           "name of a line element. It must lie in "
+                                           "the reference plane",
+                        },
+                        "angle": {
+                            "type": "number",
+                            "description": "Rotation angle in DEGREES (72 for a "
+                                           "five-fold sector)",
+                        },
+                        "orientation": {
+                            "type": "integer",
+                            "description": "Passed to AddNewPlaneAngle unchanged "
+                                           "(default 0). Measured: 0, 1 and -1 all "
+                                           "gave the same plane on a YZ/Z case, so "
+                                           "this is not interpreted here",
+                            "default": 0,
+                        },
+                        "name": {"type": "string",
+                                 "description": "Optional name for the plane"},
+                    },
+                    "required": ["plane", "axis", "angle"],
+                },
+            },
+            {
                 "name": "catia_gsd_spline",
                 "description": (
                     "Create a 3D spline through a list of points. Each point is an "
@@ -1043,7 +1099,19 @@ class GSDTools:
                 "name": "catia_gsd_fill",
                 "description": (
                     "Create a Fill surface bounded by a closed contour of curves "
-                    "(one closed curve or several connected curves)."
+                    "(one closed curve or several connected curves). "
+                    "DO NOT PASS IT A catia_gsd_boundary CURVE FROM A SURFACE "
+                    "WITH A HOLE: one boundary curve carries every loop, so the "
+                    "fill comes back as a face covering the whole original - "
+                    "overlapping geometry that joins without complaint and then "
+                    "breaks the thickening (measured 2026-11-09 on a five-lobe "
+                    "base: 1714 edges shared by more than two triangles). "
+                    "TO CAP A HOLE, cut first: catia_gsd_split(element=surface, "
+                    "cutter=<circle>) leaves the outer piece with that circle as "
+                    "its inner border, and filling the CIRCLE then joining the "
+                    "two shares the edge by construction. Whole chain measured "
+                    "on B30 2026-11-09: 1600.000 -> split 1486.903 -> fill "
+                    "113.097 -> join 1600.000 mm2, thickness 0.5 -> 800.0 mm3."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1157,7 +1225,17 @@ class GSDTools:
                     "join FIRST and split afterwards when the neighbour shares the "
                     "edge you are cutting away - a split piece no longer has that "
                     "edge to join on (measured the same day: join then fails with "
-                    "the generic update error)."
+                    "the generic update error). "
+                    "THE CUTTER CAN BE A CURVE THAT LIES ON THE SURFACE, and that "
+                    "is how a hole gets capped: split the surface with a circle "
+                    "(or any closed curve) drawn over the hole, keep the outer "
+                    "piece, then catia_gsd_fill that curve and catia_gsd_join - "
+                    "the two share the edge because the split created it. Measured "
+                    "on B30 2026-11-09 on a 40x40 patch: split by a r=6 circle "
+                    "kept 1486.903 mm2 (= 1600 - pi*36), fill gave 113.097, join "
+                    "gave 1600.000, thickness 0.5 gave 800.0 mm3. Splitting twice "
+                    "on the same element does NOT stack: do both cuts from the "
+                    "original, not from the first result."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1240,12 +1318,15 @@ class GSDTools:
                     "existing line/axis element; 'angle' is in degrees, positive "
                     "counter-clockwise looking down the axis toward its origin "
                     "(right-hand rule along +x/+y/+z). "
-                    "THIS IS HOW A GSD PATTERN IS MADE. There is no surface "
-                    "pattern tool - catia_circ_pattern is a Part Design feature "
-                    "and takes a solid. A five-lobe base is one lobe plus four "
-                    "rotations of 72 degrees; rebuilding the lobe at five "
-                    "positions instead costs five extra constructions of the same "
-                    "geometry and is what this tool exists to stop (2026-11-04). "
+                    "THIS IS THE PRIMITIVE BEHIND A GSD PATTERN. A five-lobe "
+                    "base is one lobe plus four rotations of 72 degrees; "
+                    "rebuilding the lobe at five positions instead costs five "
+                    "extra constructions of the same geometry and is what this "
+                    "tool exists to stop (2026-11-04). For the whole pattern in "
+                    "one call use catia_gsd_circ_pattern, which calls this "
+                    "count-1 times and joins the copies - the single-feature "
+                    "member ShapeFactory.AddNewGSDCircPattern exists but refuses "
+                    "to update on this build (measured 2026-11-09). "
                     "Rotating about an arbitrary axis needs a LINE, not a "
                     "direction: pass the name of a line you built."
                 ),
@@ -1272,19 +1353,35 @@ class GSDTools:
                     "join. 'total_angle' (default 360) is the span; the step is "
                     "total_angle / count, so count=5 total_angle=360 gives 72 "
                     "degrees, which is what a five-lobe base needs. "
-                    "WHAT THIS IS NOT: this build's HybridShapeFactory declares no "
-                    "GSD pattern member at all - measured on B30 2026-11-08, the "
-                    "factory has 160 members and NONE contains 'Pattern' (the "
-                    "2026-11-08 report said AddNewGSDCircPattern was declared and "
-                    "merely unexposed; it is not declared here). So this is "
-                    "rotate-and-join under one name: the tree gets count-1 rotate "
-                    "features plus one join, not a single pattern node, and editing "
-                    "'count' afterwards means calling again. Each copy is a real "
-                    "element with its own name, so the rotation angles are readable "
-                    "in the tree. The copies are NOT removed on failure: a join "
-                    "that fails leaves the rotations in place and says so, because "
-                    "deleting them would also delete whatever the caller built on "
-                    "them."
+                    "WHAT THIS IS NOT: a single pattern node. The member DOES "
+                    "exist - on the Part Design factory, "
+                    "ShapeFactory.AddNewGSDCircPattern, which takes 14 "
+                    "arguments - and an earlier version of this text said GSD "
+                    "patterns were not declared anywhere. That was wrong, and "
+                    "the 2026-11-09 report was right to call it out. What had "
+                    "actually been measured is only that HybridShapeFactory "
+                    "declares none: 160 members in all, 131 of them AddNew*, "
+                    "and not one name contains 'Pattern' (the two numbers count "
+                    "different things and both are quoted here so a recheck "
+                    "does not stall on them). "
+                    "What has been measured NOW (B30 2026-11-09, seven call "
+                    "shapes): the ShapeFactory member returns an object, and "
+                    "that object then refuses part.UpdateObject in every "
+                    "combination tried - iType 0/1/2, completeCrown on and off, "
+                    "a GSD surface and a Part Design pad as the source, the body "
+                    "set as the in-work object. A declared member that cannot be "
+                    "updated is not a capability, so the rotation path below is "
+                    "not a preference: it is what this build can do. "
+                    "Consequences to plan around: the tree gets count-1 rotate "
+                    "features plus one join instead of one node, editing 'count' "
+                    "afterwards means calling again, and a join can refuse when "
+                    "the copies do not share an edge (the reply measures the "
+                    "distance rather than guessing why). Each copy is a real "
+                    "element with its own name, so the rotation angles are "
+                    "readable in the tree, and the copies are NOT removed on "
+                    "failure: a join that fails leaves the rotations in place "
+                    "and says so, because deleting them would also delete "
+                    "whatever the caller built on them."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1477,6 +1574,8 @@ class GSDTools:
                 return self._plane_3points(arguments)
             case "catia_gsd_plane_normal_to_curve":
                 return self._plane_normal_to_curve(arguments)
+            case "catia_gsd_plane_angle":
+                return self._plane_angle(arguments)
             case "catia_gsd_spline":
                 return self._spline(arguments)
             case "catia_gsd_circle":
@@ -2207,6 +2306,86 @@ class GSDTools:
         plane = self._factory().AddNewPlane3Points(ref1, ref2, ref3)
         return self._finish(plane, args.get("name"), "Plane created through 3 points.")
 
+    _MAIN_PLANES = {"xy": "PlaneXY", "yx": "PlaneXY",
+                    "yz": "PlaneYZ", "zy": "PlaneYZ",
+                    "zx": "PlaneZX", "xz": "PlaneZX"}
+
+    def _plane_ref(self, spec: str) -> tuple[Any, str]:
+        """``(reference, label)`` for a reference plane or a named plane element.
+
+        A string is either one of the three main planes or the name of a planar
+        element in the tree — the same two forms ``catia_create_sketch`` takes,
+        so a plane built by this tool can be fed straight back in.
+        """
+        key = str(spec).strip().lower()
+        part = self.conn.get_active_part()
+        attribute = self._MAIN_PLANES.get(key)
+        if attribute is not None:
+            return (part.CreateReferenceFromObject(
+                getattr(part.OriginElements, attribute)), f"the {key} main plane")
+        return self._ref(str(spec)), f"'{spec}'"
+
+    def _plane_angle(self, args: dict[str, Any]) -> str:
+        """A datum plane rotated about an axis — ``AddNewPlaneAngle``.
+
+        The tutorial step this exists for ("新建两个基准面，角度取 36.00°") is the
+        general way to take one 1/N sector of a revolved part, and before 0.3.84
+        the only substitute was a hand-computed frame: three vectors to recompute
+        whenever the angle changed, and a hidden temporary element instead of a
+        reusable tree node.
+
+        Measured on B30 2026-11-09 (scripts/b30_v0384_planeangles.py,
+        _final.py), because the call has one trap that costs a whole session if
+        it is not known:
+
+          * THE AXIS HAS TO LIE IN THE REFERENCE PLANE. Rotating the XY plane
+            about Z is a rotation of a plane about its own normal: the plane does
+            not move, and CATIA does not say "degenerate" - ``UpdateObject``
+            fails with a generic E_FAIL, which reads like a bad argument. Eight
+            call shapes were refused that way before the geometry was blamed
+            instead of the arguments.
+          * The angle is in DEGREES. 72 landed 0.0000 mm from a point at 72
+            degrees on the rotated plane; 1.2566 (the same angle in radians) put
+            the plane 0.1355 mm away, i.e. it was read as 1.2566 degrees.
+          * ``orientation`` made no difference on that geometry (0 and 1 and -1
+            all produced the same plane), so it is passed through rather than
+            interpreted.
+        """
+        self.conn.ensure_connected()
+        angle = float(args["angle"])
+        if abs(angle) < 1e-9:
+            raise ArgumentOutOfRange(
+                f"angle must be non-zero; got {angle}. A plane rotated by 0 "
+                "degrees is the reference plane itself.")
+        plane_ref, plane_label = self._plane_ref(str(args["plane"]))
+        axis_ref, axis_note = self._axis_ref(args["axis"], "PlaneAngle")
+        orientation = int(args.get("orientation", 0))
+
+        plane = self._factory().AddNewPlaneAngle(plane_ref, axis_ref,
+                                                angle, orientation)
+        try:
+            return self._finish(
+                plane, args.get("name"),
+                f"Datum plane created {angle:g} degrees from {plane_label} about "
+                f"the axis given{axis_note}. This is a TREE ELEMENT, so it can be "
+                "referenced by later sketches and features - unlike a frame "
+                "sketch, which carries no name and cannot be picked.",
+            )
+        except RuntimeError as error:
+            raise PreconditionRejected(
+                f"CATIA rejected the {angle:g}-degree plane from {plane_label} "
+                f"({str(error).splitlines()[0][:120]}). The plane was removed "
+                "from the tree again. The one cause measured on B30 is "
+                "GEOMETRY, not the arguments: the rotation axis has to LIE IN "
+                "the reference plane. Rotating a plane about its own normal "
+                "does not move it, and this build answers with a generic "
+                "failure rather than 'degenerate'. For the usual case - a "
+                "sector of a revolved part - pass a plane and an axis that "
+                "share a direction, e.g. plane='yz' with axis='z', or "
+                "plane='zx' with axis='x'.",
+                code="PLANE_ANGLE_REJECTED", stage="execute",
+            ) from error
+
     _CLOSE_EPS = 1e-6
 
     @staticmethod
@@ -2844,9 +3023,21 @@ class GSDTools:
         boundary = self._factory().AddNewBoundaryOfSurface(self._ref(element))
         return self._finish(
             boundary, args.get("name"),
-            f"Boundary of '{element}' created (a closed surface gives one curve "
-            f"with both loops; measure it with catia_measure_distance if its "
-            f"length matters).",
+            f"Boundary of '{element}' created. ONE curve carries EVERY loop of "
+            "the surface: on a surface with a hole that is the outer border and "
+            "the hole's border in a single element. That matters before the next "
+            "step - handing this curve to catia_gsd_fill rebuilds the WHOLE face "
+            "over the original, and the duplicate surfaces then break a "
+            "thickening (measured on a caller's five-lobe base, 2026-11-09: 1714 "
+            "edges shared by more than two triangles). There is no loop selector "
+            "to ask for one of them: AddNewBoundaryOfSurface takes exactly one "
+            "argument on this build. TO CAP A HOLE, cut instead of filling the "
+            "border - catia_gsd_split(element=surface, cutter=<a circle or curve "
+            "on the hole>) keeps the outer piece with that curve as its inner "
+            "border, then catia_gsd_fill(boundaries=[that curve]) and "
+            "catia_gsd_join share the edge by construction. Measured end to end "
+            "on B30 2026-11-09: 1600.000 -> split 1486.903 -> fill 113.097 -> "
+            "join 1600.000 mm2, then thickness 0.5 gave 800.0 mm3.",
         )
 
     def _intersection(self, args: dict[str, Any]) -> str:
@@ -3221,7 +3412,12 @@ class GSDTools:
                 f"{error} A fill needs CLOSED boundaries that meet each other: one "
                 "wire for a single loop, or several curves that actually share "
                 "endpoints (the two ends of a loft plus its section rings, for "
-                "instance). Boundaries that only come close do not bind. If they do "
+                "instance). Boundaries that only come close do not bind. If the "
+                "boundary came from catia_gsd_boundary on a surface that has a "
+                "hole, it carries BOTH loops in one curve and this fill will "
+                "cover the whole face - cut the surface with the curve you want "
+                "as the border instead (catia_gsd_split), then fill that curve. "
+                "If they do "
                 "meet and this still fails, it is session-sensitive like the loft: "
                 "retry once in a fresh session, and if it still fails build the cap "
                 "as a swept-and-thickened section instead."
@@ -3456,12 +3652,23 @@ class GSDTools:
     def _circ_pattern(self, args: dict[str, Any]) -> str:
         """Repeat an element N times around an axis and join the copies.
 
-        This is rotate+join behind one call, not a CATIA GSD pattern: measured on
-        B30 2026-11-08 the HybridShapeFactory declares 160 members and none of
-        them contains "Pattern", so there is nothing to wrap. The 2026-11-08
-        report asserted AddNewGSDCircPattern was declared and merely unexposed;
-        it is not declared on this build, which is why the tool says in its own
-        description what the tree will look like.
+        This is rotate+join behind one call, not a CATIA GSD pattern. Two
+        separate facts, kept separate because conflating them is what made the
+        0.3.82 description wrong:
+
+          * HybridShapeFactory declares no pattern member: 160 members in all,
+            131 of them AddNew*, none with "Pattern" in its name (B30
+            2026-11-08).
+          * ShapeFactory DOES declare AddNewGSDCircPattern (14 arguments), and
+            an object comes back - but part.UpdateObject refuses it in all seven
+            call shapes tried (iType 0/1/2, completeCrown on and off, a GSD
+            surface and a Part Design pad as the source, the body as the in-work
+            object; B30 2026-11-09, scripts/b30_v0384_pattern.py and _final.py).
+
+        So a single pattern node is declared and not callable here. The reply
+        the caller gets says exactly that instead of claiming the member does
+        not exist - the 2026-11-09 report was right that "not in A" does not
+        mean "not anywhere".
         """
         self.conn.ensure_connected()
         element = args["element"]
@@ -3707,6 +3914,10 @@ class GSDTools:
                 self._safe_update(thick)
             except Exception as second_error:
                 total = abs(float(thickness1)) + abs(float(thickness2))
+                # The number that is actually compared against the curvature is
+                # ONE SIDE's offset, not the two added together - see the four
+                # measurements in _offset_blocker.
+                side = max(abs(float(thickness1)), abs(float(thickness2)))
                 raise RuntimeError(
                     f"{second_error} ThickSurface offset {thickness1}+{thickness2} mm "
                     "and the update failed TWICE - this call already retried once "
@@ -3716,7 +3927,7 @@ class GSDTools:
                     "cross and CATIA refuses - measured on a 2.30 mm lens section "
                     "with 1.27/1.27 and with 2.54/0, both refused, while a 6 mm "
                     "hexagon of the same shape thickened."
-                    + self._offset_blocker(part, total)
+                    + self._offset_blocker(part, total, side)
                 ) from second_error
             self.conn.refresh_display()
             return (
@@ -3733,7 +3944,7 @@ class GSDTools:
             f"({thickness1}/{thickness2} mm). Feature: '{thick.Name}'"
         )
 
-    def _offset_blocker(self, part: Any, total: float) -> str:
+    def _offset_blocker(self, part: Any, total: float, side: float | None = None) -> str:
         """The tightest radius of curvature in this document's mesh, measured now.
 
         "Update failed" is all CATIA says when an offset has to cross itself, and
@@ -3741,6 +3952,26 @@ class GSDTools:
         by hand that its valley walls had a 0.19-0.24 mm radius against a 0.3 mm
         wall. The mesh carries that number (measurement._curvature_stats), so it
         is read here and put in the error.
+
+        WHICH NUMBER IS COMPARED AGAINST THAT RADIUS is one side's offset, not
+        the two sides added: ``AddNewThickSurface(surface, symmetric, top,
+        bottom)`` applies each offset to its own side, so the two faces cross
+        when EITHER side exceeds the local radius. Four measurements agree with
+        that reading and disagree with "total must stay below the radius":
+
+          0.500 / 0       refused twice at a 0.355 mm radius (bottle base,
+                          2026-11-09 - one side of 0.5 over 0.355)
+          0.250 / 0.250   built, wall 0.500 (same report - each side 0.25 under
+                          0.355, and the TOTAL was still above it)
+          2.540 / 0       refused on a 2.30 mm lens section (one side 2.54)
+          1.270 / 1.270   refused on the same section (each side 1.27 over the
+                          ~1.15 mm half-thickness)
+
+        The 2026-11-09 report's complaint is the reason this is spelled out: the
+        old text offered only "keep the total below 0.355 mm", which reads as
+        "this wall can never be 0.5 mm" and sent them to abandon the thickness
+        the design needed. Splitting the same total across both sides is the
+        answer, and it is a different wall only in name.
 
         It runs in a FAILURE path, so everything is optional: the part is in an
         error state, the export may write nothing, and the caller still has to
@@ -3824,10 +4055,14 @@ class GSDTools:
                      f"belong to a neighbour. Hide the others and re-run before "
                      f"acting on any number in this message.")
         on_border = bool(worst.get("at_open_border"))
-        if radius is not None and radius < total:
+        # The comparison that matters is ONE side against the radius. When the
+        # caller has already split the total, `side` says so and the radius stops
+        # being an explanation at all.
+        worst_side = total if side is None else side
+        if radius is not None and radius < worst_side:
             head = (f" MEASURED: the tightest smooth radius in the visible mesh is "
-                    f"{radius:.3f} mm{where}, which is less than the {total:.3f} mm "
-                    f"total offset.")
+                    f"{radius:.3f} mm{where}, and the largest SINGLE offset is "
+                    f"{worst_side:.3f} mm (of {total:.3f} mm total).")
             if on_border:
                 # A CONDITIONAL prescription, not a flat one. The report's point
                 # was that "keep the total below 0.079 mm" reads as an instruction;
@@ -3836,15 +4071,30 @@ class GSDTools:
                 return (head + " That edge lies on an OPEN BORDER, where the mesh "
                         "ends as often as the surface bends - so confirm the bend "
                         "before acting on it. IF THE BEND IS REAL: Widen that "
-                        f"feature, or keep the total below {radius:.3f} mm. IF IT "
+                        f"feature, or keep EACH SIDE of the offset below "
+                        f"{radius:.3f} mm. IF IT "
                         "IS THE BORDER: nothing in the model needs changing, and "
                         f"the failure is elsewhere - a seam or a "
                         f"self-intersection.{skip}{scope}")
-            return (head + " There the two offset faces must cross: widen that "
-                    "feature, or keep the total below "
-                    f"{radius:.3f} mm. (Read from the document's VISIBLE mesh over "
+            return (head + " There the offset face on that side has to cross the "
+                    "other. Two ways out, and the second keeps the wall you "
+                    "asked for: (1) widen that feature, or (2) KEEP EACH SIDE "
+                    f"BELOW {radius:.3f} mm - this call takes two offsets and "
+                    "CATIA applies one to each side, so the SAME total wall split "
+                    "in half is compared against the radius one side at a time. "
+                    "Measured on a bottle base (2026-11-09): 0.500 on one side "
+                    "was refused twice against a 0.355 mm radius, 0.250/0.250 "
+                    "built with a 0.500 mm wall - same thickness, different "
+                    f"argument. (Read from the document's VISIBLE mesh over "
                     f"{data['edges_measured']} interior edges; the estimate runs a "
                     f"few percent low.){skip}{scope}")
+        if radius is not None and side is not None and radius < total:
+            return (f" MEASURED: the split offset ({side:.3f} mm on the larger "
+                    f"side, {total:.3f} mm in all) already keeps each side under "
+                    f"the tightest smooth radius {radius:.3f} mm{where}, so "
+                    f"curvature does not explain this failure - look at a seam or "
+                    f"a self-intersection in the surface itself, not at its "
+                    f"radius.{skip}{scope}")
         return (f" MEASURED: the tightest smooth radius in the visible mesh is "
                 f"{radius} mm{where}, which is NOT below the {total:.3f} mm offset - "
                 f"so on what this mesh resolves, curvature does not explain the "

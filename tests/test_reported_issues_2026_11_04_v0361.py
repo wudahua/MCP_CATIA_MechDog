@@ -206,7 +206,7 @@ def _thick(fail_first: bool, succeed_on_retry: bool):
     factory = _ShapeFactory(fail_first)
     tools = GSDTools(connection=_Conn(factory))
     tools._ref = lambda name: ("ref", name)          # type: ignore[method-assign]
-    tools._offset_blocker = lambda part, total: " [diagnosis]"  # type: ignore[method-assign]
+    tools._offset_blocker = lambda part, total, side=None: " [diagnosis]"  # type: ignore[method-assign]
     calls = {"n": 0}
 
     def fake_update(feature):
