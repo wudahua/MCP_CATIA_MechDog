@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.82** · [what changed](CHANGELOG.md) ·
+**0.3.83** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -85,7 +85,7 @@ several documents.
 | `catia_set_component_transform` | Absolute placement from a 3×3 in either convention (`matrix` = `P = A·p + T`, `basis` = row i is where local axis i points) or CATIA's native 12 numbers; reads back and reports deviation, det, orthogonality **and where each local axis ended up** |
 | `catia_get_component_transform` | The same placement in both conventions, plus where local X/Y/Z point in the assembly |
 | `catia_rename_component` | A readable assembly tree. `Part.Name` is read-only on V5-6R2020, so every part arrives as `Part1.1 / Part2.1 / …`; the instance name is writable |
-| `catia_sketch_copy` | The "copy the profile, paste it on the next plane" step. Replays a sketch's recorded geometry into a new sketch on another plane, coordinates unchanged - redrawing by hand is what leaves two copies that are not coordinate-identical, and a loft section is sensitive to that. Refused for a sketch reopened from disk, because the record is the only source of coordinates |
+| `catia_sketch_copy` | The "copy the profile, paste it on the next plane" step. Replays a sketch's recorded geometry into a new sketch on another plane - a main plane, a frame, or **a datum plane by name** - coordinates unchanged; redrawing by hand is what leaves two copies that are not coordinate-identical, and a loft section is sensitive to that. Refused for a sketch reopened from disk, because the record is the only source of coordinates |
 | `catia_gsd_circ_pattern` | Repeats one surface/curve N times around an axis and joins the copies in one call. **Not a CATIA GSD pattern**: this build's `HybridShapeFactory` declares 160 members and none contains "Pattern" (measured 2026-11-08), so the tree gets N-1 rotations plus a join, and the reply says so |
 | `catia_gsd_plane_normal_to_curve` | Plane normal to a curve with its origin ON that curve at a fraction of its length - the tutorial's "Normal to Curve + Set Origin on Curve". A tree element, unlike the frame sketch that used to be the only way; the point's measured coordinates are reported back |
 

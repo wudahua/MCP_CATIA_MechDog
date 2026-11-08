@@ -2,6 +2,58 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.83] — 2026-11-09 · the tools that did not meet
+
+The acceptance report on 0.3.82 is the best kind: it confirmed the fixes with
+the same geometry that had failed before ("上次那条批评撤回"), ran the whole
+surface route to a solid for the first time, and then found that two of the
+tools added in that release cannot be used together.
+
+**`catia_sketch_copy` refused every datum plane name (P1).** Its own schema said
+"`'xy'`/`'yz'`/`'zx'`, or a frame, **or the name of a datum plane**" and the
+resolver answered `Unknown plane 'Plane_NormValley'. Use 'xy', 'yz', or 'zx'.`
+for all of them - so `catia_gsd_plane_normal_to_curve`, added the same day,
+could be called but its output could not be used: the tutorial's Step 4 needs
+exactly that plane, and its frame cannot be hand-computed because the curve's
+tangent and normal are not readable. The name is now resolved through the tree
+(`FindObjectByName`, which reaches into the geometrical sets), a named element
+that is not a plane is refused as `SUPPORT_NOT_PLANAR` with its type, and an
+unknown name answers `PLANE_NOT_FOUND` with the datum planes the part actually
+holds - "Unknown plane" alone reads as a spelling mistake. Measured on B30:
+both the report's cases (a plane from `plane_normal_to_curve`, one from
+`plane_offset`) now take a sketch. `catia_create_sketch` accepts the same names.
+
+**The profile summary for a closed spline was wrong (P2), and so was its copy's.**
+A 6 x 6 square closed spline reported `bbox (10,10) .. (10,10)` and
+`outline 18.000 mm`. The bbox came from `_profile_ends` - the endpoint PAIRING
+table, where a closed spline repeats its first point - and the length from the
+points that were passed in, which is three sides of a four-sided loop. The
+extent now comes from the geometry (every recorded point of every element, with
+an arc's quarter-turn extremes included) and a closed spline's closing segment
+is counted. The number is labelled for what it is: a spline's outline is the
+straight line through its control points, so it is a LOWER BOUND and the bbox is
+the control polygon's.
+
+**The join refusal asserted a cause it had not measured (P2).** 0.3.82's message
+said copies fail to join when they "all touch one common line" - true of the one
+experiment behind it, and wrong for the caller's next case, whose sector was a
+ring with an arc as its inner boundary, nowhere near the axis. The real reason
+was that his sector spans half a period, so its two side boundaries differ and
+copy i's trailing edge is not copy i+1's leading edge; he rebuilt three times.
+The message now measures the distance between the original and its first copy
+and branches on it: a gap means they do not touch, 0.0000 mm means they touch
+and the edges merely coincide rather than being the same edge - and if the
+distance cannot be measured, the reply says it makes no claim about the cause.
+
+**A failed pattern left visible copies and did not say so (P3).** The copies stay
+on purpose (deleting them could take whatever was built on them), but they are
+visible, and visible geometry enters the STL that `catia_get_bounding_box` and
+`catia_check_surface` measure. The refusal now says that, and names the one call
+that removes them: `catia_delete_feature(names=[...])` - which already took a
+list, so the bulk delete the report asked for exists and was simply not findable.
+
+134 tools (unchanged), 1377 tests (+11), `scripts/b30_v0383_audit.py` 8/8 on B30.
+
 ## [0.3.82] — 2026-11-09 · the endpoints the record never kept
 
 A bottle-base report from a caller who built the whole model through this server

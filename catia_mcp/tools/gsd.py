@@ -3535,14 +3535,51 @@ class GSDTools:
         except Exception as error:  # noqa: BLE001 - the rotations stay
             raise PreconditionRejected(
                 f"The {len(copies)} rotations were built but CATIA refused the "
-                f"join ({str(error).splitlines()[0][:140]}). The rotations are "
-                "still in the tree. A join needs an edge shared by TWO faces, so "
-                "copies that all touch one common line (every patch meeting the "
-                "same axis, measured on B30 2026-11-08) cannot be joined - call "
-                "this again with join=false to keep just the rotations, then join "
-                "the pieces that do touch with catia_gsd_join.",
+                f"join ({str(error).splitlines()[0][:140]})."
+                + self._join_diagnosis(part, element, copies[0])
+                + " The copies are still in the tree and they are VISIBLE, so they "
+                "enter every mesh-based measurement (catia_get_bounding_box, "
+                "catia_check_surface, any STL export) - remove them in one call "
+                f"with catia_delete_feature(names={copies!r}) if this attempt is "
+                "being abandoned, or call this tool again with join=false to keep "
+                "the rotations deliberately.",
                 code="PATTERN_JOIN_FAILED", stage="execute",
             ) from error
+
+    def _join_diagnosis(self, part: Any, original: str, copy: str) -> str:
+        """What the distance between the original and its first copy says.
+
+        The 0.3.82 message asserted a cause - "copies that all touch one common
+        line" - and a caller was told to fix a geometry that had nothing to do
+        with it: his sector was a ring whose inner boundary is an arc, nowhere
+        near the axis, and the real reason was that the sector spans half a
+        period so its two side boundaries differ in shape (reported 2026-11-09,
+        P2). A cause in a message has to come from a measurement, so measure the
+        one thing that separates the two cases that matter, and name the rest as
+        possibilities instead of as the reason.
+        """
+        try:
+            spa = self.conn.active_document.GetWorkbench("SPAWorkbench")
+            gap = float(spa.GetMeasurable(self._ref(original)).GetMinimumDistance(
+                self._ref(copy)))
+        except Exception:  # noqa: BLE001 - an unmeasurable pair is not a failure
+            return (" The distance between the original and its first copy could "
+                    "not be measured, so this reply does not claim a cause.")
+        if gap > 1e-3:
+            return (f" The original and its first copy are {gap:.4f} mm apart, so "
+                    "they do not touch and a join has nothing to merge. Check the "
+                    "step against what the element spans: the step is "
+                    "total_angle/count, and copies only meet when that matches the "
+                    "sector's own angular size.")
+        return (f" The original and its first copy touch ({gap:.4f} mm apart), so "
+                "the join was not refused for a gap: a shared edge has to be the "
+                "SAME edge on both sides, not two edges that merely coincide. A "
+                "sector that spans half a period has two differently shaped side "
+                "boundaries, so copy i's trailing edge is not copy i+1's leading "
+                "edge and the ring cannot be built from it - make the sector one "
+                "full period (valley-ridge-valley) and divide by the number of "
+                "periods instead. Compare the boundary edges themselves with "
+                "catia_measure_distance if this is still unclear.")
 
     def _plane_normal_to_curve(self, args: dict[str, Any]) -> str:
         """A datum plane normal to a curve, with its origin ON that curve.

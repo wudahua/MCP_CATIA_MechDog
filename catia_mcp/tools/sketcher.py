@@ -92,7 +92,11 @@ class SketcherTools:
                                 "origin + u*du + v*dv). Reach for this instead of "
                                 "rotating a main plane - the rotation cannot be "
                                 "read back, and 'nearly parallel' is not parallel "
-                                "over a long part."
+                                "over a long part. A datum plane BY NAME (from "
+                                "catia_gsd_plane_offset / _normal_to_curve / "
+                                "_3points) is also accepted: the name is looked up "
+                                "in the tree, and a name that is not a plane is "
+                                "refused with the datum planes this part does have."
                             ),
                             "oneOf": [
                                 {
@@ -880,6 +884,83 @@ class SketcherTools:
             where += f" offset {offset:g} mm"
         return where
 
+    @staticmethod
+    def _named_element(part: Any, name: str) -> Any:
+        """The part-tree element called ``name``, or None.
+
+        ``FindObjectByName`` reaches into the geometrical sets, which is why the
+        same call is used for name collisions in gsd.py: a name it could not see
+        would never report as taken.
+        """
+        try:
+            found = part.FindObjectByName(name)
+        except Exception:  # noqa: BLE001 - no such name, or the call is unsupported
+            return None
+        return found
+
+    @staticmethod
+    def _element_type_name(element: Any) -> str | None:
+        """The automation type behind a tree node, or None if it will not say."""
+        try:
+            info = element._oleobj_.GetTypeInfo()
+            return str(info.GetDocumentation(-1)[0])
+        except Exception:  # noqa: BLE001 - not every node exposes type information
+            return None
+
+    def _datum_plane_names(self, part: Any) -> list[str]:
+        """Names of the datum planes in this part, for an error message.
+
+        A caller who passed a name needs to see what names exist - "Unknown
+        plane" alone sends him looking for a spelling mistake that is not there.
+        """
+        found: list[str] = []
+
+        def collect(container: Any) -> None:
+            """Every hybrid shape in one collection whose type is a plane."""
+            try:
+                count = container.Count
+            except Exception:  # noqa: BLE001
+                return
+            for index in range(1, count + 1):
+                try:
+                    node = container.Item(index)
+                except Exception:  # noqa: BLE001
+                    continue
+                name = str(getattr(node, "Name", ""))
+                kind = self._element_type_name(node) or ""
+                if "Plane" in kind and name:
+                    found.append(name)
+
+        def walk(geosets: Any, depth: int) -> None:
+            if depth > 4:
+                return
+            try:
+                count = geosets.Count
+            except Exception:  # noqa: BLE001
+                return
+            for index in range(1, count + 1):
+                try:
+                    geoset = geosets.Item(index)
+                except Exception:  # noqa: BLE001
+                    continue
+                # A datum plane is a HybridShape INSIDE the set, not a child set:
+                # walking HybridBodies alone found nothing and the message said
+                # "Datum planes here: none" for a part that held two of them.
+                try:
+                    collect(geoset.HybridShapes)
+                except Exception:  # noqa: BLE001 - a set with no shapes
+                    pass
+                try:
+                    walk(geoset.HybridBodies, depth + 1)
+                except Exception:  # noqa: BLE001 - not a nested set
+                    pass
+
+        try:
+            walk(part.HybridBodies, 1)
+        except Exception:  # noqa: BLE001 - a part with no geosets
+            return []
+        return found
+
     def _resolve_support(self, part: Any, body: Any, plane: Any,
                          offset: float | None) -> tuple[Any, str]:
         """Turn the `plane` argument into (reference, human description).
@@ -891,11 +972,39 @@ class SketcherTools:
         """
         if isinstance(plane, str):
             key = plane.lower()
-            if key not in PLANE_MAP:
-                raise ArgumentRejected(f"Unknown plane '{plane}'. Use 'xy', 'yz', or 'zx'.")
-            return (
-                self._reference_plane(part, body, key, offset),
-                self._describe_plane(key, offset),
+            if key in PLANE_MAP:
+                return (
+                    self._reference_plane(part, body, key, offset),
+                    self._describe_plane(key, offset),
+                )
+            # A datum plane (or any planar element) by NAME. 0.3.82's
+            # catia_sketch_copy advertised "or the name of a datum plane" and
+            # refused every one of them - so the two tools added that day could
+            # not be chained: plane_normal_to_curve built a plane, and
+            # sketch_copy answered "Unknown plane", which reads as a typo
+            # (reported 2026-11-09, P1). The lookup is the same one every other
+            # tool uses for an element name.
+            element = self._named_element(part, plane)
+            if element is not None:
+                type_name = self._element_type_name(element) or ""
+                if "Plane" not in type_name:
+                    raise ArgumentRejected(
+                        f"'{plane}' is a {type_name or 'element'} in this part, not "
+                        "a plane, so a sketch cannot be supported by it. Pass a "
+                        "datum plane, or a frame {type:'frame', origin:[..], "
+                        "u:[..], v:[..]}.",
+                        code="SUPPORT_NOT_PLANAR", stage="validate",
+                    )
+                return (part.CreateReferenceFromObject(element),
+                        f"on the datum plane '{plane}'")
+            planes = self._datum_plane_names(part)
+            raise ArgumentRejected(
+                f"Unknown plane '{plane}': not 'xy'/'yz'/'zx', and no datum plane "
+                f"with that name is in this part. Datum planes here: "
+                f"{planes or 'none'} - build one with catia_gsd_plane_offset, "
+                "catia_gsd_plane_normal_to_curve or catia_gsd_plane_3points, then "
+                "pass its name.",
+                code="PLANE_NOT_FOUND", stage="validate",
             )
 
         if not isinstance(plane, dict):
@@ -1430,6 +1539,63 @@ class SketcherTools:
                     return None
         return None
 
+    @staticmethod
+    def _element_points(item: dict[str, Any]) -> list[tuple[float, float]]:
+        """Every point of one recorded element that bounds its extent.
+
+        The bbox used to be computed from ``_profile_ends`` - the endpoints that
+        are PAIRED at close time. For a single closed spline both of those are
+        the same coordinate (it repeats its first point), so a 6 x 6 square came
+        back as ``bbox (10,10) .. (10,10)``: a point (reported 2026-11-09, P2).
+        The extent has to come from the geometry, not from the pairing table.
+        """
+        import math
+
+        kind = str(item.get("kind"))
+        if kind == "line":
+            return [(float(item["x1"]), float(item["y1"])),
+                    (float(item["x2"]), float(item["y2"]))]
+        if kind == "rectangle":
+            x1, y1 = float(item["x1"]), float(item["y1"])
+            x2, y2 = float(item["x2"]), float(item["y2"])
+            return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+        if kind == "circle":
+            cx, cy, r = float(item["cx"]), float(item["cy"]), float(item["radius"])
+            return [(cx - r, cy - r), (cx + r, cy + r)]
+        if kind == "point":
+            return [(float(item["x"]), float(item["y"]))]
+        if kind == "spline":
+            return [(float(x), float(y)) for x, y in item.get("pts") or []]
+        if kind == "arc":
+            # Endpoints alone can under-report: an arc that sweeps past 0, 90,
+            # 180 or 270 degrees reaches further out than both of its ends.
+            if "start_rad" not in item:
+                return []
+            cx, cy = float(item["cx"]), float(item["cy"])
+            radius = float(item["radius"])
+            start = float(item["start_rad"])
+            sweep = float(item.get("sweep_rad") or 0.0)
+            low, high = (start, start + sweep) if sweep >= 0 else (start + sweep, start)
+            points = [
+                (cx + radius * math.cos(start),
+                 cy + radius * math.sin(start)),
+                (cx + radius * math.cos(start + sweep),
+                 cy + radius * math.sin(start + sweep)),
+            ]
+            for quarter in (0.0, math.pi / 2, math.pi, 3 * math.pi / 2):
+                turned = quarter
+                while turned < low:
+                    turned += 2 * math.pi
+                if turned <= high:
+                    points.append((cx + radius * math.cos(quarter),
+                                   cy + radius * math.sin(quarter)))
+            # Rounded and de-duplicated: cos(pi/2) is 6.1e-16, not 0, so the
+            # same corner arrived twice with two spellings and a caller comparing
+            # coordinates saw a point that was "not there".
+            rounded = [(round(x, 9) + 0.0, round(y, 9) + 0.0) for x, y in points]
+            return list(dict.fromkeys(rounded))
+        return []
+
     def _profile_summary(self, sketch_name: str | None = None) -> str:
         """Echo the drawn profile: element counts, size, total outline length.
 
@@ -1452,8 +1618,11 @@ class SketcherTools:
             return ""
         counts: dict[str, int] = {}
         length = 0.0
+        bounds: list[tuple[float, float]] = []
+        straight_spline = False
         for item in drawn:
             counts[item["kind"]] = counts.get(item["kind"], 0) + 1
+            bounds.extend(self._element_points(item))
             if item["kind"] == "line":
                 length += math.hypot(item["x2"] - item["x1"], item["y2"] - item["y1"])
             elif item["kind"] in ("arc", "circle"):
@@ -1462,19 +1631,35 @@ class SketcherTools:
                 length += 2 * (abs(item["x2"] - item["x1"])
                                + abs(item["y2"] - item["y1"]))
             elif item["kind"] == "spline":
-                length += item.get("chord", 0.0)
+                # Straight-line sum through the control points, and the closing
+                # segment included: a closed 4-point spline has FOUR sides, and
+                # leaving the last one out is what turned 24 mm into 18 mm
+                # (reported 2026-11-09, P2 - 18.000 = 3 x 6).
+                control = [[float(x), float(y)] for x, y in item.get("pts") or []]
+                if item.get("closed") and len(control) >= 3:
+                    control = control + [control[0]]
+                length += sum(math.hypot(control[i + 1][0] - control[i][0],
+                                         control[i + 1][1] - control[i][1])
+                              for i in range(len(control) - 1))
+                straight_spline = True
         parts = []
         if counts:
             parts.append(", ".join(f"{n} {kind}(s)"
                                    for kind, n in sorted(counts.items())))
-        if ends:
-            xs = [p[0] for p in ends]
-            ys = [p[1] for p in ends]
+        if bounds:
+            xs = [p[0] for p in bounds]
+            ys = [p[1] for p in bounds]
             parts.append("bbox (%.4f, %.4f) .. (%.4f, %.4f)"
                          % (min(xs), min(ys), max(xs), max(ys)))
         if length:
             parts.append("outline %.3f mm" % length)
-        return " Profile: " + "; ".join(parts) + "." if parts else ""
+        text = " Profile: " + "; ".join(parts) + "." if parts else ""
+        if straight_spline and length:
+            text += (" The outline counts a spline as the straight line through its "
+                     "control points, so it is a LOWER BOUND - the curve bulges "
+                     "outside it, and the bbox is the control polygon's, not the "
+                     "curve's.")
+        return text
 
     def _loop_warning(self, sketch_name: str | None = None) -> str:
         """Warn when one sketch holds several closed loops that overlap.
@@ -2024,9 +2209,12 @@ class SketcherTools:
         spline = factory.CreateSpline(spline_pts)
 
         import math
-        chord = sum(math.hypot(points[i + 1][0] - points[i][0],
-                               points[i + 1][1] - points[i][1])
-                    for i in range(len(points) - 1))
+        # Over the CONTROL list, so a closed spline includes its closing segment:
+        # counting only the points that were passed in made a 4-sided closed
+        # spline report three sides (18 mm instead of 24 mm, reported 2026-11-09).
+        chord = sum(math.hypot(control[i + 1][0] - control[i][0],
+                               control[i + 1][1] - control[i][1])
+                    for i in range(len(control) - 1))
         # The control points themselves, not just how many there were. Without
         # them a spline is the ONE closed profile the rebuild path cannot replay -
         # and since 0.3.77 makes "one closed spline" the shape a loft section has
