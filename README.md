@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.79** · [what changed](CHANGELOG.md) ·
+**0.3.80** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -12,7 +12,7 @@ defects that make that loop lie to you. Most of the work since 0.3.0 came from
 people rebuilding real assemblies with it: the changelog is a list of things that
 produced a plausible number, a wrong number, or no explanation at all.
 
-**130 tools** (upstream 98 + 32 added, and nothing dropped any more: knowledge
+**131 tools** (upstream 98 + 33 added, and nothing dropped any more: knowledge
 came back in 0.3.63 and drafting in 0.3.64, each after its tools were measured on
 B30 rather than trusted). Nothing in the COM layer was rewritten — the value of upstream is
 the field-verified knowledge in its comments, so this fork is strictly add /
@@ -69,9 +69,10 @@ two - `catia_delete_body`, `catia_solid_loft`; 0.3.19: one - `catia_copy_compone
 0.3.51: one - `catia_check_surface`; 0.3.53: one - `catia_gsd_boundary`; 0.3.55: one - `catia_gsd_heal`; 0.3.56: two -
 `catia_gsd_fillet_surface`, `catia_gsd_spine`; 0.3.60: two -
 `catia_gsd_rotate`, `catia_gsd_translate`).
-98 + 32 added = 130: the 26 below, `catia_apply_design_table` under Knowledgeware,
+98 + 33 added = 131: the 26 below, `catia_apply_design_table` under Knowledgeware,
 `catia_drawing_set_sheet` and `catia_drawing_add_frame` under Drafting (0.3.65),
-and the three colour tools in their own table below (0.3.79). 0.3.20 added
+the three colour tools in their own table below (0.3.79), and
+`catia_replace_component` (0.3.80). 0.3.20 added
 arguments instead of tools: a sketch support given as `origin`/`u`/`v`, edges
 given as coordinates, arcs given as their two endpoints, and one plan per
 several documents.
@@ -978,7 +979,7 @@ python -m venv .venv
 # offline test suite, no CATIA needed
 .venv/Scripts/python -m pytest tests -q
 
-# the smoke check: 130 tool definitions == 130 routes
+# the smoke check: 131 tool definitions == 131 routes
 .venv/Scripts/python tests/test_server.py
 ```
 
@@ -1171,7 +1172,7 @@ while a reply that only reports success cannot.
 | Sketcher | 13 | lines, rectangles, circles, constraints; reopen a closed sketch and delete one element |
 | Part Design | 25 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, solid loft, bodies (create / list / delete)… |
 | Generative Shape Design | 31 | wireframe and surfaces, extract, `boundary`, `heal`, `fillet_surface`, `spine`, `rotate`, `translate`, revolve + close surface; a GSD element or set is removed with `catia_delete_feature` |
-| Assembly | **13** | upstream 9 + get/set component transform, rename, list constraints, copy component |
+| Assembly | **14** | upstream 9 + get/set component transform, rename, list constraints, copy component, replace component |
 | Appearance | **3** | `catia_colorize_assembly`, `catia_set_color`, `catia_get_color` - per-instance colour in an assembly, per-node in a part |
 | Measurement | 7 | inertia, distance, bounding box\*, parameters, `catia_check_surface` |
 | Export | 4 | STEP / STL / IGES hand-off |

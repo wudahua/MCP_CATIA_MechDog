@@ -84,7 +84,16 @@ class ExportTools:
                     "900x900 was asked for and 300x400 written). The reply reports the "
                     "real pixel size read from the file header, and says so when it "
                     "differs from the request - resize the CATIA window if the picture "
-                    "has to be bigger."
+                    "has to be bigger. "
+                    "THE PICTURE IS NOT A CLEAN RENDER: it is the window's client "
+                    "area, so the specification tree and the axis are in it (reported "
+                    "2026-11-08, P2-1). There is no supported way to suppress it from "
+                    "automation - `Application.StartCommand` does NOT validate the "
+                    "command name (an unknown one is accepted and then opens a modal "
+                    "未知命令 dialog on the automation thread, measured 2026-11-08), so "
+                    "a guessed command is not a shortcut, it is a freeze. Hide the "
+                    "tree in the UI (F3) before calling this if the picture is for a "
+                    "report."
                 ),
                 "inputSchema": {
                     "type": "object",

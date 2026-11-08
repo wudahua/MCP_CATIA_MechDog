@@ -1216,12 +1216,17 @@ class PartDesignTools:
                                 "Hide a whole class of tree bookkeeping in one call, "
                                 "instead of naming each one: 'sketch' (every sketch in "
                                 "every body), 'datum_plane' (the three reference "
-                                "planes), or 'construction' (both). These are the "
+                                "planes PLUS every datum element inside a solid body - "
+                                "the points and plane a frame sketch creates live "
+                                "there, and until 0.3.80 they were left on screen), or "
+                                "'construction' (both). These are the "
                                 "white frames that clutter a screenshot - a sketch "
                                 "outline is not solid geometry, but it is drawn on top "
                                 "of the solid and reads as a defect. On a Product this "
                                 "walks every part under it and reports how many of how "
-                                "many it touched."
+                                "many it touched. A geometrical set is NOT descended "
+                                "here: a surface in one is usually the design, so use "
+                                "the name for those."
                             ),
                             "enum": ["sketch", "datum_plane", "construction"],
                         },
@@ -5877,14 +5882,14 @@ class PartDesignTools:
             active = str(self.conn.active_document.Name)
         except Exception:  # noqa: BLE001 - the label is a courtesy
             active = "<the active document>"
-        total = {"sketch": 0, "datum_plane": 0}
+        total = {"sketch": 0, "datum_plane": 0, "datum_element": 0}
         touched: list[str] = []
 
         want_sketch = kind in ("sketch", "construction")
         want_plane = kind in ("datum_plane", "construction")
 
         for label, part, sel in targets:
-            counts = {"sketch": 0, "datum_plane": 0}
+            counts = {"sketch": 0, "datum_plane": 0, "datum_element": 0}
 
             def apply(node, sel=sel) -> None:
                 sel.Clear()
@@ -5917,19 +5922,41 @@ class PartDesignTools:
                             counts["datum_plane"] += 1
                         except Exception:          # noqa: BLE001 - per plane
                             pass
+                    # ... and the datum elements that live INSIDE a solid body.
+                    # A frame sketch puts its three points and its plane there
+                    # (deliberately: a plane in a geometrical set poisons the fillet
+                    # on the pad built on it), and this branch only ever counted the
+                    # three origin planes - 33 for 11 parts, which is exactly what
+                    # the 2026-11-08 report saw while a white frame stayed on screen
+                    # (P2-3). Nothing in a BODY but the solid is construction, so the
+                    # whole collection goes; geometrical sets are left alone, because
+                    # there a surface is usually the design.
+                    for i in range(1, part.Bodies.Count + 1):
+                        try:
+                            hybrids = part.Bodies.Item(i).HybridShapes
+                        except Exception:      # noqa: BLE001 - body without any
+                            continue
+                        for j in range(1, hybrids.Count + 1):
+                            try:
+                                apply(hybrids.Item(j))
+                                counts["datum_element"] += 1
+                            except Exception:  # noqa: BLE001 - one element
+                                pass
             finally:
                 try:
                     sel.Clear()
                 except Exception:  # noqa: BLE001 - a selection left behind
                     pass
-            if counts["sketch"] or counts["datum_plane"]:
+            if counts["sketch"] or counts["datum_plane"] or counts["datum_element"]:
                 touched.append(label)
                 total["sketch"] += counts["sketch"]
                 total["datum_plane"] += counts["datum_plane"]
+                total["datum_element"] += counts["datum_element"]
 
         self.conn.refresh_display()
 
-        if not total["sketch"] and not total["datum_plane"]:
+        if not total["sketch"] and not total["datum_plane"] \
+                and not total["datum_element"]:
             where = ("the part has no sketches"
                      if len(targets) == 1 else
                      f"none of the {len(targets)} part(s) of '{active}' has any")
@@ -5943,6 +5970,8 @@ class PartDesignTools:
             counted.append(f"{total['sketch']} sketch(es)")
         if total["datum_plane"]:
             counted.append(f"{total['datum_plane']} datum plane(s)")
+        if total["datum_element"]:
+            counted.append(f"{total['datum_element']} datum element(s) inside bodies")
         body = " and ".join(counted)
         if len(targets) == 1:
             return f"{body} now {'shown' if show else 'hidden'}."

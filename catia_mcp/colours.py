@@ -76,8 +76,21 @@ NAMED_COLOURS = {
     "gold": (212, 175, 55),
 }
 
-#: What an untouched part or component reads back as on B30 (measured).
+#: What an untouched PART BODY reads back as (measured on B30). Not white, which
+#: is what the reference implies.
 UNCOLOURED = (210, 210, 255)
+
+#: What an untouched COMPONENT reads back as, and it is a different value from the
+#: one above - measured on B30 2026-11-08 with the same part in the same session:
+#: the body in its own document answered (210, 210, 255) while all three instances
+#: in the assembly answered (255, 255, 255).
+#:
+#: 0.3.79 compared BOTH against ``UNCOLOURED``, so every instance in an uncoloured
+#: assembly counted as "already carried a colour" - a 25-instance assembly with 11
+#: parts answered "11 already carried a colour, which was overwritten" about files
+#: that had never been coloured (reported 2026-11-08, P1-1). Two contexts, two
+#: defaults, and the tools now say which one they compared against.
+UNCOLOURED_INSTANCE = (255, 255, 255)
 
 FORMS = "'#RRGGBB' (or '#RGB'), a colour name, [r, g, b], or \"r,g,b\""
 
@@ -171,9 +184,22 @@ def apply_colour(selection: Any, node: Any,
     return read_rgb(selection)
 
 
-def uncoloured_note(rgb: tuple[int, int, int] | None) -> str:
-    """The sentence that keeps "reads as the default" from becoming "unset"."""
-    if rgb != UNCOLOURED:
+def uncoloured_note(rgb: tuple[int, int, int] | None,
+                    instance: bool = False) -> str:
+    """The sentence that keeps "reads as the default" from becoming "unset".
+
+    ``instance`` picks WHICH default: a component in an assembly reads
+    (255, 255, 255), a body in its part document (210, 210, 255). Comparing an
+    instance against the body default is what produced 0.3.79's P1-1.
+    """
+    default = UNCOLOURED_INSTANCE if instance else UNCOLOURED
+    if rgb != default:
         return ""
-    return (f"  (matches this build's uncoloured default {hex_of(UNCOLOURED)} - "
+    where = "uncoloured INSTANCE default" if instance else "uncoloured default"
+    return (f"  (matches this build's {where} {hex_of(default)} - "
             "evidence, not proof: a colour set to that exact value reads the same)")
+
+
+def is_default(rgb: tuple[int, int, int] | None, instance: bool = False) -> bool:
+    """True when ``rgb`` is the measured uncoloured default for that context."""
+    return rgb == (UNCOLOURED_INSTANCE if instance else UNCOLOURED)

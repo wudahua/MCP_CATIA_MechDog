@@ -22,8 +22,9 @@ def test_registered_tools_and_schemas_are_unchanged():
     # 0.3.56 fillet_surface + spine = 106, 0.3.60 rotate + translate = 108,
     # 0.3.63 knowledge back with 6 (5 ported + apply_design_table) = 114,
     # 0.3.64 drawing ported with 11 = 125, 0.3.65 frame + sheet = 127,
-    # 0.3.79 colour (colorize_assembly + set_color + get_color) = 130.
-    assert len(server._tool_router) == 130
+    # 0.3.79 colour (colorize_assembly + set_color + get_color) = 130,
+    # 0.3.80 replace_component = 131.
+    assert len(server._tool_router) == 131
     assert not any(name.startswith("catia_caa") for name in server._tool_router)
     for schema in server._schemas.values():
         Draft202012Validator.check_schema(schema)

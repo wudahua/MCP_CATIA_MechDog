@@ -492,6 +492,11 @@ class DocumentTools:
                        "The document is open and unsaved: it has no path, so it "
                        "cannot be referenced by an assembly. ")
                     + "CATIA refuses a first SaveAs when the FILE NAME contains non-ASCII characters"
+                    " - the FOLDER is fine, and every LATER save is fine too: a document "
+                    "that already has a path saves normally, Chinese folder and all "
+                    " (a CATProduct in ...\\WokrBuddy Catia Space\\...\\out\\ saved in "
+                    "200 ms on B30 and its colours were on disk after reopening). Only "
+                    "the first SaveAs to a NEW non-ASCII NAME is refused."
                     " - measured on B30 2026-11-07, same "
                     "session and document type: ...\\中文目录\\probe_ascii.CATPart "
                     "saved, ...\\ascii_dir\\probe_中文.CATPart was refused. The "
@@ -628,9 +633,12 @@ class DocumentTools:
                        "The assembly is open and unsaved: it has no path, so no "
                        "component can reference it. ")
                     + "CATIA refuses a first SaveAs when the FILE NAME contains non-ASCII characters"
-                    " (the folder does not "
-                    "matter - measured on B30 2026-11-07) - and it is the FIRST "
-                    "save of this document that fails, not later ones.",
+                    " (the FOLDER does not matter - measured on B30 2026-11-07) - and "
+                    "it is only the FIRST save of this document that fails: once it "
+                    "has a path, catia_save_document saves it normally, including into "
+                    "a Chinese folder (measured 2026-11-08: a CATProduct under "
+                    "...\\WokrBuddy Catia Space\\...\\out\\ saved and kept its colours "
+                    "after reopening).",
                     code="SAVE_FAILED",
                     stage="execute",
                     modified=not discarded,

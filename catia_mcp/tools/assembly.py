@@ -10,7 +10,7 @@ import json
 import os
 from typing import Any
 
-from catia_mcp.colours import UNCOLOURED, hex_of, read_rgb
+from catia_mcp.colours import UNCOLOURED_INSTANCE, hex_of, read_rgb
 from catia_mcp.connection import CATIAConnection
 from catia_mcp.results import (
     ArgumentOutOfRange,
@@ -374,6 +374,47 @@ class AssemblyTools:
                 },
             },
             {
+                "name": "catia_replace_component",
+                "description": (
+                    "Point an existing instance at a DIFFERENT file and keep its "
+                    "placement - the way to make an assembly self-contained after the "
+                    "parts were copied to another folder.\n"
+                    "This build has NO native replace: measured on B30 2026-11-08, "
+                    "Product and ProductDocument expose no ReplaceComponent / Replace "
+                    "/ Relink / Repath at all, while Products.Remove and "
+                    "Products.AddComponent both work. So the tool does what is "
+                    "available: insert the new file, copy the old instance's twelve "
+                    "placement numbers onto it, READ THE POSE BACK, and only then "
+                    "remove the old instance. A pose that does not match leaves BOTH "
+                    "instances in place and says so - nothing is removed on a guess.\n"
+                    "WHAT IS LOST: the constraints that referenced the old instance "
+                    "(CATIA stores them on the component) and its occurrence name. "
+                    "The colour is carried over when the old instance had a "
+                    "non-default one. The reply states what was removed, what the new "
+                    "pose measured, and what the caller has to redo."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "component_name": {
+                            "type": ["string", "object"],
+                            "description": (
+                                "The instance to replace: a name, a 1-based index, or "
+                                "{\"part_number\": ..., \"occurrence\": n}."
+                            ),
+                        },
+                        "file_path": {
+                            "type": "string",
+                            "description": (
+                                "Full path of the .CATPart or .CATProduct that should "
+                                "take the instance's place."
+                            ),
+                        },
+                    },
+                    "required": ["component_name", "file_path"],
+                },
+            },
+            {
                 "name": "catia_copy_component",
                 "description": (
                     "Add more INSTANCES of a component already in the assembly - the "
@@ -584,6 +625,8 @@ class AssemblyTools:
                                              bool(arguments.get("include_color", False)))
             case "catia_copy_component":
                 return self._copy_component(arguments)
+            case "catia_replace_component":
+                return self._replace_component(arguments)
             case "catia_list_constraints":
                 return self._list_constraints()
             case "catia_get_component_transform":
@@ -1478,6 +1521,144 @@ class AssemblyTools:
             f"R=({args.get('rx', 0)}, {args.get('ry', 0)}, {args.get('rz', 0)})°"
         )
 
+    def _replace_component(self, args: dict[str, Any]) -> str:
+        """Re-point an instance by rebuilding it at the same pose.
+
+        The 2026-11-08 report (P1-2) is the reason: an assembly whose components
+        pointed at ``F:////WB_CATIA_Gripper`` could not be made self-contained after
+        the files were byte-copied elsewhere, because ``Documents.Open`` on the copy
+        answers DOCUMENT_IDENTITY_CONFLICT (CATIA identifies a document by an
+        internal id, not by its path) and no tool could change what an instance
+        references.
+
+        Measured on B30 2026-11-08: no ``ReplaceComponent`` / ``Replace`` /
+        ``Relink`` / ``Repath`` on Product or ProductDocument, but ``Products.Remove``
+        works and the twelve placement numbers can be written onto a fresh instance
+        with no drift (read back identical). So: add, pose, verify, then remove.
+        """
+        self.conn.ensure_connected()
+        product = self.conn.get_active_product()
+        products = product.Products
+        target = self._resolve_component(product, args.get("component_name"))
+        path = str(args.get("file_path") or "").strip()
+        if not path:
+            raise ArgumentRejected("file_path is required - the file the instance "
+                                   "should reference instead.")
+        if not os.path.isfile(path):
+            raise ArgumentRejected(
+                f"No file at '{path}', so there is nothing to point the instance at "
+                "(the assembly was not changed). Check the path, or copy the file "
+                "there first - catia_save_as_copy writes a part, it does not move one."
+            )
+
+        old_name = str(target.Name)
+        before = self._position_components(target.Position)
+        doc = self.conn.active_document
+        old_colour = None
+        try:
+            doc.Selection.Clear()
+            doc.Selection.Add(target)
+            old_colour = read_rgb(doc.Selection)
+            doc.Selection.Clear()
+        except Exception:  # noqa: BLE001 - a colour is a bonus, not the job
+            old_colour = None
+
+        count_before = int(products.Count)
+        self._add_component(path)          # guarded insert, same path as add_component
+        count_after = int(products.Count)
+        if count_after != count_before + 1:
+            raise CodedError(
+                f"'{path}' did not add exactly one component to the assembly "
+                f"({count_before} before, {count_after} after), so '{old_name}' was "
+                "NOT replaced and nothing was removed. The tree may hold a partial "
+                "insert - catia_list_components shows what is there.",
+                code="REPLACE_INSERT_FAILED",
+                stage="execute",
+                modified=count_after > count_before,
+                next_actions=[
+                    "Run catia_list_components and delete anything the failed insert "
+                    "left behind with catia_delete_feature, or close the assembly "
+                    "without saving",
+                ],
+            )
+        new = products.Item(count_after)
+        new_name = str(new.Name)
+
+        # The pose, in the convention the reader just produced.
+        self._set_component_transform({
+            "component_name": new_name,
+            "rotation_rows": [[before[0], before[3], before[6]],
+                              [before[1], before[4], before[7]],
+                              [before[2], before[5], before[8]]],
+            "rotation_convention": "matrix",
+            "translation": [before[9], before[10], before[11]],
+            "verify": True,
+        })
+        after = self._position_components(new.Position)
+        drift = max(abs(a - b) for a, b in zip(before, after))
+        if drift > 1e-6:
+            raise CodedError(
+                f"'{new_name}' was inserted from '{path}' but its pose does not match "
+                f"'{old_name}' (largest difference {drift:.6f} mm), so NOTHING was "
+                "removed: the assembly still holds both instances. Move the new one by "
+                "hand (catia_set_component_transform) and delete the old one, or close "
+                "without saving to undo the insert.",
+                code="REPLACE_POSE_MISMATCH",
+                stage="execute",
+                modified=True,
+                next_actions=[
+                    f"catia_set_component_transform(component_name='{new_name}', "
+                    f"translation={[round(v, 3) for v in before[9:12]]}, ...) then "
+                    f"delete '{old_name}'",
+                ],
+            )
+
+        colour_note = "no colour to carry over"
+        if old_colour is not None and old_colour != UNCOLOURED_INSTANCE:
+            try:
+                doc.Selection.Clear()
+                doc.Selection.Add(new)
+                doc.Selection.VisProperties.SetRealColor(old_colour[0], old_colour[1],
+                                                          old_colour[2], 1)
+                back = read_rgb(doc.Selection)
+                doc.Selection.Clear()
+                colour_note = (f"the instance colour {hex_of(old_colour)} was carried "
+                               f"over" + ("" if back == old_colour
+                                          else f", though it reads back {back}"))
+            except Exception as error:  # noqa: BLE001 - the replace still stands
+                colour_note = (f"its colour could not be carried over "
+                               f"({str(error).splitlines()[0][:60]})")
+
+        try:
+            products.Remove(target)
+        except Exception as error:  # noqa: BLE001 - constraints are the usual cause
+            raise CodedError(
+                f"'{new_name}' is in place at the right pose, but '{old_name}' could "
+                f"NOT be removed ({str(error).splitlines()[0][:120]}): an assembly "
+                "constraint usually holds it. Both instances are in the tree - delete "
+                f"'{old_name}' after removing the constraint.",
+                code="REPLACE_STUCK",
+                stage="execute",
+                modified=True,
+                next_actions=[
+                    "catia_list_constraints shows what holds the old instance; "
+                    "delete the reference and then remove the component",
+                ],
+            ) from error
+
+        self.conn.refresh_display()
+        return (
+            f"Component '{old_name}' replaced by '{new_name}' from '{path}' "
+            f"(pose copied exactly, largest difference {drift:.2e} mm; {colour_note}).\n"
+            "Two things to know://n"
+            "  - any CONSTRAINT that referenced the old instance went with it: this "
+            "is a rebuild, not a re-point (this build exposes no replace member). "
+            "Re-create the constraints against the new instance.\n"
+            "  - the new instance references the file at that path; the assembly is "
+            "self-contained only once every component has been replaced this way. "
+            "Not saved yet: call catia_save_document."
+        )
+
     def _copy_component(self, args: dict[str, Any]) -> str:
         """Repeat an existing component as instances of the same reference.
 
@@ -1697,7 +1878,7 @@ class AssemblyTools:
                     entry["color_error"] = str(exc).splitlines()[0][:80]
                 else:
                     entry["color"] = hex_of(value) if value is not None else None
-                    entry["color_matches_default"] = value == UNCOLOURED
+                    entry["color_matches_default"] = value == UNCOLOURED_INSTANCE
             components.append(entry)
 
         # An empty assembly answers with the SAME shape as a full one. Returning

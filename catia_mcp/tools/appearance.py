@@ -34,15 +34,21 @@ from typing import Any
 from catia_mcp.colours import (
     PALETTE,
     UNCOLOURED,
+    UNCOLOURED_INSTANCE,
     apply_colour,
     generated_colour,
     hex_of,
+    is_default,
     parse_colour,
     read_rgb,
     uncoloured_note,
 )
 from catia_mcp.connection import CATIAConnection
-from catia_mcp.results import ArgumentRejected, PreconditionRejected
+from catia_mcp.results import (
+    ArgumentRejected,
+    PreconditionRejected,
+    operation_result,
+)
 from catia_mcp.tools.assembly import AssemblyTools
 from catia_mcp.tools.part_design import PartDesignTools
 
@@ -103,6 +109,19 @@ class AppearanceTools:
                             "description": (
                                 "Only colour these part numbers (or instance names). "
                                 "Omitted = every component at the top level."
+                            ),
+                        },
+                        "structured": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Return the operation envelope instead of the text "
+                                "reply: data.mapping[] carries one record per group "
+                                "(part_number in the caller's capitalisation, colour, "
+                                "rgb, instances[], previous_colour = null when there "
+                                "was nothing to overwrite, previous_was_default), plus "
+                                "generated / were_at_default / were_coloured / failed. "
+                                "Default false: the text reply is unchanged."
                             ),
                         },
                     },
@@ -223,6 +242,23 @@ class AppearanceTools:
             return (f", but it reads back {hex_of(back)} = {back} - CATIA did not take "
                     "the value")
         return f", read back {hex_of(back)}"
+
+    @staticmethod
+    def _part_label(component: Any) -> str:
+        """The part as the caller spells it: ``P01``, not ``p01``.
+
+        ``_part_key`` casefolds for grouping, and 0.3.79 printed that key - so the
+        reply listed `p01/p02` while the tree, the part number and every other
+        tool said `P01` (reported 2026-11-08, P2-2: string matching across the two
+        spellings fails).
+        """
+        try:
+            number = str(component.PartNumber)
+        except Exception:  # noqa: BLE001 - a dead link still has a name
+            number = ""
+        if number:
+            return number
+        return str(component.Name).rsplit(".", 1)[0]
 
     @staticmethod
     def _part_key(component: Any) -> str:
@@ -380,9 +416,10 @@ class AppearanceTools:
                 + "\nNot saved yet: call catia_save_document.")
 
     # ── catia_colorize_assembly ───────────────────────────────────────────
-    def _colorize_assembly(self, args: dict[str, Any]) -> str:
+    def _colorize_assembly(self, args: dict[str, Any]) -> str | dict[str, Any]:
         self.conn.ensure_connected()
         per_instance = bool(args.get("per_instance", False))
+        structured = bool(args.get("structured", False))
         raw_palette = list(args.get("palette") or PALETTE)
         wanted = [str(name).strip().casefold()
                   for name in (args.get("part_numbers") or []) if str(name).strip()]
@@ -431,16 +468,24 @@ class AppearanceTools:
         selection = doc.Selection
         lines: list[str] = []
         failures: list[str] = []
+        mapping: list[dict[str, Any]] = []
         already = 0
+        at_default = 0
         try:
             for (key, members), rgb in zip(groups.items(), colours):
                 first = members[0]
                 selection.Clear()
                 selection.Add(first)
                 before = read_rgb(selection)
-                if before is not None and before != UNCOLOURED:
-                    # A re-run silently overwriting a caller's own scheme is worth
-                    # one sentence.
+                # An INSTANCE is compared with the instance default (255, 255, 255),
+                # not with the body's (210, 210, 255). 0.3.79 used the body value
+                # here, so every instance of an uncoloured assembly counted as
+                # "already carried a colour" - a 25-instance / 11-part assembly was
+                # told 11 of them had one (reported 2026-11-08, P1-1).
+                was_default = is_default(before, instance=True)
+                if was_default:
+                    at_default += 1
+                else:
                     already += 1
                 for component in members:
                     back = apply_colour(selection, component, rgb)
@@ -448,11 +493,22 @@ class AppearanceTools:
                         failures.append(
                             f"{component.Name} -> "
                             f"{hex_of(back) if back is not None else 'unreadable'}")
-                label = str(first.Name) if per_instance else self._part_key(first)
+                label = self._part_label(first) if not per_instance else str(first.Name)
                 names = ", ".join(str(member.Name) for member in members)
                 lines.append("  " + hex_of(rgb) + "  " + label
                              + (f"  ({len(members)} instance(s): {names})"
                                 if len(members) > 1 else ""))
+                mapping.append({
+                    "part_number": label,
+                    "colour": hex_of(rgb),
+                    "rgb": [rgb[0], rgb[1], rgb[2]],
+                    "instances": [str(member.Name) for member in members],
+                    # null when there was nothing to overwrite: a caller reading
+                    # this must not see the CATIA default dressed up as an existing
+                    # colour (the 2026-11-08 report, P1-1).
+                    "previous_colour": None if was_default else hex_of(before),
+                    "previous_was_default": was_default,
+                })
         finally:
             try:
                 selection.Clear()
@@ -463,14 +519,17 @@ class AppearanceTools:
         tail = (f"\n  ... {len(lines) - MAX_LINES} more"
                 if len(lines) > MAX_LINES else "")
         instance_total = sum(len(members) for members in groups.values())
+        generated = max(0, len(groups) - len(raw_palette))
         head = (f"{len(groups)} colour(s) over {instance_total} instance(s) in "
                 f"'{doc_name}'"
                 + (" - one per INSTANCE" if per_instance else " - one per part")
                 + f" (palette of {len(raw_palette)}"
-                + (f", {len(groups) - len(raw_palette)} generated"
-                   if len(groups) > len(raw_palette) else "")
+                + (f", {generated} generated" if generated else "")
                 + "):")
         notes = []
+        if at_default:
+            notes.append(f"{at_default} part(s) were at the assembly default "
+                         f"{hex_of(UNCOLOURED_INSTANCE)} (no colour set)")
         if already:
             notes.append(f"{already} already carried a colour, which was overwritten")
         if failures:
@@ -479,10 +538,41 @@ class AppearanceTools:
                             if len(failures) > 8 else ""))
         else:
             notes.append("every colour read back exactly")
-        return (head + "\n" + shown + tail + "\n" + "; ".join(notes) + "."
-                + " Instance colours live in the CATProduct (the .CATPart files are "
-                "untouched) and survive save + reopen. Not saved yet: call "
-                "catia_save_document.")
+        message = (head + "\n" + shown + tail + "\n" + "; ".join(notes) + "."
+                   + " Instance colours live in the CATProduct (the .CATPart files "
+                   "are untouched) and survive save + reopen. Not saved yet: call "
+                   "catia_save_document.")
+        if not structured:
+            return message
+        return operation_result(
+            tool="catia_colorize_assembly",
+            ok=not failures,
+            code="COLOURIZED" if not failures else "COLOUR_PARTIAL",
+            message=message,
+            data={
+                "parts": len(groups),
+                "instances": instance_total,
+                "per_instance": per_instance,
+                "palette_size": len(raw_palette),
+                "generated": generated,
+                "were_at_default": at_default,
+                "were_coloured": already,
+                "failed": failures,
+                "default_colour": hex_of(UNCOLOURED_INSTANCE),
+                "mapping": mapping,
+            },
+            modified=True,
+            next_actions=[
+                "Save the assembly: catia_save_document (the colours are in the "
+                "CATProduct)",
+                "Read them back with catia_get_color or "
+                "catia_list_components(include_color=true)",
+            ] if not failures else [
+                "The instances listed in data.failed did not take the colour - "
+                "re-run with part_numbers=[...] for those parts, or set them one by "
+                "one with catia_set_color to see the per-call detail",
+            ],
+        )
 
     # ── catia_get_color ───────────────────────────────────────────────────
     def _get_color(self, args: dict[str, Any]) -> str:
@@ -498,14 +588,14 @@ class AppearanceTools:
                 component = AssemblyTools._resolve_component(tree, target)
                 back = self._read_one(selection, component)
                 return (f"'{component.Name}' in '{doc_name}': {self._describe(back)}"
-                        + uncoloured_note(back))
+                        + uncoloured_note(back, instance=True))
             lines = []
             count = int(tree.Products.Count)
             for index in range(1, count + 1):
                 component = tree.Products.Item(index)
                 back = self._read_one(selection, component)
                 lines.append(f"  {component.Name}: {self._describe(back)}"
-                             + uncoloured_note(back))
+                             + uncoloured_note(back, instance=True))
             if not lines:
                 return f"'{doc_name}' holds no component."
             shown = "\n".join(lines[:MAX_LINES])

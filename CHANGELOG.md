@@ -2,6 +2,100 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.80] — 2026-11-08 · two defaults, one missing capability
+
+The 0.3.79 acceptance report, in one line: the colour work succeeded (11 parts,
+25 instances, saved, reopened, read back identical) and four things around it
+were wrong.
+
+### P1-1 — "11 already carried a colour" about a file that had never been coloured
+
+`catia_colorize_assembly` compared every instance's read-back with
+`(210, 210, 255)` — the default measured on a **part body**. An uncoloured
+**component** reads `(255, 255, 255)`. Measured on B30 with one part in one
+session: the body in its own document answered (210, 210, 255) while all three
+instances in the assembly answered (255, 255, 255). So every instance of a fresh
+assembly counted as "already coloured", and a 25-instance / 11-part assembly was
+told 11 of them had a colour.
+
+Two defaults now, in `catia_mcp/colours.py` (`UNCOLOURED`,
+`UNCOLOURED_INSTANCE`), and the reply names the one it compared against:
+
+```
+2 part(s) were at the assembly default #FFFFFF (no colour set); every colour read back exactly.
+```
+
+A second run then says what it really overwrites. `catia_get_color` and
+`catia_list_components(include_color=true)` use the instance default too.
+
+### P2-2 — the mapping was text, and the part number was case-folded
+
+The reply printed the grouping key (`p01`) while the tree, the part number and
+every other tool say `P01`. Fixed, and `structured=true` now returns
+`data.mapping[]`:
+
+```json
+{"part_number": "P01", "colour": "#E4572E", "rgb": [228, 87, 46],
+ "instances": ["P01.1", "P01.2"], "previous_colour": null,
+ "previous_was_default": true}
+```
+
+plus `generated`, `were_at_default`, `were_coloured`, `failed`,
+`default_colour`. `previous_colour` is **null** when there was nothing to
+overwrite — a caller must not see CATIA's default dressed up as an existing
+colour. Default stays text: making the envelope the default would break every
+existing caller, the same rule 0.3.76 followed.
+
+### P1-2 — no way to re-point a component (`catia_replace_component`, new)
+
+The report could not make an assembly self-contained after byte-copying its parts,
+because `Documents.Open` on a copy answers `DOCUMENT_IDENTITY_CONFLICT` (CATIA
+identifies a document by an internal id, not a path) and nothing could change what
+an instance references.
+
+Measured on B30: this build's `Product` and `ProductDocument` expose **no**
+`ReplaceComponent` / `Replace` / `Relink` / `Repath`, while `Products.Remove` and
+`AddComponent` work and the twelve placement numbers can be written onto a fresh
+instance with **zero** drift. So the new tool does what is available — insert,
+copy the pose, **read it back**, then remove the old instance:
+
+* a pose that does not match leaves **both** instances and answers
+  `REPLACE_POSE_MISMATCH` — nothing is deleted on a guess;
+* a constraint that holds the old instance answers `REPLACE_STUCK` with both
+  still in the tree;
+* the instance colour is carried over, and the reply says so;
+* the reply states plainly that this is a **rebuild**: the constraints that
+  referenced the old instance went with it.
+
+### P2-3 — the white frame that survived `kind="construction"`
+
+`set_visibility(kind="construction")` hid every sketch and the **three origin
+planes** — 33 for 11 parts, exactly what the reporter saw — and never looked
+inside a solid body, where a frame sketch puts its three points and its plane.
+It walks `body.HybridShapes` now and reports them separately
+(`4 datum element(s) inside bodies`). Geometrical sets are deliberately not
+descended: a surface there is usually the design.
+
+### P2-1 and 7-2 — documentation, because there is no honest fix
+
+* A screenshot is the **window's client area**, so the specification tree and the
+  axis are in it, and the size is the viewer's. There is no supported way to
+  suppress the tree from automation: `Application.StartCommand` **does not
+  validate the command name** — an unknown one is accepted and then opens a modal
+  未知命令 dialog on the automation thread (measured the hard way, 2026-11-08). A
+  guessed command is not a shortcut, it is a freeze. Both facts are in the
+  `catia_screenshot` description now.
+* The save limit is the **first SaveAs to a new non-ASCII NAME**. A Chinese
+  folder is fine, and a document that already has a path saves normally
+  (`catia_save_document` on a CATProduct under `…\WokrBuddy Catia Space\…\out\`
+  took 200 ms and its colours were on disk afterwards). The `SAVE_FAILED` message
+  said "first save, not later ones"; it now says both halves explicitly, because
+  the report shows the old wording was read as "the whole Chinese workspace is
+  unusable".
+
+`1315 → 1332 tests`, 130 → **131 tools**.
+`scripts/b30_v0380_audit.py`: **15/15** on B30.
+
 ## [0.3.79] — 2026-11-08 · colour, and the flag that made it invisible
 
 Asked whether the server could colour different parts of an assembly differently.
