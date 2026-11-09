@@ -341,12 +341,15 @@ def _tools_for_saving(monkeypatch):
     return document_module, tools
 
 
-def test_a_refused_first_saveas_falls_back_to_an_ascii_staging_file(monkeypatch):
-    """An ASCII folder whose first SaveAs is refused still gets the staging try.
+def test_a_first_save_is_staged_whatever_the_folder_looks_like(monkeypatch):
+    """0.3.89: the staged route is not chosen by looking at the path.
 
-    0.3.88 moved the staged route EARLIER for a NON-ASCII folder (see the next
-    test); on an ASCII folder it is still the fallback, so it costs an extra
-    SaveAs only on a path that has already failed.
+    0.3.88 gated it on "the folder is non-ASCII". A report then described a path
+    shape - an ASCII ancestor with a SPACE in it plus a Chinese subfolder - where
+    the staged route allegedly never ran. Nothing here can behave that way, and
+    that exact path was measured through the staged route on B30 (two save_as
+    calls, 40701 bytes on disk), so the gate is gone: every first save is staged
+    and there is no rule left to get wrong.
     """
     import os
 
@@ -355,51 +358,58 @@ def test_a_refused_first_saveas_falls_back_to_an_ascii_staging_file(monkeypatch)
 
     def fake_save_as(doc, path, *args, **kwargs):
         saved.append(str(path))
-        if len(saved) == 1:
-            raise RuntimeError("(0, 'CATIAPartDocument', '\u65b9\u6cd5 Save \u5931\u8d25')")
         return str(path)
 
     monkeypatch.setattr(document_module.dialogs, "save_as", fake_save_as)
 
-    target = "F:/ascii_project/part.CATPart"
+    # The reported shape: ASCII ancestor CONTAINING A SPACE, Chinese subfolder,
+    # ASCII file name. Under the old rule this is the case that failed.
+    target = "F:/WokrBuddy Catia Space/\u996e\u6599\u74f6/part.CATPart"
     reply = tools._save_document(target)
 
-    assert len(saved) == 3                 # refused target, staging, target again
-    assert saved[0] == target              # the caller's path, refused
-    assert os.path.basename(saved[1]).isascii()      # staging file
-    assert "mechdog" in saved[1]
-    assert saved[2] == target              # then the real path
-    assert "moved here from an ASCII staging file" in reply
-
-
-def test_a_non_ascii_folder_is_staged_FIRST_not_after_a_failure(monkeypatch):
-    """0.3.88: the reporter's machine refuses the first SaveAs into its Chinese
-    folder on every version, and accepts the same save from a document that
-    already has a path. So the staged route runs first there, and the caller no
-    longer waits through six refused attempts for the route measured working.
-    """
-    import os
-
-    document_module, tools = _tools_for_saving(monkeypatch)
-    saved: list[str] = []
-
-    def fake_save_as(doc, path, *args, **kwargs):
-        saved.append(str(path))
-        if not os.path.basename(str(path)).isascii() and len(saved) == 1:
-            raise RuntimeError("(0, 'CATIAPartDocument', '\u65b9\u6cd5 Save \u5931\u8d25')")
-        return str(path)
-
-    monkeypatch.setattr(document_module.dialogs, "save_as", fake_save_as)
-
-    target = "F:/\u4e2d\u6587\u9879\u76ee/part.CATPart"
-    reply = tools._save_document(target)
-
-    # Staging ran FIRST, then the target - the target was never tried directly,
-    # so a caller on that machine pays one extra SaveAs instead of six refusals.
-    assert len(saved) == 2
+    assert len(saved) == 2                     # staging, then the target
     assert os.path.basename(saved[0]).isascii()
+    assert "mechdog" in saved[0]
     assert saved[1] == target
     assert "through an ASCII staging file" in reply
+    assert "new file - nothing was overwritten" in reply
+
+
+def test_the_staged_reply_still_says_whether_the_file_was_replaced(monkeypatch):
+    """The replaced/new note is a safety message, not decoration.
+
+    A 2026-10-25 verification run silently replaced a finished part, and that note
+    is what stops it happening again - so it has to survive the staged route.
+    """
+    document_module, tools = _tools_for_saving(monkeypatch)
+    monkeypatch.setattr(tools, "_existing_file_note",
+                        lambda path: "12.3 KB, last modified 2026-10-25 09:14")
+    monkeypatch.setattr(document_module.dialogs, "save_as",
+                        lambda doc, path, *a, **k: str(path))
+
+    reply = tools._save_document("F:/out/part.CATPart", overwrite=True)
+    assert "replaced the existing file" in reply
+    assert "12.3 KB" in reply
+
+
+def test_a_refused_staging_file_still_falls_through_to_the_direct_save(monkeypatch):
+    """If %TEMP% is refused, the caller's own path is still tried."""
+    document_module, tools = _tools_for_saving(monkeypatch)
+    saved: list[str] = []
+
+    def fake_save_as(doc, path, *args, **kwargs):
+        saved.append(str(path))
+        if len(saved) == 1:                      # the staging file is refused
+            raise RuntimeError("(0, 'CATIAPartDocument', 'temp refused')")
+        return str(path)
+
+    monkeypatch.setattr(document_module.dialogs, "save_as", fake_save_as)
+    target = "F:/out/part.CATPart"
+    reply = tools._save_document(target)
+
+    assert saved[0] != target                    # staging tried first
+    assert saved[1] == target                    # then the caller's path
+    assert "Document saved as" in reply
 
 
 def test_a_failed_fallback_reports_the_original_error(monkeypatch):

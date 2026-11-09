@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.88** · [what changed](CHANGELOG.md) ·
+**0.3.89** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -783,13 +783,20 @@ narrower than the folder: it is **the first save of a document that has no path*
 A `catia_save_document` into that same folder succeeds every time on both
 machines, because by then the document has a path.
 
-Since 0.3.88 `catia_new_part` therefore takes the staged route FIRST when the
-folder is non-ASCII: `SaveAs` into `%TEMP%`, then `SaveAs` onto the path asked
-for — the second call is exactly the one measured working there — and the reply
-says so. If the staged route fails too, the direct `SaveAs` is still attempted
-and the failure names both. A save that fails now also says which COM call it
-was ("this call was a bare `doc.Save()`" vs "this call was `doc.SaveAs(...)`"),
-because those are different problems with different answers.
+Since 0.3.89 **every** first save takes the staged route: `SaveAs` into `%TEMP%`,
+then `SaveAs` onto the path asked for — the second call is exactly the one
+measured working on both machines — and the reply says which route ran and whether
+the folder is ASCII. 0.3.88 gated that on "the folder is non-ASCII", and a report
+then described a path shape (an ASCII ancestor containing a space, Chinese
+subfolder) where the route apparently never ran. The test is
+`str(path).isascii()` on the whole string — no whitespace split — and that exact
+path was measured through the staged route here, so the branch is gone instead of
+defended: there is no folder shape left that can miss it. The cost is one extra
+`SaveAs` on a document that has no path to lose. If the staged route fails too,
+the direct `SaveAs` is still attempted and the failure names both. A save that
+fails also says which COM call it was ("this call was a bare `doc.Save()`" vs
+"this call was `doc.SaveAs(...)`"), because those are different problems with
+different answers.
 
 ### A path can only hold one document
 
@@ -1539,6 +1546,14 @@ Place the result with `catia_get_component_transform`.
     axis is r·cos36 (4.045 for r=5), so a circle at the "boundary distance" lies
     wholly inside the hole and cuts nothing (measured 2026-11-09). Splitting
     twice on the same element does not stack: do both cuts from the original.
+    **And the patch in that measurement is a PLANE.** On a curved surface a planar
+    circle crosses the surface without lying on it, which cuts nothing: measured
+    2026-11-09, a circle 3 mm above a patch and a circle on a 45° support both
+    failed. Since 0.3.89 the call measures the closest approach first
+    (`SPLIT_CUTTER_MISSES`, with the distance) and reports it after a refusal at
+    update too (`SPLIT_FAILED`, `modified: false`, both candidate causes named).
+    Where the centre is not flat, cap it with the hole's own edge instead — that
+    is the only cap this build can make, so a five-sided hole gets a five-sided cap.
 
   `catia_gsd_fill` measures what it built (0.3.87). Before that, an open
   boundary answered "Fill surface created" while the `Edge.N` route was refused

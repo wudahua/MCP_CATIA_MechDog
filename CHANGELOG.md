@@ -2,6 +2,60 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.89] — 2026-11-09 · the rule that nobody could settle, and a refusal
+## that names the number
+
+Two reports on 0.3.88. The first says the staged save never ran for one path
+shape - an ASCII ancestor folder containing a space, with a Chinese subfolder
+under it. The second is the one that earned real code: `catia_gsd_split` refused a
+circle cutter with nothing but `方法 UpdateObject 失败`.
+
+**The folder rule is gone rather than defended.** `_path_is_ascii` is
+`str(path).isascii()` on the whole string - no whitespace split, no prefix test -
+and the reported path was measured here through the staged route twice (two
+`save_as` calls, 40701 bytes on disk, no bare `doc.Save()` anywhere). Since this
+can neither be reproduced nor argued down, the branch that decides on it is
+removed: **every first save is staged**, so no folder shape can be described as
+"the rule did not fire". The cost is one extra `SaveAs` on a document that has no
+path to lose. The reply now also names the folder and whether it is ASCII, and the
+replaced/new-file note survives the staged route (it is a safety message - a
+2026-10-25 verification run silently replaced a finished part).
+
+**`catia_gsd_split` measures before it builds.** A cutter that does not reach the
+element is refused as `SPLIT_CUTTER_MISSES` with the distance (measured: 3.0000 mm
+for a circle 3 mm above a patch) - previously that case and every other produced
+the same generic update error. A refusal AT update is now `SPLIT_FAILED` with
+`modified: false`, the closest approach measured after the failure, both candidate
+causes named without claiming which one it is, the four control cases, and the
+route that needs no coplanar centre (`cap_center` with the hole's own edge).
+
+What those messages are built on, all measured on B30 2026-11-09 on one 40x40
+PLANE patch:
+
+    circle r=6 lying on the patch      split OK, 1486.903 mm2 kept
+    the same circle 3 mm above it      fail; GetMinimumDistance = 3.0000 mm
+    circle on a 45-degree support      fail; distance 0.0000 mm - it CROSSES the
+                                       patch without lying on it
+    after such a failure               every NEW point also refuses to update
+
+That last one is why the sampling happens before the split and only a
+`GetMinimumDistance` can be read afterwards, and it is why the refusal warns that
+a second failure is not a second cause.
+
+**The split description stops over-promising its own sample.** The 40x40 patch in
+it is a PLANE, and the precondition is the part that matters: the curve has to lie
+on the surface, not merely cross it. On a curved surface a planar circle touches
+in places and leaves in between, and there is no contour to cut along.
+
+`cap_center` now says outright that the cap has the HOLE'S OWN shape - a
+five-sided hole gets a five-sided cap, and a round cover is not something this
+build can make there.
+
+1446 tests (+7), 135 tools, `scripts/b30_v0389_audit.py` 4/4.
+`gsd_thick_surface`'s two-sided allocation has been in its description since
+0.3.86 (EACH SIDE'S OFFSET, at character 598 of 2925, with 0.25/0.25 among the
+four measurements) - the report calls it missing for the third time; it is not.
+
 ## [0.3.88] — 2026-11-09 · the P0 gets the route that is measured working,
 ## and the readback stops hiding behind its own refusal
 

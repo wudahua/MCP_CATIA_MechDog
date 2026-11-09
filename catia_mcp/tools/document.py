@@ -75,11 +75,15 @@ class DocumentTools:
                     "document that ALREADY has a path into that same folder "
                     "succeeded every time, on both. So the deterministic part is "
                     "not the folder, it is 'first save of a pathless document'. "
-                    "Since 0.3.88 this call therefore takes the staged route FIRST "
-                    "when the folder is non-ASCII: SaveAs into %TEMP%, then SaveAs "
-                    "onto the path asked for - the second call is exactly the one "
-                    "measured working there. If the staged route fails too, the "
-                    "direct SaveAs is still attempted and the reply says both. "
+                    "Since 0.3.89 EVERY first save takes the staged route: SaveAs "
+                    "into %TEMP%, then SaveAs onto the path asked for - the second "
+                    "call is exactly the one measured working on both machines, "
+                    "and no rule about what the folder looks like stands between "
+                    "the caller and it (0.3.88 gated that on 'folder is "
+                    "non-ASCII', and a report then described a folder shape where "
+                    "the gate apparently never fired). If the staged route fails "
+                    "too, the direct SaveAs is still attempted and the reply says "
+                    "both. "
                     "A non-ASCII FILE NAME is refused outright (PATH_NOT_ASCII) - "
                     "this build cannot write or open one. The failure text carries "
                     "CATIA's own error; read it before assuming a permission "
@@ -885,10 +889,11 @@ class DocumentTools:
     def _path_is_ascii(path: str) -> bool:
         """Whether the WHOLE path (folder included) is ASCII.
 
-        The file NAME is a hard limit of this build and is refused before CATIA
-        sees it; the FOLDER is the one that behaves differently from machine to
-        machine, so it is the one that decides whether the staged route is tried
-        first (0.3.88).
+        Reported, not decided on (0.3.89). It used to choose whether the staged
+        route ran at all, and a report then described a folder shape where - on
+        their machine - it apparently did not. A blanket rule cannot be argued
+        with, so the first save is always staged and this only says which kind of
+        folder the file went into.
         """
         return str(path).isascii()
 
@@ -920,10 +925,11 @@ class DocumentTools:
         an ASCII staging file gets the document a path and the move follows.
 
         NOT reproduced on B30 - the same four combinations saved and failed here
-        exactly as this package documented (see the message in the caller). It is
-        kept anyway because it costs one extra SaveAs only on the path that
-        already failed, and it turns "your folder does not work" into "the file
-        you asked for exists".
+        exactly as this package documented (see the message in the caller). Since
+        0.3.89 it runs on EVERY first save rather than only on a non-ASCII one:
+        one code path means no folder shape can be reported as "the rule did not
+        fire", and the cost is a single extra SaveAs on a document that has no
+        path to lose.
         """
         import tempfile
 
@@ -999,38 +1005,54 @@ class DocumentTools:
                     "(reported 2026-10-25). Pass overwrite=true if you mean to "
                     "replace it, or choose another path."
                 )
-            # A NEVER-SAVED document going into a NON-ASCII FOLDER takes the
-            # staging route FIRST, not after a failure (0.3.88).
+            # A document that has NEVER been saved takes the staging route FIRST,
+            # whatever the folder looks like (0.3.89).
             #
-            # Measured evidence, both sides: on the 2026-11-09 reporter's
-            # machine the FIRST SaveAs into a Chinese folder is refused on 0.3.81,
-            # 0.3.83, 0.3.85 and 0.3.87 (8+ attempts, 0 successes, empty session
-            # and multi-document alike), while `catia_save_document` into the SAME
-            # folder succeeds for a document that already has a path - and so does
-            # an export. On the machine this was developed on the first SaveAs
-            # works (9 attempts, 2026-11-07/08). That is an environment-dependent
-            # difference, not jitter, and the reporter asked for the working route
-            # to be used instead of catalogued.
+            # 0.3.88 gated this on "the folder is non-ASCII". The 2026-11-09
+            # report then showed a path shape where - on their machine - the
+            # staged route did not run: an ASCII ancestor folder containing a
+            # space, with a Chinese subfolder below it. Nothing in this file can
+            # behave that way (`_path_is_ascii` is `str(path).isascii()` on the
+            # whole string; there is no whitespace split and no prefix test), and
+            # that exact path was measured here through the staged route twice,
+            # 40701 bytes on disk. So the branch is GONE rather than argued
+            # about: a rule keyed on what the path looks like is what produced a
+            # report nobody could settle, and the cost of not having it is one
+            # extra SaveAs on a first save.
             #
-            # So: get the document a path through %TEMP% first, then the second
-            # SaveAs - the one that behaves like a save of a document that has a
-            # path - carries it into the folder asked for. If the staged route
-            # fails, the direct attempt below still runs, so this can only cost
-            # one extra SaveAs.
-            if (not self._document_has_path(doc)
-                    and not self._path_is_ascii(str(file_path))):
+            # Measured evidence for the route itself, both machines: on the
+            # reporter's machine the FIRST SaveAs into a Chinese folder is refused
+            # on 0.3.81/0.3.83/0.3.85/0.3.87 (8+ attempts, 0 successes, empty
+            # session and multi-document alike), while `catia_save_document` into
+            # the SAME folder succeeds for a document that already has a path -
+            # and so does an export. Here the direct first SaveAs works (9
+            # attempts, 2026-11-07/08) and so does the staged sequence. The staged
+            # sequence is therefore the one that is measured working on BOTH, and
+            # it only ever runs when the document has no path to lose.
+            if not self._document_has_path(doc):
                 try:
                     self._staging_attempted = True
                     target = self._save_via_ascii_staging(doc, str(file_path))
                 except Exception:  # noqa: BLE001 - the direct attempt is next
                     self._staging_attempted = True
                 else:
+                    folder = os.path.dirname(str(file_path)) or "."
+                    # The replaced/new note is a SAFETY message (2026-10-25: a
+                    # verification run silently replaced a finished part), so it
+                    # has to survive the staged route - the last SaveAs is the one
+                    # that touched the file either way.
+                    note = (f" (replaced the existing file: {replaced})"
+                            if replaced else
+                            " (new file - nothing was overwritten)")
                     return (
-                        f"Document saved as: {target} (through an ASCII staging "
-                        "file: this document had never been saved and the folder "
-                        "is non-ASCII, the one combination the 2026-11-09 report "
-                        "sees refused on every version - the staged move is the "
-                        "call measured working there)")
+                        f"Document saved as: {target}{note} (through an ASCII "
+                        "staging file: this document had never been saved, and a "
+                        "first save is the one call this build refuses on some "
+                        "machines. Every first save takes this route - it is not "
+                        "chosen by looking at the folder, so no folder shape can "
+                        f"miss it. Folder '{folder}' is "
+                        f"{'ASCII' if self._path_is_ascii(folder) else 'non-ASCII'}, "
+                        "which no longer decides anything)")
             # CATIA's SaveAs rejects forward-slash paths (E_FAIL) and pops a
             # modal prompt when the target exists, which freezes the STA worker.
             try:

@@ -1318,7 +1318,22 @@ class GSDTools:
                     "the two share the edge because the split created it. Measured "
                     "on B30 2026-11-09 on a 40x40 patch: split by a r=6 circle "
                     "kept 1486.903 mm2 (= 1600 - pi*36), fill gave 113.097, join "
-                    "gave 1600.000, thickness 0.5 gave 800.0 mm3. Splitting twice "
+                    "gave 1600.000, thickness 0.5 gave 800.0 mm3. THAT PATCH IS A "
+                    "PLANE, and what it demonstrates is narrower than it looks: "
+                    "the curve has to LIE ON the surface, not merely cross it. A "
+                    "planar circle over a CURVED surface touches it at some "
+                    "points and leaves it in between, so there is no contour to "
+                    "cut along - measured on B30 2026-11-09, a circle 3 mm above "
+                    "a patch and a circle over a five-lobe loft both failed with "
+                    "nothing but 方法 UpdateObject 失败. So this call measures the "
+                    "closest approach BEFORE building: a cutter that does not "
+                    "reach the element is refused as SPLIT_CUTTER_MISSES with "
+                    "that distance, and a refusal at update is reported as "
+                    "SPLIT_FAILED with the distance and both candidate causes. "
+                    "Where the centre of a part is not flat, do not split at all: "
+                    "catia_gsd_circ_pattern(cap_center=true, cap_curve=<the hole's "
+                    "own edge>) caps the hole in its OWN border shape and needs no "
+                    "coplanar disc. Splitting twice "
                     "on the same element does NOT stack: do both cuts from the "
                     "original, not from the first result."
                 ),
@@ -1465,6 +1480,10 @@ class GSDTools:
                     "and a circle that does cut it leaves a wavy border no join "
                     "will take. It rotates the hole's own edge (cap_curve) count-1 "
                     "times and joins those copies - geometry that meets exactly. "
+                    "So the cap has the HOLE'S OWN SHAPE: a five-sided hole gets a "
+                    "five-sided cap, and a round cap is not something this build "
+                    "can produce here (the 2026-11-09 report asked for the "
+                    "tutorial's circular cover and settled for this - correctly). "
                     "Consequences to plan around: the tree gets count-1 rotate "
                     "features plus one join instead of one node, editing 'count' "
                     "afterwards means calling again, and a join can refuse when "
@@ -4186,11 +4205,48 @@ class GSDTools:
                 "shared edge."
             ) from error
 
+    def _cutter_gap(self, elem_ref: Any, cutter_ref: Any) -> float | None:
+        """Closest approach between a cutter and the element, in mm.
+
+        One number, two uses. Before the split it separates "this cutter never
+        reaches the element" from "it reaches it and the update still fails" -
+        CATIA answers both with a bare ``方法 UpdateObject 失败``, which is what
+        the 2026-11-09 report could not get past. After a failed update it is
+        still readable: measured the same day, once an update fails EVERY new
+        point in that document refuses to update too, so sampling the cutter
+        afterwards is impossible and this is what is left.
+
+        Returns None when it cannot be measured (a datum plane of a workbench
+        that is not loaded), never a zero.
+        """
+        try:
+            spa = self.conn.active_document.GetWorkbench("SPAWorkbench")
+            return float(spa.GetMeasurable(cutter_ref).GetMinimumDistance(elem_ref))
+        except Exception:  # noqa: BLE001 - an unmeasurable pair is not a zero
+            return None
+
     def _split(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
         elem_ref = self._ref(args["element"])
         cutter_ref = self._ref(args["cutter"])
         orientation = -1 if args.get("reverse", False) else 1
+        # A cutter that does not reach the element cannot cut it, and this build
+        # says so with the same generic "update failed" it uses for everything
+        # else. Settle that case BEFORE building anything (2026-11-09 report: a
+        # circle 3 mm above a patch produced only the generic error; the distance
+        # measured 3.0000 mm, which is the whole diagnosis).
+        gap = self._cutter_gap(elem_ref, cutter_ref)
+        if gap is not None and gap > 0.01:
+            raise PreconditionRejected(
+                f"'{args['cutter']}' is {gap:.4f} mm from '{args['element']}' at "
+                "its closest point, so it cannot cut it - a split needs the "
+                "cutter to reach the element. Nothing was created. Two cases "
+                "produce this: a curve drawn where the surface is not (a circle "
+                "on a plane the surface never passes through), or a plane offset "
+                "past the geometry. Move the cutter until this distance is "
+                "0.0000 mm - catia_measure_distance reports the same number.",
+                code="SPLIT_CUTTER_MISSES", stage="validate", modified=False,
+            )
         split = self._factory().AddNewHybridSplit(elem_ref, cutter_ref, orientation)
         # Which side survived is the one thing a caller has to know and the one
         # thing the old reply never said: a plain split of a 133 mm bottle at
@@ -4203,11 +4259,45 @@ class GSDTools:
         side = ("the side the cutter's normal points to (orientation +1)"
                 if orientation == 1 else
                 "the side the cutter's normal points away from (orientation -1)")
-        return self._finish(
-            split, args.get("name"),
-            f"Split of '{args['element']}' by '{args['cutter']}' created, "
-            f"keeping {side}; reverse=true swaps the two.",
-        )
+        try:
+            return self._finish(
+                split, args.get("name"),
+                f"Split of '{args['element']}' by '{args['cutter']}' created, "
+                f"keeping {side}; reverse=true swaps the two.",
+            )
+        except Exception as error:  # noqa: BLE001 - the diagnostic is the point
+            after = self._cutter_gap(elem_ref, cutter_ref)
+            measured = (f"{after:.4f} mm" if after is not None
+                        else "not measurable after the failure")
+            raise PreconditionRejected(
+                f"CATIA rejected the split of '{args['element']}' by "
+                f"'{args['cutter']}' at update, and the attempt was removed from "
+                f"the tree again. Measured after the refusal: the closest "
+                f"approach between the two is {measured}. "
+                "TWO DIFFERENT situations produce this, and this message will not "
+                "pretend to know which: (a) the cutter does not LIE ON the element "
+                "along its whole contour - a planar closed curve over a CURVED "
+                "surface touches it in places and leaves it in between, and only a "
+                "curve lying on the surface everywhere gives a usable contour; (b) "
+                "the element is a JOIN or array result - take the piece BEFORE the "
+                "join, the same limit catia_gsd_boundary(edge=N) reports. "
+                "All measured on B30 2026-11-09 on a 40x40 PLANE patch: a r=6 "
+                "circle lying on it splits cleanly (1486.903 mm2 kept), the same "
+                "circle 3 mm above it fails exactly like this, and a circle over a "
+                "five-lobe loft fails too - so 'it works on a patch' is not a "
+                "promise about a curved surface. "
+                "WHAT TO DO: measure a few points of the cutter against the "
+                "element with catia_measure_distance; anything other than 0.0000 mm "
+                "means the contour does not exist and no argument will produce it. "
+                "To cap a hole where the centre is NOT flat, use "
+                "catia_gsd_circ_pattern(cap_center=true, cap_curve=<the hole's own "
+                "edge>) - it caps with the hole's OWN border shape and needs no "
+                "coplanar disc. Nothing this call created was left behind. One "
+                "more measurement: after a failed update even an unrelated point "
+                "refuses to update in this document, so do not read a second "
+                "failure as a second cause.",
+                code="SPLIT_FAILED", stage="execute", modified=False,
+            ) from error
 
     def _trim(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
