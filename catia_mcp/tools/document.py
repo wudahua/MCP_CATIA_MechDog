@@ -57,7 +57,20 @@ class DocumentTools:
                     "into an assembly either - the caller only finds out when "
                     "catia_add_component cannot find the file (reported 2026-10-25). "
                     "The measured-safe order for a build is new_part(file_path=...) "
-                    "then build; nothing else is needed when the path is given."
+                    "then build. The first save is a SaveAs, not a Save, so the "
+                    "file gets its path from this call (a bare Save on a "
+                    "never-saved document is refused by this build). "
+                    "IF THIS CALL FAILS TO SAVE, the empty part is closed again "
+                    "rather than left pathless, and the reply says the path in "
+                    "full. Non-ASCII FOLDERS were measured working nine times "
+                    "(2026-11-07/08) and failing intermittently on one reporter's "
+                    "machine across 0.3.81/0.3.83/0.3.85, so they are neither "
+                    "guaranteed nor refused: if the save fails, drop the model to "
+                    "an ASCII folder and catia_save_document(file_path=<the "
+                    "non-ASCII one>) afterwards. A non-ASCII FILE NAME is refused "
+                    "outright (PATH_NOT_ASCII) - this build cannot write or open "
+                    "one. The failure text carries CATIA's own error; read it "
+                    "before assuming a permission problem."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -70,8 +83,11 @@ class DocumentTools:
                             "type": "string",
                             "description": (
                                 "Save the new part here straight away, e.g. "
-                                "'E:/WB_CATIA/parts/P05.CATPart'. The directory must "
-                                "exist."
+                                "'E:/WB_CATIA/parts/P05.CATPart'. Missing parent "
+                                "folders are created. The FILE NAME must be ASCII "
+                                "(PATH_NOT_ASCII otherwise); a non-ASCII folder is "
+                                "accepted - see the tool description for what to "
+                                "do if CATIA refuses the first save there."
                             ),
                         },
                     },

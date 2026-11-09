@@ -397,7 +397,14 @@ def test_thick_surface_documents_the_thin_section_limit():
     doc = [d for d in GSDTools(connection=None).get_tool_definitions()
            if d["name"] == "catia_gsd_thick_surface"][0]
     text = doc["description"]
-    assert "SMALLEST RADIUS OF CURVATURE" in text
+    # 0.3.86: the number to compare against is ONE SIDE's offset, not the total.
+    # The old sentence said "total below twice the smallest radius", which
+    # reads as "this wall can never be 0.5 mm" (0.3.84 measured four cases that
+    # contradict it, and the 2026-11-09 report walked away from the thickness it
+    # needed because of that sentence).
+    assert "LOCAL RADIUS OF CURVATURE" in text
+    assert "EACH SIDE" in text
+    assert "0.25/0.25" in text
     assert "1.27/1.27" in text and "2.54/0" in text
     assert "padded polygon" in text
 

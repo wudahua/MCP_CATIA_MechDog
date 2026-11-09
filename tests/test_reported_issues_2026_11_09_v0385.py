@@ -134,13 +134,18 @@ def test_a_propagation_that_is_not_a_catia_mode_is_refused():
     assert "whole border" in str(caught.value)
 
 
-def test_the_loop_reply_says_which_loop_and_what_a_fill_on_it_covers():
+def test_the_loop_reply_reports_its_share_of_the_border_not_a_word():
+    """0.3.85 called a 25 mm straight side of a flat sector "Loop #1 ... THIS
+    loop only"; the border is 91.145 mm in four sides (reported 2026-11-09)."""
     tools, _factory, _part = _tools()
     reply = tools.execute("catia_gsd_boundary",
                           {"surface": "CONE", "edge": 2, "name": "TOP_LOOP"})
-    assert "Loop #2" in reply
-    assert "125.6637" in reply          # the length of the loop that was made
-    assert "THIS loop only" in reply
+    assert "Border curve #2" in reply
+    # Both numbers, because their ratio is what says "part of the border":
+    assert "125.6637" in reply
+    assert "188.4956" in reply
+    assert "THIS loop only" not in reply
+    assert "PART of the border" in reply
 
 
 def test_an_index_past_the_last_loop_lists_what_the_surface_has():
@@ -177,7 +182,11 @@ def test_a_join_result_is_named_as_the_reason_the_loop_could_not_be_built():
         tools.execute("catia_gsd_boundary", {"surface": "BASE", "edge": 1})
     message = str(caught.value)
     assert caught.value.code == "BOUNDARY_LOOP_FAILED"
+    # Two situations, both named: a join result, AND a single feature that
+    # still refuses the selector (the 2026-11-09 report's loft).
     assert "JOIN result" in message
+    assert "loft" in message
+    assert "will not pretend to know which" in message
     assert "cap_center" in message
 
 

@@ -1144,6 +1144,16 @@ class GSDTools:
                 "description": (
                     "Create a Fill surface bounded by a closed contour of curves "
                     "(one closed curve or several connected curves). "
+                    "CLOSENESS IS NOT CHECKED BEFORE THE FEATURE IS BUILT. A "
+                    "single open curve can come back as a \"successful\" fill that "
+                    "is a degenerate face, and CATIA does not complain (measured "
+                    "2026-11-09: a 25.0000 mm straight edge filled and produced a "
+                    "surface, while the same edge passed as 'Edge.N' was refused "
+                    "with \"needs CLOSED boundaries\" - two routes, two answers, "
+                    "same geometry). The degenerate face then shows up at a "
+                    "thickening or an export, where it reads as a geometry "
+                    "problem. Close the contour with catia_gsd_join first, or use "
+                    "catia_gsd_circ_pattern(cap_center=true) for a ring's centre. "
                     "DO NOT PASS IT A catia_gsd_boundary CURVE FROM A SURFACE "
                     "WITH A HOLE: one boundary curve carries every loop, so the "
                     "fill comes back as a face covering the whole original - "
@@ -1524,7 +1534,20 @@ class GSDTools:
                                 "1) returns the WHOLE border ring of a filled patch "
                                 "(91.1450 mm for a four-sided sector) and so does "
                                 "an extract of one of its edges, so the name has "
-                                "to come from the caller."
+                                "to come from the caller. "
+                                "ON A LOFT THIS CURVE HAS TO BE ONE OF THE "
+                                "GUIDES, and the sections' corresponding points "
+                                "have to lie on it. A loft's inner border is an "
+                                "interpolated curve, not an element; a curve that "
+                                "merely touches it (0.0000 mm apart, measured) is "
+                                "not the same edge, so the cap is refused even "
+                                "though the geometry looks right. Pass it as a "
+                                "third entry in catia_gsd_multi_section_surface's "
+                                "guides and make the sections start on it - then "
+                                "the border IS that curve and the cap shares an "
+                                "edge by construction. This is how the 2026-11-09 "
+                                "tutorial build succeeded after two failures that "
+                                "looked like parameter errors."
                             ),
                         },
                         "name": {
@@ -1587,21 +1610,28 @@ class GSDTools:
                     "then succeeded called alone, then succeeded again with the whole "
                     "tree visible - same document, same session, same numbers. So a "
                     "single failure is not evidence about the geometry; two are. "
-                    "THE TOTAL OFFSET MUST STAY BELOW TWICE THE SURFACE'S SMALLEST "
-                    "RADIUS OF CURVATURE, and a thin wing section is the case that "
-                    "breaks: the offset surfaces meet on the far side and the update "
-                    "fails. Measured on B30 2026-10-25 on a lens-shaped loft whose "
-                    "normal thickness is 2.30 mm - thickness1/thickness2 = 1.27/1.27 "
-                    "failed, and so did 2.54/0, so it is not a two-sided problem: at "
-                    "the sharp corners the radius goes to zero and the offset "
-                    "self-intersects whichever side it goes. A 6 mm hexagonal section "
-                    "of the same length thickens fine. If a section is thinner than "
-                    "the offset you want, thicken LESS, or model the part as a padded "
-                    "polygon - or better, use catia_solid_loft, which builds the "
-                    "same shape as a solid in one feature with no thickness to add "
-                    "and therefore no limit to hit (measured: a 2.30 mm lens "
-                    "section that refuses every offset here lofts to a 720.5 mm3 "
-                    "solid there). "
+                    "EACH SIDE'S OFFSET MUST STAY BELOW THE LOCAL RADIUS OF "
+                    "CURVATURE - not the total. Four measurements on B30 "
+                    "2026-11-09 agree with that reading and disagree with the "
+                    "old \"total below twice the radius\" one: 0.5/0 refused (one "
+                    "side of 0.5 over a 0.355 mm radius), 0.25/0.25 BUILT a "
+                    "0.500 mm wall (each side 0.25 under 0.355, total above it), "
+                    "2.54/0 refused on a 2.30 mm section, 1.27/1.27 refused "
+                    "there too. So when a wall you asked for is refused, the "
+                    "answer is often not \"thicken less\" but \"split the same "
+                    "total across both sides\": 0.25/0.25 and 0.5/0 produce the "
+                    "same 0.500 mm wall on the good side of the limit, and only "
+                    "the first one is inside it. The failure message carries the "
+                    "measured radius, so compare it with each side before giving "
+                    "up a wall thickness the design needs (reported 2026-11-09: "
+                    "the old text read as \"this wall can never be 0.5 mm\" and "
+                    "the caller abandoned it). "
+                    "If a section is thinner than either offset, model the part as "
+                    "a padded polygon - or better, use catia_solid_loft, which "
+                    "builds the same shape as a solid in one feature with no "
+                    "thickness to add and therefore no limit to hit (measured: a "
+                    "2.30 mm lens section that refuses every offset here lofts to "
+                    "a 720.5 mm3 solid there). "
                     "A SMOOTH LOFT THAT BUILT IS NOT A LOFT THAT CAN BE "
                     "THICKENED. A multi-section surface interpolates through its "
                     "sections, so where the sections change size quickly the "
@@ -2096,6 +2126,15 @@ class GSDTools:
             except Exception:  # noqa: BLE001 - an unreadable cell is not a border
                 continue
             if not nls.startswith("Selection_BorderREdge"):
+                continue
+            # A DATUM PLANE carries the same Selection_BorderREdge label as a
+            # surface (topo_search reads that label as "datum-plane border",
+            # which is right in a BODY search and wrong in a set search). Its
+            # four borders measure 2e7 mm - CATIA's idea of an infinite plane -
+            # and including them turned "91.0844 mm of border" into
+            # "80000091.0844" (2026-11-09). GSMPlane.N in the Brp path is the
+            # datum plane; a surface reads GSMFill.N / GSMRevol.N / GSMLoft.N.
+            if "GSMPlane" in nls:
                 continue
             reference = item.Reference
             length = None
@@ -2774,11 +2813,25 @@ class GSDTools:
         placement = recorded.get("placement")
         if not placement:
             raise ArgumentRejected(
-                f"'{name}' was not created on a datum plane (it sits on a face, "
-                "or on an element whose frame cannot be read back), so its 2D "
-                "coordinates cannot be turned into global XYZ here. Pass the "
-                "corners as 'points', or rebuild the sketch on an offset datum "
-                "plane - the frame of xy/yz/zx is known, a face's is not."
+                f"'{name}' has no recorded frame here, so its 2D coordinates "
+                "cannot be turned into global XYZ. This covers three cases and "
+                "they need different answers: (a) the sketch sits on a FACE - "
+                "the frame of a face cannot be read back on this build, so "
+                "rebuild on an offset datum plane; (b) the sketch sits on a datum "
+                "plane BY NAME (catia_gsd_plane_offset / _plane_angle / "
+                "_3points and so on) - the plane exists and is correct, but this "
+                "server only carries a frame for the three main planes, and "
+                "CATIA's own Sketch.GetAbsoluteAxisData needs an out-array that "
+                "pywin32's late binding cannot deliver (the same wall as "
+                "Measurable.GetPoint); (c) the sketch was made in an earlier "
+                "session, when nothing was recorded. "
+                "WHAT TO DO INSTEAD for (b): the placement is checkable without "
+                "reading it back - catia_measure_distance between the copy and "
+                "the original equals the chord between the two support planes, "
+                "which is computable (a copy onto a plane rotated by A degrees "
+                "moves a point at radius r by 2*r*sin(A/2); measured 2026-11-09: "
+                "7.0534 mm against 7.053 for r=6 at 72 degrees). Or pass the "
+                "corners as 'points' explicitly, which needs no frame at all."
             )
 
         loop = self._chain_outline(recorded.get("elements") or [], name)
@@ -3361,25 +3414,58 @@ class GSDTools:
                 "not of index order.", code="EDGE_OUT_OF_RANGE", stage="validate")
         chosen, length = offered[index - 1]
         geoset.AppendHybridShape(chosen)
+        # What came back is described by a MEASUREMENT, not by a word. "One loop"
+        # was wrong on a four-sided flat sector: the reply called a 25.0000 mm
+        # radial straight edge "Loop #1 ... THIS loop only" while the border is
+        # 91.1450 mm in all four sides (reported 2026-11-09).
+        #
+        # The total is summed over the edges the FACTORY accepted for THIS
+        # surface, not over every border edge in the set: a datum plane's border
+        # carries the same Selection_BorderREdge label as a surface's, and its
+        # length is 8e7 mm (CATIA's idea of an infinite plane), which turned
+        # "91.1450" into "80000091.1450" the first time this was written.
+        lengths = [length for _feature, length in offered if length is not None]
+        total = sum(lengths) if lengths else None
+        if length is not None and total:
+            share = (f"{length:.4f} mm of this surface's {total:.4f} mm of border "
+                     f"edges")
+            if abs(length - total) < 1e-4:
+                shape = ("that is the WHOLE border in one curve - a closed "
+                         "surface's single loop")
+            else:
+                shape = ("so it is PART of the border, not necessarily a closed "
+                         "loop: a straight side of a flat sector is an open "
+                         "segment, and a fill on one of those does not fail - it "
+                         "builds a degenerate face that only shows up at a "
+                         "thickening or an export. Check the endpoints before "
+                         "filling it")
+        elif length is not None:
+            share = f"{length:.4f} mm of border"
+            shape = "whether it closes was not measured (no per-edge lengths)"
+        else:
+            share = "length not readable"
+            shape = "whether it closes was not measured (the measurable refused)"
         try:
             message = self._completed(
                 chosen, args.get("name"),
-                f"Loop #{index} of '{element}' created as its own curve"
-                + (f" (length {length:.4f} mm)" if length is not None else "")
-                + f", propagation={propagation}. This curve carries THIS loop "
-                "only, so a fill on it covers this loop and not the whole face - "
-                "which is what capping a hole needs.",
+                f"Border curve #{index} of '{element}' created"
+                f" ({share}), propagation={propagation}. {shape}.",
                 geoset)
         except Exception as error:  # noqa: BLE001 - keep the measurement
             raise PreconditionRejected(
                 "CATIA accepted the edge and refused the feature at update "
-                f"({str(error).splitlines()[0][:140]}). Measured on B30 "
-                "2026-11-09: this is what a JOIN result answers - AddNewBoundary "
-                "on a five-patch array refused all 30 border edges at "
-                "UpdateObject, while the whole-border boundary of the same "
-                "surface worked. Take the loop from the piece BEFORE the join, or "
-                "let catia_gsd_circ_pattern cap the centre for you "
-                "(cap_center=true).",
+                f"({str(error).splitlines()[0][:140]}). Two DIFFERENT situations "
+                "produce this, and this message will not pretend to know which "
+                "one you hit: (a) the surface is a JOIN result - measured on B30 "
+                "2026-11-09, all 30 border edges of a five-patch array refused at "
+                "UpdateObject while the whole-border call on that same surface "
+                "worked; (b) the surface is a single feature and the build still "
+                "refuses the selector - the 2026-11-09 report hit this on a "
+                "single multi-section surface (a loft), which is NOT a join. What "
+                "is measured to work: the one-argument whole-border boundary "
+                "(omit 'edge'), and catia_gsd_circ_pattern(cap_center=true, "
+                "cap_curve=...) for closing a ring's centre. Take the loop from "
+                "the piece before the join where there is one.",
                 code="BOUNDARY_LOOP_FAILED", stage="execute") from error
         return message
 

@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.85** · [what changed](CHANGELOG.md) ·
+**0.3.86** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1505,18 +1505,51 @@ Place the result with `catia_get_component_transform`.
     cone's two circles, against 188.496 for both — and a fill on it covers only
     that loop (314.159 / 1256.637 mm² measured). This works on a single feature.
     On a JOIN result (an array) all 30 border edges of a five-patch base failed
-    at update, so pick the loop BEFORE the join.
+    at update, so pick the loop BEFORE the join. It also refuses on some SINGLE
+    features: a four-sided flat fill and a five-section loft both failed at
+    `UpdateObject` (2026-11-09), so "it is not a join" does not mean it will work
+    — the reply names both possibilities rather than guessing.
   * `catia_gsd_circ_pattern(cap_center=true, cap_curve=<the hole's edge on the
     source piece>)` closes the centre in the same call: that curve is rotated
     count−1 times, the copies joined into the hole's border, filled, and joined
     onto the base. Measured 2080.436 + 59.441 = 2139.877 mm² on a five-lobe base
-    — exact, because the cap shares the hole's edge by construction.
+    — exact, because the cap shares the hole's edge by construction. ON A LOFT
+    THE CURVE HAS TO BE ONE OF THE GUIDES, with the sections' corresponding
+    points on it: a loft's inner border is interpolated, not an element, and a
+    curve that merely touches it (0.0000 mm apart) is not the same edge, so the
+    cap is refused even though the geometry looks right. That is how the
+    2026-11-09 tutorial build closed its centre after two failures that read
+    like parameter errors.
   * `catia_gsd_split` with a circle, then fill, then join — 1600.000 → 1486.903 →
     113.097 → 1600.000 mm², thickness 0.5 → 800.0 mm³. Works, but a circle has to
     be big enough to reach the border: a five-sided hole's nearest point to its
     axis is r·cos36 (4.045 for r=5), so a circle at the "boundary distance" lies
     wholly inside the hole and cuts nothing (measured 2026-11-09). Splitting
     twice on the same element does not stack: do both cuts from the original.
+
+* **A sketch on a named datum plane cannot have its coordinates read back.** It
+  is created where you asked (0.3.86: `catia_create_sketch` accepts any datum
+  plane name — the schema's `enum ["xy","yz","zx"]` used to reject one before the
+  server saw it, while the description promised names worked), and
+  `catia_sketch_copy` has always taken one. What is missing is the reverse
+  direction: `catia_gsd_spline(element=<that sketch>)` needs to turn (u, v) into
+  XYZ, and the frame of a named plane is not recorded. CATIA's own
+  `Sketch.GetAbsoluteAxisData` would answer it but takes an out-array that
+  pywin32's late binding cannot deliver — the same wall as
+  `Measurable.GetPoint`. Check the placement geometrically instead:
+  `catia_measure_distance` between the copy and the original is the chord between
+  the two supports, 2r·sin(A/2) for a copy on a plane rotated by A degrees
+  (measured 7.0534 mm against 7.053 for r=6 at 72°), or pass the corners
+  explicitly as `points`.
+
+* **Hiding a geometrical set does not hide the solid — measured twice.** One pad
+  in the body and one surface in the set: STL triangle count 63 with the solid
+  alone, 73 with the surface added, 73 after hiding the construction geometry,
+  63 after hiding the set. It lands exactly on "solid alone". Two reports saw an
+  empty 3D view after hiding a set; the likeliest explanation is a 0.5 mm plate
+  seen edge-on. If the view does go empty, what you were looking at is an element
+  INSIDE that set — show the set again (`show=true` on the same name), not
+  `零件几何体`, which holds none of it.
 
 * **A surface fillet only where the two surfaces form a plain corner, and a
   spine only from two or more sections.** 0.3.53 wrote that neither could be

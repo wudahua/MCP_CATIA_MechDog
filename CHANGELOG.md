@@ -2,6 +2,86 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.86] — 2026-11-09 · the schema that called its own description a lie
+
+Three reports on 0.3.85. The two capability gaps it closed (angle datum plane,
+`cap_center`) were confirmed working with independent geometry - a 1069.9521 mm³
+thickened ring against 1069.94 theoretical. What they found instead is a set of
+places where this server said something it had not checked.
+
+**`catia_create_sketch` rejected a datum plane NAME for two releases.** Its
+`plane` schema offered `enum ["xy","yz","zx"]` while the same field's description
+said a datum plane by name was accepted - so `plane="Plane3_36"` died in
+validation with "must be equal to one of the allowed values", before the server
+ever looked at the tree. The resolver has understood names since 0.3.83. The enum
+protected nothing (`"xy"` is a string too) and made the tutorial's Step 4
+impossible: copy the end profile to Plane4 worked, DRAW the middle one on Plane3
+did not. `anyOf` with a bare string now, and the description names
+`_plane_angle` among the tools that produce such a plane.
+
+**A 25 mm straight side was reported as "Loop #1 ... THIS loop only".** Measured
+on a four-sided flat sector: the selector returned one edge of 25.0000 mm while
+the border is 91.1450 mm in all four. The reply now reports the share -
+"Border curve #1 ... (5.8779 mm of this surface's 91.1450 mm of border edges)" -
+and says plainly that a piece of a border is not necessarily a closed loop, and
+that a fill on an open one succeeds as a degenerate face instead of failing.
+
+**That sum was wrong at first, and wrong in a way worth recording.** A datum
+plane's border carries the same `Selection_BorderREdge` label a surface's does
+(topo_search reads that label as "datum-plane border" - correct in a body search,
+wrong in a set search), and its four borders measure 2e7 mm, CATIA's idea of an
+infinite plane. Summing "the border edges" gave 80000091.1450 mm. The collector
+now excludes `GSMPlane.N`, and a construction line's own edge
+(`Selection_WireREdge`) was already excluded.
+
+**Every `edge=N` failure claimed to be a JOIN result.** True of the one geometry
+it was measured on, false for the next caller: the 2026-11-09 report hit it on a
+single multi-section surface. A loft is not a join, and being told to "take the
+loop from the piece before the join" sent them to check the wrong thing. The
+refusal now names both situations and says it cannot tell which one it is.
+
+**`SAVE_FAILED` asserted three things about a document it never looked at.** The
+message carried "This document already has a file, so the path is not the problem"
+next to "session state: document=`<none>` | no part document". Those sentences
+were written for the one caller that always has a file and printed for every
+caller. They are conditions now (IF it had a file / IF it never was saved / IF the
+name is non-ASCII), and `effects.modified` is `false` instead of `null`.
+
+**The Chinese-folder P0 has an answer, and it is not the one the report expects.**
+`new_part(file_path=...)` calls `_save_document`, which takes `dialogs.save_as`.
+The failure text every report quotes - "Save failed after 3 attempts:
+<document name>" - can only come from `dialogs.save`, the bare `doc.Save()`, and
+`new_part` has no such site; its own failure reads "Part '...' was created but
+COULD NOT BE SAVED". Measured in the reporter's own folder, instrumented:
+`F:/WokrBuddy Catia Space/饮料瓶瓶底曲面建模/_probe86_a.CATPart` saved through
+`save_as` alone, 40695 bytes on disk, and a bare `Save()` on that document
+afterwards also succeeded. So this is recorded as NOT REPRODUCED for the fifth
+time, with the call trace that shows which function ran - and the misleading
+suggestion text is fixed either way, because that part of the report was exactly
+right.
+
+**Hiding a geometrical set still does not hide the solid** - second measurement,
+this time with a clean control: one pad in the body and one surface in the set,
+STL triangles 63 solid alone -> 73 with the surface -> 73 after hiding
+construction -> 63 after hiding the set. It lands exactly on "solid alone". The
+0.5 mm plate seen edge-on is the likeliest explanation for the empty view.
+
+**The angle-plane sketch still has no readable frame**, and now says so with a
+way out: `Sketch.GetAbsoluteAxisData` needs an out-array pywin32 cannot deliver,
+so the reply explains that the placement is checkable with
+`catia_measure_distance` between the copy and the original (a copy rotated by A
+degrees moves a point at radius r by 2r·sin(A/2) - measured 7.0534 mm against
+7.053), or by passing the corners explicitly.
+
+Also: `catia_gsd_thick_surface`'s description now compares EACH SIDE against the
+local radius instead of "total below twice the smallest radius" - the old
+sentence reads as "this wall can never be 0.5 mm" and the report abandoned a
+0.5 mm wall because of it; `cap_curve` says a loft's inner border has to be one
+of the guides; `gsd_fill` says closeness is not checked; `catia_new_part` no
+longer promises "nothing else is needed when the path is given".
+
+1412 tests, 135 tools, scripts/b30_v0386_audit.py 5/5 on B30.
+
 ## [0.3.85] — 2026-11-09 · the selector that was there, one argument away
 
 The 2026-11-09 report asked for three APIs. Two of them were the right idea

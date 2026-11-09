@@ -238,6 +238,7 @@ def save_as(doc, path: str, tries: int = 6, wait: float = 0.6) -> str:
         f"SaveAs failed after {tries} attempts: {target} ({last})",
         code="SAVE_FAILED",
         stage="execute",
+        modified=False,
         next_actions=[
             "A non-ASCII file NAME never reaches CATIA: it is refused above as "
             "PATH_NOT_ASCII before the first attempt, so this failure is "
@@ -264,17 +265,31 @@ def save(doc, tries: int = 3) -> str:
             last = error
             dismiss(rounds=2, wait=0.3)
             time.sleep(0.5)
+    # The three sentences this used to carry ("This document already has a
+    # file, so the path is not the problem") were written for the one caller
+    # that always has a file and then printed for every caller - including a
+    # document that had never been saved at all. A report quoted them back next
+    # to "session state: document=<none> | no part document": every suggestion
+    # pointed at a condition that did not exist (2026-11-09). Conditions, not
+    # assertions: this function cannot see which case it is in.
     raise CodedError(
         f"Save failed after {tries} attempts: {name} ({last})",
         code="SAVE_FAILED",
         stage="execute",
+        modified=False,
         next_actions=[
-            "This document already has a file, so the path is not the problem: "
-            "the file is most likely read-only or held by another program. Free "
-            "it and retry, or write a copy elsewhere (catia_save_as_copy)",
-            "If its file NAME is non-ASCII, this build cannot write it at all, "
+            "IF this document already had a file: that file is most likely "
+            "read-only or held by another program. Free it and retry, or write a "
+            "copy elsewhere (catia_save_as_copy)",
+            "IF it has never been saved: this build refuses a bare Save on such "
+            "a document, and no retry will change that - pass file_path to "
+            "catia_save_document (SaveAs is the call that gives it a path), or "
+            "rebuild through catia_new_part(file_path=...), which sets the path "
+            "on an empty part",
+            "IF its file NAME is non-ASCII: this build cannot write it at all, "
             "and it cannot open such a name either - write a copy under an ASCII "
-            "name (catia_save_as_copy) and keep that one",
-            "The document is still open and unsaved either way - nothing was lost",
+            "name and keep that one",
+            "Nothing was written, so the document still holds everything it held "
+            "before this call",
         ],
     )

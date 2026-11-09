@@ -57,15 +57,23 @@ def test_create_sketch_accepts_an_offset():
     props = schema(CATIAMCPServer(), "catia_create_sketch")["properties"]
     assert "offset" in props
     assert props["offset"]["type"] == "number"
-    # The plane name itself stays a plain enum inside oneOf, so every existing
-    # call (plane='xy') keeps validating.
-    planes = props["plane"]["oneOf"]
-    assert {"type": "string", "enum": ["xy", "yz", "zx"]} in planes
+    # The plane name is a PLAIN STRING on purpose (0.3.86). It used to be an
+    # enum of the three main planes while the description said a datum plane
+    # could be named - so 'Plane3_36' was rejected by the schema before the
+    # server saw it, twice, for two releases (reported 2026-11-09). The enum
+    # protected nothing: 'xy' still validates as a string, and the resolver is
+    # what decides whether a name exists.
+    planes = props["plane"]["anyOf"]
+    strings = [p for p in planes if p["type"] == "string"]
+    assert len(strings) == 1
+    assert "enum" not in strings[0], (
+        "an enum here re-breaks datum-plane names: the schema would reject "
+        "them before _resolve_support can look them up")
 
 
 def test_create_sketch_accepts_a_face_and_an_offset_object():
     props = schema(CATIAMCPServer(), "catia_create_sketch")["properties"]
-    objects = [p for p in props["plane"]["oneOf"] if p["type"] == "object"]
+    objects = [p for p in props["plane"]["anyOf"] if p["type"] == "object"]
     assert len(objects) == 1
     assert objects[0]["properties"]["type"]["enum"] == ["offset", "face", "frame"]
     assert "index" in objects[0]["properties"]

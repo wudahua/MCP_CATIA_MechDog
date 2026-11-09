@@ -92,16 +92,32 @@ class SketcherTools:
                                 "origin + u*du + v*dv). Reach for this instead of "
                                 "rotating a main plane - the rotation cannot be "
                                 "read back, and 'nearly parallel' is not parallel "
-                                "over a long part. A datum plane BY NAME (from "
-                                "catia_gsd_plane_offset / _normal_to_curve / "
-                                "_3points) is also accepted: the name is looked up "
-                                "in the tree, and a name that is not a plane is "
-                                "refused with the datum planes this part does have."
+                                "over a long part. A datum plane BY NAME is also "
+                                "accepted - any name, not just the three main "
+                                "planes: catia_gsd_plane_offset, "
+                                "_plane_normal_to_curve, _plane_angle, _plane_"
+                                "3points and _plane_2lines all produce one. The "
+                                "name is looked up in the tree, and a name that "
+                                "is not a plane is refused with the datum planes "
+                                "this part does have. Why this matters: an angle "
+                                "datum plane is the one support a hand-written "
+                                "frame cannot replace cheaply - a frame has to be "
+                                "recomputed from cos/sin every time the angle "
+                                "changes, and the frame itself is not a tree "
+                                "element anyone can see or reuse."
                             ),
-                            "oneOf": [
+                            "anyOf": [
                                 {
                                     "type": "string",
-                                    "enum": ["xy", "yz", "zx"],
+                                    # Deliberately NOT an enum: an enum here made
+                                    # the sentence above false for two releases.
+                                    # The schema rejected 'Plane3_36' before the
+                                    # server ever saw it - "must be equal to one
+                                    # of the allowed values" - while the
+                                    # implementation has resolved datum-plane
+                                    # names since 0.3.83. A caller following the
+                                    # description was told the description was a
+                                    # lie (reported 2026-11-09, twice).
                                 },
                                 {
                                     "type": "object",
