@@ -11,6 +11,7 @@ from typing import Any
 
 from catia_mcp.connection import CATIAConnection
 from catia_mcp.results import CodedError
+from catia_mcp.sketch_frames import plane_angle_frame, point_world
 from catia_mcp.results import (
     ArgumentOutOfRange,
     ArgumentRejected,
@@ -1319,12 +1320,14 @@ class SketcherTools:
         rename_note = ""
         wanted = args.get("name")
         if wanted:
+            before = target
             try:
                 self._active_sketch.Name = str(wanted)
                 target = str(self._active_sketch.Name)
                 rename_note = self._make_sketch_name_unique(
                     self.conn.get_active_part(), self._active_sketch)
                 target = str(self._active_sketch.Name)
+                self._rekey_records(before, target)
             except Exception as error:  # noqa: BLE001 - the copy keeps its name
                 rename_note = (f" Could not rename it to '{wanted}' "
                                f"({str(error).splitlines()[0][:60]}).")
@@ -1346,11 +1349,53 @@ class SketcherTools:
             f"Sketch '{target}' created as a copy of '{source}' "
             f"({count} element(s), 2D coordinates {where}) on the new plane"
             f"{source_note}{rename_note}. " + str(closed)
+            + self._copy_placement_note(target)
             + " The copy holds the coordinates that were PASSED IN, not the ones "
             "CATIA solved to: constraints on the original are not carried over, so "
             "if the source was constrained after drawing, check the copy with "
             "catia_sketch_get_geometry before using it as a loft section."
         )
+
+    def _copy_placement_note(self, target: str) -> str:
+        """Where the copy landed in global XYZ, when the frame is known.
+
+        The 2026-11-09 report had to derive this by hand - a copy onto a plane
+        rotated by 72 degrees moves a point at radius r by 2*r*sin(36), and the
+        measured 7.0534 mm was the only evidence the copy landed on the right
+        side. Printing the coordinates is cheaper than that derivation, and the
+        reply says which frame they came from, because a reconstructed frame is
+        a claim that has to be checked (the GSD side does that with a probe
+        point when it hands coordinates over).
+        """
+        outlines = getattr(self.conn, "sketch_outlines", None)
+        if not isinstance(outlines, dict):
+            return ""
+        record = outlines.get(self._sketch_key(target)) or {}
+        placement = record.get("placement")
+        if not isinstance(placement, dict):
+            return (" Its 2D coordinates cannot be turned into global XYZ here "
+                    "(no frame for that plane), so check the placement by "
+                    "measuring the copy against the original.")
+        points: list[list[float]] = []
+        for element in record.get("elements") or []:
+            for x, y in self._element_points(dict(element))[:2]:
+                world = point_world(placement, x, y)
+                if world:
+                    points.append(world)
+            if len(points) >= 3:
+                break
+        if not points:
+            return ""
+        listed = "; ".join(
+            "(%g, %g, %g)" % tuple(round(c, 4) for c in point) for point in points)
+        derived = placement.get("derived")
+        if derived:
+            return (f" Where it landed, computed from {derived}: {listed} mm. "
+                    "That frame is reconstructed from the plane's construction, "
+                    "not read back (this build cannot read a sketch frame), so "
+                    "check it with catia_measure_distance against the original "
+                    "before relying on it.")
+        return f" Key points in global XYZ: {listed} mm."
 
     def _create_sketch(self, plane: Any = "xy", offset: float | None = None) -> str:
         self.conn.ensure_connected()
@@ -1375,7 +1420,10 @@ class SketcherTools:
         self._drawn[key] = []
         record = self._outline_record(key)
         if record is not None:
-            record["placement"] = self._placement_of(plane, offset)
+            placement = self._placement_of(plane, offset)
+            if placement is None:
+                placement = self._angled_placement(plane)
+            record["placement"] = placement
             record["elements"] = []
         # Remember it by identity: body.Sketches is ordered by tree position,
         # not by creation, so a later feature cannot find "the sketch I just
@@ -1500,6 +1548,38 @@ class SketcherTools:
         if record is not None:
             record["elements"].append({"kind": kind, **params})
 
+    def _rekey_records(self, before: str, after: str) -> None:
+        """Carry what was recorded under a sketch's old name to its new one.
+
+        A rename splits one sketch's record in two, because every store here is
+        keyed by name: the copy records its placement under the auto name
+        ('草图.2'), is renamed a moment later, and then records its elements under
+        the chosen name - so the GSD side was told about a sketch whose frame was
+        under a different key and refused it ("has no recorded frame here").
+        One fact, two records, same shape as the 0.3.82 duplicate-recorder bug.
+        """
+        if not before or not after or before == after:
+            return
+        stores = [self._drawn, getattr(self.conn, "sketch_outlines", None)]
+        for store in stores:
+            if not isinstance(store, dict):
+                continue
+            old_key, new_key = self._sketch_key(before), self._sketch_key(after)
+            if old_key not in store:
+                continue
+            moved = store.pop(old_key)
+            if new_key not in store:
+                store[new_key] = moved
+                continue
+            target = store[new_key]
+            if isinstance(target, dict) and isinstance(moved, dict):
+                if not target.get("placement") and moved.get("placement"):
+                    target["placement"] = moved["placement"]
+                if moved.get("elements") and not target.get("elements"):
+                    target["elements"] = moved["elements"]
+            elif isinstance(target, list) and isinstance(moved, list):
+                target.extend(moved)
+
     def _outline_record(self, key: str) -> dict[str, Any] | None:
         """The shared outline record for one sketch (None with no connection)."""
         outlines = getattr(self.conn, "sketch_outlines", None)
@@ -1554,6 +1634,49 @@ class SketcherTools:
                 except (TypeError, ValueError):
                     return None
         return None
+
+    def _angled_placement(self, plane: Any) -> dict[str, Any] | None:
+        """The frame of a sketch on a datum plane this server built by rotation.
+
+        ``catia_gsd_plane_angle`` records what its plane was made from, because
+        the plane's own axes cannot be read back (``GetFirstAxis`` and friends
+        take by-ref out-parameters - 44-member typeinfo dump, 2026-11-09). With
+        that record the frame is reconstructible, and the 2026-11-09 report is
+        explicit about why it matters: a sketch on a 36/72-degree plane is the
+        whole point of the tutorial's Step 3-4, and until now nothing could turn
+        its 2D coordinates back into XYZ to show it landed there.
+
+        The record is a CLAIM, not a reading, so the ``derived`` note travels with
+        it and the GSD side checks it against a measured distance before it
+        publishes coordinates.
+        """
+        if not isinstance(plane, str):
+            return None
+        store = getattr(self.conn, "datum_plane_angles", None)
+        if not isinstance(store, dict):
+            return None
+        spec = store.get(plane.strip())
+        if not isinstance(spec, dict):
+            return None
+        try:
+            frame = plane_angle_frame(str(spec["base"]), list(spec["axis"]),
+                                      float(spec["angle"]))
+        except (KeyError, TypeError, ValueError):
+            return None
+        if frame is None:
+            return None
+        u, v = frame
+        axis_name = spec.get("axis_name") or "the axis"
+        return {
+            "base": "frame",
+            # A plane built by rotation about an axis through the origin passes
+            # through the origin, so the origin is exact rather than assumed.
+            "origin": [0.0, 0.0, 0.0],
+            "u": [round(c, 12) for c in u],
+            "v": [round(c, 12) for c in v],
+            "derived": (f"'{plane.strip()}' = the {spec['base']} plane rotated "
+                        f"{float(spec['angle']):g} degrees about {axis_name}"),
+        }
 
     @staticmethod
     def _element_points(item: dict[str, Any]) -> list[tuple[float, float]]:

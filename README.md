@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.86** · [what changed](CHANGELOG.md) ·
+**0.3.87** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1527,20 +1527,35 @@ Place the result with `catia_get_component_transform`.
     wholly inside the hole and cuts nothing (measured 2026-11-09). Splitting
     twice on the same element does not stack: do both cuts from the original.
 
-* **A sketch on a named datum plane cannot have its coordinates read back.** It
-  is created where you asked (0.3.86: `catia_create_sketch` accepts any datum
-  plane name — the schema's `enum ["xy","yz","zx"]` used to reject one before the
-  server saw it, while the description promised names worked), and
-  `catia_sketch_copy` has always taken one. What is missing is the reverse
-  direction: `catia_gsd_spline(element=<that sketch>)` needs to turn (u, v) into
-  XYZ, and the frame of a named plane is not recorded. CATIA's own
-  `Sketch.GetAbsoluteAxisData` would answer it but takes an out-array that
-  pywin32's late binding cannot deliver — the same wall as
-  `Measurable.GetPoint`. Check the placement geometrically instead:
-  `catia_measure_distance` between the copy and the original is the chord between
-  the two supports, 2r·sin(A/2) for a copy on a plane rotated by A degrees
-  (measured 7.0534 mm against 7.053 for r=6 at 72°), or pass the corners
-  explicitly as `points`.
+  `catia_gsd_fill` measures what it built (0.3.87). Before that, an open
+  boundary answered "Fill surface created" while the `Edge.N` route was refused
+  for not being closed — two routes, two answers, and the silent one left a
+  zero-area face that only surfaced later as non-manifold edges when the result
+  was thickened. The area is now published ("Its area measures 100.0000 mm2,
+  which is what says the boundary really closed a region"), and below 0.001 mm²
+  the fill is deleted again and the call raises `FILL_DEGENERATE` with the
+  number: `catia_gsd_boundary(edge=N)` can return ONE SEGMENT of a border
+  (25.0000 mm of a 91.1450 mm four-sided border), and filling a segment does not
+  fail on this build — it makes that face.
+
+* **A sketch frame cannot be READ back — but a rotated plane's can be
+  reconstructed and checked.** `Sketch.GetAbsoluteAxisData` takes an out-array
+  pywin32's late binding cannot deliver (the same wall as `Measurable.GetPoint`),
+  and so do `HybridShapePlaneAngle`'s own `GetOrigin` / `GetFirstAxis` /
+  `GetSecondAxis` / `GetPosition` — measured 2026-11-09 on a 44-member typeinfo
+  dump, every call answers 「方法 … 失败」. So a plane built by
+  `catia_gsd_plane_angle` in THIS session records what it was built from, and a
+  sketch on it gets a frame reconstructed from that record (the reference plane's
+  frame rotated about the axis by the angle). Because that is a reconstruction
+  and not a reading, one corner is placed as a real point element and its
+  distance to the sketch is measured: 0.0000 mm on B30, i.e. the frame matches
+  CATIA — and a mismatch refuses with `SKETCH_FRAME_MISMATCH` and the gap. What
+  still has no frame: a plane that came from disk, one rotated about a NAMED
+  element, and any sketch on a FACE. For those, check the placement
+  geometrically — `catia_measure_distance` between a copy and its original is the
+  chord between the two supports, 2r·sin(A/2) for a copy on a plane rotated by A
+  degrees (measured 7.0534 mm against 7.053 for r=6 at 72°) — or pass the
+  corners explicitly as `points`.
 
 * **Hiding a geometrical set does not hide the solid — measured twice.** One pad
   in the body and one surface in the set: STL triangle count 63 with the solid

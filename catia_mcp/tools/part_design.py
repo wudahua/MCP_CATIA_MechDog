@@ -13,6 +13,7 @@ from typing import Any
 
 from catia_mcp.connection import CATIAConnection
 from catia_mcp.results import CodedError, FeatureRejected, PreconditionRejected
+from catia_mcp.sketch_frames import BASES, frame_of, point_world
 from catia_mcp.results import ArgumentOutOfRange, ArgumentRejected
 from catia_mcp.topo_search import (
     edge_fingerprint,
@@ -158,52 +159,21 @@ class _ProbePoints:
         self._restore_in_work()
 
 
-# Where a sketch's own (x, y) sits in the part's coordinate system. The same
-# table the sketcher uses for GSD outlines, and the same one an acceptance run
-# verified on B30 2026-10-25 by padding a 20 x 6 rectangle on each plane and
-# reading the box back. ``base: (u, v, normal)`` with origin = normal * offset.
-_SKETCH_BASES: dict[str, tuple[tuple[float, float, float],
-                               tuple[float, float, float],
-                               tuple[float, float, float]]] = {
-    "xy": ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
-    "yz": ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0)),
-    "zx": ((0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
-}
+# Where a sketch's own (x, y) sits in the part's coordinate system. The table
+# itself lives in catia_mcp.sketch_frames, because the GSD side and the sketcher
+# need the same one - two copies is how they stop agreeing (2026-11-09).
+_SKETCH_BASES = BASES
 
 
 def _sketch_frame(placement: Any) -> tuple[list[float], list[float],
                                            list[float]] | None:
     """``(origin, u, v)`` in world mm for a recorded sketch placement."""
-    if not isinstance(placement, dict):
-        return None
-    base = str(placement.get("base") or "").lower()
-    if base in _SKETCH_BASES:
-        u, v, normal = _SKETCH_BASES[base]
-        try:
-            distance = float(placement.get("distance") or 0.0)
-        except (TypeError, ValueError):
-            return None
-        return [c * distance for c in normal], list(u), list(v)
-    if base == "frame":
-        try:
-            origin = [float(c) for c in placement["origin"]]
-            u = [float(c) for c in placement["u"]]
-            v = [float(c) for c in placement["v"]]
-        except (KeyError, TypeError, ValueError):
-            return None
-        if len(origin) != 3 or len(u) != 3 or len(v) != 3:
-            return None
-        return origin, u, v
-    return None
+    return frame_of(placement)
 
 
 def _sketch_point_world(placement: Any, x: float, y: float) -> list[float] | None:
     """World XYZ of the sketch coordinate ``(x, y)``, or None when unknown."""
-    frame = _sketch_frame(placement)
-    if frame is None:
-        return None
-    origin, u, v = frame
-    return [origin[i] + u[i] * float(x) + v[i] * float(y) for i in range(3)]
+    return point_world(placement, x, y)
 
 
 def _in_plane_distance(first: Any, second: Any, placement: Any) -> float | None:
@@ -1197,7 +1167,12 @@ class PartDesignTools:
                     "does not move - so cleaning a finished assembly before a "
                     "screenshot is one call, not one call per part. Visibility is "
                     "session state in each part document: save the parts if it has to "
-                    "survive the session."
+                    "survive the session. "
+                    "When only ONE thing has to come back, call this on that element "
+                    "by name rather than on the set: measured 2026-11-09 on a "
+                    "thickened surface inside a hidden set - "
+                    "set_visibility(name='加厚曲面.1', show=true) brought the solid "
+                    "back without showing the rest of the set."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -2533,9 +2508,16 @@ class PartDesignTools:
             parts.append(f"… {len(elements) - 4} more element(s)")
         where = ""
         if placement.get("base"):
-            where = " on plane '%s'" % placement["base"]
-            if placement.get("distance") is not None:
-                where += " at offset %g" % placement["distance"]
+            if str(placement.get("base")).lower() == "frame":
+                # A sketch on a rotated datum plane records vectors, not an
+                # offset - and says where they came from (0.3.87).
+                derived = placement.get("derived")
+                where = (" on the plane it was drawn on (%s)" % derived
+                         if derived else " on the plane it was drawn on")
+            else:
+                where = " on plane '%s'" % placement["base"]
+                if placement.get("distance") is not None:
+                    where += " at offset %g" % placement["distance"]
         if not parts and not where:
             return ""
         drawn = "; ".join(parts) if parts else "no element recorded"
@@ -5782,7 +5764,12 @@ class PartDesignTools:
                         "left the solid's in place. If the view DOES go empty, the "
                         "geometry you were looking at is an element INSIDE this set; "
                         "show the set again with this same call and show=true, "
-                        "rather than showing '零件几何体', which holds none of it.")
+                        "rather than showing '零件几何体', which holds none of it. "
+                        "When only ONE thing has to come back, call this on that "
+                        "element by name instead - measured 2026-11-09 on a "
+                        "thickened surface inside a hidden set: "
+                        "set_visibility(name='加厚曲面.1', show=true) brought the "
+                        "solid back without touching the rest of the set.")
 
             # An element inside a HIDDEN set stays invisible however it is set:
             # the UI greys the lightbulb and CATIA keeps the parent's visibility.

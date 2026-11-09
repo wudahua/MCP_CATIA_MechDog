@@ -19,6 +19,7 @@ import re
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
+from catia_mcp.sketch_frames import ORIGIN_AXIS, plane_angle_frame, point_world
 from catia_mcp.results import (ArgumentOutOfRange, ArgumentRejected,
                                CodedError, PreconditionRejected)
 from catia_mcp.topo_search import search_topology
@@ -129,6 +130,13 @@ class GSDTools:
     """Tools for Generative Shape Design (wireframe & surface) in CATIA V5."""
 
     DEFAULT_GEOSET = "GSD_Set"
+
+    # Below this a fill is not a face, it is the degenerate result of boundaries
+    # that do not close a region (measured 2026-11-09: an open 25.0000 mm line
+    # came back as a face with no area at all, while a real closed loop measured
+    # 314.1593 mm2). 0.001 mm2 is 30 micrometres square - below anything a caller
+    # can mean, above the noise of a legitimate tiny patch.
+    _FILL_MIN_AREA_MM2 = 0.001
 
     def __init__(self, connection: CATIAConnection) -> None:
         self.conn = connection
@@ -2280,6 +2288,37 @@ class GSDTools:
         geoset.AppendHybridShape(shape)
         return self._completed(shape, name, message, geoset)
 
+    def _shape_area_mm2(self, shape: Any) -> float | None:
+        """Area of a surface in mm2, or None when it cannot be measured.
+
+        ``Measurable.Area`` answers in m2 (a 1600 mm2 face reads 0.0016) - the
+        same unit trap as ``Volume`` in m3. It is ALSO the only number that can
+        tell a real fill from the degenerate face this build builds when the
+        boundary does not close (2026-11-09), so a failure to measure it is
+        reported as "unknown", never as zero.
+        """
+        try:
+            part = self.conn.get_active_part()
+            spa = self.conn.active_document.GetWorkbench("SPAWorkbench")
+            reference = part.CreateReferenceFromObject(shape)
+            return float(spa.GetMeasurable(reference).Area) * 1e6
+        except Exception:  # noqa: BLE001 - an unmeasurable shape is not a zero
+            return None
+
+    def _drop_element(self, shape: Any) -> None:
+        """Delete an element this call created, best effort, leaving no trace."""
+        try:
+            selection = self.conn.active_document.Selection
+            selection.Clear()
+            selection.Add(shape)
+            selection.Delete()
+        except Exception:  # noqa: BLE001 - the caller is already being told
+            pass
+        try:
+            self.conn.active_document.Selection.Clear()
+        except Exception:  # noqa: BLE001
+            pass
+
     def _free_name(self, part: Any, wanted: str) -> tuple[str, bool]:
         """``(name, verified)``: ``wanted``, or ``wanted.2`` / ``.3`` … if taken.
 
@@ -2628,7 +2667,7 @@ class GSDTools:
         plane = self._factory().AddNewPlaneAngle(plane_ref, axis_ref,
                                                 angle, orientation)
         try:
-            return self._finish(
+            reply = self._finish(
                 plane, args.get("name"),
                 f"Datum plane created {angle:g} degrees from {plane_label} about "
                 f"the axis given{axis_note}. This is a TREE ELEMENT, so it can be "
@@ -2649,6 +2688,45 @@ class GSDTools:
                 "plane='zx' with axis='x'.",
                 code="PLANE_ANGLE_REJECTED", stage="execute",
             ) from error
+        remembered = self._remember_plane_angle(plane, args, angle)
+        return reply + remembered
+
+    def _remember_plane_angle(self, shape: Any, args: dict[str, Any],
+                              angle: float) -> str:
+        """Remember the rotation this plane was built from, so a sketch on it can
+        be placed in 3D later.
+
+        The plane's own frame cannot be read back on this build: a typeinfo dump
+        of ``HybridShapePlaneAngle`` (44 members, 2026-11-09) shows
+        ``GetFirstAxis`` / ``GetSecondAxis`` / ``GetPosition`` / ``GetOrigin``,
+        and every one of them answers 「方法 … 失败」 because they take by-ref
+        out-parameters - the same wall as ``Sketch.GetAbsoluteAxisData``. What IS
+        readable is what it was built from, so that is recorded: the reference
+        plane's frame rotated about this axis by this angle. Callers that publish
+        coordinates check that claim against a measurement before trusting it
+        (``_verify_frame``), because a reconstruction is not a reading.
+        """
+        base = str(args.get("plane", "")).strip().lower()
+        axis = str(args.get("axis", "")).strip().lower()
+        if base not in ("xy", "yz", "zx") or axis not in ORIGIN_AXIS:
+            return (" The sketch-frame record for this plane is NOT available: "
+                    "its reference has to be one of xy/yz/zx and its axis one of "
+                    "'x'/'y'/'z' for the frame to be reconstructible, so a sketch "
+                    "drawn on it will refuse to give global coordinates.")
+        try:
+            name = str(shape.Name)
+        except Exception:  # noqa: BLE001 - no name, nothing to key on
+            return ""
+        store = getattr(self.conn, "datum_plane_angles", None)
+        if store is None:
+            store = {}
+            self.conn.datum_plane_angles = store
+        store[name] = {"base": base, "axis": list(ORIGIN_AXIS[axis]),
+                       "angle": float(angle), "axis_name": axis}
+        return (f" Its frame is recorded as the {base} plane rotated {angle:g} "
+                f"degrees about {axis}, so a sketch drawn on it can be turned "
+                "back into global XYZ (checked against a measurement when it is "
+                "used).")
 
     _CLOSE_EPS = 1e-6
 
@@ -2823,8 +2901,13 @@ class GSDTools:
                 "server only carries a frame for the three main planes, and "
                 "CATIA's own Sketch.GetAbsoluteAxisData needs an out-array that "
                 "pywin32's late binding cannot deliver (the same wall as "
-                "Measurable.GetPoint); (c) the sketch was made in an earlier "
-                "session, when nothing was recorded. "
+                "Measurable.GetPoint). One exception since 0.3.87: a plane built "
+                "by catia_gsd_plane_angle IN THIS SESSION does carry a frame, "
+                "reconstructed from its rotation (reference plane xy/yz/zx plus "
+                "axis 'x'/'y'/'z') and checked against a measured distance before "
+                "any coordinate is handed over; a plane that came from disk, or "
+                "one rotated about a NAMED element, still has none. (c) the sketch "
+                "was made in an earlier session, when nothing was recorded. "
                 "WHAT TO DO INSTEAD for (b): the placement is checkable without "
                 "reading it back - catia_measure_distance between the copy and "
                 "the original equals the chord between the two support planes, "
@@ -2843,8 +2926,102 @@ class GSDTools:
         coords = [self._to_global(placement, u, v) for u, v in loop]
         label = (f"'{name}'" if not alias or alias == name
                  else f"'{name}' (rebuilt as '{alias}')")
-        return coords, (f" Corners taken from sketch {label} in "
-                        f"{placement['base']} plane order, z={placement['distance']:g}.")
+        listed = "; ".join(
+            "(%g, %g, %g)" % tuple(round(c, 4) for c in point)
+            for point in (coords if len(coords) <= 3 else [coords[0], coords[-1]]))
+        return coords, (f" Corners taken from sketch {label}"
+                        f"{self._placement_note(placement)}: {listed} mm."
+                        + self._verify_frame(name, self._far_corner(coords),
+                                             placement))
+
+    @staticmethod
+    def _far_corner(coords: list[list[float]]) -> list[float]:
+        """The corner FARTHEST from the plane's origin.
+
+        This is the point the frame check probes with, and it has to be that one:
+        the first corner of most profiles is the sketch origin, which lies on any
+        sketch through it - a probe there would answer 0.0000 mm for a frame that
+        is wrong by 90 degrees, which is exactly the failure the check exists to
+        catch.
+        """
+        return max(coords, key=lambda point: sum(c * c for c in point))
+
+    @staticmethod
+    def _placement_note(placement: dict[str, Any]) -> str:
+        """How the frame was obtained, in the caller's terms."""
+        base = str(placement.get("base") or "xy").lower()
+        if base == "frame":
+            derived = placement.get("derived")
+            return (f" in the frame of {derived}" if derived
+                    else " in the frame it was drawn in")
+        return (f" in {base} plane order, "
+                f"z={float(placement.get('distance') or 0.0):g}")
+
+    def _verify_frame(self, name: str, point: list[float],
+                      placement: dict[str, Any]) -> str:
+        """Check a RECONSTRUCTED sketch frame against CATIA before trusting it.
+
+        A frame taken from the plane's construction arguments is a claim about
+        where CATIA put the sketch, and a wrong claim does not error - it puts
+        every coordinate in the wrong place. So one corner is turned into a real
+        point element at the position the frame predicts, and the distance from
+        that point to the sketch itself is measured: on a correct frame it is
+        0.0000 mm, because that point IS on the sketch.
+
+        Only reconstructed frames are checked (a datum plane's frame is measured,
+        not derived), the answer is cached on the placement, and the probe point
+        is deleted again either way.
+        """
+        if not placement.get("derived"):
+            return ""
+        cached = placement.get("verified")
+        if isinstance(cached, str):
+            return cached
+        part = self.conn.get_active_part()
+        probe = None
+        gap: float | None = None
+        try:
+            sketch = part.FindObjectByName(str(name))
+            if sketch is None:
+                return ""
+            sketch_ref = part.CreateReferenceFromObject(sketch)
+            probe = self._factory().AddNewPointCoord(float(point[0]),
+                                                     float(point[1]),
+                                                     float(point[2]))
+            self._get_geoset().AppendHybridShape(probe)
+            part.UpdateObject(probe)
+            spa = self.conn.active_document.GetWorkbench("SPAWorkbench")
+            gap = float(spa.GetMeasurable(
+                part.CreateReferenceFromObject(probe)).GetMinimumDistance(sketch_ref))
+        except Exception:  # noqa: BLE001 - an unchecked frame says so
+            gap = None
+        finally:
+            if probe is not None:
+                self._drop_element(probe)
+        if gap is None:
+            note = (" The frame was reconstructed from the plane's construction "
+                    "(this build cannot read it back) and could not be checked "
+                    "here - if the placement matters, measure the result.")
+        elif gap > 0.01:
+            raise PreconditionRejected(
+                f"The frame recorded for '{name}' does not match the sketch: a "
+                f"probe point placed where that frame predicts one corner lies "
+                f"{gap:.4f} mm from the sketch itself, and on a correct frame it "
+                "would be 0.0000 mm (the point would BE on the sketch). Nothing "
+                "was changed - the probe point has been deleted again. The frame "
+                "is reconstructed from the datum plane's rotation arguments, so "
+                "this means this build oriented the sketch differently from the "
+                "reconstruction. Pass the corners as 'points' explicitly, or call "
+                "catia_measure_distance between the sketch and a known reference.",
+                code="SKETCH_FRAME_MISMATCH", stage="validate", modified=False,
+            )
+        else:
+            note = (f" The frame was reconstructed from the plane's construction "
+                    f"(this build cannot read it back) and CHECKED: a probe point "
+                    f"placed at the predicted position of one corner lies "
+                    f"{gap:.4f} mm from the sketch itself.")
+        placement["verified"] = note
+        return note
 
     def _sketch_exists(self, name: str) -> bool:
         """Whether the active part still holds a sketch by that name.
@@ -2946,21 +3123,13 @@ class GSDTools:
         Measured on B30 2026-10-25: a 20 x 6 rectangle on each datum plane at
         offset 25 padded to the box xy -> (0..20, 0..6, 25), yz -> (25, 0..20,
         0..6), zx -> (0..6, 25, 0..20). So zx maps u to Z and v to X, which is
-        the mapping everybody gets wrong once.
+        the mapping everybody gets wrong once - the table now lives in
+        catia_mcp.sketch_frames so this side and the sketcher cannot drift.
         """
-        base = str(placement.get("base") or "xy").lower()
-        if base == "frame":
-            # A sketch on an arbitrary plane keeps its own (u, v): p = O + u*w + v*t.
-            origin = [float(x) for x in placement.get("origin") or (0, 0, 0)]
-            first = [float(x) for x in placement.get("u") or (1, 0, 0)]
-            second = [float(x) for x in placement.get("v") or (0, 1, 0)]
-            return [origin[i] + first[i] * u + second[i] * v for i in range(3)]
-        distance = float(placement.get("distance") or 0.0)
-        if base == "yz":
-            return [distance, u, v]
-        if base == "zx":
-            return [v, distance, u]
-        return [u, v, distance]
+        mapped = point_world(placement, u, v)
+        if mapped is not None:
+            return mapped
+        return [float(u), float(v), float(placement.get("distance") or 0.0)]
 
     def _circle(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
@@ -3842,12 +4011,12 @@ class GSDTools:
             else:
                 fill.AddBound(self._ref(boundary_name))
         try:
-            return self._finish(
+            message = self._finish(
                 fill, args.get("name"),
                 f"Fill surface created from {len(boundaries)} boundary curve(s).",
             )
         except RuntimeError as error:
-            raise RuntimeError(
+            raise PreconditionRejected(
                 f"{error} A fill needs CLOSED boundaries that meet each other: one "
                 "wire for a single loop, or several curves that actually share "
                 "endpoints (the two ends of a loft plus its section rings, for "
@@ -3859,8 +4028,38 @@ class GSDTools:
                 "If they do "
                 "meet and this still fails, it is session-sensitive like the loft: "
                 "retry once in a fresh session, and if it still fails build the cap "
-                "as a swept-and-thickened section instead."
+                "as a swept-and-thickened section instead.",
+                code="FILL_NOT_CLOSED", stage="execute", modified=False,
             ) from error
+
+        # MEASURE WHAT CAME BACK. Before 0.3.87 this returned "Fill surface
+        # created" for a 25.0000 mm open straight line, while the same call with
+        # "Edge.1" was refused with "needs CLOSED boundaries" - two routes, two
+        # answers, and the silent one put a zero-area face in the tree that only
+        # showed up when a later thickening produced non-manifold edges (reported
+        # 2026-11-09, twice). The area is the number that separates the two
+        # cases, so it is measured, published, and a degenerate result is taken
+        # back out instead of being handed over.
+        area = self._shape_area_mm2(fill)
+        if area is None:
+            return message
+        if area < self._FILL_MIN_AREA_MM2:
+            self._drop_element(fill)
+            raise PreconditionRejected(
+                f"The fill was built and measured {area:.6f} mm2, which is a "
+                "degenerate face: the boundaries do not close a region. Nothing "
+                "was left in the tree - the fill this call created has been "
+                "deleted again. The usual cause is a boundary that is an OPEN "
+                "piece rather than a loop: catia_gsd_boundary(edge=N) can return "
+                "one SEGMENT of a border (measured 2026-11-09: 25.0000 mm for one "
+                "radial side of a 91.1450 mm four-sided border), and filling that "
+                "segment does not fail on this build - it makes this face. Check "
+                "the boundary is a single closed wire, or pass every segment of "
+                "the loop in order, then retry.",
+                code="FILL_DEGENERATE", stage="execute", modified=False,
+            )
+        return (message + f" Its area measures {area:.4f} mm2, which is what says "
+                "the boundary really closed a region.")
 
     def _blend(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
@@ -4303,7 +4502,17 @@ class GSDTools:
                 f"The cap needs '{curve}' to run along the hole's border on "
                 f"'{base.Name}' and its rotated copies to meet end to end: "
                 "a curve that stops short leaves the joined border open and "
-                "the fill cannot close it. WHAT WAS ROLLED BACK: "
+                "the fill cannot close it. IF 'element' IS A LOFT "
+                "(catia_gsd_multi_section_surface), THIS IS THE USUAL CAUSE AND "
+                "THE FIX IS NOT ON THIS CALL: a loft's inner border is an "
+                "interpolated curve, not an element, so a curve that merely "
+                "sits on it - even at 0.0000 mm, measured 2026-11-09 - is a "
+                "different edge and cannot be shared. Pass this same curve as "
+                "one of the loft's guides AND make the sections start on it, "
+                "then run this call again: the border IS that curve and the cap "
+                "shares an edge by construction. That is how the 2026-11-09 "
+                "tutorial build succeeded after two failures that looked like "
+                "parameter errors. WHAT WAS ROLLED BACK: "
                 + (f"{len(built)} element(s) this call created were deleted; "
                    "the array itself was NOT touched. " if built else
                    "nothing this call created was left behind. ")

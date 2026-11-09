@@ -2,6 +2,68 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.87] — 2026-11-09 · three things that were left open, and one of them
+## was measurable all along
+
+The three items the 2026-11-09 reports left standing, done. The middle one is
+the interesting one: the frame of a rotated datum plane **cannot be read**, but
+it can be reconstructed and then **checked by measurement**, and the check came
+back 0.0000 mm.
+
+**`catia_gsd_fill` now measures what came back.** Reported twice: an open
+25.0000 mm line produced "Fill surface created" while the same call with
+`Edge.1` was refused for "needs CLOSED boundaries" - two routes, two answers,
+and the silent one left a zero-area face that only surfaced later as non-manifold
+edges. The area is now read from CATIA (`Measurable.Area`, m², so 100 mm² reads
+0.0001) and published: a closed 10 x 10 loop answers "Its area measures 100.0000
+mm2, which is what says the boundary really closed a region". Below 0.001 mm² the
+fill is **deleted again** and the call raises `FILL_DEGENERATE` with the measured
+number and the reason - `catia_gsd_boundary(edge=N)` can return one segment of a
+border (25.0000 mm of a 91.1450 mm border), and filling a segment does not fail
+on this build, it makes that face. The CATIA-side refusal now carries the same
+code family (`FILL_NOT_CLOSED`), so both routes answer alike.
+
+**A sketch on a rotated datum plane can be turned back into global XYZ, and the
+frame is checked.** `HybridShapePlaneAngle` has 44 members - `GetOrigin`,
+`GetFirstAxis`, `GetSecondAxis`, `GetPosition` - and every one of them answers
+「方法 … 失败」: they take by-ref out-parameters, the same wall as
+`Sketch.GetAbsoluteAxisData` (measured 2026-11-09 with a typeinfo dump). So the
+frame is RECONSTRUCTED from what the plane was built from - the reference plane's
+own frame, rotated about the axis by the angle - and the reconstruction is a
+claim, so one corner is turned into a real point element at the position it
+predicts and the distance from that point to the sketch is measured. On B30:
+**0.0000 mm**, i.e. the point IS on the sketch, so the frame matches CATIA.
+The probe uses the corner FARTHEST from the origin (the first corner is usually
+the sketch origin, which lies on any sketch through it - a probe there would
+answer 0.0000 for a frame wrong by 90 degrees). On a mismatch the call refuses
+with `SKETCH_FRAME_MISMATCH` and the measured gap.
+
+Measured end to end on B30 2026-11-09 with the reporter's own geometry: sketch on
+`P72` (= zx rotated 72° about z), a 6 mm line along V comes back as
+`(1.8541, 5.7063, 0)` - 6*(cos72, sin72, 0) - and the frame is CHECKED at
+0.0000 mm. The three call sites now share one table (`catia_mcp/sketch_frames.py`)
+instead of three copies.
+
+**`catia_sketch_copy` says where the copy landed**, with the coordinates and the
+provenance of the frame, so the reporter's own derivation (2·r·sin(A/2) = 7.0534
+against 7.053 for r=6 at 72°) no longer has to be done by hand. Found while doing
+it: a rename split one sketch's record in two - the placement went under the auto
+name `草图.2`, the elements under `COPY` - so GSD refused a sketch it had just
+been told about. `_rekey_records` carries the record across.
+
+**The cap failure now names the loft fix.** `cap_curve`'s description has said
+since 0.3.86 that on a loft the curve has to be one of the guides; the failure
+message still only said "measure the joined border", which is the one thing the
+reporter had already tried. It now says it: a loft's inner border is an
+interpolated curve, a curve 0.0000 mm from it is still a different edge, and the
+fix is to pass that curve as a third guide and make the sections start on it.
+
+Also: `catia_set_visibility` says that one element can be shown alone
+(`set_visibility(name='加厚曲面.1', show=true)` brought a solid back without
+showing its set - measured 2026-11-09).
+
+1428 tests (+16), 135 tools (no new ones), `scripts/b30_v0387_audit.py` 5/5.
+
 ## [0.3.86] — 2026-11-09 · the schema that called its own description a lie
 
 Three reports on 0.3.85. The two capability gaps it closed (angle datum plane,
