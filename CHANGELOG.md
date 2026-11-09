@@ -2,6 +2,66 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.91] — 2026-11-10 · "tried" is not "worked", and F: is not a fact
+
+A report that ran the suite on a machine with **no F: drive** (C:/D:/E: only).
+`1445 passed, 1 failed`. Following that one failure down turned up two real
+defects, both reproducible without CATIA. Nothing here needed a B30 measurement -
+which is itself the point: all three were ordinary code, and two of them had been
+in the package since 0.3.80.
+
+**A test depended on the author's drive letters.** `dialogs.save_as(doc,
+"F:/ascii/x.CATPart")` called the real `os.makedirs("F:\\ascii")` first; on their
+machine that raised `PermissionError` before the fake `SaveAs` ever ran, so the
+`CodedError` the test expected never appeared. The assertion was right, the
+fixture was not. It uses `tmp_path` now, and a guard test scans every
+`*save_as(...)`/`*save(...)` call in `tests/` and fails on a drive-letter literal
+(same nature as the `//n` AST guard from 0.3.81). Writing the guard found two more:
+`test_a_non_ascii_folder_is_not_refused` had been creating `C:\中文目录` on
+whatever machine ran the suite, and another test named `C:/any/...`.
+
+**A folder that cannot be created is a save failure, not a COM error.**
+`os.makedirs(parent, exist_ok=True)` sat **outside** every `try` in
+`dialogs.save_as`, so its `PermissionError` escaped the envelope and
+`server._execute_tool` classified it `COM_ERROR` - with the "CATIA reports most
+automation failures as a bare 'method failed'… check `in_work_object`" advice,
+for a path that CATIA never saw. Reproduced here (`Q:\`: `PermissionError`, code
+`COM_ERROR`), then fixed: `SAVE_FAILED`, `modified: false`, `data.call =
+"os.makedirs"`, `data.folder`, the raw `OSError` text, and advice about a drive
+that does not exist. The message says outright that CATIA was never asked.
+
+**The staging route now knows the difference between "tried" and "saved".**
+0.3.89 set `_staging_attempted` *before* the call and the failure prose read it as
+*after the return*: "this document was saved to %TEMP% first and then moved … and
+THAT move was refused too - so this is not the 'first SaveAs' limitation". Their
+minimal reproduction (two `save_as` calls, both raising, no file in `%TEMP%`)
+showed all three clauses false and the conclusion resting on the second one. Two
+SaveAs calls fail for different reasons, and one flag cannot carry both:
+
+    _staging_attempted   entered the route
+    _staging_saved       the %TEMP% SaveAs RETURNED
+    _staging_save_error  why it did not (kept, no longer swallowed)
+    _staging_move_error  why the second SaveAs failed
+
+`_staging_sentence()` picks the wording from those, and only claims "not the
+first SaveAs limitation" where both of its premises hold (staging ran first AND
+the document really had a path when the second call ran). Otherwise it says the
+cause is undetermined and warns that the bracketed error belongs to the direct
+attempt, not to the folder. `data.staging_route` publishes the same four facts,
+`data.save_route` now traces `staging_save` and `staging_move` separately (a
+single `staging: ok=false` could not say which of them failed), and a SAVE_FAILED
+raised by `dialogs.save_as` itself - the production path - gets the same sentence
+appended, instead of telling the caller less than the fake-doc path did.
+
+**The tag-without-a-release gap (their §4.4) was mine, and it is closed**:
+`v0.3.90` was tagged and pushed before its release existed, so `releases/tags`
+answered Not Found while `main` already said 0.3.90. The release, zip and
+`.sha256` are published; PUBLISH.md now says the two must leave together.
+
+1464 tests (+8), 135 tools. Their §5 observation is right: `SPLIT_CUTTER_MISSES`
+reporting `stage="validate"` after a `GetMinimumDistance` call matches the
+documented meaning of that stage (CATIA was not asked to change anything).
+
 ## [0.3.90] — 2026-11-09 · the record that did not follow a delete
 
 Two reports on 0.3.89. One is the folder that keeps failing (one folder, on their

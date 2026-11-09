@@ -567,14 +567,7 @@ class DocumentTools:
                        if discarded else
                        "The document is open and unsaved: it has no path, so it "
                        "cannot be referenced by an assembly. ")
-                    + ("An ASCII staging file was already tried: this document was "
-                       "saved to %TEMP% first and then moved to the path asked for, "
-                       "and THAT move was refused too - so this is not the "
-                       "'first SaveAs' limitation of this build."
-                       if getattr(self, "_staging_attempted", False) else
-                       "The refusal came before any staging attempt, so the ASCII "
-                       "route this fork has for a first SaveAs was not the problem "
-                       "and was not tried.")
+                    + self._staging_sentence()
                     + (" The file NAME is not ASCII, which this build refuses on "
                        "every SaveAs (measured on B30 2026-11-07: "
                        "...\\中文目录\\probe_ascii.CATPart saved, "
@@ -593,7 +586,9 @@ class DocumentTools:
                     code="SAVE_FAILED",
                     stage="execute",
                     modified=not discarded,
-                    data={"save_route": list(getattr(self, "_save_trace", []))},
+                    data={"save_route": list(getattr(self, "_save_trace", [])),
+                          "staging_route": self._staging_report(),
+                          "direct_error": str(exc).splitlines()[0][:160]},
                     next_actions=(
                         ["Use an ASCII FILE NAME and put the Chinese wording in the "
                          "part number (catia_set_part_number) - that is what the "
@@ -933,18 +928,115 @@ class DocumentTools:
         nothing in the envelope could tell "the staged branch never ran" from
         "its second step failed". data.save_route does: each step, in order, with
         the COM answer.
+
+        0.3.91 adds two things a SAVE_FAILED raised by `dialogs.save_as` never
+        carried: the staging route as structure (`data.staging_route` - tried,
+        whether %TEMP% really took the file, and each step's own error) and the
+        sentence that says which of them failed. Without that, the production
+        path (a CodedError from the COM call) told the caller less than the
+        fake-doc path did, which is how the wrong staging sentence survived two
+        versions.
         """
         trace = getattr(self, "_save_trace", None)
         if not trace:
             return
         data = dict(getattr(error, "data", None) or {})
         data.setdefault("save_route", list(trace))
+        report = self._staging_report()
+        if report["tried"] and "staging_route" not in data:
+            data["staging_route"] = report
+            message = str(error)
+            sentence = self._staging_sentence()
+            if sentence not in message:
+                error.args = (message.rstrip() + " " + sentence, *error.args[1:])
         error.data = data
+
+    def _staging_report(self) -> dict[str, Any]:
+        """The staging route as data: what was tried, and what actually returned."""
+        return {
+            "tried": bool(getattr(self, "_staging_attempted", False)),
+            "temp_file_saved": bool(getattr(self, "_staging_saved", False)),
+            "tried_first": bool(getattr(self, "_staging_first", False)),
+            "temp_error": self._first_line(
+                getattr(self, "_staging_save_error", None)),
+            "move_error": self._first_line(
+                getattr(self, "_staging_move_error", None)),
+        }
+
+    def _trace(self, step: dict[str, Any]) -> None:
+        """Add one step to data.save_route - if a route is being kept at all.
+
+        _save_via_ascii_staging can be reached from a test (or a future caller)
+        without _save_document having initialised the list; a missing route must
+        not turn a save failure into an AttributeError.
+        """
+        trace = getattr(self, "_save_trace", None)
+        if trace is not None:
+            trace.append(step)
+
+    @staticmethod
+    def _first_line(error: Exception | None) -> str | None:
+        """The first line of an exception, or None - for envelopes, not for prose."""
+        if error is None:
+            return None
+        text = str(error).splitlines()
+        if not text:
+            return type(error).__name__
+        return text[0] if len(text[0]) <= 160 else text[0][:157] + "..."
+
+    def _staging_sentence(self) -> str:
+        """What the staging route DID - past tense only where a call returned.
+
+        0.3.89 set the flag before the call, so a staging SaveAs that failed still
+        produced "this document was saved to %TEMP% first and then moved ... and
+        THAT move was refused too", followed by a causal conclusion ("so this is
+        not the 'first SaveAs' limitation") that rests on the move having been
+        reached. A 2026-11-09 report reproduced it with a fake document: two
+        SaveAs calls, no staging file on disk, and that sentence in the reply.
+        Every branch below is keyed on a RETURNED call, and the causal claim is
+        only made where both of its premises hold.
+        """
+        saved = bool(getattr(self, "_staging_saved", False))
+        first = bool(getattr(self, "_staging_first", False))
+        temp_error = self._first_line(getattr(self, "_staging_save_error", None))
+        move_error = self._first_line(getattr(self, "_staging_move_error", None))
+        if first and saved:
+            return ("An ASCII staging file was tried FIRST: this document WAS "
+                    "saved to %TEMP%, and the second SaveAs - onto the path asked "
+                    "for, from a document that already had a path - was refused "
+                    f"too ({move_error or 'no COM error recorded'}). So this is "
+                    "not the 'first SaveAs' limitation of this build.")
+        if first and temp_error is not None:
+            return ("An ASCII staging file was tried FIRST and REFUSED at the "
+                    f"%TEMP% step ({temp_error}) - nothing was ever saved there, "
+                    "so the path asked for was never reached by a second SaveAs "
+                    "from a document with a path, and the bracketed error is the "
+                    "direct attempt's, not the folder's verdict. Cause undetermined.")
+        if saved:
+            return ("The direct SaveAs was refused first; the document was then "
+                    "saved to %TEMP%, and the move onto the path asked for was "
+                    f"refused as well ({move_error or 'no COM error recorded'}). "
+                    "Two refusals, so 'the first SaveAs limitation' does not "
+                    "account for both on its own.")
+        if temp_error is not None:
+            return ("The direct SaveAs was refused first, and the staged fallback "
+                    f"was refused at its %TEMP% step ({temp_error}), so the "
+                    "target folder was never reached by a document with a path - "
+                    "the cause is undetermined, do not read the bracketed error as "
+                    "the folder's verdict.")
+        if getattr(self, "_staging_attempted", False) and not saved \
+                and temp_error is None:
+            return ("An ASCII staging file was entered and refused before its "
+                    "first SaveAs (a non-ASCII file NAME is refused by this build "
+                    "on every SaveAs, and a staging file cannot carry the name), "
+                    "so nothing was written through it - the name is the problem, "
+                    "not the folder.")
+        return ("The refusal came before any staging attempt, so the ASCII route "
+                "this fork has for a first SaveAs was not the problem and was not "
+                "tried.")
 
     def _document_at_path(self, path: str) -> Any:
         """The open document whose file is ``path`` (None when nothing holds it)."""
-        import os
-
         wanted = os.path.normcase(os.path.abspath(path))
         docs = self.conn.documents
         # `Count` may be absent on a connection double (tests) - the same reason
@@ -987,9 +1079,29 @@ class DocumentTools:
         staging_dir = os.path.join(tempfile.gettempdir(), "mechdog")
         os.makedirs(staging_dir, exist_ok=True)
         staging = os.path.join(staging_dir, base)
-        dialogs.save_as(doc, staging)
+        # Two SaveAs calls, and they fail for different reasons. Until 0.3.91 both
+        # of them were summarised as one `staging: ok=false`, so a reply could not
+        # say whether %TEMP% was refused or the MOVE onto the caller's path was -
+        # and the caller's prose claimed the first had worked (reported
+        # 2026-11-09). Each step is now traced, and the two errors are kept apart.
+        try:
+            dialogs.save_as(doc, staging)
+        except Exception as error:  # noqa: BLE001 - the caller reports it
+            self._staging_save_error = error
+            self._trace({"step": "staging_save", "ok": False,
+                         "target": staging,
+                         "error": str(error).splitlines()[0][:160]})
+            raise
+        self._staging_saved = True
+        self._trace({"step": "staging_save", "ok": True, "target": staging})
         try:
             return dialogs.save_as(doc, file_path)
+        except Exception as error:  # noqa: BLE001 - the move is what failed
+            self._staging_move_error = error
+            self._trace({"step": "staging_move", "ok": False,
+                         "target": str(file_path),
+                         "error": str(error).splitlines()[0][:160]})
+            raise
         finally:
             try:
                 if os.path.isfile(staging):
@@ -1006,6 +1118,17 @@ class DocumentTools:
         # (found 2026-11-08 re-running the audit: the refusal was "that file
         # exists", and the reply talked about non-ASCII folders).
         self._staging_attempted = False
+        # "Tried" and "worked" are two different facts, and 0.3.89 printed the
+        # second while storing the first: the flag was set BEFORE the call, so a
+        # staging SaveAs that failed left the caller telling the user the document
+        # "was saved to %TEMP% first and then moved ... THAT move was refused too"
+        # when in fact %TEMP% never received anything (reported 2026-11-09, with a
+        # fake-doc reproduction: two SaveAs calls, no staging file, flag True).
+        # Each step now has its own flag and its own exception.
+        self._staging_saved = False
+        self._staging_first = False
+        self._staging_save_error: Exception | None = None
+        self._staging_move_error: Exception | None = None
         # Every route this call takes, in order, with the COM answer for each.
         # A 2026-11-09 report could only say "the reply blames a bare doc.Save()
         # while the description promises a staged SaveAs" - and data.call alone
@@ -1095,11 +1218,14 @@ class DocumentTools:
             if not self._document_has_path(doc):
                 try:
                     self._staging_attempted = True
+                    self._staging_first = True
                     target = self._save_via_ascii_staging(doc, str(file_path))
                 except Exception as staging_error:  # noqa: BLE001 - direct next
                     self._staging_attempted = True
                     self._save_trace.append({
                         "step": "staging", "ok": False,
+                        "where": ("temp file" if self._staging_save_error
+                                  is not None else "move onto the target"),
                         "error": str(staging_error).splitlines()[0][:160]})
                 else:
                     folder = os.path.dirname(str(file_path)) or "."

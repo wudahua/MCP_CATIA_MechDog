@@ -223,3 +223,21 @@ git push -u origin fix/zh-cn-topology-search
 - `Position.GetComponents` 读到全零（erased rotation）
 - `pad`/`pocket` 按树顺序取"最后一张草图"导致切错轮廓
 - `trust_env` 测试缺陷（三行改动、有明确复现条件）
+
+---
+
+## 七、每版发版的顺序（2026-11-10 补）
+
+一个版本要走完这五步，**顺序不能换**：
+
+1. `pytest tests -q` 全绿、`-q --collect-only | tail -1` 记下测试数；
+2. `pyproject.toml` / `catia_mcp/__init__.py` 的版本号与 `CHANGELOG.md` 顶部条目一致；
+3. `scripts/package_release.py` 打包，得到 `dist/*.zip` 与 `.zip.sha256`；
+4. commit + tag **与 release 同批产出**：`releases/tags/vX.Y.Z` 要能解析、zip 要能下载、
+   `.sha256` 要与下载回来的字节一致；
+5. 工作区 clean，项目记忆写入本版条目。
+
+**第 4 步单独列出来是有代价的**：0.3.90 的 tag 与 main 先推出去了，release 隔了一段时间才建，
+于是 `releases/tags/v0.3.90` 返回 Not Found、zip 返回 404，而 `main` 上的 `pyproject` 已经写着
+`0.3.90`。一个验收方按"最新 tag"拉源码、按"最新 release"拉包，就会拿到两个不同的版本号。
+发 tag 之前先确认包已经打得出来、token 拿得到；否则宁可不打 tag。

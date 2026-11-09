@@ -394,7 +394,7 @@ def test_an_unknown_key_is_reported_before_a_missing_one():
 # ────────────────────────────── 6. a path CATIA cannot write
 
 
-def test_a_non_ascii_file_name_is_refused_before_catia_is_asked():
+def test_a_non_ascii_file_name_is_refused_before_catia_is_asked(tmp_path):
     r"""Measured limit, not a guess: a non-ASCII FOLDER works, a NAME does not.
 
     same folder, same length, only the name differing (V5-6R2020 B30, 2026-10-31):
@@ -410,8 +410,10 @@ def test_a_non_ascii_file_name_is_refused_before_catia_is_asked():
     from catia_mcp.dialogs import save_as
     from catia_mcp.results import PathNotSupported
 
+    # tmp_path, not `C:/any`: the guard in the 0.3.91 tests keeps a save call
+    # from depending on a drive letter, and this one only needs a non-ASCII NAME
     with pytest.raises(PathNotSupported) as caught:
-        save_as(None, r"C:/any/中文探针.CATPart")
+        save_as(None, str(tmp_path / "中文探针.CATPart"))
     assert caught.value.code == "PATH_NOT_ASCII"
     assert caught.value.stage == "validate"
     assert caught.value.modified is False
@@ -419,12 +421,17 @@ def test_a_non_ascii_file_name_is_refused_before_catia_is_asked():
     assert "rename the file afterwards" not in str(caught.value)
 
 
-def test_a_non_ascii_folder_is_not_refused():
-    """The limit is the file name - refusing the folder too would be a new bug."""
+def test_a_non_ascii_folder_is_not_refused(tmp_path):
+    """The limit is the file name - refusing the folder too would be a new bug.
+
+    Run under tmp_path since 0.3.91: this call really does create its parent
+    folder, so it used to leave `C://中文目录` behind on whatever machine ran
+    the suite - found by the drive-literal guard in the 0.3.91 tests.
+    """
     from catia_mcp.dialogs import save_as
 
     with pytest.raises(Exception) as caught:
-        save_as(None, r"C:/中文目录/probe.CATPart")
+        save_as(None, str(tmp_path / "中文目录" / "probe.CATPart"))
     assert type(caught.value).__name__ != "PathNotSupported"
 
 

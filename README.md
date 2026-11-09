@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.90** · [what changed](CHANGELOG.md) ·
+**0.3.91** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -798,7 +798,14 @@ fails also says which COM call it was ("this call was a bare `doc.Save()`" vs
 "this call was `doc.SaveAs(...)`"), because those are different problems with
 different answers — and since 0.3.90 it carries `data.save_route`, every step in
 order with the COM answer for each, so "the staged branch never ran" and "its
-second step failed" are told apart by reading instead of guessing. The one
+second step failed" are told apart by reading instead of guessing. Since 0.3.91
+that route also separates the staged route's two SaveAs calls (`staging_save`,
+`staging_move`) and publishes `data.staging_route` — `tried`, `temp_file_saved`,
+`temp_error`, `move_error` — because one flag set before the call had been read as
+"the document was saved to %TEMP% and the move was refused too" even when %TEMP%
+had refused the file. A folder that cannot be created is now `SAVE_FAILED` with
+`data.call = "os.makedirs"` rather than an escaped `OSError` reported as
+`COM_ERROR`. The one
 bare-Save branch left in that path ("the target is this document's own file")
 compares **FullName**, not `Name`: CATIA gives two open documents the same name,
 and a document with no path can never be "the same file".

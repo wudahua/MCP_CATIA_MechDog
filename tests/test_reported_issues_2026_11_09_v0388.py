@@ -34,14 +34,23 @@ def test_a_bare_save_failure_says_it_was_a_bare_save():
     assert caught.value.data["call"] == "Document.Save"
 
 
-def test_a_saveas_failure_says_it_was_a_saveas():
+def test_a_saveas_failure_says_it_was_a_saveas(tmp_path):
+    """The path is a real folder under tmp_path, not `F:/ascii`.
+
+    It was `F:/ascii/x.CATPart` until 0.3.91, and a 2026-11-09 report showed what
+    that costs: on a machine with no F: drive, `os.makedirs('F:\\ascii')` raised
+    PermissionError BEFORE the fake SaveAs ever ran, so the expected CodedError
+    never appeared and this test failed - a green suite that depended on the
+    author's drive letters.
+    """
     from catia_mcp import dialogs
 
     doc = types.SimpleNamespace(
         Name="P.CATPart",
         SaveAs=lambda path: (_ for _ in ()).throw(RuntimeError("E_FAIL")))
+    target = str(tmp_path / "ascii" / "x.CATPart")
     with pytest.raises(CodedError) as caught:
-        dialogs.save_as(doc, "F:/ascii/x.CATPart", tries=1, wait=0)
+        dialogs.save_as(doc, target, tries=1, wait=0)
     text = str(caught.value)
     assert text.startswith("SaveAs failed after 1 attempts")
     assert "this call was doc.SaveAs(" in text

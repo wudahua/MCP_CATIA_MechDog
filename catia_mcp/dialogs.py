@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import os
+import tempfile
 import threading
 import time
 from ctypes import wintypes as _wt
@@ -212,8 +213,38 @@ def save_as(doc, path: str, tries: int = 6, wait: float = 0.6) -> str:
             "evidence, 2026-11-07), which is the same limit seen through the UI."
         )
     parent = os.path.dirname(target)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
+    try:
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+    except OSError as error:
+        # The filesystem can refuse before CATIA is ever asked. This used to sit
+        # outside every try, so a missing drive or a read-only folder escaped as
+        # a bare PermissionError and the envelope called it COM_ERROR - with the
+        # "CATIA reports most automation failures as a bare method failed"
+        # advice, which has nothing to do with a folder that cannot be created
+        # (reported 2026-11-09: os.makedirs('F:\\ascii') on a machine with no F:).
+        # data.call is a diagnostic contract now, so it has to cover the steps
+        # before the COM call as well as the call itself.
+        raise CodedError(
+            f"Could not create the folder for '{target}' - CATIA was NOT asked "
+            f"to save anything yet (this call was os.makedirs({parent!r}); the "
+            f"filesystem said: {error}).\n"
+            "  Nothing was written and the document keeps its previous state, so "
+            "retrying the same path cannot help.",
+            code="SAVE_FAILED",
+            stage="execute",
+            modified=False,
+            data={"call": "os.makedirs", "target": str(target),
+                  "folder": str(parent), "error": str(error)},
+            next_actions=[
+                "Check that the drive exists and the folder is writable: a path "
+                "on an unmounted drive fails like this on every attempt, and no "
+                "retry of catia_save_document can create it",
+                f"Write to a folder that exists instead - for example "
+                f"'{os.path.join(tempfile.gettempdir(), os.path.basename(target))}' "
+                "- and note the document is still open and unsaved",
+            ],
+        )
     for _ in range(3):
         if not os.path.exists(target):
             break

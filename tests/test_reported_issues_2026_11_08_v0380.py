@@ -440,10 +440,17 @@ def test_the_save_failure_message_separates_first_saveas_from_save():
     0.3.82 rewrote the sentence around the three facts it now acts on: a first
     SaveAs can be refused, an ASCII staging file is tried before giving up, and
     what is left to check depends on whether the NAME is ASCII.
+
+    0.3.91: the staging sentence moved into `_staging_sentence`, because the
+    literal in the caller could only say "a staging file was tried" - and 0.3.89
+    printed it as "was saved to %TEMP% ... the move was refused too" even when the
+    %TEMP% SaveAs itself had failed. The separation is asserted where it lives now
+    (tests/test_reported_issues_2026_11_10_v0391.py); here it is enough that the
+    three facts are still the message's structure.
     """
     from catia_mcp.tools import document
 
     text = inspect.getsource(document)
     assert "'first SaveAs' limitation" in text
-    assert "An ASCII staging file was already tried" in text
+    assert "_staging_sentence" in text
     assert "_save_via_ascii_staging" in text
