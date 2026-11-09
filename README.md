@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.84** · [what changed](CHANGELOG.md) ·
+**0.3.85** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -74,7 +74,11 @@ two - `catia_delete_body`, `catia_solid_loft`; 0.3.19: one - `catia_copy_compone
 98 + 37 added = 135: the 30 below, `catia_apply_design_table` under Knowledgeware,
 `catia_drawing_set_sheet` and `catia_drawing_add_frame` under Drafting (0.3.65),
 the three colour tools in their own table below (0.3.79), and
-`catia_replace_component` (0.3.80). 0.3.20 added
+`catia_replace_component` (0.3.80). 0.3.85 added arguments instead of tools:
+`catia_gsd_boundary(edge=N, propagation=…)` takes one loop of a border (a
+selector `AddNewBoundaryOfSurface` does not have), `catia_gsd_fill` accepts
+`Edge.N`, and `catia_gsd_circ_pattern(cap_center=true, cap_curve=…)` closes the
+centre of a full ring. 0.3.20 added
 arguments instead of tools: a sketch support given as `origin`/`u`/`v`, edges
 given as coordinates, arcs given as their two endpoints, and one plan per
 several documents.
@@ -1489,17 +1493,30 @@ Place the result with `catia_get_component_transform`.
   that it was declared nowhere. `catia_diagnose` now prints both factories' own
   method tables, so the next question of this kind is a lookup.
 
-* **Capping a hole in a surface: cut it, do not fill the boundary.** One
+* **Capping a hole in a surface: use the hole's own edge, not a circle.** One
   `catia_gsd_boundary` curve carries every loop, so filling it rebuilds the whole
   face over the original and the duplicate then breaks a thickening (measured
-  2026-11-09 on a five-lobe base: 1714 edges shared by more than two triangles).
-  `AddNewBoundaryOfSurface` takes one argument on this build, so there is no
-  "give me the inner loop" call. The route that works, measured end to end on B30
-  2026-11-09: `catia_gsd_split` the surface with a circle drawn over the hole,
-  keep the outer piece (its inner border IS that circle), `catia_gsd_fill` the
-  circle, `catia_gsd_join` — 1600.000 → 1486.903 → 113.097 → 1600.000 mm², then
-  thickness 0.5 gave 800.0 mm³. Splitting twice on the same element does not
-  stack: do both cuts from the original.
+  2026-11-09 on a five-lobe base: 1714 edges shared by more than two triangles;
+  on a cone the same call gave 1570.796 mm² = π·400 + π·100, one flat face per
+  loop stacked, not the lateral area). Three routes exist and they differ by
+  geometry:
+
+  * `catia_gsd_boundary(edge=N)` returns ONE loop — 62.832 and 125.664 mm on a
+    cone's two circles, against 188.496 for both — and a fill on it covers only
+    that loop (314.159 / 1256.637 mm² measured). This works on a single feature.
+    On a JOIN result (an array) all 30 border edges of a five-patch base failed
+    at update, so pick the loop BEFORE the join.
+  * `catia_gsd_circ_pattern(cap_center=true, cap_curve=<the hole's edge on the
+    source piece>)` closes the centre in the same call: that curve is rotated
+    count−1 times, the copies joined into the hole's border, filled, and joined
+    onto the base. Measured 2080.436 + 59.441 = 2139.877 mm² on a five-lobe base
+    — exact, because the cap shares the hole's edge by construction.
+  * `catia_gsd_split` with a circle, then fill, then join — 1600.000 → 1486.903 →
+    113.097 → 1600.000 mm², thickness 0.5 → 800.0 mm³. Works, but a circle has to
+    be big enough to reach the border: a five-sided hole's nearest point to its
+    axis is r·cos36 (4.045 for r=5), so a circle at the "boundary distance" lies
+    wholly inside the hole and cuts nothing (measured 2026-11-09). Splitting
+    twice on the same element does not stack: do both cuts from the original.
 
 * **A surface fillet only where the two surfaces form a plain corner, and a
   spine only from two or more sections.** 0.3.53 wrote that neither could be

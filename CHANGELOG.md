@@ -2,6 +2,61 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.85] — 2026-11-09 · the selector that was there, one argument away
+
+The 2026-11-09 report asked for three APIs. Two of them were the right idea
+about the wrong object, and the measurements are more useful than the code:
+
+**`AddNewBoundary(edge, support, propagation)` IS the loop selector.** The
+report said `AddNewBoundaryOfSurface` cannot pick a loop, and that is true - it
+takes one argument and returns one curve carrying every loop. But the three-
+argument sibling was in the same factory table the whole time. On a cone, whose
+two border circles have deliberately different lengths so the answer cannot be
+ambiguous:
+
+    propagation 0 -> 188.496 mm   both loops
+    propagation 1 ->  62.832 mm   the r=10 loop, when that edge is named
+    propagation 1 -> 125.664 mm   the r=20 loop
+    propagation 2 -> the same as 1 on a smooth border
+
+and a fill on one of those loops measured 314.159 and 1256.637 mm², against
+1570.796 for the whole border - which is π·400 + π·100, one flat face per loop
+STACKED, not the lateral area of the surface it came from. That number is what
+broke the report's Step 6: not a "duplicate face" in the abstract, but two discs.
+
+**Where it does not work is worth as much.** On a JOIN of five patches, all 30
+border edges refused at `UpdateObject` - while `AddNewBoundaryOfSurface` on that
+same joined surface answered fine (border 205.725 mm). So the selector is a
+single-feature tool, and an array result cannot use it. That is stated in the
+tool, in the refusal, and in README, because "it worked on my cone" would
+otherwise send the next caller into the same wall.
+
+**`cap_center` closes the hole with the hole's own edge.** A circle cannot do
+it: a five-sided hole's nearest point to its axis is r·cos36 - 4.045 for r=5 -
+so a circle drawn at "the distance to the border" lies wholly inside the hole and
+splits nothing (measured; that is why the report's circle route failed and not
+only the shared-edge business). What works is rotating the hole's own edge
+count−1 times, joining the copies into the border, filling that, and joining onto
+the base. Measured on a five-lobe base (five 72° sectors, 2080.436 mm², hole at
+r=5): joined border 29.3893 mm (the pentagon's perimeter), fill 59.441 mm² (its
+area), closed 2139.877 = 2080.436 + 59.441. Exact, because the cap shares an edge
+by construction. The curve has to be named - `cap_curve` - and that is not
+laziness: a filled patch's border cannot be split into its sides by any call
+tried (an extract of one edge came back as all four, 91.1450 mm), so guessing
+would be inventing.
+
+**`catia_gsd_fill` takes `Edge.N`.** A raw topological edge is not a curve
+(`Fill.AddBound` answers E_INVALIDARG), so it is extracted first - and on a
+surface in a geometrical set the search now walks the SET instead of the body,
+which is what made every `Edge.N` answer "the active body has no solid shape
+yet". The extract returns the whole ring (91.1450 mm for a four-sided sector),
+and the description says so instead of implying a single side.
+
+Also: the two `cap_center` refusals happen before any rotation is built, and a
+cap that fails at join deletes what it built and says the array was untouched.
+
+1403 tests, 135 tools, scripts/b30_v0385_audit.py 6/6 on B30.
+
 ## [0.3.84] — 2026-11-09 · ten members away from the answer
 
 Two reports arrived the same evening and they disagree with each other about one

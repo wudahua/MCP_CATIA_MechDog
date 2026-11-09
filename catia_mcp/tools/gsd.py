@@ -753,8 +753,17 @@ class GSDTools:
                     "argument and updates; on the 30 mm extrusion of a r=10 circle "
                     "the result measured 125.664 mm, exactly the two circles. A "
                     "closed surface gives one curve carrying both loops, so the "
-                    "length is the sum of the borders - that is not a defect, and "
-                    "splitting it further needs catia_gsd_split on the loops. "
+                    "length is the sum of the borders - that is not a defect. "
+                    "TAKING ONE LOOP (0.3.85): pass 'edge' and the reply is that "
+                    "loop alone - AddNewBoundary(edge, support, propagation) has "
+                    "the selector AddNewBoundaryOfSurface lacks (three arguments "
+                    "against one). Measured on a cone: propagation 0 -> 188.496 mm "
+                    "(both loops), 1 -> 62.832 mm (the r=10 loop) or 125.664 mm "
+                    "(the r=20 loop) depending on which edge is named, 2 -> the "
+                    "same as 1 on a smooth border. This is a SINGLE-FEATURE tool: "
+                    "on a JOIN result (an array) all 30 border edges of a "
+                    "five-patch base refused at update, while the whole-border "
+                    "call on that same surface worked. "
                     "NOT the same tool as catia_gsd_extract (which copies the "
                     "element you name, keeping its type). "
                     "This does NOT smooth a seam: CATIA V5 automation exposes no "
@@ -770,6 +779,41 @@ class GSDTools:
                             "description": (
                                 "Surface whose border you want: a tree name, or "
                                 "'Face.N' from the active body"),
+                        },
+                        "edge": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": (
+                                "Take ONE loop of the border instead of all of "
+                                "them: the number of the surface-border edge, "
+                                "counted within 'surface'. Without it the reply is "
+                                "one curve carrying every loop (fill that and you "
+                                "rebuild every loop as a separate face). Measured "
+                                "on a cone (B30 2026-11-09): edge 1 -> 62.832 mm "
+                                "(r=10 loop), edge 2 -> 125.664 mm (r=20 loop); "
+                                "the fills were 314.159 and 1256.637 mm2, against "
+                                "1570.796 for both loops at once (the two discs "
+                                "ADDED, not the lateral area). "
+                                "ON AN ARRAY RESULT THIS REFUSES: all 30 border "
+                                "edges of a five-patch join failed at "
+                                "UpdateObject while the whole-border call on the "
+                                "same surface worked. Take the loop from the "
+                                "source piece before the join, or let "
+                                "catia_gsd_circ_pattern cap the centre."
+                            ),
+                        },
+                        "propagation": {
+                            "type": "integer",
+                            "enum": [0, 1, 2],
+                            "default": 1,
+                            "description": (
+                                "Only used with 'edge'. 0 returns the whole border "
+                                "(all loops, same as omitting 'edge'), 1 the loop "
+                                "the chosen edge belongs to, 2 the tangent chain "
+                                "from it. 1 and 2 gave identical results on a "
+                                "smooth border (measured); they differ where the "
+                                "border has corners."
+                            ),
                         },
                         "name": {"type": "string", "description": "Optional name for the result"},
                     },
@@ -1105,7 +1149,15 @@ class GSDTools:
                     "fill comes back as a face covering the whole original - "
                     "overlapping geometry that joins without complaint and then "
                     "breaks the thickening (measured 2026-11-09 on a five-lobe "
-                    "base: 1714 edges shared by more than two triangles). "
+                    "base: 1714 edges shared by more than two triangles). The "
+                    "same measurement, on a cone, came to 1570.796 mm2 = pi*400 + "
+                    "pi*100: one flat face per loop, stacked - not the lateral "
+                    "area of the surface it came from. "
+                    "IF YOU NEED ONE LOOP ONLY, ask catia_gsd_boundary for it by "
+                    "index (edge=N): that curve carries one loop and its fill "
+                    "covers only that loop (314.159 and 1256.637 mm2 measured, "
+                    "one per loop). That works on a single feature, not on a "
+                    "join. "
                     "TO CAP A HOLE, cut first: catia_gsd_split(element=surface, "
                     "cutter=<circle>) leaves the outer piece with that circle as "
                     "its inner border, and filling the CIRCLE then joining the "
@@ -1120,7 +1172,22 @@ class GSDTools:
                             "type": "array",
                             "items": {"type": "string"},
                             "minItems": 1,
-                            "description": "Boundary curve element names, in contour order",
+                            "description": (
+                                "Boundary curve element names, in contour order. "
+                                "'Edge.N' is accepted too and is extracted to a "
+                                "curve first - a raw topological edge is not one "
+                                "(Fill.AddBound answers E_INVALIDARG). On a "
+                                "surface in a geometrical set, N counts that "
+                                "set's SURFACE-BORDER edges; construction-line "
+                                "edges are not counted, because a GSD line's edge "
+                                "can measure the same as a border circle "
+                                "(measured: both 50.0000 mm on B30 2026-11-09). "
+                                "The extract returns the WHOLE border ring of the "
+                                "patch, not the single edge (91.1450 mm for a "
+                                "four-sided sector, measured), so filling it "
+                                "covers that patch's outline - use it when the "
+                                "outline is what you want to cap."
+                            ),
                         },
                         "name": {"type": "string", "description": "Optional name for the surface"},
                     },
@@ -1372,6 +1439,14 @@ class GSDTools:
                     "set as the in-work object. A declared member that cannot be "
                     "updated is not a capability, so the rotation path below is "
                     "not a preference: it is what this build can do. "
+                    "CAPPING THE CENTRE: cap_center=true closes the hole a full "
+                    "ring leaves in the middle, which is the tutorial's Step 6. "
+                    "It does NOT use a circle: a five-sided hole's nearest point "
+                    "to the axis is 5*cos36 = 4.045, so a circle at that radius "
+                    "lies wholly inside the hole and splits nothing (measured), "
+                    "and a circle that does cut it leaves a wavy border no join "
+                    "will take. It rotates the hole's own edge (cap_curve) count-1 "
+                    "times and joins those copies - geometry that meets exactly. "
                     "Consequences to plan around: the tree gets count-1 rotate "
                     "features plus one join instead of one node, editing 'count' "
                     "afterwards means calling again, and a join can refuse when "
@@ -1418,6 +1493,39 @@ class GSDTools:
                                 "edge, three faces)"
                             ),
                             "default": True,
+                        },
+                        "cap_center": {
+                            "type": "boolean",
+                            "description": (
+                                "Close the hole the ring leaves in the middle, in "
+                                "the same call (default false). Needs cap_curve and "
+                                "a full turn. The cap is built from the hole's OWN "
+                                "edge: that curve is rotated count-1 times about "
+                                "the same axis, the copies are joined into the "
+                                "hole's border, filled, and joined onto the result. "
+                                "Measured on B30 2026-11-09 on a five-lobe base "
+                                "(2080.436 mm2, hole at r=5): border 29.3893 mm, "
+                                "cap 59.441 mm2, closed 2139.877 mm2 - exact. If "
+                                "the cap fails, the elements this call built for it "
+                                "are deleted again and the array is left alone."
+                            ),
+                            "default": False,
+                        },
+                        "cap_curve": {
+                            "type": "string",
+                            "description": (
+                                "The curve that runs along the hole's border on "
+                                "'element' - a tree name, required when "
+                                "cap_center=true. It has to be the edge of ONE "
+                                "period: rotating it count-1 times must close the "
+                                "ring (on a five-lobe base, the inner edge of one "
+                                "72-degree sector). There is no automatic way to "
+                                "pick it - measured: AddNewBoundary(edge, surface, "
+                                "1) returns the WHOLE border ring of a filled patch "
+                                "(91.1450 mm for a four-sided sector) and so does "
+                                "an extract of one of its edges, so the name has "
+                                "to come from the caller."
+                            ),
                         },
                         "name": {
                             "type": "string",
@@ -1889,6 +1997,25 @@ class GSDTools:
             return None
         kind = match.group(1).capitalize()      # Edge / Face / Vertex
         index = int(match.group(2))
+        # A surface in a geometrical set has no body shape, so a body search
+        # finds nothing and every "Edge.N" answered "the active body has no solid
+        # shape yet" - true about the body, useless about the surface the caller
+        # is pointing at. The set is searched instead (0.3.85).
+        if kind == "Edge":
+            body = None
+            try:
+                body = self.conn.get_active_part_body()
+            except Exception:  # noqa: BLE001 - no body is exactly the case below
+                body = None
+            try:
+                shaped = body is not None and int(body.Shapes.Count) > 0
+            except Exception:  # noqa: BLE001
+                # The body will not report its shapes - a test double, or a build
+                # that hides the property. Keep the old path: switching to the set
+                # search on a guess would change where Edge.N points.
+                shaped = True
+            if not shaped:
+                return self._geoset_edge_reference(name)
         part = self.conn.get_active_part()
         body = self.conn.get_active_part_body()
         sel = self.conn.hso
@@ -1930,6 +2057,104 @@ class GSDTools:
         if topology is not None:
             return topology
         return part.CreateReferenceFromObject(self._find_element(name))
+
+    def _geoset_border_edges(self) -> tuple[Any, list[tuple[int, Any, float | None]]]:
+        """Every surface-border edge in the active geometrical set.
+
+        Returns the selection (left HOLDING the cells: a reference taken from
+        ``Selection.Item(i).Reference`` dies the moment the selection is cleared,
+        and a factory call given a dead reference answers "method failed" with no
+        explanation) plus ``(index, reference, length)`` rows.
+
+        Only ``Selection_BorderREdge`` rows come back. A GSD line's own edge sits
+        in the same search and can measure exactly the same length as a border
+        circle (measured on B30 2026-11-09: a 50 mm construction line and a
+        r=7.96 border are both 50.0000), so an index over "all edges" points at
+        the wrong element often enough to be unusable. ``WireREdge`` and
+        ``BorderRVertex`` are CATIA's own labels for "not a surface border"
+        (topo_search.construction_reason knows the rest).
+
+        Lengths are read here, once, because the answer "which loop is the inner
+        one" is a comparison of lengths and distances - a bare index would make
+        the caller guess.
+        """
+        sel = self.conn.hso
+        sel.Clear()
+        house = self._get_geoset()
+        sel.Add(house)
+        search_topology(sel, "Edge")
+        spa = None
+        try:
+            spa = self.conn.active_document.GetWorkbench("SPAWorkbench")
+        except Exception:  # noqa: BLE001 - lengths become None, nothing else
+            pass
+        rows: list[tuple[int, Any, float | None]] = []
+        for i in range(1, int(getattr(sel, "Count", 0)) + 1):
+            try:
+                item = sel.Item(i)
+                nls = str(item.Value.Name)
+            except Exception:  # noqa: BLE001 - an unreadable cell is not a border
+                continue
+            if not nls.startswith("Selection_BorderREdge"):
+                continue
+            reference = item.Reference
+            length = None
+            if spa is not None:
+                try:
+                    length = float(spa.GetMeasurable(reference).Length)
+                except Exception:  # noqa: BLE001 - a length is optional
+                    length = None
+            rows.append((i, reference, length))
+        return sel, rows
+
+    def _geoset_edge_reference(self, name: str) -> Any:
+        """``Edge.N`` on a GSD surface: extract the nth surface-border edge.
+
+        ``_topology_reference`` searches the active BODY, which is right for a
+        solid's topology and useless here - a surface in a geometrical set has no
+        body shape, so every ``Edge.N`` answered "the active body has no solid
+        shape yet". The set is searched instead, and only surface borders are
+        counted, so N means the same thing as it does in ``_boundary``.
+
+        The extract is appended and updated because a raw topological edge is not
+        a curve: ``Fill.AddBound`` and friends reject the reference (the same
+        E_INVALIDARG that made ``_topology_reference`` extract in the first
+        place). ``PropagationType`` is NOT set: measured on B30 2026-11-09, an
+        extract of one edge of a filled quadrilateral came back as the WHOLE
+        border ring (91.1450 mm = all four sides) with PropagationType=1, so
+        setting it buys nothing and claiming "this edge only" would be false.
+        """
+        match = re.fullmatch(r"edge\s*\.\s*(\d+)", name.strip(), re.I)
+        if not match:
+            raise ArgumentRejected(
+                f"'{name}' is not an edge index. Use 'Edge.N' where N counts the "
+                "SURFACE BORDER edges of the active geometrical set.",
+                code="EDGE_NAME_MALFORMED", stage="validate")
+        index = int(match.group(1))
+        sel, rows = self._geoset_border_edges()
+        try:
+            if not 1 <= index <= len(rows):
+                listed = ", ".join(
+                    f"Edge.{i}"
+                    + (f" ({length:.4f} mm)" if length is not None else "")
+                    for i, _r, length in rows) or "none"
+                raise ArgumentOutOfRange(
+                    f"Edge.{index} is out of range: the active geometrical set "
+                    f"exposes {len(rows)} surface-border edge(s): {listed}. "
+                    "Construction-line edges are NOT counted here - only curves "
+                    "that border a surface, which is what a fill can use.",
+                    code="EDGE_OUT_OF_RANGE", stage="validate")
+            _i, reference, _length = rows[index - 1]
+            part = self.conn.get_active_part()
+            extract = self._factory().AddNewExtract(reference)
+            self._get_geoset().AppendHybridShape(extract)
+            part.UpdateObject(extract)
+        finally:
+            try:
+                sel.Clear()
+            except Exception:  # noqa: BLE001
+                pass
+        return part.CreateReferenceFromObject(extract)
 
     def _point_ref(self, spec: Any) -> Any:
         """Resolve points, sharing one part/factory/geoset lookup.
@@ -3020,6 +3245,8 @@ class GSDTools:
         """
         self.conn.ensure_connected()
         element = args["surface"]
+        if args.get("edge") is not None:
+            return self._boundary_loop(args)
         boundary = self._factory().AddNewBoundaryOfSurface(self._ref(element))
         return self._finish(
             boundary, args.get("name"),
@@ -3039,6 +3266,122 @@ class GSDTools:
             "on B30 2026-11-09: 1600.000 -> split 1486.903 -> fill 113.097 -> "
             "join 1600.000 mm2, then thickness 0.5 gave 800.0 mm3.",
         )
+
+    def _boundary_loop(self, args: dict[str, Any]) -> str:
+        """One loop of a surface's border, chosen by index.
+
+        ``AddNewBoundaryOfSurface(surface)`` takes one argument and returns ONE
+        curve carrying every loop, which is why the 2026-11-09 report could not
+        cap a hole: filling that curve rebuilds every loop as a separate flat
+        face stacked on the original. ``AddNewBoundary(edge, support,
+        propagation)`` takes three, and the third one is the loop selector the
+        report asked for - measured on B30 2026-11-09 on a cone whose two border
+        circles have different lengths:
+
+            propagation 0 -> 188.496 mm   both loops
+            propagation 1 -> 62.832 mm    the r=10 loop only
+            propagation 1 -> 125.664 mm   the r=20 loop only
+            propagation 2 -> the same as 1 on a smooth border
+
+        (0 is "the whole border", so passing 0 is the same as omitting 'edge'.)
+
+        WHERE IT DOES NOT WORK, and this is the part worth knowing before trying
+        it on an array: on a JOIN of five patches all 30 border edges refused at
+        ``UpdateObject`` (same day, scripts/b30_v0385_cap.py), while the
+        one-argument version on the same joined surface was fine (border 205.725
+        mm). So the selector is a single-feature tool. On an array result, pick
+        the loop BEFORE the join, or cap with the source edge rotated (what
+        catia_gsd_circ_pattern's cap_center does).
+
+        Which index belongs to the surface is decided by CATIA rather than by us:
+        the factory REJECTS an edge that is not on the given support (measured),
+        so the edges are offered to it one by one and the ones it refuses are not
+        this surface's. The rows are only OFFERED, never updated, so a wrong
+        guess costs nothing but a COM object.
+
+        A fill built on the loop covers only that loop: the same measurements gave
+        1256.637 mm2 for the r=20 loop and 314.159 for the r=10 one, against
+        1570.796 - the two discs ADDED - for a fill of both.
+        """
+        self.conn.ensure_connected()
+        element = str(args["surface"])
+        index = int(args["edge"])
+        if index < 1:
+            raise ArgumentOutOfRange(
+                f"edge={index} - the index counts loops from 1 (measured: a cone "
+                "exposes 2 surface-border edges).", code="EDGE_OUT_OF_RANGE",
+                stage="validate")
+        propagation = int(args.get("propagation", 1))
+        if propagation not in (0, 1, 2):
+            raise ArgumentOutOfRange(
+                f"propagation={propagation} is not a CATIA mode: 0 returns the "
+                "whole border (all loops), 1 the loop of the chosen edge, 2 the "
+                "tangent chain from it.", code="PROPAGATION_OUT_OF_RANGE",
+                stage="validate")
+        surface_ref = self._ref(element)
+        factory = self._factory()
+        part = self.conn.get_active_part()
+        geoset = self._get_geoset()
+        sel, rows = self._geoset_border_edges()
+        offered: list[tuple[Any, float | None]] = []
+        try:
+            if not rows:
+                raise PreconditionRejected(
+                    "The active geometrical set exposes no surface-border edges, "
+                    "so there is no loop to choose. Build the surface first, or "
+                    "pass no 'edge' to get the whole border as one curve.",
+                    code="NO_BORDER_EDGES", stage="validate")
+            for _cell, reference, length in rows:
+                try:
+                    feature = factory.AddNewBoundary(reference, surface_ref,
+                                                     propagation)
+                except Exception:  # noqa: BLE001 - not this surface's edge
+                    continue
+                offered.append((feature, length))
+        finally:
+            try:
+                sel.Clear()
+            except Exception:  # noqa: BLE001
+                pass
+        if not offered:
+            raise ArgumentOutOfRange(
+                f"None of the {len(rows)} surface-border edge(s) in "
+                f"'{geoset.Name}' belongs to '{element}', so there is no loop to "
+                "cut out of it. Name the surface whose border you mean, or pass "
+                "no 'edge' to take its whole border as one curve.",
+                code="BOUNDARY_EDGE_NOT_ON_SURFACE", stage="validate")
+        if index > len(offered):
+            listed = ", ".join(
+                f"{n}" + (f" ({length:.4f} mm)" if length is not None else "")
+                for n, (_f, length) in enumerate(offered, start=1))
+            raise ArgumentOutOfRange(
+                f"edge={index} is out of range: '{element}' exposes "
+                f"{len(offered)} surface-border edge(s) - {listed}. Which loop is "
+                "the inner one is a question of length and distance to the axis, "
+                "not of index order.", code="EDGE_OUT_OF_RANGE", stage="validate")
+        chosen, length = offered[index - 1]
+        geoset.AppendHybridShape(chosen)
+        try:
+            message = self._completed(
+                chosen, args.get("name"),
+                f"Loop #{index} of '{element}' created as its own curve"
+                + (f" (length {length:.4f} mm)" if length is not None else "")
+                + f", propagation={propagation}. This curve carries THIS loop "
+                "only, so a fill on it covers this loop and not the whole face - "
+                "which is what capping a hole needs.",
+                geoset)
+        except Exception as error:  # noqa: BLE001 - keep the measurement
+            raise PreconditionRejected(
+                "CATIA accepted the edge and refused the feature at update "
+                f"({str(error).splitlines()[0][:140]}). Measured on B30 "
+                "2026-11-09: this is what a JOIN result answers - AddNewBoundary "
+                "on a five-patch array refused all 30 border edges at "
+                "UpdateObject, while the whole-border boundary of the same "
+                "surface worked. Take the loop from the piece BEFORE the join, or "
+                "let catia_gsd_circ_pattern cap the centre for you "
+                "(cap_center=true).",
+                code="BOUNDARY_LOOP_FAILED", stage="execute") from error
+        return message
 
     def _intersection(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
@@ -3401,7 +3744,17 @@ class GSDTools:
         boundaries = args["boundaries"]
         fill = self._factory().AddNewFill()
         for boundary_name in boundaries:
-            fill.AddBound(self._ref(boundary_name))
+            # 'Edge.N' means "use this edge as the boundary": a raw topological
+            # edge is not a curve (Fill.AddBound answers E_INVALIDARG), so it is
+            # extracted first - the same route _topology_reference already takes
+            # for loft sections. On a surface in a geometrical set that search
+            # walks the SET, not the body (0.3.85); before that, every Edge.N
+            # against a GSD surface answered "the active body has no solid shape
+            # yet", which was true and useless.
+            if self._TOPO_NAME.fullmatch(str(boundary_name).strip()):
+                fill.AddBound(self._topology_reference(str(boundary_name)))
+            else:
+                fill.AddBound(self._ref(boundary_name))
         try:
             return self._finish(
                 fill, args.get("name"),
@@ -3687,6 +4040,32 @@ class GSDTools:
                 code="PATTERN_ANGLE_OUT_OF_RANGE", stage="validate")
         # Resolve before anything is built: a typo must not leave four rotations.
         self._ref(element)
+        # cap_center is validated HERE, not in the capping code: by the time the
+        # rotations exist, refusing costs four features and an apology.
+        cap_center = bool(args.get("cap_center"))
+        cap_curve = args.get("cap_curve")
+        if cap_center:
+            if not cap_curve:
+                raise ArgumentRejected(
+                    "cap_center=true also needs cap_curve: the name of the curve "
+                    "that runs along the hole's border ON THE SOURCE ELEMENT "
+                    f"'{element}'. There is no way to find it automatically - "
+                    "measured on B30 2026-11-09: AddNewBoundary(edge, surface, 1) "
+                    "walks the whole border ring of a filled patch (a four-sided "
+                    "sector came back as 91.1450 mm, all four sides), and an "
+                    "extract of one of its edges came back as the same 91.1450 mm. "
+                    "So the caller has to name the curve, and every ring built from "
+                    "it is then exact geometry rather than a circle that nearly "
+                    "fits.",
+                    code="CAP_CURVE_REQUIRED", stage="validate")
+            if abs(total - 360.0) > 1e-6:
+                raise PreconditionRejected(
+                    f"cap_center=true needs a full turn (total_angle=360) - a "
+                    f"centre hole is what the ring leaves behind when it closes. "
+                    f"Got total_angle={total:g}: the copies would leave a pie "
+                    "slice open, not a hole. Drop cap_center for a partial array.",
+                    code="CAP_NOT_FULL_TURN", stage="validate")
+            self._ref(str(cap_curve))
 
         part = self.conn.get_active_part()
         factory = self._factory()
@@ -3729,7 +4108,7 @@ class GSDTools:
         for name in copies[1:]:
             join.AddElement(self._ref(name))
         try:
-            return self._finish(
+            reply = self._finish(
                 join, args.get("name") or f"{element}_pattern",
                 f"Repeated '{element}' {count} times over {total:g} degrees "
                 f"(step {step:g} degrees) about '{args.get('axis', 'z')}' and "
@@ -3752,6 +4131,108 @@ class GSDTools:
                 "the rotations deliberately.",
                 code="PATTERN_JOIN_FAILED", stage="execute",
             ) from error
+
+        if cap_center:
+            reply += self._cap_centre(part, factory, geoset, axis_ref,
+                                      str(cap_curve), count, step, join)
+        return reply
+
+    def _cap_centre(self, part: Any, factory: Any, geoset: Any, axis_ref: Any,
+                    curve: str, count: int, step: float, base: Any) -> str:
+        """Close the hole an array leaves in the middle, using the hole's edge.
+
+        The report's Step 6 in one call. Three routes were measured on B30
+        2026-11-09 and two of them do not work on an array result:
+
+          * fill the whole border curve - it carries every loop, and the fill
+            comes back as one flat face per loop, stacked (1570.796 mm2 for the
+            two discs of a cone border, i.e. pi*400 + pi*100, not the lateral
+            area), which then breaks a thickening;
+          * split by a circle - a five-sided hole's nearest point to the axis is
+            5*cos36 = 4.045, not 5, so a circle at that radius lies wholly inside
+            the hole and cuts nothing;
+          * rotate the hole's OWN edge and join the copies - exact, no near miss.
+
+        The third one is this. Measured end to end on a five-lobe base (r 5..30,
+        five 72-degree sectors, 2080.436 mm2): the joined inner edges measured
+        29.3893 mm (the pentagon's perimeter), the fill 59.441 mm2 (the pentagon's
+        area), and the closed base 2139.877 = 2080.436 + 59.441.
+
+        Every intermediate is named and every failure deletes what this call
+        already built: a caller who abandons an attempt should not be left with
+        five rotated copies to hunt down.
+        """
+        built: list[Any] = []
+        try:
+            copies: list[str] = []
+            for index in range(1, count):
+                angle = index * step
+                rotate = factory.AddNewRotate(self._ref(curve), axis_ref, angle)
+                geoset.AppendHybridShape(rotate)
+                unique, _verified = self._free_name(
+                    part, f"{curve}_cap_r{angle:g}")
+                rotate.Name = unique
+                part.UpdateObject(rotate)
+                built.append(rotate)
+                copies.append(unique)
+            border = factory.AddNewJoin(self._ref(curve), self._ref(copies[0]))
+            for name in copies[1:]:
+                border.AddElement(self._ref(name))
+            geoset.AppendHybridShape(border)
+            unique, _verified = self._free_name(part, f"{base.Name}_hole")
+            border.Name = unique
+            part.UpdateObject(border)
+            built.append(border)
+            cap = factory.AddNewFill()
+            cap.AddBound(part.CreateReferenceFromObject(border))
+            geoset.AppendHybridShape(cap)
+            unique, _verified = self._free_name(part, f"{base.Name}_centre")
+            cap.Name = unique
+            part.UpdateObject(cap)
+            built.append(cap)
+            closed = factory.AddNewJoin(part.CreateReferenceFromObject(base),
+                                        part.CreateReferenceFromObject(cap))
+            geoset.AppendHybridShape(closed)
+            unique, _verified = self._free_name(part, f"{base.Name}_closed")
+            closed.Name = unique
+            part.InWorkObject = closed
+            self._safe_update(closed)
+            self.conn.refresh_display()
+        except Exception as error:  # noqa: BLE001 - clean up, then explain
+            for shape in reversed(built):
+                try:
+                    selection = self.conn.active_document.Selection
+                    selection.Clear()
+                    selection.Add(shape)
+                    selection.Delete()
+                except Exception:  # noqa: BLE001 - a leftover is not the failure
+                    pass
+            try:
+                self.conn.active_document.Selection.Clear()
+            except Exception:  # noqa: BLE001
+                pass
+            raise PreconditionRejected(
+                f"The {count} copies and their join were built, but capping the "
+                f"centre failed ({str(error).splitlines()[0][:160]}). "
+                f"The cap needs '{curve}' to run along the hole's border on "
+                f"'{base.Name}' and its rotated copies to meet end to end: "
+                "a curve that stops short leaves the joined border open and "
+                "the fill cannot close it. WHAT WAS ROLLED BACK: "
+                + (f"{len(built)} element(s) this call created were deleted; "
+                   "the array itself was NOT touched. " if built else
+                   "nothing this call created was left behind. ")
+                + "Measure the joined border with catia_measure_distance before "
+                "retrying, or run without cap_center and close the hole by hand.",
+                code="CAP_CENTRE_FAILED", stage="execute",
+            ) from error
+        return (
+            f" CENTRE CAPPED: '{curve}' was rotated {count - 1} time(s) about the "
+            f"same axis, the copies were joined into '{border.Name}' (the hole's "
+            f"border), filled as '{cap.Name}', and joined onto the base as "
+            f"'{closed.Name}'. The cap shares the hole's edge by construction - "
+            "no circle, no near miss. The tree now holds those "
+            f"{2 + (count - 1)} extra elements."
+        )
 
     def _join_diagnosis(self, part: Any, original: str, copy: str) -> str:
         """What the distance between the original and its first copy says.
