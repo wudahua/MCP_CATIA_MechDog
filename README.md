@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.89** · [what changed](CHANGELOG.md) ·
+**0.3.90** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -90,7 +90,7 @@ several documents.
 | `catia_set_component_transform` | Absolute placement from a 3×3 in either convention (`matrix` = `P = A·p + T`, `basis` = row i is where local axis i points) or CATIA's native 12 numbers; reads back and reports deviation, det, orthogonality **and where each local axis ended up** |
 | `catia_get_component_transform` | The same placement in both conventions, plus where local X/Y/Z point in the assembly |
 | `catia_rename_component` | A readable assembly tree. `Part.Name` is read-only on V5-6R2020, so every part arrives as `Part1.1 / Part2.1 / …`; the instance name is writable |
-| `catia_sketch_copy` | The "copy the profile, paste it on the next plane" step. Replays a sketch's recorded geometry into a new sketch on another plane - a main plane, a frame, or **a datum plane by name** - coordinates unchanged; redrawing by hand is what leaves two copies that are not coordinate-identical, and a loft section is sensitive to that. Refused for a sketch reopened from disk, because the record is the only source of coordinates |
+| `catia_sketch_copy` | The "copy the profile, paste it on the next plane" step. Replays a sketch's recorded geometry into a new sketch on another plane - a main plane, a frame, or **a datum plane by name** - coordinates unchanged; redrawing by hand is what leaves two copies that are not coordinate-identical, and a loft section is sensitive to that. Refused for a sketch reopened from disk, because the record is the only source of coordinates. **The record now follows a delete** (0.3.90): measured 2026-11-09, two lines with the second deleted still left BOTH in the record, so the copy came back with twice the source's outline - the shape of a report's "2 spline(s)". A shape made of several elements (a rectangle is four lines) cannot be replayed after one side goes, so the record is dropped whole and the reply says `catia_sketch_copy` will refuse that sketch |
 | `catia_gsd_circ_pattern` | Repeats one surface/curve N times around an axis and joins the copies in one call. **Not a CATIA GSD pattern**: this build's `HybridShapeFactory` declares 160 members and none contains "Pattern" (measured 2026-11-08), so the tree gets N-1 rotations plus a join, and the reply says so |
 | `catia_gsd_plane_normal_to_curve` | Plane normal to a curve with its origin ON that curve at a fraction of its length - the tutorial's "Normal to Curve + Set Origin on Curve". A tree element, unlike the frame sketch that used to be the only way; the point's measured coordinates are reported back |
 | `catia_gsd_plane_angle` | A datum plane rotated a given angle about an axis - the tutorial's 36-degree construction and the general 1/N-sector plane. A named, editable, referenceable tree element, unlike a frame sketch. The axis must LIE IN the reference plane (rotating a plane about its own normal leaves it where it was and CATIA answers with a generic failure), and the angle is in degrees |
@@ -796,7 +796,12 @@ defended: there is no folder shape left that can miss it. The cost is one extra
 the direct `SaveAs` is still attempted and the failure names both. A save that
 fails also says which COM call it was ("this call was a bare `doc.Save()`" vs
 "this call was `doc.SaveAs(...)`"), because those are different problems with
-different answers.
+different answers — and since 0.3.90 it carries `data.save_route`, every step in
+order with the COM answer for each, so "the staged branch never ran" and "its
+second step failed" are told apart by reading instead of guessing. The one
+bare-Save branch left in that path ("the target is this document's own file")
+compares **FullName**, not `Name`: CATIA gives two open documents the same name,
+and a document with no path can never be "the same file".
 
 ### A path can only hold one document
 

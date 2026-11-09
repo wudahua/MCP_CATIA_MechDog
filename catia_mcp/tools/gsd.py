@@ -3911,8 +3911,59 @@ class GSDTools:
                        + ", ".join(f"{count} {kind}" for kind, count in sorted(kinds.items()))
                        + f"), guides: {len(guides)}, ruled: false"
                        + (", end tangency set" if tangency else ""))
+            # A guide has to INTERSECT EVERY section, and that is measurable, so
+            # it is measured instead of being one bullet in a list of guesses.
+            # The 2026-11-09 report made five attempts and had to invent a
+            # subtraction (2 guides fail, 1 builds) to find that the guides, not
+            # the sections, were the problem - while this list led with "fold",
+            # which was wrong every time.
+            guide_note = ""
+            if guides:
+                rows: list[tuple[str, float | None]] = []
+                for guide_name in guides:
+                    try:
+                        guide_ref = self._ref(str(guide_name))
+                    except Exception:  # noqa: BLE001 - already resolved once
+                        continue
+                    worst: float | None = None
+                    for _name, (_element, section_ref) in zip(sections, resolved):
+                        gap = self._cutter_gap(section_ref, guide_ref)
+                        if gap is None:
+                            continue
+                        if worst is None or gap > worst:
+                            worst = gap
+                    rows.append((str(guide_name), worst))
+                measured = ", ".join(
+                    f"'{name}' {('unknown' if gap is None else f'{gap:.4f} mm')}"
+                    for name, gap in rows)
+                missing = [name for name, gap in rows
+                           if gap is not None and gap > 0.01]
+                if missing:
+                    guide_note = (
+                        f"MEASURED BEFORE THIS MESSAGE - the farthest any section is "
+                        f"from each guide: {measured}. "
+                        f"'{missing[0]}' does not reach every section, and a guide "
+                        "has to INTERSECT ALL OF THEM: a guide that misses one "
+                        "leaves the loft with no correspondence to follow and the "
+                        "update fails exactly like this. That is the first thing to "
+                        "fix, before anything below. ")
+                else:
+                    guide_note = (
+                        f"MEASURED BEFORE THIS MESSAGE - the farthest any section is "
+                        f"from each guide: {measured}. Every guide REACHES every "
+                        "section, so 'a guide that misses a section' is NOT what "
+                        "this is - read the list below with that excluded. Touching "
+                        "is necessary, not sufficient: a guide anchored to a "
+                        "SPLINE's control point touches the hull of the section "
+                        "while missing the interpolated curve the loft actually "
+                        "follows (measured 2026-11-09: three guides anchored to "
+                        "control points failed three times, while ONE guide through "
+                        "the sections' shared start points built). So if the "
+                        "sections alone build, the guide anchors are the problem - "
+                        "put them on points the section curve really passes "
+                        "through. ")
             raise RuntimeError(
-                f"{e}{tangency_error} THIS CALL: {context}. "
+                f"{e}{tangency_error} THIS CALL: {context}. " + guide_note + 
                 f"FIRST, and the cause of nearly every failure on a real part: AN "
                 f"ARRANGEMENT THAT MAKES THE INTERPOLATED SURFACE FOLD. This loft "
                 f"passes THROUGH the sections and stays inside their hull; if one "
@@ -4246,6 +4297,14 @@ class GSDTools:
                 "past the geometry. Move the cutter until this distance is "
                 "0.0000 mm - catia_measure_distance reports the same number.",
                 code="SPLIT_CUTTER_MISSES", stage="validate", modified=False,
+                next_actions=[
+                    "Move the cutter onto the element until this distance is "
+                    "0.0000 mm - catia_measure_distance reports the same number, so "
+                    "iterate there instead of guessing",
+                    "A curve cutter has to be BUILT on the surface (a circle whose "
+                    "support plane the surface passes through, or a sketch on the "
+                    "face itself); a plane cutter has to cross the element",
+                ],
             )
         split = self._factory().AddNewHybridSplit(elem_ref, cutter_ref, orientation)
         # Which side survived is the one thing a caller has to know and the one
@@ -4297,6 +4356,17 @@ class GSDTools:
                 "refuses to update in this document, so do not read a second "
                 "failure as a second cause.",
                 code="SPLIT_FAILED", stage="execute", modified=False,
+                next_actions=[
+                    "Measure a few points of the cutter against the element "
+                    "(catia_measure_distance). Anything other than 0.0000 mm means "
+                    "the contour does not exist - rebuild the cutter where the "
+                    "surface actually is",
+                    "If the element is a JOIN or an array, split the PIECE before "
+                    "the join and join the results afterwards",
+                    "If the centre of the part is not flat, do not split: cap the "
+                    "hole with catia_gsd_circ_pattern(cap_center=true, "
+                    "cap_curve=<the hole's own edge>), which needs no coplanar disc",
+                ],
             ) from error
 
     def _trim(self, args: dict[str, Any]) -> str:

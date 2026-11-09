@@ -84,6 +84,11 @@ class DocumentTools:
                     "the gate apparently never fired). If the staged route fails "
                     "too, the direct SaveAs is still attempted and the reply says "
                     "both. "
+                    "A FAILED SAVE NOW CARRIES ITS ROUTE: data.save_route lists "
+                    "every step this call took (enter, staging, save_as), with "
+                    "each COM answer and the temp path used - so 'the staged "
+                    "branch never ran' and 'its second step failed' can be told "
+                    "apart from the envelope instead of re-derived from prose. "
                     "A non-ASCII FILE NAME is refused outright (PATH_NOT_ASCII) - "
                     "this build cannot write or open one. The failure text carries "
                     "CATIA's own error; read it before assuming a permission "
@@ -546,6 +551,7 @@ class DocumentTools:
                 # this branch only runs when that failed too.
                 discarded = self._discard_unsaved_document(doc)
                 if isinstance(exc, CodedError):
+                    self._attach_save_route(exc)
                     # A refusal this server made itself keeps its own code and
                     # its own next_actions: dressing "that file exists, pass
                     # overwrite=true" up as SAVE_FAILED (and then claiming a
@@ -587,6 +593,7 @@ class DocumentTools:
                     code="SAVE_FAILED",
                     stage="execute",
                     modified=not discarded,
+                    data={"save_route": list(getattr(self, "_save_trace", []))},
                     next_actions=(
                         ["Use an ASCII FILE NAME and put the Chinese wording in the "
                          "part number (catia_set_part_number) - that is what the "
@@ -897,6 +904,43 @@ class DocumentTools:
         """
         return str(path).isascii()
 
+    @staticmethod
+    def _same_file(first: Any, second: Any) -> bool:
+        """"These two documents hold the same FILE" - not "share a name".
+
+        A name cannot answer it: CATIA gives two open documents the same name
+        whenever their files do (and after a SaveAs renames one of them), which is
+        why `document=` by name is refused elsewhere. Reading FullName fails for a
+        document that has never been saved, and that failure is the answer here -
+        a pathless document holds no file, so it can never be "the same file" as
+        the target.
+        """
+        try:
+            one = str(first.FullName)
+            two = str(second.FullName)
+        except Exception:  # noqa: BLE001 - never saved: no file to compare
+            return False
+        if not one or not two:
+            return False
+        return (os.path.normcase(os.path.abspath(one))
+                == os.path.normcase(os.path.abspath(two)))
+
+    def _attach_save_route(self, error: CodedError) -> None:
+        """Publish the route a failed save took, step by step.
+
+        The 2026-11-09 report could show a failure whose data.call said
+        "Document.Save" while the description promised a staged SaveAs, and
+        nothing in the envelope could tell "the staged branch never ran" from
+        "its second step failed". data.save_route does: each step, in order, with
+        the COM answer.
+        """
+        trace = getattr(self, "_save_trace", None)
+        if not trace:
+            return
+        data = dict(getattr(error, "data", None) or {})
+        data.setdefault("save_route", list(trace))
+        error.data = data
+
     def _document_at_path(self, path: str) -> Any:
         """The open document whose file is ``path`` (None when nothing holds it)."""
         import os
@@ -962,7 +1006,20 @@ class DocumentTools:
         # (found 2026-11-08 re-running the audit: the refusal was "that file
         # exists", and the reply talked about non-ASCII folders).
         self._staging_attempted = False
+        # Every route this call takes, in order, with the COM answer for each.
+        # A 2026-11-09 report could only say "the reply blames a bare doc.Save()
+        # while the description promises a staged SaveAs" - and data.call alone
+        # cannot tell "the staged branch never ran" from "its second step failed".
+        # So the whole route travels with the failure (data.save_route), and the
+        # next report settles it by reading instead of by re-deriving.
+        self._save_trace: list[dict[str, Any]] = []
         if file_path:
+            self._save_trace.append({
+                "step": "enter", "path": str(file_path),
+                "has_path": self._document_has_path(doc),
+                "folder_ascii": self._path_is_ascii(os.path.dirname(str(file_path))
+                                                    or "."),
+            })
             # SaveAs onto the file of a document that is already open (very often
             # a part loaded as a component of an open assembly) cannot work: the
             # overwrite needs the file and the open document holds it. CATIA says
@@ -971,10 +1028,16 @@ class DocumentTools:
             holder = self._document_at_path(file_path)
             existing = self._existing_file_note(file_path)
             if holder is not None:
-                try:
-                    same = str(holder.Name) == str(doc.Name)
-                except Exception:  # noqa: BLE001
-                    same = False
+                # IDENTITY IS THE FILE, NOT THE NAME (0.3.90). This compared
+                # `holder.Name == doc.Name`, and CATIA happily gives two open
+                # documents the same name - the very reason `document=` by name is
+                # refused elsewhere in this file. So "asking to save a document
+                # onto its own file" could fire for a document that merely shared a
+                # name, and it then called a bare Save, which cannot give a
+                # never-saved document a path. That is the only bare Save this
+                # entry point could reach, and a report kept meeting it on ONE
+                # folder while every neighbouring folder worked (2026-11-09).
+                same = self._same_file(holder, doc)
                 if same:
                     # Asking to save a document onto its own file is a Save.
                     name = dialogs.save(doc)
@@ -1033,8 +1096,11 @@ class DocumentTools:
                 try:
                     self._staging_attempted = True
                     target = self._save_via_ascii_staging(doc, str(file_path))
-                except Exception:  # noqa: BLE001 - the direct attempt is next
+                except Exception as staging_error:  # noqa: BLE001 - direct next
                     self._staging_attempted = True
+                    self._save_trace.append({
+                        "step": "staging", "ok": False,
+                        "error": str(staging_error).splitlines()[0][:160]})
                 else:
                     folder = os.path.dirname(str(file_path)) or "."
                     # The replaced/new note is a SAFETY message (2026-10-25: a
@@ -1057,6 +1123,8 @@ class DocumentTools:
             # modal prompt when the target exists, which freezes the STA worker.
             try:
                 target = dialogs.save_as(doc, file_path)
+                self._save_trace.append({"step": "save_as", "ok": True,
+                                         "target": str(target)})
             except Exception as first_error:  # noqa: BLE001 - one other route
                 # 0.3.82: a document that has NEVER been saved gets one more try
                 # through an ASCII staging file. The 2026-11-08 report's control
@@ -1072,7 +1140,14 @@ class DocumentTools:
                 # existing target) OVERWRITE a file the caller was told would not
                 # be touched. Found while re-running the audit script, whose
                 # second run hit exactly that path.
+                self._save_trace.append({
+                    "step": "save_as", "ok": False,
+                    "error": str(first_error).splitlines()[0][:160]})
                 if isinstance(first_error, CodedError):
+                    # The route travels with the failure from HERE, because
+                    # catia_save_document reaches this function directly and its
+                    # caller cannot add what it does not know.
+                    self._attach_save_route(first_error)
                     raise
                 if self._document_has_path(doc) or self._staging_attempted:
                     raise

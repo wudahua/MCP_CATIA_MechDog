@@ -1444,6 +1444,10 @@ class SketcherTools:
         # would carry the previous sketch's elements into this one's echo.
         key = self._sketch_key(str(sketch.Name))
         self._drawn[key] = []
+        try:
+            self._last_geom_count = int(sketch.GeometricElements.Count)
+        except Exception:  # noqa: BLE001 - spans are then simply unknown
+            self._last_geom_count = None
         placement = self._placement_of(plane, offset)
         if placement is None:
             placement = self._angled_placement(plane)
@@ -1560,20 +1564,87 @@ class SketcherTools:
         self._profile_ends.extend((float(x), float(y)) for x, y in points)
 
     def _note_element(self, kind: str, **params: Any) -> None:
-        """Remember what was drawn, for the profile echo at close time."""
+        """Remember what was drawn, for the profile echo at close time.
+
+        Each entry also carries ``_span``: the indices of the LIVE elements that
+        this one draw created. Without it the record cannot follow a delete - and
+        it did not (found 2026-11-09 re-probing a report): two lines, delete the
+        second, and the record still held both, so ``catia_sketch_copy`` replayed
+        a line the sketch no longer had and the copy's outline came out exactly
+        twice the source's. That is the shape of the "2 spline(s)" report.
+        """
+        params.pop("_span", None)          # a replayed entry carries the source's
         try:
             name = str(self._active_sketch.Name)
         except Exception:  # noqa: BLE001 - the record is still useful
             name = "?"
         key = self._sketch_key(name)
-        self._drawn.setdefault(key, []).append({"kind": kind, **params})
+        entry = {"kind": kind, **params}
+        span = self._live_span()
+        if span is not None:
+            entry["_span"] = span
+        self._drawn.setdefault(key, []).append(entry)
         # Same record on the connection, where catia_gsd_spline can reach it:
         # GSD needs the outline's coordinates to build a 3D spline through a
         # polygon's corners, and the sketch itself cannot hand them back (a
         # Point2D exposes no readable X/Y through automation on this build).
         record = self._outline_record(key)
         if record is not None:
-            record["elements"].append({"kind": kind, **params})
+            record["elements"].append(dict(entry))
+
+    def _live_span(self) -> list[int] | None:
+        """The live element indices one draw just added, or None if unknown."""
+        try:
+            count = int(self._active_sketch.GeometricElements.Count)
+        except Exception:  # noqa: BLE001 - no sketch in hand
+            return None
+        previous = getattr(self, "_last_geom_count", None)
+        self._last_geom_count = count
+        if previous is None or count <= previous:
+            return None
+        return [previous + 1, count]
+
+    def _forget_deleted_element(self, sketch_name: str, index: int) -> str:
+        """Keep the drawing record in step with ``catia_sketch_delete_element``.
+
+        Two answers, both honest: an entry that produced exactly one live element
+        is dropped (the common case - a line, a circle, a spline) and the rest of
+        the record still describes the sketch; anything else (a rectangle is ONE
+        entry over four elements) cannot be redrawn faithfully, so the record is
+        dropped whole rather than left lying about a sketch it no longer matches.
+        """
+        key = self._sketch_key(sketch_name)
+        drawn = self._drawn.get(key) or []
+        if not drawn:
+            return ""
+        spans = [entry.get("_span") for entry in drawn]
+        if all(isinstance(span, list) and len(span) == 2 for span in spans):
+            hits = [position for position, span in enumerate(spans)
+                    if int(span[0]) <= index <= int(span[1])]
+            if len(hits) == 1 and int(spans[hits[0]][1]) == int(spans[hits[0]][0]):
+                dropped = drawn.pop(hits[0])
+                spans.pop(hits[0])
+                for span in spans:
+                    if int(span[0]) > index:
+                        span[0] = int(span[0]) - 1
+                        span[1] = int(span[1]) - 1
+                record = self._outline_record(key)
+                if record is not None:
+                    record["elements"] = [entry for entry
+                                          in record.get("elements") or []
+                                          if entry.get("_span") != dropped.get("_span")]
+                return (f" The drawing record dropped that {dropped.get('kind')} "
+                        "too, so a copy of this sketch now reproduces what is left.")
+        self._drawn[key] = []
+        record = self._outline_record(key)
+        if record is not None:
+            record["elements"] = []
+        return (" The session's drawing record for this sketch no longer matched it "
+                f"after removing element {index} (that shape is made of several "
+                "elements, and CATIA cannot read the remaining coordinates back), "
+                "so the record was dropped: catia_sketch_copy will refuse this "
+                "sketch until it is drawn again, and the profile echo will be "
+                "empty. The sketch itself is intact.")
 
     def _rekey_records(self, before: str, after: str) -> None:
         """Carry what was recorded under a sketch's old name to its new one.
@@ -2756,6 +2827,10 @@ class SketcherTools:
         # so the closed-curve count goes with them - a circle drawn from here on
         # is the only thing this session can vouch for.
         self._profile_closed_curves = 0
+        try:
+            self._last_geom_count = int(sketch.GeometricElements.Count)
+        except Exception:  # noqa: BLE001 - spans are then simply unknown
+            self._last_geom_count = None
         count = 0
         try:
             count = sketch.GeometricElements.Count
@@ -2809,7 +2884,14 @@ class SketcherTools:
                 except Exception:
                     pass
             left = sketch.GeometricElements.Count
+            # The record has to follow the delete, or a copy reproduces geometry
+            # the sketch no longer has (measured 2026-11-09: two lines, delete the
+            # second, the record still held both and the copy's outline was twice
+            # the source's - the shape of the "2 spline(s)" report).
+            record_note = self._forget_deleted_element(name, index)
+            self._last_geom_count = left
         finally:
+            record_note = locals().get("record_note", "")
             if not was_open:
                 try:
                     sketch.CloseEdition()
@@ -2849,6 +2931,7 @@ class SketcherTools:
                 + (" The sketch is still open, so you can append the replacement "
                    "geometry directly." if reopened else
                    " Call catia_sketch_edit to repair it.")
+                + record_note
             )
         after = self._solid_volume(part)
         change = ""
@@ -2868,6 +2951,7 @@ class SketcherTools:
                "re-read catia_sketch_get_geometry before deleting another - an "
                "index reused from before this call removes the wrong curve."
                if left else "")
+            + record_note
         )
 
     @staticmethod

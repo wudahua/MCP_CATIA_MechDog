@@ -2,6 +2,60 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.90] — 2026-11-09 · the record that did not follow a delete
+
+Two reports on 0.3.89. One is the folder that keeps failing (one folder, on their
+machine, 3/3: `SAVE_FAILED` with `data.call = "Document.Save"`). The other is a
+tutorial build whose copied section reported "2 spline(s)" with exactly twice the
+source's outline.
+
+**The record now follows `catia_sketch_delete_element`.** Measured on B30
+2026-11-09: two 20/10 mm lines, delete the second, and the session's drawing
+record still held BOTH - so `catia_sketch_copy` replayed a line the sketch no
+longer had, the copy's outline came out 30.000 mm against the source's 20.000, and
+the profile echo counted a shape that was gone. A rectangle would do worse: it is
+ONE entry over four elements. Each recorded entry now carries `_span`, the live
+element indices that draw produced, so a delete drops exactly that entry and
+re-bases the ones after it - or, when one entry covers several elements, drops the
+record whole and says so in the reply ("catia_sketch_copy will refuse this sketch
+until it is drawn again") rather than leaving a record that lies about the sketch.
+Same fix applies to the profile echo at close time and to the outline record GSD
+reads.
+
+**The bare-Save branch decides by FILE, not by name.** `_save_document` takes
+"save onto its own file" when the target is the active document's own file, and
+that test compared names - while CATIA freely gives two open documents one name
+(the reason `document=` by name is refused in this same file). `_same_file`
+compares FullName, so a document with no path can never be "the same file" - which
+is precisely the case where a bare `Save` cannot work. This is the only bare Save
+`new_part` could reach.
+
+**A failed save publishes its route.** `data.save_route` lists every step in
+order (`enter` with has_path/folder_ascii, `staging` with its answer, `save_as`
+with target or error). The report could only say "the reply blames a bare
+doc.Save() while the description promises a staged SaveAs"; those two possibilities
+are now distinguishable by reading the envelope.
+
+I could NOT reproduce the folder failure: the reported path was measured through
+the staged route here again (two `save_as` calls, 40702 bytes, no bare save), so
+this release does not claim it fixed. It removes the one name-based decision in
+that path and makes the next report decisive.
+
+**A loft refusal leads with the guides, measured.** The report's five attempts all
+got the same prioritised list, whose first item (fold) was wrong every time; they
+found by subtraction that 2 guides fail while 1 builds. The refusal now measures,
+for each guide, the farthest section from it: a guide that misses one is named
+first with its distance, and when every guide reaches every section it says so
+outright and warns that touching is necessary but not sufficient - a guide
+anchored to a SPLINE's control point touches the hull while missing the
+interpolated curve the loft follows.
+
+`SPLIT_FAILED` / `SPLIT_CUTTER_MISSES` now carry `next_actions` naming the cutter
+measurement, the join/piece split and `cap_center`, instead of the generic
+"This is a state, not a typo" template.
+
+1456 tests (+10), 135 tools, `scripts/b30_v0390_audit.py` 4/4.
+
 ## [0.3.89] — 2026-11-09 · the rule that nobody could settle, and a refusal
 ## that names the number
 
