@@ -2917,7 +2917,30 @@ class GSDTools:
                 "corners as 'points' explicitly, which needs no frame at all."
             )
 
-        loop = self._chain_outline(recorded.get("elements") or [], name)
+        try:
+            loop = self._chain_outline(recorded.get("elements") or [], name)
+        except ArgumentRejected as error:
+            # A sketch that already holds a SPLINE is one curve, so wrapping it
+            # in a 3D spline is refused - correctly, and that refusal used to be
+            # the end of the road: gsd_spline(element=...) was the only readback
+            # this server had, and the tutorial's sections are exactly the
+            # single-spline sketches. The frame is already reconstructed by this
+            # point, so hand the coordinates over WITH the refusal instead of
+            # keeping them to ourselves (2026-11-09 report, §4.1).
+            world = self._recorded_spline_points(recorded, placement)
+            if not world:
+                raise
+            listed = "; ".join("(%g, %g, %g)" % tuple(round(c, 4) for c in point)
+                               for point in world[:8])
+            more = (f" and {len(world) - 8} more" if len(world) > 8 else "")
+            raise ArgumentRejected(
+                f"{error} Its points, in global XYZ, so the placement can be "
+                f"checked without building anything: {listed}{more} mm "
+                f"(frame{self._placement_note(placement)}). Nothing was created."
+                + self._verify_frame(name, max(world, key=lambda p: sum(c * c
+                                                                      for c in p)),
+                                     placement)
+            ) from None
         if len(loop) < 2:
             raise ArgumentRejected(
                 f"'{name}' holds {len(loop)} usable corner(s); a spline needs at "
@@ -2945,6 +2968,23 @@ class GSDTools:
         catch.
         """
         return max(coords, key=lambda point: sum(c * c for c in point))
+
+    def _recorded_spline_points(self, recorded: dict[str, Any],
+                                placement: dict[str, Any]) -> list[list[float]]:
+        """Every control point of a recorded spline, in global XYZ."""
+        for element in recorded.get("elements") or []:
+            if str(element.get("kind")) != "spline":
+                continue
+            points = []
+            for pair in element.get("pts") or []:
+                try:
+                    points.append(self._to_global(placement, float(pair[0]),
+                                                  float(pair[1])))
+                except (IndexError, TypeError, ValueError):
+                    continue
+            if points:
+                return points
+        return []
 
     @staticmethod
     def _placement_note(placement: dict[str, Any]) -> str:

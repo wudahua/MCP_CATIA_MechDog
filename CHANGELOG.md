@@ -2,6 +2,61 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.88] — 2026-11-09 · the P0 gets the route that is measured working,
+## and the readback stops hiding behind its own refusal
+
+Two reports on 0.3.87. Every information-layer item from the previous round was
+confirmed fixed; what was left is the P0 that keeps failing on one machine, and a
+readback that worked for lines but not for splines - which is what the tutorial's
+sections are.
+
+**The first save of a pathless document now stages through %TEMP% FIRST, and the
+measurements are on both sides.** Nine successes here (2026-11-07/08), eight
+failures and no success on the reporter's machine across 0.3.81/0.3.83/0.3.85/
+0.3.87, empty session and multi-document alike - while `catia_save_document` into
+that same folder succeeds EVERY time on BOTH, because by then the document has a
+path. So the deterministic part is not the folder, it is "the first save of a
+document that has no path", and 0.3.88 uses that: when the folder is non-ASCII,
+`catia_new_part` writes to an ASCII staging file and then SaveAs onto the path
+asked for. On B30 the staged route lands the file in the reporter's own Chinese
+folder (40695 bytes, checked). If staging fails too, the direct SaveAs still runs.
+
+**The save failures now name the COM call that ran**, which settles a contradiction
+the reporter could not: the description said "the first save is a SaveAs, not a
+Save" while the error said 「方法 Save 失败」. Both sentences were this server's,
+about two different members - `doc.Save()` and `doc.SaveAs(path)` - and now the
+first line of every failure says which one it was ("this call was a bare
+doc.Save()" / "this call was doc.SaveAs('<path>')") and `data.call` carries it for
+a machine to branch on. `SAVE_FAILED.next_actions` no longer advises re-running
+`catia_new_part(file_path=...)`, which is the call that had just failed; it gives
+the two-step order that works.
+
+**"Intermittently" is gone from the description.** It was wrong twice over: nine
+successes on one machine is not "intermittent" either, it is a different
+environment. The text now carries both counts and the narrower invariant.
+
+**A one-spline sketch hands over its coordinates with the refusal.**
+`catia_gsd_spline(element=…)` is the only readback this server has, and it refused
+a sketch that already IS one spline - correctly, since wrapping one curve in a 3D
+spline is wrong - but that closed the only path to the tutorial's own sections
+(a 7-point spline on Plane3_36). The frame is already reconstructed at that point,
+so the refusal now ends with the points in global XYZ, checked by the same probe
+point as any other readback: measured `(0, 0, 0); (0.9271, 2.8532, 2)` for the
+control point (2, 3) on a zx plane rotated 72°, i.e. 3·(cos72, sin72) + 2·Z.
+
+**`catia_create_sketch` stops saying "unknown for this support" about a plane it
+can describe.** For a plane built by `catia_gsd_plane_angle` in this session it now
+answers `H = (0, 0, 1), V = (0.309017, 0.951057, 0), normal = (-0.951057, 0.309017,
+0)`, with the derivation and the note that it is checked by measurement - the same
+frame `catia_gsd_spline` was already reporting two calls later. Also fixed while
+there: the reply said "created on on the datum plane 'P72'".
+
+`gsd_thick_surface`'s description has carried the two-sided allocation since
+0.3.86 (EACH SIDE'S OFFSET, with the four measurements including 0.25/0.25) - the
+report says it is still missing; it is not.
+
+1438 tests (+9), 135 tools, `scripts/b30_v0388_audit.py` 3/3.
+
 ## [0.3.87] — 2026-11-09 · three things that were left open, and one of them
 ## was measurable all along
 

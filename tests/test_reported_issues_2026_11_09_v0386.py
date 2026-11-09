@@ -226,5 +226,9 @@ def test_new_part_no_longer_promises_that_the_path_is_enough():
                   if entry["name"] == "catia_new_part")
     text = schema["description"]
     assert "nothing else is needed when the path is given" not in text
-    assert "Non-ASCII FOLDERS" in text
-    assert "first save is a SaveAs, not a Save" in text
+    # 0.3.88 reworded both sentences with the measurements behind them: the
+    # folder is environment-dependent (nine successes here, eight failures on
+    # the reporter's machine), and the first save names the COM call it makes.
+    assert "A NON-ASCII FOLDER is environment-dependent" in text
+    assert "THE FIRST SAVE IS doc.SaveAs(path)" in text
+    assert "eight failures and no success" in text

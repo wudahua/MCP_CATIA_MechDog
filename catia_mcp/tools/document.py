@@ -57,20 +57,33 @@ class DocumentTools:
                     "into an assembly either - the caller only finds out when "
                     "catia_add_component cannot find the file (reported 2026-10-25). "
                     "The measured-safe order for a build is new_part(file_path=...) "
-                    "then build. The first save is a SaveAs, not a Save, so the "
-                    "file gets its path from this call (a bare Save on a "
-                    "never-saved document is refused by this build). "
+                    "then build. "
+                    "THE FIRST SAVE IS doc.SaveAs(path) - a bare doc.Save() cannot "
+                    "give a never-saved document a path, and this build refuses "
+                    "it. Both failures carry the call they came from in their "
+                    "first line ('this call was a bare doc.Save()' vs 'this call "
+                    "was doc.SaveAs(...)'), because those are different problems "
+                    "with different answers. "
                     "IF THIS CALL FAILS TO SAVE, the empty part is closed again "
                     "rather than left pathless, and the reply says the path in "
-                    "full. Non-ASCII FOLDERS were measured working nine times "
-                    "(2026-11-07/08) and failing intermittently on one reporter's "
-                    "machine across 0.3.81/0.3.83/0.3.85, so they are neither "
-                    "guaranteed nor refused: if the save fails, drop the model to "
-                    "an ASCII folder and catia_save_document(file_path=<the "
-                    "non-ASCII one>) afterwards. A non-ASCII FILE NAME is refused "
-                    "outright (PATH_NOT_ASCII) - this build cannot write or open "
-                    "one. The failure text carries CATIA's own error; read it "
-                    "before assuming a permission problem."
+                    "full. "
+                    "A NON-ASCII FOLDER is environment-dependent, with measurements "
+                    "on both sides: nine successes here (2026-11-07/08, five and "
+                    "four path shapes) against eight failures and no success on "
+                    "the 2026-11-09 reporter's machine (0.3.81/0.3.83/0.3.85/0.3.87, "
+                    "empty session and multi-document alike) - while a save of a "
+                    "document that ALREADY has a path into that same folder "
+                    "succeeded every time, on both. So the deterministic part is "
+                    "not the folder, it is 'first save of a pathless document'. "
+                    "Since 0.3.88 this call therefore takes the staged route FIRST "
+                    "when the folder is non-ASCII: SaveAs into %TEMP%, then SaveAs "
+                    "onto the path asked for - the second call is exactly the one "
+                    "measured working there. If the staged route fails too, the "
+                    "direct SaveAs is still attempted and the reply says both. "
+                    "A non-ASCII FILE NAME is refused outright (PATH_NOT_ASCII) - "
+                    "this build cannot write or open one. The failure text carries "
+                    "CATIA's own error; read it before assuming a permission "
+                    "problem."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -868,6 +881,17 @@ class DocumentTools:
             return False
         return True
 
+    @staticmethod
+    def _path_is_ascii(path: str) -> bool:
+        """Whether the WHOLE path (folder included) is ASCII.
+
+        The file NAME is a hard limit of this build and is refused before CATIA
+        sees it; the FOLDER is the one that behaves differently from machine to
+        machine, so it is the one that decides whether the staged route is tried
+        first (0.3.88).
+        """
+        return str(path).isascii()
+
     def _document_at_path(self, path: str) -> Any:
         """The open document whose file is ``path`` (None when nothing holds it)."""
         import os
@@ -975,6 +999,38 @@ class DocumentTools:
                     "(reported 2026-10-25). Pass overwrite=true if you mean to "
                     "replace it, or choose another path."
                 )
+            # A NEVER-SAVED document going into a NON-ASCII FOLDER takes the
+            # staging route FIRST, not after a failure (0.3.88).
+            #
+            # Measured evidence, both sides: on the 2026-11-09 reporter's
+            # machine the FIRST SaveAs into a Chinese folder is refused on 0.3.81,
+            # 0.3.83, 0.3.85 and 0.3.87 (8+ attempts, 0 successes, empty session
+            # and multi-document alike), while `catia_save_document` into the SAME
+            # folder succeeds for a document that already has a path - and so does
+            # an export. On the machine this was developed on the first SaveAs
+            # works (9 attempts, 2026-11-07/08). That is an environment-dependent
+            # difference, not jitter, and the reporter asked for the working route
+            # to be used instead of catalogued.
+            #
+            # So: get the document a path through %TEMP% first, then the second
+            # SaveAs - the one that behaves like a save of a document that has a
+            # path - carries it into the folder asked for. If the staged route
+            # fails, the direct attempt below still runs, so this can only cost
+            # one extra SaveAs.
+            if (not self._document_has_path(doc)
+                    and not self._path_is_ascii(str(file_path))):
+                try:
+                    self._staging_attempted = True
+                    target = self._save_via_ascii_staging(doc, str(file_path))
+                except Exception:  # noqa: BLE001 - the direct attempt is next
+                    self._staging_attempted = True
+                else:
+                    return (
+                        f"Document saved as: {target} (through an ASCII staging "
+                        "file: this document had never been saved and the folder "
+                        "is non-ASCII, the one combination the 2026-11-09 report "
+                        "sees refused on every version - the staged move is the "
+                        "call measured working there)")
             # CATIA's SaveAs rejects forward-slash paths (E_FAIL) and pops a
             # modal prompt when the target exists, which freezes the STA worker.
             try:
@@ -996,7 +1052,7 @@ class DocumentTools:
                 # second run hit exactly that path.
                 if isinstance(first_error, CodedError):
                     raise
-                if self._document_has_path(doc):
+                if self._document_has_path(doc) or self._staging_attempted:
                     raise
                 try:
                     self._staging_attempted = True

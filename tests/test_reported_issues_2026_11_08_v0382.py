@@ -326,26 +326,8 @@ def test_pattern_refuses_count_and_angle_outside_the_useful_range():
 
 # ── the save fallback ──────────────────────────────────────────────────────
 
-def test_a_refused_first_saveas_falls_back_to_an_ascii_staging_file(monkeypatch):
-    """The report's control: their Chinese folder refused the FIRST SaveAs and
-    accepted the second, from a document that already had a path.
-
-    Not reproduced here in nine attempts, so the fallback costs an extra SaveAs
-    only on a path that has already failed - and it says which route was taken.
-    """
-    import os
-
+def _tools_for_saving(monkeypatch):
     from catia_mcp.tools import document as document_module
-
-    saved: list[str] = []
-
-    def fake_save_as(doc, path, *args, **kwargs):
-        saved.append(str(path))
-        if len(saved) == 1:
-            raise RuntimeError("(0, 'CATIAPartDocument', '方法 Save 失败')")
-        return str(path)
-
-    monkeypatch.setattr(document_module.dialogs, "save_as", fake_save_as)
 
     tools = document_module.DocumentTools(connection=None)
     tools.conn = SimpleNamespace(
@@ -356,8 +338,30 @@ def test_a_refused_first_saveas_falls_back_to_an_ascii_staging_file(monkeypatch)
     monkeypatch.setattr(tools, "_document_at_path", lambda path: None)
     monkeypatch.setattr(tools, "_existing_file_note", lambda path: None)
     monkeypatch.setattr(tools, "_document_has_path", lambda doc: False)
+    return document_module, tools
 
-    target = r"F:\中文项目\part.CATPart"
+
+def test_a_refused_first_saveas_falls_back_to_an_ascii_staging_file(monkeypatch):
+    """An ASCII folder whose first SaveAs is refused still gets the staging try.
+
+    0.3.88 moved the staged route EARLIER for a NON-ASCII folder (see the next
+    test); on an ASCII folder it is still the fallback, so it costs an extra
+    SaveAs only on a path that has already failed.
+    """
+    import os
+
+    document_module, tools = _tools_for_saving(monkeypatch)
+    saved: list[str] = []
+
+    def fake_save_as(doc, path, *args, **kwargs):
+        saved.append(str(path))
+        if len(saved) == 1:
+            raise RuntimeError("(0, 'CATIAPartDocument', '\u65b9\u6cd5 Save \u5931\u8d25')")
+        return str(path)
+
+    monkeypatch.setattr(document_module.dialogs, "save_as", fake_save_as)
+
+    target = "F:/ascii_project/part.CATPart"
     reply = tools._save_document(target)
 
     assert len(saved) == 3                 # refused target, staging, target again
@@ -366,6 +370,36 @@ def test_a_refused_first_saveas_falls_back_to_an_ascii_staging_file(monkeypatch)
     assert "mechdog" in saved[1]
     assert saved[2] == target              # then the real path
     assert "moved here from an ASCII staging file" in reply
+
+
+def test_a_non_ascii_folder_is_staged_FIRST_not_after_a_failure(monkeypatch):
+    """0.3.88: the reporter's machine refuses the first SaveAs into its Chinese
+    folder on every version, and accepts the same save from a document that
+    already has a path. So the staged route runs first there, and the caller no
+    longer waits through six refused attempts for the route measured working.
+    """
+    import os
+
+    document_module, tools = _tools_for_saving(monkeypatch)
+    saved: list[str] = []
+
+    def fake_save_as(doc, path, *args, **kwargs):
+        saved.append(str(path))
+        if not os.path.basename(str(path)).isascii() and len(saved) == 1:
+            raise RuntimeError("(0, 'CATIAPartDocument', '\u65b9\u6cd5 Save \u5931\u8d25')")
+        return str(path)
+
+    monkeypatch.setattr(document_module.dialogs, "save_as", fake_save_as)
+
+    target = "F:/\u4e2d\u6587\u9879\u76ee/part.CATPart"
+    reply = tools._save_document(target)
+
+    # Staging ran FIRST, then the target - the target was never tried directly,
+    # so a caller on that machine pays one extra SaveAs instead of six refusals.
+    assert len(saved) == 2
+    assert os.path.basename(saved[0]).isascii()
+    assert saved[1] == target
+    assert "through an ASCII staging file" in reply
 
 
 def test_a_failed_fallback_reports_the_original_error(monkeypatch):

@@ -235,10 +235,16 @@ def save_as(doc, path: str, tries: int = 6, wait: float = 0.6) -> str:
             # A retry without a dismissed dialog is just a busy loop.
             time.sleep(wait if clicks else min(0.2 * (attempt + 1), 1.5))
     raise CodedError(
-        f"SaveAs failed after {tries} attempts: {target} ({last})",
+        # Same reason as dialogs.save: the call is named in the text. A SaveAs
+        # can fail where a Save succeeds and the other way round, so which one
+        # ran is the first thing a report has to establish.
+        f"SaveAs failed after {tries} attempts: {target} (this call was "
+        f"doc.SaveAs('{target}'); the COM error was {last})",
         code="SAVE_FAILED",
         stage="execute",
         modified=False,
+        data={"call": "Document.SaveAs", "target": str(target),
+              "attempts": int(tries)},
         next_actions=[
             "A non-ASCII file NAME never reaches CATIA: it is refused above as "
             "PATH_NOT_ASCII before the first attempt, so this failure is "
@@ -273,19 +279,31 @@ def save(doc, tries: int = 3) -> str:
     # pointed at a condition that did not exist (2026-11-09). Conditions, not
     # assertions: this function cannot see which case it is in.
     raise CodedError(
-        f"Save failed after {tries} attempts: {name} ({last})",
+        # WHICH CALL THIS WAS is in the first line, because a report spent a
+        # round arguing that "the first save is a SaveAs, not a Save" contradicted
+        # an error that said 「方法 Save 失败」 (2026-11-09). Both statements were
+        # this server's, about two different calls: a bare Save and a SaveAs are
+        # separate members of the document, and CATIA names them separately in
+        # the error it raises. Naming the call here means the text settles it
+        # without reading the source.
+        f"Save failed after {tries} attempts: {name} (this call was a bare "
+        f"doc.Save(), which cannot give a never-saved document a path; the "
+        f"COM error was {last})",
         code="SAVE_FAILED",
         stage="execute",
         modified=False,
+        data={"call": "Document.Save", "document": str(name),
+              "attempts": int(tries)},
         next_actions=[
             "IF this document already had a file: that file is most likely "
             "read-only or held by another program. Free it and retry, or write a "
             "copy elsewhere (catia_save_as_copy)",
-            "IF it has never been saved: this build refuses a bare Save on such "
-            "a document, and no retry will change that - pass file_path to "
-            "catia_save_document (SaveAs is the call that gives it a path), or "
-            "rebuild through catia_new_part(file_path=...), which sets the path "
-            "on an empty part",
+            "IF it has never been saved: a bare Save cannot give it a path, so "
+            "NO retry of this call can work. The order that does work - measured "
+            "on both machines - is: catia_new_part(file_path='<an ASCII "
+            "folder>/name.CATPart') to create it with a path, build, then "
+            "catia_save_document(file_path='<the non-ASCII folder>/name.CATPart') "
+            "to move it there",
             "IF its file NAME is non-ASCII: this build cannot write it at all, "
             "and it cannot open such a name either - write a copy under an ASCII "
             "name and keep that one",

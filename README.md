@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.87** · [what changed](CHANGELOG.md) ·
+**0.3.88** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -773,10 +773,23 @@ length, only the name differing:
 | `…\中文探针.CATPart` | `DISP_E_EXCEPTION`, 6 attempts |
 | `…\中文目录\probe.CATPart` | saved |
 
-The limit is the file **name**; a non-ASCII **folder** is fine. It is now refused
-before CATIA is asked, at the validate stage, with that table in the message and
-the one route that works: save under an ASCII name and rename the file afterwards.
-The `.CATPart` does not care what it is called — only CATIA's own SaveAs does.
+The limit is the file **name** — that one is refused before CATIA is asked, at
+the validate stage, with that table in the message. A non-ASCII **folder** is a
+different story and the measurements disagree from machine to machine: nine
+successes here (2026-11-07/08, five then four path shapes) against eight failures
+and no success on the 2026-11-09 reporter's machine (0.3.81/0.3.83/0.3.85/0.3.87,
+empty session and multi-document alike). What is deterministic on both is
+narrower than the folder: it is **the first save of a document that has no path**.
+A `catia_save_document` into that same folder succeeds every time on both
+machines, because by then the document has a path.
+
+Since 0.3.88 `catia_new_part` therefore takes the staged route FIRST when the
+folder is non-ASCII: `SaveAs` into `%TEMP%`, then `SaveAs` onto the path asked
+for — the second call is exactly the one measured working there — and the reply
+says so. If the staged route fails too, the direct `SaveAs` is still attempted
+and the failure names both. A save that fails now also says which COM call it
+was ("this call was a bare `doc.Save()`" vs "this call was `doc.SaveAs(...)`"),
+because those are different problems with different answers.
 
 ### A path can only hold one document
 

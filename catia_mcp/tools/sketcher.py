@@ -20,6 +20,12 @@ from catia_mcp.results import (
 )
 from catia_mcp.topo_search import topology_reference
 
+
+def _vector_text(values: list[float]) -> str:
+    """``"(0, 0, 1)"`` - a direction as it would be typed back in."""
+    return "(" + ", ".join(f"{float(c):g}" for c in values) + ")"
+
+
 # Plane name mapping
 PLANE_MAP = {
     "xy": "PlaneXY",
@@ -722,7 +728,27 @@ class SketcherTools:
     }
 
     @classmethod
-    def _axis_note(cls, plane: Any) -> str:
+    def _axis_note(cls, plane: Any, placement: dict[str, Any] | None = None) -> str:
+        """What H/V mean here - and for a rotated plane, the actual vectors.
+
+        A reconstructed frame is known at creation time (0.3.87 recorded it), so
+        answering "unknown for this support" here while `catia_gsd_spline` hands
+        over a checked frame two calls later was this server contradicting
+        itself: a caller read the first sentence and gave up on the readback that
+        would have worked (reported twice, 2026-11-09).
+        """
+        if isinstance(placement, dict) and placement.get("derived"):
+            u = [float(c) for c in placement.get("u") or (1.0, 0.0, 0.0)]
+            v = [float(c) for c in placement.get("v") or (0.0, 1.0, 0.0)]
+            normal = [u[1] * v[2] - u[2] * v[1],
+                      u[2] * v[0] - u[0] * v[2],
+                      u[0] * v[1] - u[1] * v[0]]
+            return (
+                f"H/V/normal: H = {_vector_text(u)}, V = {_vector_text(v)}, normal = "
+                f"{_vector_text(normal)} - reconstructed from {placement['derived']} "
+                "(this build cannot read a sketch frame back), and checked "
+                "against a measured distance the first time coordinates are asked "
+                "for")
         if isinstance(plane, str) and plane.lower() in cls._AXES:
             return "H/V/normal: " + cls._AXES[plane.lower()]
         if isinstance(plane, dict):
@@ -1013,7 +1039,7 @@ class SketcherTools:
                         code="SUPPORT_NOT_PLANAR", stage="validate",
                     )
                 return (part.CreateReferenceFromObject(element),
-                        f"on the datum plane '{plane}'")
+                        f"the datum plane '{plane}'")
             planes = self._datum_plane_names(part)
             raise ArgumentRejected(
                 f"Unknown plane '{plane}': not 'xy'/'yz'/'zx', and no datum plane "
@@ -1418,11 +1444,11 @@ class SketcherTools:
         # would carry the previous sketch's elements into this one's echo.
         key = self._sketch_key(str(sketch.Name))
         self._drawn[key] = []
+        placement = self._placement_of(plane, offset)
+        if placement is None:
+            placement = self._angled_placement(plane)
         record = self._outline_record(key)
         if record is not None:
-            placement = self._placement_of(plane, offset)
-            if placement is None:
-                placement = self._angled_placement(plane)
             record["placement"] = placement
             record["elements"] = []
         # Remember it by identity: body.Sketches is ordered by tree position,
@@ -1440,7 +1466,8 @@ class SketcherTools:
         self._profile_closed_curves = 0
 
         return (f"Sketch '{sketch.Name}' created on {where}. "
-                f"{self._axis_note(plane)}. Ready for geometry." + rename_note)
+                f"{self._axis_note(plane, placement)}. Ready for geometry."
+                + rename_note)
 
     @classmethod
     def _all_sketch_names(cls, part: Any) -> list[str]:
