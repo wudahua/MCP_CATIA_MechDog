@@ -339,7 +339,14 @@ class SketcherTools:
                     "2026-10-25: 1 of 236 arcs in the source data was a 240-degree "
                     "arc, and treating it as minor put the boss on the wrong side). "
                     "The reply always states the SWEPT angle, because 'from 10 to 250' "
-                    "does not tell a reader whether it swept 240 or -120 degrees."
+                    "does not tell a reader whether it swept 240 or -120 degrees. "
+                    "BOTH FORMS HONOUR `direction` AND `major`, and without major "
+                    "the SHORT way round wins: start_angle 90 to end_angle 0 draws "
+                    "the 90-degree arc the clockwise way (not 270 degrees), and the "
+                    "reply says which way it went. Pass major=true when the long "
+                    "arc really is wanted. start_angle equal to end_angle is "
+                    "refused with DEGENERATE_ARC - that pair is one point, not an "
+                    "arc, and catia_sketch_circle is the tool for a full circle."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -371,10 +378,13 @@ class SketcherTools:
                             "enum": ["ccw", "cw"],
                             "default": "ccw",
                             "description": (
-                                "Which way round the circle the arc runs from p1 "
-                                "to p2. With two endpoints this only matters when "
-                                "the two ways are both under half a circle; "
-                                "'major' decides the rest."
+                                "Which way round the circle the arc runs, from p1 "
+                                "to p2 OR from start_angle to end_angle - it "
+                                "applies to BOTH forms (until 0.3.93 the angle "
+                                "form silently ignored it, reported 2026-11-10). "
+                                "Without major the short way round wins, so a "
+                                "direction that would go the long way is "
+                                "overridden and the reply says so."
                             ),
                         },
                         "major": {
@@ -390,10 +400,12 @@ class SketcherTools:
                                 "shaft built on it failed three steps later with a "
                                 "bare 'UpdateObject 失败' (reported 2026-11-01). "
                                 "When this flips the arc, the reply says so and "
-                                "names both sweeps. It has NO effect on a request "
-                                "that is already a half circle or less: the sweep "
-                                "is the same either way, so setting it on a short "
-                                "arc changes nothing (reported 2026-11-01 as a "
+                                "names both sweeps. It applies to both forms: with "
+                                "two angles it keeps the sweep you asked for instead "
+                                "of flipping to the short way. It has NO effect on a "
+                                "request that is already a half circle or less: the "
+                                "sweep is the same either way, so setting it on a "
+                                "short arc changes nothing (reported 2026-11-01 as a "
                                 "possible defect, which it is not)."
                             ),
                         },

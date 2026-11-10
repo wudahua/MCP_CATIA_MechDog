@@ -53,6 +53,31 @@ _ARGUMENT_ALIASES: dict[str, dict[str, str]] = {
     "catia_gsd_symmetry": {"mirror_plane": "plane"},
 }
 
+# What to do after a split refuses to update. The ORDER is the fix: until 0.3.97
+# the first item was "measure a few points of the cutter", which is exactly the
+# instruction the 2026-11-10 report followed three times - rebuilding a cutter
+# that lay on the surface by construction, because the message body had just
+# measured that combination as unsupported. Advice that contradicts the
+# measurement is worse than no advice, so the unsupported case now comes first
+# and "measure points" is scoped to the one case where it decides anything.
+_SPLIT_FAILURE_ACTIONS = (
+    "If the cutter came from catia_gsd_project onto a CURVED surface, stop "
+    "rebuilding it: that combination is measured-unsupported on B30 - the "
+    "projection itself, an extract of it, and a projected circle all failed "
+    "(2026-11-10). Use one of the routes below instead",
+    "If the element is a JOIN or an array, split the PIECE before the join and "
+    "join the results afterwards",
+    "If the centre of the part is not flat, do not split: cap the hole with "
+    "catia_gsd_circ_pattern(cap_center=true, cap_curve=<the hole's own edge>), "
+    "which needs no coplanar disc",
+    "To remove material inside a closed curve on a curved surface, build a "
+    "solid tool body and call catia_boolean(operation='remove') - its depth "
+    "follows an axis, not the surface normal",
+    "Only for a PLANE patch is measuring points the right next step: "
+    "catia_measure_distance other than 0.0000 mm there means the contour is "
+    "not on the surface at all",
+)
+
 
 def _normalise_arguments(tool_name: str,
                          arguments: dict[str, Any]) -> dict[str, Any]:
@@ -3210,10 +3235,61 @@ class GSDTools:
         elem_ref = self._ref(args["element"])
         support_ref = self._ref(args["support"])
         projection = self._factory().AddNewProject(elem_ref, support_ref)
-        return self._finish(
-            projection, args.get("name"),
-            f"Projection of '{args['element']}' onto '{args['support']}' created.",
-        )
+        try:
+            return self._finish(
+                projection, args.get("name"),
+                f"Projection of '{args['element']}' onto '{args['support']}' "
+                "created.",
+            )
+        except Exception as error:  # noqa: BLE001 - the diagnostic is the point
+            # A PROJECTION RUNS ALONG THE SUPPORT'S NORMAL, AND A PLANAR ELEMENT
+            # NEEDS A SUPPORT THAT CROSSES IT AT AN ANGLE (0.3.97). The first
+            # draft of this message blamed the PARALLEL case only - which the
+            # audit then disproved in one run: the same rectangle failed onto
+            # 'yz' and 'zx' too. Measured on B30 2026-11-10, 40x40 rectangle on
+            # an XY plane offset 40 mm: xy FAIL, yz FAIL, zx FAIL, the block's
+            # own top face FAIL, a plane tilted 45 deg about X OK. Parallel
+            # collapses the curve to a point, perpendicular collapses it to a
+            # line, and CATIA reports both as 方法 UpdateObject 失败.
+            gap = self._cutter_gap(support_ref, elem_ref)
+            measured = (
+                f"Measured after the refusal: '{args['element']}' is {gap:.4f} mm "
+                f"from '{args['support']}' at its closest point."
+                if gap is not None else
+                "The distance could not be measured after the refusal (once an "
+                "update fails, new elements in that document refuse to update too "
+                "- measured 2026-11-09)."
+            )
+            raise PreconditionRejected(
+                f"CATIA created the projection of '{args['element']}' onto "
+                f"'{args['support']}' and then refused it at update. A projection "
+                "runs along the SUPPORT's own normal, so a PLANAR element needs a "
+                "support that crosses its plane AT AN ANGLE: parallel makes every "
+                "point land on the same spot, perpendicular flattens the curve "
+                "onto a line, and both are degenerate - CATIA reports them as "
+                "'方法 UpdateObject 失败' and nothing else. Measured on B30 "
+                "2026-11-10 with a 40x40 rectangle on an XY plane offset 40 mm: "
+                "'xy', 'yz' and 'zx' and the block's own top face ALL failed, and "
+                "a plane tilted 45 degrees about X worked. " + measured +
+                " So 'not parallel' is not enough - the support has to be skewed "
+                "to the element, or the element has to not be flat. Nothing this "
+                "call created was left behind.",
+                code="PROJECT_FAILED", stage="execute", modified=False,
+                next_actions=[
+                    "Project onto a support that is NEITHER parallel NOR "
+                    "perpendicular to the element - on B30 a plane tilted 45 "
+                    "degrees (catia_gsd_plane_angle) worked where 'xy', 'yz' and "
+                    "'zx' all failed (measured 2026-11-10)",
+                    "A NON-PLANAR support is fine and is usually what you want: "
+                    "projecting onto an extracted curved face succeeded in the "
+                    "2026-11-10 acceptance (extract the face, then project onto "
+                    "that element)",
+                    "If the target really is a parallel plane, there is no "
+                    "projection to make: move the element to it with "
+                    "catia_gsd_translate, or extrude it there with "
+                    "catia_gsd_extrude",
+                ],
+            ) from error
 
     def _extract(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
@@ -4183,14 +4259,66 @@ class GSDTools:
 
     def _offset_surface(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
+        part = self.conn.get_active_part()
         surface_ref = self._ref(args["surface"])
         offset = args["offset"]
         reverse = args.get("reverse", False)
         # AddNewOffset(surface, value, orientation, repetition)
         offset_surf = self._factory().AddNewOffset(surface_ref, offset, reverse, 0)
-        return self._finish(
+        reply = self._finish(
             offset_surf, args.get("name"),
             f"Offset surface created: {offset} mm from '{args['surface']}'.",
+        )
+        return reply + self._offset_side_note(part, surface_ref, offset_surf,
+                                              reverse)
+
+    def _offset_side_note(self, part: Any, surface_ref: Any, offset_surf: Any,
+                          reverse: bool) -> str:
+        """What the offset's side can and cannot be read from here.
+
+        The 2026-11-10 report offset a bottle skin by 0.4 mm and could not tell
+        inside from outside: the reply said only "0.4 mm from 'BottleSkin'", and
+        `reverse` is CATIA's orientation flag, not a word for a direction.
+
+        THE OBVIOUS ANSWERS DO NOT WORK, and both were measured on B30 2026-11-10
+        with this exact code before being rejected:
+
+          * ``SPAWorkbench.GetMeasurable(<reference to a hybrid surface>)``
+            resolves to the enclosing SOLID. A 100x100 face extract reports
+            Area 24000 mm2 - the whole 100x100x10 block - and its COG is the
+            block's (0, 0, 5), so comparing the two centroids measures the same
+            block twice and answers 0.0000 mm.
+          * the distance between the surface and EITHER of its two offsets is
+            0.3999999 mm, so a distance cannot separate the two directions.
+
+        What is left is the flag that was used, the distance that shows the
+        offset landed where it was asked, and the operation that answers the
+        question by consequence: cut toward it and read the volume.
+        """
+        flag = ("reverse=false (CATIA orientation flag 0)" if not reverse
+                else "reverse=true (CATIA orientation flag 1)")
+        gap = None
+        try:
+            gap = self._cutter_gap(part.CreateReferenceFromObject(offset_surf),
+                                   surface_ref)
+        except Exception:  # noqa: BLE001 - the note degrades, the call succeeded
+            gap = None
+        distance = (
+            f"The two surfaces measure {gap:.4f} mm apart, so the offset landed "
+            "where it was asked to. " if gap is not None else
+            "The distance between the two surfaces could not be measured here. "
+        )
+        return (
+            f" Orientation used: {flag}. {distance}"
+            "WHICH SIDE that is cannot be read from here, and the two obvious "
+            "measurements were tried and rejected on B30 (2026-11-10): a measurable "
+            "taken on a hybrid surface resolves to the enclosing SOLID (a 100x100 "
+            "face extract reports the whole block's area and centroid), and both "
+            "offset directions sit 0.4000 mm from the original, so a distance "
+            "cannot tell them apart. To settle the side, cut toward it and read the "
+            "volume - catia_boolean(remove) reports before/after, and a tool body "
+            "built on this surface that removes nothing went the wrong way, so pass "
+            "reverse=true and repeat."
         )
 
     # ────────────────────────────────────────────────────────────
@@ -4368,17 +4496,7 @@ class GSDTools:
                 "after a failed update even an unrelated point refuses to update in "
                 "this document, so do not read a second failure as a second cause.",
                 code="SPLIT_FAILED", stage="execute", modified=False,
-                next_actions=[
-                    "Measure a few points of the cutter against the element "
-                    "(catia_measure_distance). Anything other than 0.0000 mm means "
-                    "the contour does not exist - rebuild the cutter where the "
-                    "surface actually is",
-                    "If the element is a JOIN or an array, split the PIECE before "
-                    "the join and join the results afterwards",
-                    "If the centre of the part is not flat, do not split: cap the "
-                    "hole with catia_gsd_circ_pattern(cap_center=true, "
-                    "cap_curve=<the hole's own edge>), which needs no coplanar disc",
-                ],
+                next_actions=list(_SPLIT_FAILURE_ACTIONS),
             ) from error
 
     def _trim(self, args: dict[str, Any]) -> str:

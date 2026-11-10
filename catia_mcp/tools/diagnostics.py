@@ -66,6 +66,92 @@ _HYBRID_SHAPE_FACTORY_METHODS = [
     "AddNewSymmetry",
 ]
 
+# WHAT THE TYPE LIBRARY DECLARES AND WHAT B30 DOES WITH IT ARE TWO ANSWERS.
+# A member appearing in typeinfo_addnew means DECLARED, and three 2026-11-10
+# reports in a row read that as "the capability exists" and spent their
+# acceptance runs on it: "建议在 catia_diagnose 里给 UNSUPPORTED_ON_B30 明确结论，
+# 避免调用者反复试". This block is that answer, and it is deliberately kept
+# separate from the probe because one is a reading and the other is a
+# measurement - mixing them is how "declared" got read as "works".
+#
+# status vocabulary:
+#   UNSUPPORTED_ON_B30     construct-and-then-refuse, measured on this machine
+#   NOT_IN_TYPELIB         the member (or its parameter) is not in the model
+#   DECLARED_NOT_MEASURED  declared, not wrapped, nobody has measured it yet
+#   AVAILABLE_WITH_LIMIT   works, with a limit that is easy to get wrong
+_CAPABILITY_CEILINGS: list[dict[str, Any]] = [
+    {
+        "member": "AddNewSewSurface",
+        "status": "UNSUPPORTED_ON_B30",
+        "detail": (
+            "Declared on HybridShapeFactory, and every attempt was refused at "
+            "update: 8 of 8 on B30 2026-11-10, across three topologies and both "
+            "integer and boolean arguments. No tool is wrapped, on purpose."
+        ),
+    },
+    {
+        "member": "AddNewWrapCurve",
+        "status": "UNSUPPORTED_ON_B30",
+        "detail": (
+            "DECLARED, CONSTRUCTIBLE, AND STILL NOT USABLE - the third state. It "
+            "builds with no arguments, accepts InsertReferenceCurve / "
+            "InsertCurves / SetReferenceDirection, reports "
+            "GetNumberOfCurves() == 2, and then refuses UpdateObject every time "
+            "(measured 2026-11-10). Same family as AddNewGSDCircPattern (0.3.85): "
+            "an object that can be configured and never updated. No tool is "
+            "wrapped: the surface-side route it belongs to needs a patch cut out "
+            "of a curved surface, and catia_gsd_split refuses a projected curve "
+            "there (measured 2026-11-10, three cutters)."
+        ),
+    },
+    {
+        "member": "AddNewSplit",
+        "status": "AVAILABLE_WITH_LIMIT",
+        "detail": (
+            "Works, as catia_split_solid, and the limit is the whole point: it "
+            "cuts a body in TWO and keeps one half, so the cutter has to divide "
+            "the body completely. A patch covering part of the cross-section "
+            "leaves no valid second half - split is NOT a local cut, an engraving "
+            "or a pocket, whatever the Chinese UI calls it (分割 for both). For "
+            "local removal build a tool body and use catia_boolean(remove)."
+        ),
+    },
+    {
+        "member": "AddNewRib / AddNewStiffener",
+        "status": "DECLARED_NOT_MEASURED",
+        "detail": (
+            "Declared on the type library (read there by a 2026-11-10 report). No "
+            "tool is wrapped and nobody has measured whether they update on B30, "
+            "so treat this as unknown rather than either way - a rib request "
+            "currently has to go around as a pad, which is a flat plate, not a "
+            "round tube."
+        ),
+    },
+    {
+        "member": "Factory2D.CreateText",
+        "status": "NOT_IN_TYPELIB",
+        "detail": (
+            "Factory2D exposes 37 members on B30 and none of them creates text "
+            "(measured 2026-11-10). This is not a missing wrapper: a glyph outline "
+            "is GEOMETRY that has to be imported or computed, and "
+            "catia_drawing_add_text draws on a drawing sheet, never in 3D. "
+            "catia_sketch_strokes takes a whole outline in one call as polylines - "
+            "the geometry half of the problem, with the font left to the caller."
+        ),
+    },
+    {
+        "member": "AddNewSpline (periodic)",
+        "status": "NOT_IN_TYPELIB",
+        "detail": (
+            "The spline member exists; a periodic flag is not among its "
+            "parameters on B30, which is why catia_sketch_spline(closed=true) "
+            "repeats the first point instead of closing with matching tangents. "
+            "The reply says so: a closed spline of this kind carries a seam, and "
+            "a fill or split may then report a gap that looks like bad geometry."
+        ),
+    },
+]
+
 
 class DiagnosticsTools:
     """Diagnostics for the running CATIA installation."""
@@ -118,7 +204,14 @@ class DiagnosticsTools:
                     "capability list, and a member listed under "
                     "typeinfo_addnew is DECLARED - whether it can be updated "
                     "has to be measured separately (that same member returns an "
-                    "object and then refuses UpdateObject on B30)."
+                    "object and then refuses UpdateObject on B30). That "
+                    "measurement list is the 'capability_ceilings' block, kept "
+                    "apart from the probe on purpose: UNSUPPORTED_ON_B30 means it "
+                    "was constructed and refused at update (with the date), "
+                    "NOT_IN_TYPELIB means the member or parameter is absent, "
+                    "DECLARED_NOT_MEASURED means nobody has tried and it is not an "
+                    "answer either way, and AVAILABLE_WITH_LIMIT means it works "
+                    "but the limit is easy to get wrong."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -159,6 +252,10 @@ class DiagnosticsTools:
         # hard way. This probe answers what can be answered from here.
         report["sheetmetal"] = self._sheetmetal_probe(app)
         report["factories"] = self._factory_probe()
+        # A declared member is not a working capability, and the difference cost
+        # three acceptance runs in a row (2026-11-10). This block is the other
+        # half of the answer the factory probe cannot give.
+        report["capability_ceilings"] = _CAPABILITY_CEILINGS
         report["notes"] = self._notes(report)
 
         return json.dumps(report, indent=2)
@@ -574,6 +671,15 @@ class DiagnosticsTools:
                 "something. Remember that a tool's own factory is not the only "
                 "candidate: a GSD pattern lives on ShapeFactory."
             )
+        notes.append(
+            "capability_ceilings answers the NEXT question - 'declared, but does "
+            "it update?' - and it is a measurement list, not a typelib reading. "
+            "UNSUPPORTED_ON_B30 means the member was constructed and then refused "
+            "at update on this machine, with the date of the measurement; "
+            "DECLARED_NOT_MEASURED means nobody has tried, and should not be read "
+            "as either answer. Read this block before writing a long chain that "
+            "depends on one of these members."
+        )
         factories = report.get("factories", {})
         labels = {
             "shape_factory": ("ShapeFactory", "Part Design (MD2/PD1 level)"),

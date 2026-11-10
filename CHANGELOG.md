@@ -2,6 +2,90 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.97] — 2026-11-10 · the five leftovers, and a half-rule caught by its own audit
+
+The two 2026-11-10 reports on 0.3.94 were answered by 0.3.95 and 0.3.96. This is
+what was left over: five items, none of them a headline, all of them the same
+shape — **a reply that says something the measurement in front of it does not
+support**, which is the defect this whole run of reports keeps paying for.
+
+**`catia_gsd_project` answered a degenerate pair with a bare COM error.** Roughly
+three lines of code and no handler, so a projection of a sketch on an XY plane
+offset 40 mm onto support `xy` came back as `方法 UpdateObject 失败` and nothing
+else. It now raises `PROJECT_FAILED` with the measured distance (40.0000 mm on
+that pair) and the rule.
+
+**...and the first version of that rule was half wrong, caught by the audit that
+shipped with it.** The draft said "parallel planes collapse". The audit projected
+the same rectangle onto `yz` and failed: a curve in a plane PERPENDICULAR to the
+projection direction flattens onto a line, which is just as degenerate. One
+controlled run settled the matrix on B30: `xy` FAIL, `yz` FAIL, `zx` FAIL, the
+block's own top face FAIL, a plane tilted 45 degrees about X **OK** — a 40×40
+rectangle, all five supports, one document. So the message states both cases and
+names the support that works, and "not parallel" is explicitly called out as not
+enough. This is the same failure mode as the reports themselves, caught one step
+earlier because the acceptance script asserts what the reply SAYS and not only
+what the geometry does.
+
+**`catia_gsd_split`'s advice contradicted its own measurement.** 0.3.95 taught the
+message body that a curve projected onto a curved surface is measured-unsupported
+on B30, and left `next_actions[0]` telling the caller to measure a few points of
+the cutter and rebuild it. That is the instruction the report followed three
+times. The list is now ordered by what the measurement says: the unsupported case
+first, the join/array and cap routes next, and "measure a few points" last and
+scoped to a PLANE patch — the one case where the number decides anything.
+
+**`catia_gsd_offset_surface` can now say what it cannot say.** It used to answer
+`0.4 mm from 'BottleSkin'` and leave inside/outside to the caller, with `reverse`
+being CATIA's orientation flag rather than a word for a direction. The first fix
+measured the surface's area centroid before and after, and the audit run one hour
+later reported "the centroid did not move" — investigation found why, and it
+retired the idea:
+
+* `SPAWorkbench.GetMeasurable(<reference to a hybrid surface>)` **resolves to the
+  enclosing SOLID on B30** (measured 2026-11-10): a 100×100 face extract reports
+  `Area` 24000 mm² — the whole 100×100×10 block — and a COG of (0, 0, 5). Two
+  centroid readings therefore measure the same block twice.
+* the distance from the surface to **either** of its two offsets is 0.4000 mm, so
+  a distance cannot tell the directions apart either.
+
+Both are documented in the tool and in `capability_ceilings`' neighbourhood
+rather than shipped as a number that happened to look right once. What the reply
+does say is the flag that was used, the measured gap (0.4000 mm, which shows the
+offset landed where it was asked), and the operation that answers the question by
+consequence: thicken it into a tool body, cut, and read the volume —
+`catia_boolean(remove)` reports before/after, so a body that removes nothing went
+the wrong way.
+
+**`catia_sketch_arc`'s schema described the endpoint form only.** 0.3.95 made the
+angle form honour `direction` and `major` and describe the arc it drew; the
+description still read "With two endpoints this only matters...", which would
+talk an angle-form caller out of a parameter that now works. Both parameters say
+they apply to both forms, the short-way rule and `DEGENERATE_ARC` are in the
+description, and the README bullet that called `catia_sketch_arc` a 0.3.92
+feature was the only place the old rule was written down.
+
+**`catia_diagnose` publishes `capability_ceilings`.** A member in
+`typeinfo_addnew` is DECLARED; three reports in a row read that as "it works" and
+spent their acceptance runs finding out. The new block keeps the measurement
+apart from the reading, with a status per member: `UNSUPPORTED_ON_B30` (Sew
+Surface 8/8, Wrap Curve constructs and never updates), `NOT_IN_TYPELIB`
+(`Factory2D.CreateText`, the spline's periodic flag), `DECLARED_NOT_MEASURED`
+(Rib / Stiffener — explicitly not an answer either way), and
+`AVAILABLE_WITH_LIMIT` (`AddNewSplit` is a two-way cut, not a local one).
+
+Not done, and the reason is measured rather than assumed: a periodic-spline flag
+still needs a B30 session of its own (the flag is not in the spline's parameter
+list, and `closed=true` repeats the first point), and `offset_surface` still
+refuses to name inside/outside — for the two reasons above, not for lack of
+trying.
+
+1547 tests (+20), 137 tools, `scripts/b30_v0397_audit.py` 10/10 on B30: the arc
+says clockwise, the offset reports `0.4000 mm` apart and says the side is
+unreadable, the skewed support accepts the projection while `xy` refuses it as
+`PROJECT_FAILED / 40.0000 mm`, and `catia_diagnose` lists six ceilings with four
+distinct statuses.
+
 ## [0.3.96] — 2026-11-10 · the thick-surface message measured the wrong quantity
 
 Split out of 0.3.95 rather than folded into it: that release was already tagged

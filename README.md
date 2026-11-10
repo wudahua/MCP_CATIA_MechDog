@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.96** · [what changed](CHANGELOG.md) ·
+**0.3.97** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1533,6 +1533,25 @@ Place the result with `catia_get_component_transform`.
   MINIMUM - it is 0.0000 mm for a curve that merely touches the surface once, so
   it cannot tell you whether the contour follows it.
 
+* **A planar element only projects onto a support that crosses it at an angle.**
+  Measured on B30 2026-11-10 with a 40×40 rectangle on an XY plane offset 40 mm:
+  `support="xy"` (parallel, collapses to a point), `"yz"` and `"zx"`
+  (perpendicular, collapses to a line) and the block's own top face all fail; a
+  plane tilted 45° about X succeeds. CATIA answers every one of them with the same
+  `方法 UpdateObject 失败`, which is why `catia_gsd_project` now refuses with
+  `PROJECT_FAILED` and states the rule plus the measured distance. A NON-planar
+  support (an extracted curved face) is fine — the degenerate cases are
+  plane-to-plane.
+
+* **A measurable taken on a hybrid surface measures the enclosing SOLID.**
+  Measured on B30 2026-11-10: `SPAWorkbench.GetMeasurable(<reference to a hybrid
+  shape>)` answers `Area` = 24000 mm² for a 100×100 face of a 100×100×10 block,
+  and its COG is the block's (0, 0, 5) — not the face's. So "compare the centroid
+  before and after" measures the same body twice, and `catia_gsd_offset_surface`
+  cannot name inside/outside that way. It reports the flag it used, the measured
+  gap (0.4000 mm for a 0.4 mm offset, both directions) and the route that does
+  answer it: cut toward the surface and read the volume.
+
 * **`AddNewSewSurface` is declared, accepts the call, and never updates.** Same
   shape of failure as the GSD pattern above, measured on B30 2026-11-10 before a
   tool was written for it: `ShapeFactory.AddNewSewSurface(iSewingElement,
@@ -1544,6 +1563,10 @@ Place the result with `catia_get_component_transform`.
   engraving route a 2026-11-10 report asked for does not go through Sew Surface on
   this build; the two that do work are `catia_split_solid` (a cutter that divides
   the body completely) and a solid tool body through `catia_boolean(remove)`.
+  `catia_diagnose` publishes these conclusions as `capability_ceilings` — one
+  status per member (`UNSUPPORTED_ON_B30`, `NOT_IN_TYPELIB`,
+  `DECLARED_NOT_MEASURED`, `AVAILABLE_WITH_LIMIT`) — so "is this declared or does
+  it work" is a lookup instead of a report.
 
 * **There is no text in a V5 sketch.** Not a missing feature of this fork: the
   `Factory2D` a sketch hands back declares 37 members and none of them creates
