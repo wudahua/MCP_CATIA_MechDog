@@ -556,7 +556,10 @@ def test_boolean_defaults_to_the_other_body_not_the_tool():
     part.ShapeFactory = FakeSF()
     part.InWorkObject = None
     part.CreateReferenceFromObject = lambda o: o
+    # 0.3.93: the boolean now asks for a whole-part update before it answers
+    # success, so a body that fails somewhere else cannot be reported as fine.
     part.UpdateObject = lambda f: None
+    part.Update = lambda: None
 
     tools._boolean({"operation": "assemble", "tool_body": "Tool"})
     assert recorded["tool"] == "Tool"
@@ -588,6 +591,7 @@ def test_boolean_passes_the_body_itself_not_a_reference():
     part.ShapeFactory = FakeSF()
     part.InWorkObject = None
     part.UpdateObject = lambda f: None
+    part.Update = lambda: None      # 0.3.93: the boolean verifies the whole part
     tools._boolean({"operation": "intersect", "tool_body": "Tool"})
     assert isinstance(seen["arg"], FakeSolidBody), type(seen["arg"])
 

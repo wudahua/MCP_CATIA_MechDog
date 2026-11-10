@@ -47,9 +47,13 @@ def test_update_part_names_the_feature_that_blocks_it():
     from catia_mcp.tools.measurement import MeasurementTools as MT
 
     source = inspect.getsource(MT._update_part)
-    assert "_first_failing_feature" in source
+    # 0.3.93: the probe moved into catia_mcp/update_errors.py and now returns
+    # EVERY failing element, including GSD ones - the 2026-11-10 report's
+    # culprit lived in a geometrical set and the old bodies-only walk could not
+    # see it. The sentence is still the one this test was written for.
+    assert "failing_elements" in source
     assert "catia_delete_feature" in source
-    assert "no single feature reproduces it" in source
+    assert "no single element reproduces it" in source
 
 
 def test_list_features_publishes_the_count():

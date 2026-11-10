@@ -12,6 +12,7 @@ import re
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
+from catia_mcp.update_errors import describe, failing_elements
 from catia_mcp.results import CodedError, FeatureRejected, PreconditionRejected
 from catia_mcp.sketch_frames import BASES, frame_of, point_world
 from catia_mcp.results import ArgumentOutOfRange, ArgumentRejected
@@ -1864,6 +1865,18 @@ class PartDesignTools:
         if volume is None:
             return None, "the measurable returned no volume"
         return volume * 1e9, None  # m3 -> mm3
+
+    def _note_part_error(self, message: str | None) -> None:
+        """Remember whether the part is known to be in an update-error state.
+
+        ``catia_list_bodies`` reads it: CATIA keeps answering with the last valid
+        volume and face count while the tree is broken (2026-11-10: 168607.5 mm3
+        reported twice on a part whose update had already failed).
+        """
+        try:
+            self.conn.part_in_error = message
+        except Exception:  # noqa: BLE001 - a double without the attribute
+            pass
 
     def _body_volume_mm3(self, part: Any, body: Any) -> float | None:
         """Measure the body's solid volume in mm3, or None if unavailable."""
@@ -4635,14 +4648,30 @@ class PartDesignTools:
             part.Update()
         except Exception as e:
             self.conn.refresh_display()
+            # NAME the casualties. "features that depended on it are now in
+            # error" sent the 2026-11-10 reporter hunting by hand - the culprit
+            # was a projection in a geometrical set, which the old probe (bodies
+            # only) could not see. It costs one walk, and only on this path.
+            culprits = failing_elements(part)
+            self._note_part_error(str(e))
             lost = [n for n in before
                     if n not in self._sketch_names() and n != target]
             return (
                 f"Feature '{target}' deleted, but the part update failed "
-                f"afterwards ({e}): features that depended on it are now "
-                "in error. Fix or delete them too."
+                f"afterwards ({e}). "
+                + (describe(culprits) + " - every later update stops there; delete "
+                   + ("it" if len(culprits) == 1 else "those")
+                   + " too (catia_delete_feature). "
+                   if culprits else
+                   "No single element fails on its own, so the damage is a relation "
+                   "between features; every body feature and geometrical-set element "
+                   "still updates alone. ")
+                + "The part is IN ERROR until this is cleared - catia_update_part "
+                "says whether it is, and catia_list_bodies now marks its numbers "
+                "stale instead of reporting them as current."
                 + (f" Sketches removed with it: {', '.join(lost)}." if lost else "")
             )
+        self._note_part_error(None)
         self.conn.refresh_display()
         # A sketch deleted on purpose is not a casualty of the delete.
         lost = [n for n in before
@@ -5559,6 +5588,26 @@ class PartDesignTools:
             "total_volume_mm3": round(total_volume, 1),
             "total_faces": total_faces,
         }
+        # WHOSE NUMBERS THESE ARE (0.3.93). A part whose update failed keeps
+        # answering with the last valid volume and face count - no error, no
+        # stale flag, just numbers that describe the state BEFORE the change the
+        # caller just made. The 2026-11-10 report trusted 168607.5 mm3 twice on a
+        # part that could not update at all. Only this server knows its own update
+        # results, so that is what it says; CATIA itself gives no hint.
+        part_error = getattr(self.conn, "part_in_error", None)
+        if part_error:
+            payload = {
+                "stale": True,
+                "stale_because": ("the last full update of this part failed: "
+                                 + str(part_error).splitlines()[0][:160]),
+                **payload,
+                "stale_note": (
+                    "CATIA keeps answering with the last valid volume and face "
+                    "count while the tree is in error, so the numbers above may "
+                    "describe the state BEFORE the change that broke it. Run "
+                    "catia_update_part to see what fails; if a boolean or feature "
+                    "just answered success, do not trust that until it does."),
+            }
         if total_excluded:
             payload["faces_note"] = (
                 f"{total_excluded} face(s) the search also returns are datum-plane "
@@ -6198,18 +6247,103 @@ class PartDesignTools:
         # These four take the Body itself, not a Reference: passing a Reference
         # is accepted for add/remove/assemble and then does nothing, and
         # AddNewIntersect rejects it outright with a type mismatch.
+        volume_before = self._body_volume_mm3(part, target)
         part.InWorkObject = target
         feature = getattr(part.ShapeFactory, method)(tool)
         if args.get("name"):
             feature.Name = args["name"]
         self._safe_update(part, feature)
+        volume_after = self._body_volume_mm3(part, target)
 
+        # A 'remove' THAT REMOVED NOTHING IS NOT A SUCCESS (0.3.93).
+        #
+        # The 2026-11-10 report answered "Boolean 'remove': ... feature
+        # '图案_刻蚀'" twice on a tool body that stopped 0.3 mm short of the
+        # material: the volume never moved (168607.5 both times), and the reply
+        # carried no warning at all. UpdateObject had accepted the feature - a
+        # boolean with an empty intersection is a perfectly valid feature - so
+        # only the measurement can tell. The feature is taken back out here, for
+        # the same reason pad and pocket roll back: a caller who is told "no
+        # material" must not be left with a node in the tree that did nothing.
+        #
+        # Only 'remove' is judged this way: a union with a body that lies inside
+        # the target adds no volume either, and an intersection with a larger
+        # tool leaves the volume unchanged - both are correct results.
+        if (operation == "remove" and volume_before is not None
+                and volume_after is not None
+                and volume_before - volume_after <= 1e-6):
+            gone = self._remove_feature(part, feature, target)
+            error = FeatureRejected(
+                f"The boolean removed no material: '{target.Name}' still measures "
+                f"{volume_after:.1f} mm3, the same as before the call "
+                f"({volume_before:.1f} mm3), so '{tool.Name}' does not overlap "
+                f"it. The feature was "
+                + ("taken back out of the tree" if gone else
+                   "left in the tree (it could NOT be deleted - close the document "
+                   "without saving)")
+                + ". CATIA accepted it because a boolean with an empty "
+                "intersection is a valid feature; the volume is what disagrees. "
+                "Check the tool body's extent against the target's - a cut that "
+                "stops a fraction of a millimetre short looks exactly like this.",
+                rolled_back=bool(gone),
+                code="NO_MATERIAL",
+                next_actions=[
+                    "Measure before cutting: catia_get_bounding_box(component="
+                    f"'{tool.Name}') and compare it with the target's, or "
+                    "catia_measure_distance between the two bodies - the two are "
+                    "not touching",
+                    "If the tool body was meant to cut into a face, check the pad "
+                    "direction and height that built it (catia_list_features "
+                    "reports its depth), not the boolean",
+                ])
+            error.modified = False
+            error.data = {"operation": operation, "tool_body": str(tool.Name),
+                          "target_body": str(target.Name),
+                          "volume_before_mm3": round(volume_before, 1),
+                          "volume_after_mm3": round(volume_after, 1),
+                          "rolled_back": bool(gone)}
+            raise error
+
+        # UpdateObject checks the feature, NOT the tree. A boolean can be accepted
+        # and still leave relations broken, and the failure then surfaces at the
+        # NEXT call - which is how the report's part went bad while this tool kept
+        # answering success. Ask for the whole update before claiming anything.
+        try:
+            part.Update()
+        except Exception as error:  # noqa: BLE001 - named below
+            culprits = failing_elements(part)
+            self._note_part_error(str(error))
+            raise FeatureRejected(
+                f"The boolean '{feature.Name}' was accepted, but the part no longer "
+                "updates: " + (describe(culprits) + " - every later update stops "
+                               "there, so this is not the boolean alone. "
+                               if culprits else
+                               "no single element fails on its own, so the damage is "
+                               "a relation between features. ")
+                + "The feature was LEFT in the tree (deleting it would hide the "
+                "evidence), and catia_list_bodies now reports its numbers as "
+                f"stale. Original error: {error}",
+                rolled_back=False,
+                code="PART_UPDATE_FAILED",
+                next_actions=[
+                    "Run catia_update_part to see the list again, then delete the "
+                    "named element(s) with catia_delete_feature",
+                    "If the named element is the boolean you just made, delete it "
+                    "and rebuild the tool body so it actually overlaps the target",
+                ]) from error
+
+        self._note_part_error(None)
         # The tool body is consumed by CATIA, so it can no longer be the target
         # of new features.
         self.conn.active_body = target
+        volume_note = ""
+        if volume_before is not None and volume_after is not None:
+            volume_note = (f" Volume of '{target.Name}': {volume_before:.1f} -> "
+                           f"{volume_after:.1f} mm3.")
         return (
             f"Boolean '{operation}': '{tool.Name}' into '{target.Name}' "
-            f"(feature '{feature.Name}'). Active body is now '{target.Name}'."
+            f"(feature '{feature.Name}').{volume_note} Active body is now "
+            f"'{target.Name}'."
         )
 
     def _topo_measure(self, part: Any) -> Any:

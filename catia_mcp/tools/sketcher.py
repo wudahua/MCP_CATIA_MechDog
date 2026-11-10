@@ -1186,7 +1186,23 @@ class SketcherTools:
             for element in elements:
                 self._replay_element(factory, element)
             sketch.CloseEdition()
-            part.Update()
+            # Update the SKETCH, not the whole part (0.3.93). This runs on a part
+            # that has just failed a feature - the reason the sketch is missing -
+            # so `part.Update()` can still fail on whatever else is wrong, and it
+            # did: the 2026-11-10 reply said "it could NOT be re-created ...
+            # 方法 Update 失败" about a sketch whose drawing calls had all worked.
+            # The rebuild is worth keeping even when the tree is still broken; the
+            # sketch's own update is the one that says whether IT is sound.
+            try:
+                part.UpdateObject(sketch)
+            except Exception:  # noqa: BLE001 - the part may be in error elsewhere
+                # Nothing to lose by asking for the whole update: if it succeeds
+                # the sketch is updated as well, and if it fails the caller learns
+                # that from the feature that broke, not from this rebuild.
+                try:
+                    part.Update()
+                except Exception:  # noqa: BLE001 - reported by the caller
+                    pass
         except Exception as exc:  # noqa: BLE001
             try:
                 if sketch is not None:
@@ -2374,6 +2390,37 @@ class SketcherTools:
         elif start_angle is not None and end_angle is not None:
             start_rad = math.radians(start_angle)
             end_rad = math.radians(end_angle)
+            # THE ANGLE FORM USED TO IGNORE direction AND major (0.3.93). The
+            # points form has chosen the short way round since 0.3.45, but this
+            # branch handed the pair straight to CreateCircle, whose only
+            # requirement is start < end - so (90, 0) silently became the 270
+            # degree arc instead of the 90 degree one, and `major` changed
+            # nothing. Reported 2026-11-10: "I ask for 90 degrees and keep
+            # getting 270". Same rule as the points form, and it says so.
+            first_rad, second_rad = start_rad, end_rad
+            span = (second_rad - first_rad) % (2 * math.pi)
+            if span < 1e-9:
+                raise ArgumentRejected(
+                    f"catia_sketch_arc got start_angle {start_angle:g} and "
+                    f"end_angle {end_angle:g}, which are the same point on the "
+                    "circle, so the arc would sweep nothing. Use "
+                    "catia_sketch_circle for a full circle.",
+                    code="DEGENERATE_ARC")
+            ccw_wanted = direction != "cw"
+            sweep = span if ccw_wanted else (2 * math.pi - span)
+            if not major and sweep > math.pi + 1e-9:
+                ccw_wanted = not ccw_wanted
+                sweep = 2 * math.pi - sweep
+                notes.append(
+                    f" Took the SHORT way round ({math.degrees(sweep):.4f} deg) "
+                    f"between {start_angle:g} and {end_angle:g} deg: walking "
+                    f"{direction} from the first angle to the second is "
+                    f"{360 - math.degrees(sweep):.4f} deg. Pass major=true if that "
+                    "arc really is more than half a circle.")
+            if ccw_wanted:
+                start_rad, end_rad = first_rad, first_rad + sweep
+            else:
+                start_rad, end_rad = second_rad, second_rad + sweep
         else:
             raise ArgumentRejected(
                 "catia_sketch_arc needs either start_angle and end_angle, or p1 "

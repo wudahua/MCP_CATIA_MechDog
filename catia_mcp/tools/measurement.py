@@ -24,6 +24,7 @@ from catia_mcp.regime import (
     TOPOLOGY,
     SessionBooks,
 )
+from catia_mcp.update_errors import describe, failing_elements
 from catia_mcp.arguments import (
     ELEMENT1_NAMES,
     ELEMENT2_NAMES,
@@ -5556,23 +5557,52 @@ class MeasurementTools:
         try:
             part.Update()
         except Exception as error:  # noqa: BLE001 - diagnosed below
-            culprit = self._first_failing_feature(part)
-            if culprit:
+            # EVERY failing element, not the first one - and GSD included. The
+            # 2026-11-10 report deleted two dead Part Design features and the
+            # part still would not update, because the real culprit was a
+            # projection inside a geometrical set: the probe only walked
+            # bodies[].Shapes, so it could not name it and the reply said
+            # "features that depended on it are now in error" about nothing.
+            culprits = failing_elements(part)
+            self._note_part_error(str(error))
+            if culprits:
                 raise RuntimeError(
-                    f"Update failed, and '{culprit}' is the feature that fails on "
-                    "its own - every later update stops there. A failed Part Design "
-                    "feature that is still in the tree does exactly this (a rejected "
-                    "fillet leaves an empty 倒圆角.N behind): delete it with "
-                    f"catia_delete_feature(feature_name='{culprit}') and update again. "
+                    f"Update failed, and " + describe(culprits) + " - every later "
+                    "update stops there. A failed feature left in the tree does "
+                    "exactly this (a rejected fillet leaves an empty 倒圆角.N "
+                    "behind), and so does an element whose input was deleted. "
+                    "Delete " + ("that element" if len(culprits) == 1 else
+                                 "those elements") + " with catia_delete_feature("
+                    + ("feature_name='%s'" % culprits[0] if len(culprits) == 1
+                       else "names=[...]")
+                    + ") and update again. "
                     f"Original error: {error}"
                 ) from error
             raise RuntimeError(
-                f"Update failed and no single feature reproduces it on its own, so "
+                f"Update failed and no single element reproduces it on its own, so "
                 f"the problem is a relation between features (a fillet whose support "
-                f"moved, a pattern whose seed changed). Original error: {error}"
+                f"moved, a pattern whose seed changed). Every body feature and every "
+                f"geometrical-set element updates alone, which is why this one has "
+                f"to be found by inspection rather than by bisection. "
+                f"Original error: {error}"
             ) from error
+        self._note_part_error(None)
         self.conn.refresh_display()
         return "Part updated successfully"
+
+    def _note_part_error(self, message: str | None) -> None:
+        """Remember whether the part is known to be in an update-error state.
+
+        ``catia_list_bodies`` cannot tell: CATIA keeps answering with the last
+        valid volume and face count while the tree is broken (2026-11-10 report,
+        twice - the reporter trusted 168607.5 mm3 on a part whose update already
+        failed). The one thing this server DOES know is its own update results,
+        so that is what it publishes.
+        """
+        try:
+            self.conn.part_in_error = message
+        except Exception:  # noqa: BLE001 - a double without the attribute
+            pass
 
     def _first_failing_feature(self, part: Any) -> str | None:
         """Name of the first feature that fails to update alone, or None.

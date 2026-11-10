@@ -2,6 +2,110 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.93] — 2026-11-10 · the tools that broke the model and said they hadn't
+
+A report from a ~200-call session (a hand-built bottle with an engraved label). It
+is the most useful report this fork has had, because all three P0s are the same
+category: **the tool answered success while the model was broken, or broke it on
+its way out.** Long report, so this entry is ordered by what it cost them.
+
+**`catia_boolean(remove)` measured nothing before saying "Boolean 'remove': …".**
+Their tool body stopped 0.3 mm short of the material and the call answered success
+twice, volume 168607.5 both times. `UpdateObject` had accepted the feature - a
+boolean with an empty intersection is a perfectly valid feature - so only a
+measurement can tell. It now compares the target body's volume before and after:
+a `remove` that changes nothing is `NO_MATERIAL` with both numbers, the feature is
+taken back out of the tree (`rolled_back: true`), and `next_actions` point at the
+tool body's extent rather than at the boolean. A `remove` that did bite reports
+`168902.1 -> 168607.5 mm3` in its own reply. Union and intersect are NOT judged
+this way: a body inside the target adds no volume, and a superset tool leaves it
+unchanged - both correct.
+
+**A boolean that leaves the tree broken is no longer reported as success.** The
+call now ends with `part.Update()`, not just `UpdateObject(feature)` - the old
+code checked the feature and never the tree, which is exactly how their part went
+bad silently and failed at the NEXT call. If the whole update fails the answer is
+`PART_UPDATE_FAILED`, `rolled_back: false` (the feature is left in place on
+purpose: deleting it would hide the evidence), the culprits are named, and
+`catia_list_bodies` starts saying its numbers are stale.
+
+**`catia_list_bodies` now says when its numbers are stale.** CATIA keeps
+answering with the last valid volume and face count while the update is in error,
+and gives no hint that it is doing so; the reporter trusted 168607.5 mm3 twice.
+The one thing this server knows is its own update results, so a failed full update
+sets a flag, a successful one clears it, and `list_bodies` puts `stale: true`,
+`stale_because` (the error) and `stale_note` (what to run) FIRST in the payload -
+before the numbers they qualify.
+
+**`catia_update_part` / `catia_delete_feature` name the casualties.** Their
+culprit was `图案_投影`, a projection inside a geometrical set: the probe that
+finds "the feature that fails on its own" only ever walked `bodies[].Shapes`, so
+it reported "no single feature reproduces it" about an element it had never
+asked. The probe moved to `catia_mcp/update_errors.py`, walks both trees (nested
+sets included) and returns EVERY culprit, because a part can carry two
+independent casualties and naming one sends the caller round the loop again.
+`catia_delete_feature`'s "features that depended on it are now in error" now names
+them, or says outright that no single element fails and the damage is a relation.
+
+**A lost sketch is rebuilt even when the part cannot update.** `pocket`'s rollback
+takes the input sketch with it (CATIA cascades, and whether it does depends on the
+document's history - one call in their session kept it), and the rebuild added in
+0.3.30 ended with `part.Update()` - on a part that was in error precisely because
+the feature had just failed. So the reply said "it could NOT be re-created:
+方法 Update 失败" about drawing calls that had all worked. The rebuild now updates
+the SKETCH (`UpdateObject(sketch)`), falls back to the whole-part update without
+treating its failure as the rebuild's, and therefore leaves a sketch the caller can
+retry with.
+
+I did NOT add `keep_sketch=true`. Whether the sketch survives is CATIA's cascade
+during the rollback of the feature node, not something this server chooses; a flag
+that claims to control it would be the same kind of lie this release is about. What
+it does now is put the sketch back deterministically.
+
+**`catia_sketch_arc`'s angle form obeyed neither `direction` nor `major`.**
+Reported as "I ask for 90 degrees and keep getting 270, and major=true/false makes
+no difference" - `CreateCircle` only requires start < end, so every descending
+pair wrapped the long way round. The angle form now follows the same short-way
+rule as the endpoint form (0.3.45), says which way it went, and refuses two equal
+angles as `DEGENERATE_ARC` instead of drawing a full circle.
+
+**Not done, and why** - these are their P1s, and every one of them needs a B30
+session to earn its place:
+
+    AddNewRib / AddNewStiffener      the ring handle is the real use case, and a
+                                     rib is a sweep along a path with a profile
+                                     that must stay normal to it - the same trap
+                                     that makes GSD sweeps fail. Shipping it
+                                     untested would produce exactly the "tool
+                                     exists but wrecks the model" this report is
+                                     about.
+    AddNewSplit / AddNewSewSurface   the engraving chain's missing link. It also
+                                     needs the offset that gives the depth, and a
+                                     Split on a non-planar projected curve has to
+                                     be verified on a real bottle before it is
+                                     advertised.
+    AddNewWrapCurve / WrapSurface    declared by the typelib and, like
+                                     AddNewGSDCircPattern in 0.3.85, quite
+                                     possibly not callable - that is a measurement,
+                                     not a wrapper.
+    catia_sketch_text                letter outlines are a font problem (kerning,
+                                     stroke order, curves), not a COM problem.
+    sketch_copy(target_body)         small and useful; queued rather than rushed.
+    periodic splines                 `AddNewSpline` is exposed, but the periodic
+                                     flag is not in the typelib this fork reads,
+                                     so it would be another untested guess.
+    NO_MATERIAL "distance to the      the number they want is the shortest distance
+    material"                        from the profile to the solid, which is not
+                                     the same as "depth short by 0.3 mm along the
+                                     normal" - publishing it as if it were would be
+                                     another number that misleads.
+    screenshot hide_tree             `Viewer.HideTree` is worth trying on B30, not
+                                     assuming.
+
+1490 tests (+15), 135 tools. Their §4 list of what already works (`catia_solid_loft`,
+`catia_gsd_project`, `catia_diagnose`'s typelib tables, `created_by` on faces) is
+unchanged - no tool was removed or renamed in this release.
+
 ## [0.3.92] — 2026-11-10 · the branch that answered a contradiction with a Save
 
 Two reports. The first confirms the guide diagnostics work (their words: better
