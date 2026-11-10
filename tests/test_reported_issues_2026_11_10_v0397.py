@@ -100,10 +100,45 @@ def _gsd() -> GSDTools:
 
 
 def test_project_still_reports_success_plainly() -> None:
+    """0.3.100: "created" is no longer the whole reply - it carries the measured
+    length of what landed, because a projection that keeps 6 % of the element is
+    still "created" and every downstream tool then measures the fragment."""
     tools = _gsd()
     tools._finish = lambda shape, name, message: message  # type: ignore[method-assign]
+    tools._curve_length_mm = lambda reference: 63.96  # type: ignore[method-assign]
+    tools._source_length_mm = lambda name: (63.96, "outline")  # type: ignore[method-assign]
+    tools._ref = lambda name, *a, **k: None  # type: ignore[method-assign]
+    tools._factory = lambda: types.SimpleNamespace(  # type: ignore[method-assign]
+        AddNewProject=lambda a, b: types.SimpleNamespace())
+    tools.conn = types.SimpleNamespace(
+        ensure_connected=lambda: None,
+        get_active_part=lambda: types.SimpleNamespace(
+            CreateReferenceFromObject=lambda obj: obj))
     reply = tools._project({"element": "草图.8", "support": "yz"})
-    assert reply == "Projection of '草图.8' onto 'yz' created."
+    assert reply.startswith("Projection of '草图.8' onto 'yz' created.")
+    assert "63.960 mm long" in reply
+    assert "WARNING" not in reply      # the whole thing landed
+
+
+def test_project_warns_when_only_part_of_the_element_landed() -> None:
+    """The 2026-11-10 bottle case: 63.96 mm outline -> 4.000 mm curve, and the
+    reply said only "created". Measured on B30."""
+    tools = _gsd()
+    tools._finish = lambda shape, name, message: message  # type: ignore[method-assign]
+    tools._curve_length_mm = lambda reference: 4.0  # type: ignore[method-assign]
+    tools._source_length_mm = lambda name: (63.96, "outline")  # type: ignore[method-assign]
+    tools._ref = lambda name, *a, **k: None  # type: ignore[method-assign]
+    tools._factory = lambda: types.SimpleNamespace(  # type: ignore[method-assign]
+        AddNewProject=lambda a, b: types.SimpleNamespace())
+    tools.conn = types.SimpleNamespace(
+        ensure_connected=lambda: None,
+        get_active_part=lambda: types.SimpleNamespace(
+            CreateReferenceFromObject=lambda obj: obj))
+    reply = tools._project({"element": "草图.45", "support": "Face.13"})
+    assert reply.startswith(" WARNING")
+    assert "4.000 mm" in reply and "63.960 mm" in reply
+    assert "6.3 %" in reply
+    assert "MINIMUM" in reply
 
 
 def test_project_failure_names_both_degenerate_cases() -> None:

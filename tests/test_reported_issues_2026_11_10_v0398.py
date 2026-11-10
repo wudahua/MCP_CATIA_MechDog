@@ -178,7 +178,8 @@ def fake_pd(monkeypatch):
 
 def test_cleanup_removes_the_body_then_the_elements(fake_pd) -> None:
     holder = fake_pd()
-    tools = GSDTools(connection=_Conn())
+    tools = GSDTools(connection=_Conn(
+        body_names=("零件几何体", "Engrave_Trace")))
     note = tools._engrave_cleanup(["Engrave_Trace_N", "Engrave_Trace_P"],
                                   "Engrave_Trace")
     assert "left behind" in note and "could not" not in note
@@ -188,12 +189,32 @@ def test_cleanup_removes_the_body_then_the_elements(fake_pd) -> None:
 
 
 def test_cleanup_admits_what_it_could_not_remove(fake_pd) -> None:
+    """0.3.100: a delete that fails on a part that will not answer for names is
+    reported as UNVERIFIED, not as "may still hold them" - the 2026-11-10 report
+    got that sentence while `catia_list_bodies` showed one body, because the
+    boolean had already consumed the cutter."""
     fake_pd(fail_on={"Engrave_Trace_P"})
     tools = GSDTools(connection=_Conn())
     note = tools._engrave_cleanup(["Engrave_Trace_N", "Engrave_Trace_P"],
                                   "Engrave_Trace")
-    assert "could not remove" in note
+    assert "could not be checked" in note
     assert "Engrave_Trace_P" in note
+    assert "Bodies now" in note
+
+
+def test_a_consumed_cutter_body_is_not_reported_as_still_there(fake_pd) -> None:
+    """The exact false alarm of the 2026-11-10 report: the boolean consumed the
+    tool body (tool_body_consumed: true), so deleting it BY NAME failed and the
+    reply said "could not remove body ... may still hold them" while the tree had
+    one body."""
+    holder = fake_pd()
+    tools = GSDTools(connection=_Conn(body_names=("零件几何体",)))
+    note = tools._engrave_cleanup(["Engrave_Trace_N"], "Engrave_Trace")
+    assert "could not" not in note.lower()
+    assert "already been consumed" in note
+    assert "Bodies now: 零件几何体" in note
+    # It must not try to delete a body that is gone.
+    assert all(call[0] != "catia_delete_body" for call in holder.calls)
 
 
 # ── a refusal keeps the code it chose, and gains the cleanup sentence ──

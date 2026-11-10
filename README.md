@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.99** · [what changed](CHANGELOG.md) ·
+**0.3.100** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1560,6 +1560,42 @@ Place the result with `catia_get_component_transform`.
   cannot name inside/outside that way. It reports the flag it used, the measured
   gap (0.4000 mm for a 0.4 mm offset, both directions) and the route that does
   answer it: cut toward the surface and read the volume.
+
+* **A projection can keep a sixth of the element and still report success — it
+  now reports the number.** `AddNewProject` runs along the support's own normal,
+  so on a curved support part of the element can miss it entirely. Measured on
+  the 2026-11-10 bottle part (a copy, never saved): a 63.947 mm glyph outline
+  onto a lofted body face gave a **4.000 mm** curve — 6.3 %, one segment of seven.
+  `catia_measure_distance` then answered `0.0000 mm`, which is a MINIMUM and only
+  says the fragment touches; `catia_surface_engrave` swept a 2.0106 mm3 tube along
+  those 4 mm and removed nothing, correctly. The reply now begins with
+  `WARNING: ONLY PART OF THE ELEMENT LANDED` below a 25 % share, and always prints
+  the projected length against the source's. 25 % and not 50 % because a CLOSED
+  curve on a round support legitimately keeps about half (measured: 47.2 % on the
+  0.3.98 acceptance cylinder, which engraves fine).
+  The other routes to a curve that lies on such a face do not reach the chain
+  either, all measured the same day: an **intersection** is a real curve on the
+  face (37.699 mm, 0.0000 mm) but all four point-on-curve overloads refuse it, and
+  `AddNewSweepCircle` + `SetRadius(1, r)` — a tube with no profile at all — is
+  accepted and never updates.
+
+* **A projection can keep a sixth of the element and still report success — it
+  now reports the number.** `AddNewProject` runs along the support's own normal,
+  so on a curved support part of the element can miss it entirely. Measured on
+  the 2026-11-10 bottle part (a copy, never saved): a 63.947 mm glyph outline
+  onto a lofted body face gave a **4.000 mm** curve — 6.3 %, one segment of seven.
+  `catia_measure_distance` then answered `0.0000 mm`, which is a MINIMUM and only
+  says the fragment touches; `catia_surface_engrave` swept a 2.0106 mm3 tube along
+  those 4 mm and removed nothing, correctly. The reply now begins with
+  `WARNING: ONLY PART OF THE ELEMENT LANDED` below a 25 % share, and always prints
+  the projected length against the source's. 25 % and not 50 % because a CLOSED
+  curve on a round support legitimately keeps about half (measured: 47.2 % on the
+  0.3.98 acceptance cylinder, which engraves fine).
+  The other routes to a curve that lies on such a face do not reach the chain
+  either, all measured the same day: an **intersection** is a real curve on the
+  face (37.699 mm, 0.0000 mm) but all four point-on-curve overloads refuse it, and
+  `AddNewSweepCircle` + `SetRadius(1, r)` — a tube with no profile at all — is
+  accepted and never updates.
 
 * **A loft's end conditions are a support, not a strength, and a datum plane is
   one.** `HybridShapeLoft` exposes 78 members on B30 (read from its own type

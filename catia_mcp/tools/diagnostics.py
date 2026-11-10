@@ -127,7 +127,16 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
             "solid, boolean remove - 2.974 mm3 off, exactly the half of the tube that "
             "sits inside the material. Limits: the guide has to be CLOSED (an open "
             "guide sweeps a pipe with two open ends and CloseSurface refuses it), and "
-            "the curve has to LIE ON the body, which this cannot arrange."
+            "the curve has to LIE ON the body, which this cannot arrange. "
+            "HOW FAR THAT HAS BEEN VERIFIED, because the 2026-11-10 bottle "
+            "report is the case outside it: the acceptance geometry is an "
+            "ANALYTIC cylinder r=40 with a r=4 trace projected onto it. On a "
+            "NON-ANALYTIC multi-section lofted bottle face the projection kept "
+            "6.3 % of a 63.947 mm outline (4.000 mm), measured 2026-11-10 - and "
+            "the engrave then found no material, correctly, because the tube was "
+            "4 mm long. So treat this as available on a surface a projection can "
+            "cover, not as available everywhere: read the WARNING that "
+            "catia_gsd_project now prints before building anything on the curve."
         ),
     },
     {

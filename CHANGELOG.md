@@ -2,6 +2,84 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.100] — 2026-11-10 · the projection kept 6 % of the letter, and every reply said "created"
+
+The bottle report ran `catia_surface_engrave` four times on a real lofted body
+face and got `NO_MATERIAL` four times, while `catia_measure_distance` said the
+curve was `0.0000 mm` from the face. Reproduced on a copy of that part: **the
+engrave was right and the projection was the problem.** A 63.947 mm glyph
+outline projected onto the lofted face produced a **4.000 mm** curve — 6.3 %, one
+segment of seven — and every layer below said "fine": the reply said "created",
+the distance said 0.0000 (a MINIMUM, so it only says the fragment touches), and
+the engrave then built a 4 mm tube that removed nothing.
+
+**`catia_gsd_project` measures what landed.** The reply now carries the projected
+length against the source's, and starts with `WARNING: ONLY PART OF THE ELEMENT
+LANDED` when the share falls below 25 %. On the report's part that reads
+`WARNING: ONLY PART OF THE ELEMENT LANDED - 6.3 % of it. ... the projected curve
+is 4.000 mm long, 6.3 % of the 63.947 mm outline this session drew`. A closed
+sketch has no measurable `Length` at all (Measurable on a sketch raises on B30),
+so the source comes from the outline the session recorded, and the reply says
+which of the two it used.
+
+The bar is at 25 % and not at 50 % because a CLOSED curve on a round support
+legitimately loses half — the far side has nowhere to land. Measured on the
+0.3.98 acceptance geometry: a r=6 circle onto a r=40 cylinder keeps **47.2 %**,
+and that projection engraves correctly (2.974 mm3 out of a 5.9657 mm3 tube). A
+50 % bar would have cried wolf on the one case that works.
+
+**A failed groove now reports the cutter.** `catia_boolean` CONSUMES the tool
+body, so after `NO_MATERIAL` the tube is gone and its numbers are unrecoverable —
+which is why the report got "shares no VOLUME" and nothing else. The tube's
+volume, its swept length and its distance to the body are measured BEFORE the
+cut: on the report's geometry, `a 2.0106 mm3 tube swept over 4.000 mm of curve,
+its body 0.0000 mm from '零件几何体' at the closest point`. A tube that touches at
+0.0000 mm and removes nothing is GRAZING the body, not buried in it, and the
+reply now says that and points at the swept length as the comparison to make.
+
+**The cleanup stopped inventing its own failure.** It said "Cleanup could not
+remove body 'CurveEngrave_A' - the tree may still hold them" while
+`catia_list_bodies` showed one body: the boolean had already consumed the cutter
+(`tool_body_consumed: true`), so deleting it BY NAME failed and the failure was
+read as "still there". It now checks whether the body exists before speaking,
+and ends with the measured tree: `Nothing this call created was left behind (the
+cutter body had already been consumed by the boolean, so there was nothing to
+delete). Bodies now: 零件几何体.`
+
+**And the modal warning has a cause that can be fixed by construction.** The
+deletion order took the reference POINT out before the PLANE that references it,
+which is what makes CATIA raise `已移除授权输入 "参考点"`. `created` is now
+ordered by dependency, so the reverse pass deletes the plane before the point.
+That is a fix by construction, not a verified absence: CATIA's dialog is not
+observable from here, and claiming otherwise would be the same defect in a new
+place.
+
+**What this release does NOT do, measured today.** The report's P0-2 asks for a
+way to make a curve lie on a body. Three routes were tried on its own part and
+none produces an engrave-able curve:
+
+* **intersection** — `Bottle ∩ cylinder` gives a genuine 37.699 mm curve lying on
+  the face (0.0000 mm), and `catia_surface_engrave` refuses it with
+  `ENGRAVE_CURVE_UNPARAMETRISABLE`: **all four** point-on-curve overloads
+  (`FromPercent`, `FromDistance`, `WithReferenceFromPercent`,
+  `WithReferenceFromDistance`) refuse an intersection curve.
+* **`AddNewSweepCircle(guide)` + `SetRadius(1, r)`** — a tube with no profile and
+  therefore no normal plane and no point on the curve. Both calls are accepted
+  and `UpdateObject` refuses every time, so it joins `AddNewGSDCircPattern` in
+  the "configurable and never updated" family.
+* **extract, then project onto the extract** — this is the 0.3.98 route, and on
+  this part it gives the same 4.000 mm fragment.
+
+So the honest answer to "the tool exists but cannot be used here" is: it can, on
+a surface a projection can cover; on this lofted bottle face the projection
+never produces the outline, and no other route reaches a curve the chain can
+consume. `capability_ceilings` now says exactly that instead of implying the
+cylinder acceptance was universal.
+
+1582 tests (+2), 139 tools, `scripts/b30_v0400_audit.py` 8/8 on B30, plus the
+report's own `SpecialBottle_Handle.CATPart` reproduced from a copy and never
+saved.
+
 ## [0.3.99] — 2026-11-10 · 3 277 non-manifold edges that were not there, and a shape nothing could see
 
 A five-lug PET bottle base was built end to end through this server and came out

@@ -152,6 +152,16 @@ POINT_OR_NAME = {
 }
 
 
+# A projection of a CLOSED curve onto a round support keeps about HALF of it,
+# and that half is usable: the 0.3.98 acceptance geometry (a r=4 trace onto a
+# r=40 cylinder) measured 47.2 % of the source and engraved correctly - 2.974
+# mm3 out of a 5.9657 mm3 tube. So a "mostly missing" warning cannot sit at 50 %,
+# which would fire on the one case that works. It sits below the half a closed
+# curve legitimately loses, and above the fragment the 2026-11-10 bottle report
+# got: 4.000 mm of a 63.947 mm outline = 6.3 %, one segment of seven.
+_PROJECT_FRAGMENT_SHARE = 25.0
+
+
 class GSDTools:
     """Tools for Generative Shape Design (wireframe & surface) in CATIA V5."""
 
@@ -545,7 +555,21 @@ class GSDTools:
             },
             {
                 "name": "catia_gsd_project",
-                "description": "Project a curve/point onto a support surface or plane.",
+                "description": (
+                    "Project a curve or point onto a support surface or plane, and "
+                    "MEASURE WHAT LANDED. A projection runs along the support's own "
+                    "normal, so on a curved support part of the element can miss it "
+                    "entirely: measured on B30 2026-11-10, a 63.947 mm glyph "
+                    "outline onto a lofted bottle face produced a 4.000 mm curve - "
+                    "6.3 %, one segment - and the reply said only 'created'. "
+                    "catia_measure_distance then answered 0.0000 mm, because that "
+                    "is a MINIMUM: the fragment touches, so the number looks "
+                    "perfect. The reply now starts with WARNING and carries the "
+                    "projected length against the source's, so a fragment cannot be "
+                    "mistaken for the whole element. That matters downstream: "
+                    "catia_surface_engrave sweeps a tube along THIS curve, and a "
+                    "4 mm tube removes nothing (measured the same day)."
+                ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1162,7 +1186,18 @@ class GSDTools:
                     "letter, give its OUTLINE (catia_sketch_strokes draws a whole "
                     "outline in one call), project it onto the face with "
                     "catia_gsd_project, and engrave along the projection. The curve "
-                    "must LIE ON the target body; the tool cannot make it do so."
+                    "must LIE ON the target body; the tool cannot make it do so. "
+                    "CHECK THAT THE PROJECTION KEPT YOUR CURVE: catia_gsd_project "
+                    "now prints the projected length against the source's and puts "
+                    "a WARNING in front when most of the element did not land. A "
+                    "fragment still measures 0.0000 mm to the face - that number is "
+                    "a MINIMUM - and it engraves NOTHING: measured on a lofted "
+                    "bottle face (2026-11-10), a 63.947 mm outline projected to "
+                    "4.000 mm, the tube measured 2.0106 mm3, sat 0.0000 mm from the "
+                    "body, and removed no material at all. When that happens this "
+                    "tool now reports the tube's volume, its swept length and its "
+                    "distance to the body, because the boolean consumes the cutter "
+                    "and those numbers are otherwise unrecoverable."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -3350,17 +3385,107 @@ class GSDTools:
             f"3D circle created: radius {radius} mm on '{args['support_plane']}'.",
         )
 
+    def _source_length_mm(self, element_name: str) -> tuple[float | None, str]:
+        """Length of the element being projected, and where the number came from.
+
+        A closed SKETCH has no measurable ``Length`` at all (Measurable on a
+        sketch raises on B30, measured 2026-11-10), so a sketch falls back to the
+        outline this session recorded when it drew it - and a sketch that came
+        from a reopened file has neither. None, never a guess.
+        """
+        name = str(element_name)
+        try:
+            reference = self._ref(name)
+        except Exception:  # noqa: BLE001 - not resolvable here; the call reports it
+            reference = None
+        if reference is not None:
+            length = self._curve_length_mm(reference)
+            if length is not None:
+                return length, "curve"
+        try:
+            document = str(self.conn.active_document.Name)
+        except Exception:  # noqa: BLE001
+            return None, ""
+        outlines = getattr(self.conn, "sketch_outlines", None) or {}
+        record = outlines.get(f"{document}::{name}") or {}
+        total = 0.0
+        found = False
+        for element in record.get("elements") or []:
+            kind = str(element.get("kind"))
+            try:
+                if kind == "line":
+                    total += math.hypot(float(element["x2"]) - float(element["x1"]),
+                                        float(element["y2"]) - float(element["y1"]))
+                    found = True
+                elif kind == "circle":
+                    total += 2.0 * math.pi * float(element["radius"])
+                    found = True
+            except (KeyError, TypeError, ValueError):
+                continue
+        return (total, "outline this session drew") if found and total > 0 else (
+            None, "")
+
     def _project(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
         elem_ref = self._ref(args["element"])
         support_ref = self._ref(args["support"])
         projection = self._factory().AddNewProject(elem_ref, support_ref)
         try:
-            return self._finish(
+            reply = self._finish(
                 projection, args.get("name"),
                 f"Projection of '{args['element']}' onto '{args['support']}' "
                 "created.",
             )
+            # HOW MUCH OF IT LANDED. A projection that keeps 6 % of the element
+            # is not a projection, it is a fragment - and every downstream tool
+            # measures THAT fragment: engrave sweeps a tube along it, split cuts
+            # with it, fill closes with it. Measured on the 2026-11-10 bottle
+            # report: a 63.96 mm glyph outline onto a lofted bottle face gave a
+            # 4.000 mm curve, distance-to-face 0.0000 mm (a MINIMUM, so it only
+            # says "touches somewhere"), and catia_surface_engrave then found no
+            # material - correctly, because the tube was 4 mm long.
+            part = self.conn.get_active_part()
+            try:
+                projected = self._curve_length_mm(
+                    part.CreateReferenceFromObject(projection))
+            except Exception:  # noqa: BLE001 - an unreadable length is not 0 mm
+                projected = None
+            source, origin = self._source_length_mm(str(args["element"]))
+            warning = ""
+            if projected is None:
+                note = (" ITS LENGTH COULD NOT BE MEASURED, so this call cannot "
+                        "say how much of the element landed - measure it with "
+                        "catia_measure_distance against the support before using "
+                        "it downstream.")
+            else:
+                note = f" MEASURED: the projected curve is {projected:.3f} mm long"
+                if source:
+                    share = projected / source * 100.0 if source else 0.0
+                    note += (f", {share:.1f} % of the {source:.3f} mm {origin} "
+                             "it came from.")
+                    if share < _PROJECT_FRAGMENT_SHARE:
+                        # BEFORE the success sentence, because a caller that
+                        # reads the first line and stops would otherwise take
+                        # "created" for "usable" - which is what happened in the
+                        # 2026-11-10 report.
+                        warning = (" WARNING: ONLY PART OF THE ELEMENT LANDED - "
+                                   f"{share:.1f} % of it. ")
+                        note += (" A projection lands only where the support "
+                                 "faces the element, and on a curved support most "
+                                 "of an outline can miss it entirely. Downstream "
+                                 "tools use THIS curve, not the one you drew: "
+                                 "catia_surface_engrave sweeps a tube along it and "
+                                 "will then find no material, and the 0.0000 mm "
+                                 "distance is a MINIMUM, so it only says the "
+                                 "fragment touches. Move the element closer to the "
+                                 "support (catia_gsd_translate), or project onto a "
+                                 "surface that wraps the target more fully.")
+                else:
+                    note += ("; the element's own length could not be read (a "
+                             "closed sketch has no measurable Length, and this "
+                             "session did not draw it), so compare that number "
+                             "with what you drew before relying on it.")
+            return warning + reply + note
         except Exception as error:  # noqa: BLE001 - the diagnostic is the point
             # A PROJECTION RUNS ALONG THE SUPPORT'S NORMAL, AND A PLANAR ELEMENT
             # NEEDS A SUPPORT THAT CROSSES IT AT AN ANGLE (0.3.97). The first
@@ -4381,25 +4506,85 @@ class GSDTools:
             f"No body named '{name}'. Top-level bodies: {names or 'none'}.")
 
     def _engrave_cleanup(self, created: list[str], body_name: str | None) -> str:
-        """Take back everything an engrave attempt made; say what survived."""
+        """Take back everything an engrave attempt made; say what is ACTUALLY left.
+
+        Two defects of the 2026-11-10 bottle report are fixed here, and both were
+        the reply talking about the model without looking at it:
+
+        * it said "Cleanup could not remove body 'CurveEngrave_A' - the tree may
+          still hold them" while `catia_list_bodies` showed ONE body: the boolean
+          had already consumed the cutter (``tool_body_consumed: true``), so
+          deleting it BY NAME failed and the failure was read as "still there".
+          A body that is gone cannot be deleted - this now checks before it
+          speaks, and reports the bodies that remain.
+        * the deletion order took the point out before the plane that references
+          it, which is what raises CATIA's modal 警告 (『已移除授权输入
+          "参考点"』). `created` is ordered by dependency, so reversing it deletes
+          dependents first: tube, profile, plane, point.
+        """
         from catia_mcp.tools.part_design import PartDesignTools
 
         pd = PartDesignTools(self.conn)
-        leftovers: list[str] = []
-        if body_name:
+        part = self.conn.get_active_part()
+        failed: list[str] = []
+        consumed = False
+
+        unverified: list[str] = []
+
+        def exists(name: str) -> bool | None:
+            """Is it in the tree? None when the part cannot answer."""
             try:
-                pd.execute("catia_delete_body", {"name": body_name, "force": True})
-            except Exception:  # noqa: BLE001 - reported, not raised
-                leftovers.append(f"body '{body_name}'")
+                return part.FindObjectByName(name) is not None
+            except Exception:  # noqa: BLE001 - a part that will not be asked
+                return None
+
+        if body_name:
+            if not self._body_exists(part, body_name):
+                # Already consumed by the boolean - nothing to delete, and
+                # nothing to report as a failure either.
+                consumed = True
+            else:
+                try:
+                    pd.execute("catia_delete_body",
+                               {"name": body_name, "force": True})
+                except Exception:  # noqa: BLE001 - reported, not raised
+                    failed.append(f"body '{body_name}'")
         for name in reversed(created):
+            present = exists(name)
+            if present is False:
+                continue                      # it went with the body
             try:
                 pd.execute("catia_delete_feature", {"feature_name": name})
             except Exception:  # noqa: BLE001 - reported, not raised
-                leftovers.append(f"'{name}'")
-        if leftovers:
-            return (" Cleanup could not remove " + ", ".join(leftovers)
-                    + " - the tree may still hold them.")
-        return " Nothing this call created was left behind."
+                if present is None:
+                    unverified.append(f"'{name}'")
+                else:
+                    failed.append(f"'{name}'")
+
+        bodies = [str(part.Bodies.Item(i).Name)
+                  for i in range(1, int(getattr(part.Bodies, "Count", 0)) + 1)]
+        body_text = (" Bodies now: " + (", ".join(bodies) if bodies else "none")
+                     + ".")
+        if not failed and not unverified:
+            return (" Nothing this call created was left behind"
+                    + (" (the cutter body had already been consumed by the "
+                       "boolean, so there was nothing to delete)" if consumed else "")
+                    + "." + body_text)
+        if failed:
+            return (" These are still in the tree: " + ", ".join(failed)
+                    + "." + body_text)
+        return (" These could not be checked - their delete failed and this part "
+                "cannot answer for a name: " + ", ".join(unverified)
+                + "." + body_text)
+
+    def _body_exists(self, part: Any, name: str) -> bool:
+        try:
+            for i in range(1, int(part.Bodies.Count) + 1):
+                if str(part.Bodies.Item(i).Name) == str(name):
+                    return True
+        except Exception:  # noqa: BLE001 - unreadable is not "gone"
+            return True
+        return False
 
     def _surface_engrave(self, args: dict[str, Any]) -> str:
         """A constant-depth groove along a curve that lies ON a surface.
@@ -4466,6 +4651,12 @@ class GSDTools:
             suffix += 1
 
         created: list[str] = []
+        # THE POINT COMES BEFORE THE PLANE IN THIS LIST, and the list is deleted
+        # in reverse. The plane holds the point as an input, so removing the point
+        # first makes CATIA raise a modal 警告 ('已移除授权输入 "参考点"') - which is
+        # exactly what the 2026-11-10 bottle report photographed. Reverse order is
+        # dependency order: tube, profile, plane, point.
+        tube_facts = ""
         plane_name = f"{base}_N"
         profile_name = f"{base}_P"
         tube_name = f"{base}_T"
@@ -4498,13 +4689,13 @@ class GSDTools:
                         "If the curve already exists as a circle, project it onto "
                         "the surface to get a usable copy",
                     ]) from error
-            created.append(plane_name)
             # The point the plane tool made is named after the curve and the
             # position, and it is the only thing the profile can be centred on
             # that is guaranteed to lie ON the curve.
             origin = re.search(r"origin '([^']+)'", plane_reply or "")
             centre = origin.group(1) if origin else f"{curve}_at{position:g}"
             created.append(centre)
+            created.append(plane_name)
             self._circle({"center": centre, "support_plane": plane_name,
                           "radius": depth, "name": profile_name})
             created.append(profile_name)
@@ -4528,6 +4719,40 @@ class GSDTools:
                     "outline.", code="ENGRAVE_TUBE_NOT_CLOSED", stage="execute",
                     modified=False) from error
 
+            # MEASURE THE CUTTER BEFORE THE BOOLEAN EATS IT. catia_boolean
+            # consumes the tool body, so once it reports NO_MATERIAL the tube is
+            # gone and its numbers are unrecoverable - which is why the report got
+            # "shares no VOLUME" and nothing else. Three numbers make the failure
+            # actionable: how big the tube is, how far it is from the material,
+            # and over what length it was swept.
+            # The measurement must never become the failure: if any of it cannot
+            # be read, the boolean's own code is what the caller needs to see.
+            try:
+                tube_body = self._body_by_name(part, body_name)
+                tube_volume = pd._body_volume_mm3(part, tube_body)
+                tube_gap = self._cutter_gap(
+                    part.CreateReferenceFromObject(tube_body),
+                    part.CreateReferenceFromObject(target))
+            except Exception:  # noqa: BLE001 - diagnostics, not the operation
+                tube_volume, tube_gap = None, None
+            tube_facts = (
+                " The cutter was measured before it was consumed:"
+                + (f" a {tube_volume:.4f} mm3 tube" if tube_volume is not None
+                   else " a tube whose volume could not be read")
+                + (f" swept over {length:.3f} mm of curve" if length else "")
+                + (f", its body {tube_gap:.4f} mm from '{target.Name}' at the "
+                   "closest point" if tube_gap is not None else
+                   ", and its distance to '" + str(target.Name) + "' could not be "
+                   "measured")
+                + (". A tube that touches at 0.0000 mm and still removes nothing is "
+                   "GRAZING the body, not buried in it: the curve it swept along "
+                   "meets the body at a point or two instead of running through "
+                   "it. Compare the swept length above with the length of the "
+                   "element you projected - a curve that is a small fraction of it "
+                   "is a fragment that merely touches, which is what a projection "
+                   "onto a curved face can produce (measured on a lofted bottle "
+                   "face 2026-11-10: 4.000 mm of a 63.947 mm outline)"
+                   if tube_gap is not None and tube_gap < 0.05 else "."))
             pd.execute("catia_set_active_body", {"name": str(target.Name)})
             before = pd._body_volume_mm3(part, target)
             pd.execute("catia_boolean", {"operation": "remove",
@@ -4542,11 +4767,11 @@ class GSDTools:
             # NOT a CodedError subclass (it carries .code without inheriting it),
             # so the test is on the attribute, not the class.
             if getattr(error, "code", None):
-                error.args = (str(error) + note,)
+                error.args = (str(error) + tube_facts + note,)
                 raise
             raise PreconditionRejected(
                 f"Engraving along '{curve}' failed: "
-                f"{str(error).splitlines()[0][:160]}.{note}",
+                f"{str(error).splitlines()[0][:160]}.{tube_facts}{note}",
                 code="ENGRAVE_FAILED", stage="execute", modified=False,
                 next_actions=[
                     "Check that the curve really lies ON the target body - a "
