@@ -119,6 +119,25 @@ class ExportTools:
                             ),
                             "default": 1080,
                         },
+                        "clean": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Hide the geometrical sets, capture, and put every "
+                                "visibility flag back. This is what makes a picture "
+                                "of the SOLID: with construction surfaces on screen "
+                                "they draw over it, and if the solid itself lives in "
+                                "one of those sets (a ThickSurface does) hiding the "
+                                "set by hand gives a blank window - reported "
+                                "2026-11-10. The elements carrying the solid are kept "
+                                "visible, so the model is still in the picture, and "
+                                "the reply says how many flags were restored. "
+                                "THE TREE IS STILL IN THE PICTURE: no automation "
+                                "member hides it (Viewer3D exposes 58 members on B30 "
+                                "and no HideTree/ShowTree, measured 2026-11-10) - "
+                                "press F3 in the UI before calling this for a report "
+                                "image."),
+                        },
                     },
                     "required": ["file_path"],
                 },
@@ -177,6 +196,7 @@ class ExportTools:
                     arguments["file_path"],
                     arguments.get("width", 1920),
                     arguments.get("height", 1080),
+                    bool(arguments.get("clean", False)),
                 )
             case "catia_set_view":
                 return self._set_view(arguments["view"])
@@ -366,7 +386,8 @@ class ExportTools:
             return None
         return None
 
-    def _screenshot(self, file_path: str, width: int = 1920, height: int = 1080) -> str:
+    def _screenshot(self, file_path: str, width: int = 1920, height: int = 1080,
+                    clean: bool = False) -> str:
         self.conn.ensure_connected()
 
         # Ensure output directory exists
@@ -396,7 +417,15 @@ class ExportTools:
             viewer.Update()
         except Exception:  # noqa: BLE001 - not every build exposes Update
             pass
-        viewer.CaptureToFile(capture_format, os.path.normpath(file_path))
+        hidden_note = ""
+        records: list[Any] = []
+        if clean:
+            records, hidden_note = self._clean_view()
+        try:
+            viewer.CaptureToFile(capture_format, os.path.normpath(file_path))
+        finally:
+            if records:
+                self._restore_view(records)
 
         actual = self._image_size(file_path)
         note = ""
@@ -411,7 +440,45 @@ class ExportTools:
                          "client area and exposes no capture-resolution setting - "
                          "Window.Width/Height do not change it, measured on B30 "
                          "2026-11-03. Resize the CATIA window to change this.]")
-        return f"Screenshot saved to {file_path} ({size_note}){note}"
+        return f"Screenshot saved to {file_path} ({size_note}){note}{hidden_note}"
+
+    def _clean_view(self) -> tuple[list[Any], str]:
+        """Hide construction geometry for one capture; returns what to restore.
+
+        The 2026-11-10 report followed this tool's own advice - hide the
+        geometrical set before a screenshot - and got a blank picture, because
+        the solid was a ThickSurface INSIDE that set. Hiding the set hides the
+        model, and no reply said so.
+        """
+        try:
+            part = self.conn.get_active_part()
+        except Exception:  # noqa: BLE001 - an assembly or no document
+            return [], (" [clean was asked for but the active document has no part "
+                        "to clean: no visibility was changed]")
+        from catia_mcp.tools.measurement import _hide_construct_geometry
+        records, info = _hide_construct_geometry(part, getattr(self.conn, "hso",
+                                                               None))
+        if not records:
+            return [], (" [clean was asked for but this part has no geometrical "
+                        "sets, so nothing was hidden]")
+        kept = info.get("kept") or []
+        return records, (
+            f" [clean: {info.get('hidden', 0)} construction element(s) in "
+            f"{info.get('sets', 0)} set(s) hidden for the capture"
+            + (f", keeping {', '.join(repr(k) for k in kept[:3])} visible because "
+               f"it carries the solid" if kept else "")
+            + "; all flags restored afterwards. The specification tree is still in "
+              "the picture - no automation member hides it (measured 2026-11-10)]")
+
+    def _restore_view(self, records: list[Any]) -> None:
+        """Put every visibility flag back after a capture."""
+        from catia_mcp.tools.measurement import _restore_visibility
+
+        _restore_visibility(records, getattr(self.conn, "hso", None))
+        try:
+            self.conn.refresh_display()
+        except Exception:  # noqa: BLE001 - the file is already written
+            pass
 
     def _set_view(self, view: str) -> str:
         self.conn.ensure_connected()

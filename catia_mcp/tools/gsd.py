@@ -903,7 +903,13 @@ class GSDTools:
                     "fails to update - the support has to touch that section. What "
                     "does NOT exist: a tangent factor, a curvature factor, or a "
                     "MaintainTangency switch (every *TangentFactor / MaintainTangency "
-                    "name is absent from the object). "
+                    "name is absent from the object; HybridShapeLoft exposes 78 "
+                    "members on B30, read from its type information 2026-11-10). "
+                    "TUTORIAL PARAMETERS: 'normal_to_profile', 'tangent_factor' "
+                    "and 'guide_influence' are accepted as aliases, so a tutorial "
+                    "recipe gets an answer about the tutorial - a coded refusal "
+                    "naming the measurement and the route that does work - instead "
+                    "of 'root: must NOT have additional properties'. "
                     "BUILD SENSITIVITY: reported failing on V5-6R2022 (B32) with "
                     "'UpdateObject failed' even for two coaxial equal-radius circles "
                     "whose pair catia_gsd_blend accepts in the same session "
@@ -1073,6 +1079,48 @@ class GSDTools:
                             ),
                         },
                         "name": {"type": "string", "description": "Optional name for the surface"},
+                        "tangent_factor": {
+                            "type": "number",
+                            "description": (
+                                "TUTORIAL ALIAS, accepted so the answer is about the "
+                                "tutorial and not about JSON Schema. A guide that "
+                                "says 'strength 1.5' means CATIA's tension field; "
+                                "HybridShapeLoft exposes 78 members on B30 and none "
+                                "of them carries a tension (measured 2026-11-10). "
+                                "1.0 is accepted and changes nothing - it is the "
+                                "only value this API has. Any other value is refused "
+                                "with the measurement and the two things that do "
+                                "change the shape: an end tangency support, or an "
+                                "extra section where the bulge belongs."),
+                        },
+                        "normal_to_profile": {
+                            "type": "boolean",
+                            "description": (
+                                "TUTORIAL ALIAS for the end condition 'Normal to "
+                                "Profile'. The nearest member is start_tangent / "
+                                "end_tangent with a support the section lies on, and "
+                                "a DATUM PLANE is one (measured 2026-11-10: two "
+                                "circles r=10 and r=14 give 3030.971 mm2 open, "
+                                "2869.025 with start_tangent='xy', 3202.807 with "
+                                "end_tangent='xy'). Note what that means: tangent TO "
+                                "the plane, so the surface leaves flat - not the same "
+                                "as leaving perpendicular to the section. Setting "
+                                "this true without a support named is refused with "
+                                "that choice spelled out."),
+                        },
+                        "guide_influence": {
+                            "type": "string",
+                            "description": (
+                                "TUTORIAL ALIAS for CATIA's 'Guide influence' "
+                                "('To Next Guide' / 'To End Points'). Not exposed by "
+                                "the API on this build: HybridShapeLoft has "
+                                "AddGuide / AddGuideWithTangent / GetGuide and no "
+                                "per-guide influence member (78 members read "
+                                "2026-11-10). Passing it is refused with that fact "
+                                "and the routes that do control where a guide acts: "
+                                "an extra section, or moving the guide's own control "
+                                "points."),
+                        },
                     },
                     "required": ["sections"],
                 },
@@ -3980,8 +4028,100 @@ class GSDTools:
             "carry it there."
         )
 
+    def _answer_tutorial_parameters(self, args: dict[str, Any]) -> None:
+        """Turn the tutorial's three loft parameters into the answer they need.
+
+        The 2026-11-10 report called exactly this call:
+
+            {"sections": [...], "normal_to_profile": true, "tangent_factor": 1.5,
+             "guide_influence": "To Next Guide", "guides": []}
+
+        and got ``root: must NOT have additional properties`` three times - before
+        a single CATIA call, and with nothing said about what the API can do. The
+        refusal is correct, so it stays; what changes is that it now names the
+        measurement and the route that works. Every claim below was read off
+        HybridShapeLoft's OWN type information on B30 2026-11-10, not off the
+        factory method's parameter list - which is how the AddNewSpline/SetClosing
+        mistake was made in 0.3.97.
+        """
+        factor = args.get("tangent_factor")
+        if factor is not None:
+            try:
+                value = float(factor)
+            except (TypeError, ValueError):
+                raise ArgumentRejected(
+                    f"tangent_factor must be a number, not {factor!r}.",
+                    code="BAD_ARGUMENT", stage="validate") from None
+            if abs(value - 1.0) > 1e-9:
+                raise ArgumentRejected(
+                    f"tangent_factor={value:g} cannot be applied: there is no "
+                    "tension member to apply it to. HybridShapeLoft exposes 78 "
+                    "members on B30 and not one of them takes a factor, a weight or "
+                    "a strength (read from its type information 2026-11-10) - the "
+                    "same answer for curvature. 1.0 is accepted because it is the "
+                    "only value this API has. What DOES change the shape at a "
+                    "section, both measured on B30 the same day: (1) an end tangency "
+                    "support - start_tangent/end_tangent take a surface or a DATUM "
+                    "PLANE the section lies on, and two circles r=10 and r=14 give "
+                    "3030.971 mm2 open, 2869.025 with start_tangent='xy', 3202.807 "
+                    "with end_tangent='xy'; (2) an extra SECTION where the bulge "
+                    "belongs, which the tutorial itself does by sampling. Nothing "
+                    "was created.",
+                    code="NO_TANGENT_FACTOR", stage="validate",
+                    next_actions=[
+                        "Drop tangent_factor and add the section where the bulge "
+                        "should be - a section is a control the loft must pass "
+                        "through, and it is what 'strength' was standing in for",
+                        "Or set the end condition the API does have: "
+                        "start_tangent='<surface or datum plane the section lies "
+                        "on>'",
+                    ])
+        if args.get("normal_to_profile") and not (args.get("start_tangent")
+                                                  or args.get("end_tangent")):
+            raise ArgumentRejected(
+                "normal_to_profile was asked for, and there is no member with that "
+                "name. The nearest one is an end tangency support: "
+                "start_tangent / end_tangent take a surface - or a DATUM PLANE - "
+                "that the section lies on, and a plane does work and does change "
+                "the shape (measured on B30 2026-11-10: two circles r=10 at z=0 and "
+                "r=14 at z=40 give 3030.971 mm2 with no condition, 2869.025 with "
+                "start_tangent='xy', 3202.807 with end_tangent='xy'). Read that "
+                "literally: the surface leaves TANGENT TO THE PLANE, i.e. flat along "
+                "it. 'Normal to profile' in the tutorial means the opposite "
+                "direction - perpendicular to the section's own plane - and no "
+                "member here says that. Nothing was created.",
+                code="NO_NORMAL_TO_PROFILE", stage="validate",
+                next_actions=[
+                    "Pass start_tangent='xy' (or the plane the section actually "
+                    "lies on) if a FLAT departure is what the shape needs",
+                    "If the surface has to leave perpendicular to the section, add "
+                    "a section right next to it - one short segment leaving at 90 "
+                    "degrees is what the loft then interpolates",
+                ])
+        influence = args.get("guide_influence")
+        if influence:
+            raise ArgumentRejected(
+                f"guide_influence='{influence}' cannot be applied: there is no "
+                "per-guide influence member. HybridShapeLoft has AddGuide, "
+                "AddGuideWithTangent, GetGuide, GetNbOfGuides and RemoveGuide - and "
+                "no influence, coupling or reach setting on any of them (78 members "
+                "read from its type information on B30 2026-11-10). 'To Next Guide' "
+                "decides how far a guide acts between two sections; the API here "
+                "lets a guide act along the whole loft or not at all. Nothing was "
+                "created.",
+                code="NO_GUIDE_INFLUENCE", stage="validate",
+                next_actions=[
+                    "Put the effect where it belongs by adding a SECTION: with a "
+                    "section at the place the guide should stop acting, the loft "
+                    "run to that section is the same shape the influence would have "
+                    "produced",
+                    "Or move the guide's own control points - the guide pulls the "
+                    "surface wherever it passes close to a section",
+                ])
+
     def _multi_section_surface(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
+        self._answer_tutorial_parameters(args)
         sections = args["sections"]
         guides = args.get("guides", [])
         orientations = args.get("orientations") or [1] * len(sections)

@@ -131,6 +131,77 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
         ),
     },
     {
+        "member": "ShapeFactory.AddNewGSDCircPattern (surface pattern)",
+        "status": "UNSUPPORTED_ON_B30",
+        "detail": (
+            "The SURFACE circular pattern, and there is no single-node substitute "
+            "for it. On B30 2026-11-10 its real 14-argument signature on "
+            "ShapeFactory refused UpdateObject in 16 of 16 flag "
+            "combinations - complete crown on/off x total 72/360 x radius-aligned "
+            "on/off x type 0/1 - with a real extracted surface as the source and "
+            "again with a solid one, with InWorkObject set. "
+            "THE SOLID COUNTERPART DOES WORK: ShapeFactory.AddNewCircPattern is "
+            "wrapped as catia_circ_pattern, one node for N instances (measured: a "
+            "r=5 boss at r=20, count=5 over 360 deg, pattern area 2356.19 mm2 "
+            "against 471.24 for the seed - and it needs part.InWorkObject set, "
+            "without which it refuses with one sentence naming no cause). So a "
+            "solid can be patterned as one editable node; a surface cannot, which "
+            "is why catia_gsd_circ_pattern rotates copies and joins them and says "
+            "so."
+        ),
+    },
+    {
+        "member": "HybridShapeLoft tangent factor / guide influence",
+        "status": "NOT_IN_TYPELIB",
+        "detail": (
+            "The tutorial's 'Normal to Profile, strength 1.5' and 'To Next Guide' "
+            "have no member. HybridShapeLoft exposes 78 members on B30 (read from "
+            "its own type information 2026-11-10) and not one of them carries a "
+            "tension, factor, weight or per-guide influence. What exists and is "
+            "wrapped: SetStartSectionTangent / SetEndSectionTangent through "
+            "start_tangent / end_tangent, and AddGuide. A DATUM PLANE is a legal "
+            "tangency support - measured the same day: two circles r=10 at z=0 and "
+            "r=14 at z=40 loft to 3030.971 mm2 with no condition, 2869.025 with "
+            "start_tangent='xy' and 3202.807 with end_tangent='xy'. That is tangency "
+            "TO the plane, so the surface leaves flat, which is not the tutorial's "
+            "'normal to profile' - the two directions are opposite. "
+            "catia_gsd_multi_section_surface accepts normal_to_profile / "
+            "tangent_factor / guide_influence as aliases and refuses each with this "
+            "measurement, instead of letting JSON Schema answer for it."
+        ),
+    },
+    {
+        "member": "Sketch frame / Point2D coordinates (read back)",
+        "status": "NOT_IN_TYPELIB",
+        "detail": (
+            "A closed sketch answers no coordinates: Point2D exposes no readable "
+            "X/Y through automation, and a sketch's own frame cannot be read back "
+            "either (both measured on B30 2026-11-10, in the report that hit them). "
+            "Consequences, stated rather than worked around: catia_sketch_copy "
+            "replays the coordinates this session recorded when it drew the "
+            "sketch, so a sketch that came from disk, or one whose constraints "
+            "solved to different positions, cannot be copied faithfully - the reply "
+            "says which of the two it is. catia_sketch_get_geometry says the same. "
+            "Ask CATIA instead of the sketch: catia_measure_distance against the "
+            "built geometry, catia_list_edges, or catia_get_bounding_box on the "
+            "solid - those are read from the model, not from the sketch."
+        ),
+    },
+    {
+        "member": "Viewer3D capture size / tree visibility",
+        "status": "NOT_IN_TYPELIB",
+        "detail": (
+            "Viewer3D exposes 58 members on B30 (measured 2026-11-10) and none of "
+            "them hides the specification tree: no HideTree and no ShowTree, and "
+            "Width/Height answer 'can not be set'. CaptureToFile therefore writes "
+            "the 3D window's client area - 300x400 in the session measured, whatever "
+            "was requested - tree and axis included. A clean render needs the CATIA "
+            "window sized and the tree hidden by hand in the GUI. What CAN be done "
+            "from here is hiding construction geometry, which is what "
+            "catia_screenshot(clean=true) does."
+        ),
+    },
+    {
         "member": "AddNewRib / AddNewStiffener",
         "status": "DECLARED_NOT_MEASURED",
         "detail": (

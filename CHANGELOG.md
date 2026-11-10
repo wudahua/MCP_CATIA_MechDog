@@ -2,6 +2,79 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.99] — 2026-11-10 · 3 277 non-manifold edges that were not there, and a shape nothing could see
+
+A five-lug PET bottle base was built end to end through this server and came out
+3.15 % under the tutorial's volume, with the wall thickness back-computed to
+0.4953 mm against 0.4954. The report's two structural findings were both right:
+the tools measured the wrong thing twice over — once spatially, once
+conceptually.
+
+**`catia_check_surface` measured the screen, not the solid.** The STL export
+contains every VISIBLE element, so the construction surfaces of a finished part
+were measured as part of its geometry: the same solid read 5 boundary + 3 277
+non-manifold edges and 11 049 triangles with its geometrical set on screen, and
+0 / 0 with 4 568 triangles when hidden. The second pair is the solid; the first
+pair reads as "my model is broken". It now hides the sets for the export and puts
+every flag back, and it keeps visible whatever CARRIES the solid — a ThickSurface
+lives inside its set, and hiding that set is how the same report got a blank
+screenshot and an empty STL. Measured on B30: 108 triangles against 540,
+0 non-manifold against 162, five flags hidden and five restored, and the set
+measured as shown again afterwards. `include_construction=true` restores the old
+view, so neither scope is a secret. `brief=true` drops the fixed prose (3 042
+characters against 6 931) for a `catia_run_plan` that self-checks at every step.
+`catia_screenshot(clean=true)` uses the same helper.
+
+**`catia_shape_audit`: r(theta), because volume cannot see a shape.** The
+report's point stands — every check this server had answered "the build worked",
+and the tutorial's own appendix describes eight earlier versions that passed all
+of them and were a smooth bowl. This bins every mesh vertex by angle about +Z and
+reports the outer radius: amplitude, peak angles, peak count, and — with `fold` —
+whether the repeats agree. Measured on a five-lug solid on B30: amplitude
+13.0 mm (outer 33, inner 20), five peaks at 2.57 / 69.43 / 146.57 / 213.43 /
+290.57 degrees, fold-5 deviation 0.0000 mm. The first run of that audit reported
+TEN peaks for the five lugs, which is the important part of this entry: a coarse
+mesh leaves empty angular bins, and an empty bin split each flat-topped lobe in
+two. Bins are now interpolated circularly and maxima are filtered by PROMINENCE
+(15 % of the amplitude), not by distance to the global maximum — on a plateau
+every bin is near the maximum. The mesh volume and area it prints are computed
+from the same triangles, so they cross-check `catia_get_inertia` instead of
+copying it.
+
+**The tutorial's three loft parameters now get an answer about the tutorial.**
+`{"normal_to_profile": true, "tangent_factor": 1.5, "guide_influence": "To Next
+Guide"}` used to die at `root: must NOT have additional properties` three times,
+before any CATIA call, saying nothing about what the API can do. The three names
+are now accepted as aliases and refused with the measurement:
+`NO_TANGENT_FACTOR`, `NO_NORMAL_TO_PROFILE`, `NO_GUIDE_INFLUENCE`. What settled
+it was reading HybridShapeLoft's OWN type information — 78 members, not one of
+them a tension, factor or per-guide influence. That is the lesson 0.3.97 paid for
+with `AddNewSpline`/`SetClosing`: ask the object, not the factory method's
+parameter list. And a datum plane IS a legal end-tangency support, which the
+schema did not say: two circles r=10 and r=14 loft to 3 030.971 mm2 with no
+condition, 2 869.025 with `start_tangent='xy'` and 3 202.807 with
+`end_tangent='xy'`. Tangency TO the plane, so the surface leaves flat — visibly
+not the same as "normal to profile", and the reply says so rather than pretending
+they are equal.
+
+**Four new `capability_ceilings`**, so "can it?" is answerable without reading
+133 KB of README: `ShapeFactory.AddNewGSDCircPattern` — the SURFACE pattern —
+`UNSUPPORTED_ON_B30`, 16 of 16 flag combinations refused on top of the earlier
+attempts, with the contrast that matters in the same entry (the SOLID pattern
+works and is `catia_circ_pattern`); `HybridShapeLoft` tangent factor / guide
+influence `NOT_IN_TYPELIB`; the sketch frame and `Point2D` readback
+`NOT_IN_TYPELIB`; and `Viewer3D` capture size / tree visibility
+`NOT_IN_TYPELIB` — 58 members, no HideTree, Width read-only.
+
+**A duplicate that was caught before it shipped.** The same report item produced
+a new "solid circular pattern" tool here for about twenty minutes: the
+measurement `AddNewCircPattern` needed (`part.InWorkObject` = the feature) turned
+out to be what the existing `catia_circ_pattern` had been doing since it was
+written. It was deleted rather than merged — the report's claim that a
+single-feature pattern is unavailable is true for SURFACES only.
+
+1580 tests (+15), 139 tools, `scripts/b30_v0399_audit.py` 14/14 on B30.
+
 ## [0.3.98] — 2026-11-10 · the engraving chain was there all along
 
 Three 2026-11-10 reports asked for "cut text into a curved face". Every route

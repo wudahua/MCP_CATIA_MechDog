@@ -267,7 +267,7 @@ def _three_faces_on_one_edge(tmp_path):
     return str(path)
 
 
-def _measure(tmp_path, visible):
+def _measure(tmp_path, visible, include_construction: bool = True):
     from catia_mcp.tools.measurement import MeasurementTools
 
     tools = MeasurementTools(connection=None)
@@ -282,24 +282,29 @@ def _measure(tmp_path, visible):
     tools._mesh_export = (lambda part, limit, visit:
                           visit(_three_faces_on_one_edge(tmp_path)))
     tools._visible_hybrid_sets = lambda part: visible
-    return json.loads(tools._check_surface(25.0, 600000, None))
+    return json.loads(tools._check_surface(25.0, 600000, None, None, 8, None,
+                                           include_construction))
 
 
 def test_the_visibility_hint_leads_the_report(tmp_path):
     """1373 reads as "my model is broken"; it was the visible GSD set on top of
-    the solid. The explanation was in non_manifold_note, after the number."""
-    payload = _measure(tmp_path, (1, 1))          # one set, visible
+    the solid. The explanation was in non_manifold_note, after the number.
+
+    0.3.99: the hint survives but the ROUTE changed - the default now measures the
+    solid alone, so the hint only appears when the caller asked for what is on
+    screen, and it names the switch that puts it right."""
+    payload = _measure(tmp_path, (1, 1), include_construction=True)   # set visible
 
     assert payload["non_manifold_edges"] > 0
     assert list(payload)[0] == "headline"         # first key in the JSON
-    assert "catia_set_visibility" in payload["headline"]
+    assert "include_construction" in payload["headline"]
     assert "non-manifold" in payload["headline"]
 
 
 def test_no_hint_when_nothing_extra_is_visible(tmp_path):
     """With every set hidden the count is about the solid itself - then the
     first thing to read is not an instruction to hide something."""
-    payload = _measure(tmp_path, (0, 1))
+    payload = _measure(tmp_path, (0, 1), include_construction=True)
 
     assert payload["non_manifold_edges"] > 0
     assert "headline" not in payload

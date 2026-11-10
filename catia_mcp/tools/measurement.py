@@ -109,6 +109,170 @@ def _region_bounds(region: Any) -> dict[str, tuple[float, float]] | None:
     return bounds
 
 
+# A geometrical set holds construction geometry, and every mesh-based tool here
+# measures whatever is VISIBLE. On a finished part that means the construction
+# surfaces lie on top of the solid and the numbers describe both at once.
+_SOLID_TYPE_HINTS = ("ThickSurface", "CloseSurface", "SewSurface", "Solid")
+_SOLID_NAME_HINTS = ("加厚曲面", "封闭曲面", "ThickSurface", "CloseSurface")
+
+
+def _type_name(node: Any) -> str:
+    """The COM type of a tree node, or '' when the build will not say."""
+    try:
+        return str(node._oleobj_.GetTypeInfo().GetDocumentation(-1)[0])
+    except Exception:  # noqa: BLE001 - a node without type information
+        return ""
+
+
+def _set_members(node: Any) -> list[Any]:
+    """The direct members of a geometrical set, of all three kinds."""
+    out: list[Any] = []
+    for collection in ("HybridShapes", "HybridSketches", "HybridBodies"):
+        try:
+            items = getattr(node, collection)
+            count = int(items.Count)
+        except Exception:  # noqa: BLE001 - the set does not hold this kind
+            continue
+        for index in range(1, count + 1):
+            try:
+                out.append(items.Item(index))
+            except Exception:  # noqa: BLE001 - one item, not the rest
+                continue
+    return out
+
+
+def _set_tree(node: Any, depth: int = 0, seen: set[int] | None = None) -> list[Any]:
+    """A geometrical set and everything under it, at any depth.
+
+    A set inside a set is the case that made hiding one level useless: the outer
+    flag does not reach the inner elements, and each element carries its own.
+    Recursion is by IDENTITY, not by "does this look like a set" - a nested set
+    may hold only shapes, and asking whether it has sub-sets then stops one level
+    too early (which is exactly how a set-inside-a-set stayed on screen in 0.3.73).
+    """
+    if depth > 4:
+        return []
+    seen = set() if seen is None else seen
+    found: list[Any] = []
+    for child in _set_members(node):
+        key = id(child)
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(child)
+        found.extend(_set_tree(child, depth + 1, seen))
+    return found
+
+
+def _read_show(selection: Any, node: Any) -> int | None:
+    """The node's own visibility flag (0 shown, 1 hidden), or None."""
+    try:
+        selection.Clear()
+        selection.Add(node)
+        state = selection.VisProperties.GetShow()
+        if isinstance(state, (tuple, list)):
+            state = state[-1] if state else 0
+        return int(state)
+    except Exception:  # noqa: BLE001 - a node the selection will not take
+        return None
+    finally:
+        try:
+            selection.Clear()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _write_show(selection: Any, node: Any, state: int) -> bool:
+    try:
+        selection.Clear()
+        selection.Add(node)
+        selection.VisProperties.SetShow(state)
+        return True
+    except Exception:  # noqa: BLE001 - one node, not the rest
+        return False
+    finally:
+        try:
+            selection.Clear()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _hide_construct_geometry(part: Any, selection: Any
+                             ) -> tuple[list[tuple[Any, int]], dict[str, Any]]:
+    """Hide the construction geometry for ONE mesh export, keeping the solid.
+
+    The 2026-11-10 report is the field case: with the geometrical set visible,
+    ``catia_check_surface`` read 5 boundary and 3277 non-manifold edges and 11049
+    triangles; with the set hidden it read 0 / 0 and 4568. Both describe the same
+    solid, and the first pair reads as "my model is broken". Telling the caller to
+    hide the set by hand is not a fix - hiding it also hides the solid when the
+    solid IS one of its elements (a ThickSurface or CloseSurface lives inside the
+    set, measured 2026-11-09), which is how the same report got a blank
+    screenshot and an empty STL.
+
+    So: hide every set and every element in it, then put back on screen the
+    elements that CARRY the solid. Returns the (node, previous flag) pairs to
+    restore and a small report; the caller restores in a ``finally``.
+    """
+    info: dict[str, Any] = {"sets": 0, "elements": 0, "hidden": 0,
+                            "kept": [], "readable": True, "failed": 0}
+    if selection is None:
+        info["readable"] = False
+        return [], info
+    try:
+        sets = part.HybridBodies
+        total = int(sets.Count)
+    except Exception:  # noqa: BLE001 - no sets, or unreadable
+        return [], info
+    if not total:
+        return [], info
+    info["sets"] = total
+
+    nodes: list[Any] = []
+    for index in range(1, total + 1):
+        try:
+            node = sets.Item(index)
+        except Exception:  # noqa: BLE001 - one set, not the rest
+            continue
+        nodes.append(node)
+        nodes.extend(_set_tree(node))
+    info["elements"] = len(nodes)
+
+    records: list[tuple[Any, int]] = []
+    for node in nodes:
+        kind = _type_name(node)
+        try:
+            name = str(node.Name)
+        except Exception:  # noqa: BLE001 - a half-dead node
+            name = ""
+        carrier = (any(hint in kind for hint in _SOLID_TYPE_HINTS)
+                   or any(hint in name for hint in _SOLID_NAME_HINTS))
+        before = _read_show(selection, node)
+        if before is None:
+            info["readable"] = False
+            info["failed"] += 1
+            continue
+        records.append((node, before))
+        if _write_show(selection, node, 0 if carrier else 1):
+            info["hidden"] += 0 if carrier else 1
+            if carrier:
+                info["kept"].append(name or kind or "<unnamed>")
+        else:
+            info["failed"] += 1
+    return records, info
+
+
+def _restore_visibility(records: list[tuple[Any, int]], selection: Any) -> int:
+    """Put every flag back the way it was. Returns how many were restored."""
+    if selection is None:
+        return 0
+    done = 0
+    for node, state in records:
+        if _write_show(selection, node, state):
+            done += 1
+    return done
+
+
 def _fold_stats(path: str, crease_deg: float, cap: int,
                 region: dict[str, tuple[float, float]] | None = None,
                 top: int = 8) -> dict[str, Any]:
@@ -470,6 +634,199 @@ class EmptyMesh(RuntimeError):
 # removes a third of the evidence and moves no conclusion is a rule that will
 # later be quoted as if it did something.
 RESOLVABLE_LENGTH_RATIO = 10.0
+
+
+def _interpolate_bins(series: list[float | None]) -> list[float]:
+    """Fill empty angular bins by linear interpolation, circularly.
+
+    A coarse tessellation leaves bins with no vertex at all, and a gap in this
+    series splits one lobe into two peaks - measured on B30 2026-11-10, where a
+    five-lug base with 10-degree facets reported ten peaks on 72 five-degree bins.
+    """
+    n = len(series)
+    known = [i for i, value in enumerate(series) if value is not None]
+    if not known:
+        raise EmptyMesh("no bin had a vertex in it")
+    if len(known) == n:
+        return [float(value) for value in series]  # type: ignore[arg-type]
+    out: list[float] = [0.0] * n
+    for index in range(n):
+        value = series[index]
+        if value is not None:
+            out[index] = float(value)
+            continue
+        before = max((k for k in known if k < index), default=None)
+        after = min((k for k in known if k > index), default=None)
+        if before is None:
+            before = max(known) - n
+        if after is None:
+            after = min(known) + n
+        span = after - before
+        weight = (index - before) / span if span else 0.0
+        out[index] = (float(series[before % n]) * (1.0 - weight)
+                      + float(series[after % n]) * weight)
+    return out
+
+
+def _prominent_maxima(series: list[float], amplitude: float,
+                      step: float) -> list[float]:
+    """Angles of the maxima that stand out, in degrees.
+
+    Smoothing first (tessellation noise is per-bin; a lobe is not), then keeping
+    only maxima whose PROMINENCE - how far they drop before the series rises
+    again - is at least 15 % of the amplitude. Distance to the global maximum
+    would not do: on a flat-topped lobe every bin is close to it, which is exactly
+    how one lug became two peaks.
+    """
+    n = len(series)
+    if n < 3:
+        return []
+    smooth = [(series[(i - 1) % n] + 2.0 * series[i] + series[(i + 1) % n]) / 4.0
+              for i in range(n)]
+    floor = max(0.15 * amplitude, 1e-9)
+    found: list[float] = []
+    for i in range(n):
+        if not (smooth[i] >= smooth[(i - 1) % n] and smooth[i] > smooth[(i + 1) % n]):
+            continue
+        peak = smooth[i]
+        left = peak
+        for distance in range(1, n // 2 + 1):
+            value = smooth[(i - distance) % n]
+            if value > peak:
+                break
+            left = min(left, value)
+        right = peak
+        for distance in range(1, n // 2 + 1):
+            value = smooth[(i + distance) % n]
+            if value > peak:
+                break
+            right = min(right, value)
+        if peak - max(left, right) >= floor:
+            found.append(round((i + 0.5) * step, 2))
+    return found
+
+
+def _shape_profile(path: str, bins: int, cap: int,
+                   top: int = 6) -> dict[str, Any]:
+    """The circumferential profile of a mesh: r(θ) as numbers.
+
+    The 2026-11-10 report is the reason this exists. A five-lug bottle base was
+    built end to end - loft, pattern, thick surface, single closed solid - with a
+    volume 3.15 % under the tutorial's and a centroid 0.36 mm off, and NOTHING in
+    the tool set could say which: volume "looked reasonable", the mesh was
+    manifold, the thickness back-computed to 0.4954 mm against 0.4953. The
+    tutorial's own appendix D describes eight earlier versions that were all
+    "successful" and all the wrong shape.
+
+    So: bin every mesh vertex by angle about +Z and report the largest and
+    smallest radius in each bin. A 5-lug base shows five maxima; a smooth bowl
+    shows none. The volume of a shape and the shape itself are different
+    questions, and only one of them was answerable.
+
+    What this can and cannot say, because both matter: the radius is sampled from
+    the mesh, so it is a LOWER bound by the chording (a 20 mm cylinder reads a few
+    microns small), and a feature narrower than one bin is smeared across it. A
+    peak count is therefore a hint that has to agree with the model, not a
+    measurement of the design intent.
+    """
+    triangles = _stl_triangles(path, cap)
+    if not triangles:
+        raise EmptyMesh("the STL carries no triangles, so there is no profile")
+    step = 360.0 / bins
+    r_max = [-math.inf] * bins
+    r_min = [math.inf] * bins
+    z_lo = [math.inf] * bins
+    z_hi = [-math.inf] * bins
+    counts = [0] * bins
+    volume6 = 0.0
+    area = 0.0
+    z_all_lo = math.inf
+    z_all_hi = -math.inf
+    for _normal, verts in triangles:
+        (ax, ay, az), (bx, by, bz), (cx, cy, cz) = verts
+        # signed tetra volume from the origin - exact for a closed, correctly
+        # oriented mesh and a useful cross-check against catia_get_inertia
+        volume6 += (ax * (by * cz - bz * cy)
+                    - ay * (bx * cz - bz * cx)
+                    + az * (bx * cy - by * cx))
+        ux, uy, uz = bx - ax, by - ay, bz - az
+        vx, vy, vz = cx - ax, cy - ay, cz - az
+        nx = uy * vz - uz * vy
+        ny = uz * vx - ux * vz
+        nz = ux * vy - uy * vx
+        area += 0.5 * math.sqrt(nx * nx + ny * ny + nz * nz)
+        for x, y, z in verts:
+            r = math.hypot(x, y)
+            theta = math.degrees(math.atan2(y, x)) % 360.0
+            index = int(theta // step) % bins
+            if r > r_max[index]:
+                r_max[index] = r
+            if r < r_min[index]:
+                r_min[index] = r
+            if z < z_lo[index]:
+                z_lo[index] = z
+            if z > z_hi[index]:
+                z_hi[index] = z
+            counts[index] += 1
+            z_all_lo = min(z_all_lo, z)
+            z_all_hi = max(z_all_hi, z)
+
+    filled = [i for i in range(bins) if counts[i]]
+    if not filled:
+        raise EmptyMesh("no vertex fell in any angular bin")
+    outer = [(i, r_max[i]) for i in filled]
+    peak = max(value for _i, value in outer)
+    trough = min(value for _i, value in outer)
+    amplitude = peak - trough
+
+    # The series has to be repaired before it is read, and both repairs are
+    # measured rather than assumed. A coarse mesh leaves EMPTY bins (a 10-degree
+    # tessellation fills half of 72 five-degree bins), and an empty bin used to
+    # split one flat-topped lobe into two peaks - a five-lug base reported TEN
+    # peaks on B30 2026-11-10. Then a flat top plus per-bin tessellation noise
+    # adds maxima of its own; those are dropped by PROMINENCE, not by distance to
+    # the global maximum, because on a plateau every bin is close to the maximum.
+    series = _interpolate_bins([r_max[i] if counts[i] else None
+                                for i in range(bins)])
+    peaks = _prominent_maxima(series, amplitude, step)
+    valleys = _prominent_maxima([-value for value in series], amplitude, step)
+    profile = [
+        {"theta_deg": round((i + 0.5) * step, 2),
+         "r_max": round(r_max[i], 4),
+         "r_min": round(r_min[i], 4),
+         "z_min": round(z_lo[i], 4),
+         "z_max": round(z_hi[i], 4),
+         "vertices": counts[i]}
+        for i in filled
+    ]
+    # Keep the reply readable: the extremes plus a coarse summary, not 72 rows of
+    # JSON on every call (the same complaint that produced brief on
+    # catia_check_surface).
+    ordered = sorted(profile, key=lambda row: row["r_max"], reverse=True)
+    return {
+        "triangles": len(triangles),
+        "bins": bins,
+        "bin_deg": round(step, 3),
+        "bins_filled": len(filled),
+        "circumference": {
+            "r_max_mm": round(peak, 4),
+            "r_min_mm": round(trough, 4),
+            "amplitude_mm": round(amplitude, 4),
+            "mean_r_max_mm": round(sum(v for _i, v in outer) / len(outer), 4),
+            "peak_angles_deg": peaks[:12],
+            "trough_angles_deg": valleys[:12],
+            "peak_count": len(peaks),
+        },
+        "axial": {"z_min": round(z_all_lo, 4), "z_max": round(z_all_hi, 4),
+                  "height": round(z_all_hi - z_all_lo, 4)},
+        "mesh_properties": {"volume_mm3": round(volume6 / 6.0, 3),
+                            "area_mm2": round(area, 3)},
+        "widest_bins": ordered[:max(1, top)],
+        "narrowest_bins": ordered[-max(1, top):],
+        "_profile": profile,
+        "_r_by_bin": [round(r_max[i], 4) if counts[i] else None
+                      for i in range(bins)],
+    }
 
 
 def _curvature_stats(path: str, thickness: float | None = None,
@@ -1847,6 +2204,70 @@ class MeasurementTools:
                 },
             },
             {
+                "name": "catia_shape_audit",
+                "description": (
+                    "Does the SOLID have the SHAPE it was supposed to have? Bins "
+                    "every mesh vertex by angle about +Z and reports the outer "
+                    "radius r(theta): its amplitude, where the peaks and troughs "
+                    "are, how many there are, and - with 'fold' - whether the "
+                    "repeats agree with each other. "
+                    "WHY THIS IS NOT catia_get_inertia: volume, area and centroid "
+                    "can all be right while the shape is wrong. Measured case "
+                    "(2026-11-10): a five-lug bottle base came out 3.15 % under the "
+                    "tutorial's volume with the back-computed wall thickness "
+                    "matching to 0.0001 mm - and the tutorial's own appendix "
+                    "describes eight earlier versions that passed every such check "
+                    "and were a smooth shallow bowl. A bowl has a near-constant "
+                    "outer radius; a five-lug base does not, and that difference is "
+                    "one number here. "
+                    "READ IT AS MESH SAMPLES: r is a LOWER bound (the STL chords "
+                    "curves) and a feature narrower than one bin is smeared across "
+                    "it, so peak_count is a hint to check against the design, not a "
+                    "measurement of intent. mesh_properties (volume and area) is "
+                    "computed from the same triangles, which makes it a cross-check "
+                    "of catia_get_inertia rather than a second copy of it. "
+                    "Construction geometry is hidden for the measurement and "
+                    "restored afterwards, so this reads the SOLID."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "bins": {
+                            "type": "integer",
+                            "default": 72,
+                            "minimum": 8,
+                            "maximum": 720,
+                            "description": (
+                                "Angular bins around +Z (default 72 = 5 degrees "
+                                "each). Raise it for a shape with many narrow "
+                                "features; lower it when the mesh is coarse."),
+                        },
+                        "fold": {
+                            "type": "integer",
+                            "minimum": 2,
+                            "description": (
+                                "Repeat count to test, e.g. 5 for a five-lug base. "
+                                "Compares each bin's outer radius with the same bin "
+                                "one repeat around, and reports the worst "
+                                "disagreement and where it is. 'bins' is rounded "
+                                "down to a multiple of this."),
+                        },
+                        "top": {
+                            "type": "integer",
+                            "default": 6,
+                            "description": ("How many of the widest and narrowest "
+                                            "bins to list."),
+                        },
+                        "document": {
+                            "type": "string",
+                            "description": ("Document name, if it is not the active "
+                                            "one."),
+                        },
+                    },
+                    "required": [],
+                },
+            },
+            {
                 "name": "catia_get_parameters",
                 "description": (
                     "List all user-defined and computed parameters of the active part. "
@@ -1953,13 +2374,52 @@ class MeasurementTools:
                     "tightest_edges[*].at_open_border marks a real reading whose "
                     "edge ends on a border, and excluded.open_boundary_edges says "
                     "how many borders the mesh has. "
-                    "SCOPE: the STL export contains every VISIBLE element of the "
-                    "document, so hide construction geometry before checking a "
-                    "solid. The report says which case it read."
+                    "SCOPE: this now measures the SOLID only. The STL export "
+                    "contains every VISIBLE element, so construction geometry lying "
+                    "on top of a solid used to be counted as part of it - reported "
+                    "2026-11-10: 5 boundary and 3277 non-manifold edges with the "
+                    "geometrical set on screen, 0 and 0 with it hidden, 11049 "
+                    "against 4568 triangles, same solid. The tool hides the sets for "
+                    "the export and puts every flag back afterwards, keeping visible "
+                    "whatever CARRIES the solid (a ThickSurface lives inside its "
+                    "set, and hiding that set empties the STL). The reply's 'scope' "
+                    "says what was excluded and how many flags were restored, so a "
+                    "number always states what it measured. Pass "
+                    "include_construction=true to measure exactly what is on screen "
+                    "instead - and read scope before comparing two runs."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
+                        "include_construction": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Measure what is ON SCREEN instead of the solid "
+                                "alone. Off (the default since 0.3.99): every "
+                                "geometrical set is hidden for the duration of the "
+                                "export and restored afterwards, so "
+                                "boundary_edges/non_manifold_edges describe the "
+                                "solid. On: no hiding at all, which is the old "
+                                "behaviour - the numbers then include visible "
+                                "construction surfaces, and a set lying on a solid "
+                                "reads as thousands of non-manifold edges. Use it "
+                                "when the thing you are checking IS a surface patch "
+                                "sitting in a set."
+                            ),
+                        },
+                        "brief": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Numbers only: drop how_to_read, side_rule, the "
+                                "labelled vertex sample and the other fixed prose, "
+                                "keeping document, scope, triangles, "
+                                "boundary_edges, non_manifold_edges, fold_deg, "
+                                "creases, curvature and warnings. The full report is "
+                                "about 4k tokens, which a catia_run_plan pays at "
+                                "every self-check step."),
+                        },
                         "crease_deg": {
                             "type": "number",
                             "description": (
@@ -2066,6 +2526,12 @@ class MeasurementTools:
                 if arguments.get("warm_up"):
                     return self._warm_up_report(reply)
                 return reply
+            case "catia_shape_audit":
+                return self._shape_audit(
+                    int(arguments.get("bins", 72)),
+                    int(arguments["fold"]) if arguments.get("fold") else None,
+                    arguments.get("document") or arguments.get("document_name"),
+                    int(arguments.get("top", 6)))
             case "catia_get_parameters":
                 return self._get_parameters(arguments.get("filter"))
             case "catia_set_parameter":
@@ -2080,7 +2546,12 @@ class MeasurementTools:
                     arguments.get("region"),
                     int(arguments.get("top_creases", 8)),
                     float(arguments["thickness"]) if arguments.get("thickness")
-                    else None)
+                    else None,
+                    # include_construction is "measure what is on screen", so it
+                    # must stay opt-in: the default answers for the SOLID, which
+                    # is the question a finished part raises (0.3.99).
+                    bool(arguments.get("include_construction", False)),
+                    bool(arguments.get("brief", False)))
             case _:
                 raise ArgumentRejected(f"Unknown measurement tool: {tool_name}")
 
@@ -4785,7 +5256,9 @@ class MeasurementTools:
     def _check_surface(self, crease_deg: float = 25.0, cap: int = 600000,
                        document: str | None = None,
                        region: Any = None, top: int = 8,
-                       thickness: float | None = None) -> str:
+                       thickness: float | None = None,
+                       include_construction: bool = False,
+                       brief: bool = False) -> str:
         """Dihedral-angle report of the active part's mesh: the zebra substitute.
 
         CATIA V5 exposes no zebra, curvature-comb or environment-mapping object
@@ -4801,6 +5274,16 @@ class MeasurementTools:
         Read ``fold_deg.median`` first, not ``max``: the STL chords every curved
         face, so a cylinder has a nonzero fold across all of its facet edges and
         that background is the median. A crease is an edge far above it.
+
+        SOLID ONLY, AND THAT IS NEW (0.3.99): the mesh includes every VISIBLE
+        element, so a part with its construction geometry on screen was measured
+        on both at once - 5 boundary / 3277 non-manifold edges on a solid whose
+        own mesh reads 0 / 0 (2026-11-10 report). This now hides the geometrical
+        sets for the duration of the export and puts them back afterwards,
+        keeping any element that CARRIES the solid (a ThickSurface lives inside
+        its set, and hiding that set empties the STL). Pass
+        ``include_construction=True`` for the old behaviour, i.e. to measure what
+        is on screen.
         """
         self.conn.ensure_connected()
         bounds = _region_bounds(region)
@@ -4825,7 +5308,24 @@ class MeasurementTools:
             # costs one more read of a mesh already in hand.
             captured["curvature"] = _curvature_stats(path, thickness, top, bounds)
 
-        self._mesh_export(part, None, grab)
+        scope_info: dict[str, Any] = {"sets": 0, "elements": 0, "hidden": 0,
+                                      "kept": [], "readable": True, "failed": 0}
+        records: list[tuple[Any, int]] = []
+        if not include_construction:
+            selection = getattr(self.conn, "hso", None)
+            records, scope_info = _hide_construct_geometry(part, selection)
+        exported: Any = None
+        try:
+            exported = self._mesh_export(part, None, grab)
+        finally:
+            if records:
+                restored = _restore_visibility(records,
+                                               getattr(self.conn, "hso", None))
+                scope_info["restored"] = restored
+                try:
+                    self.conn.refresh_display()
+                except Exception:  # noqa: BLE001 - the numbers are already in hand
+                    pass
         stats = captured.get("stats")
         if stats is None:
             raise CodedError(
@@ -4847,6 +5347,38 @@ class MeasurementTools:
         shown, sets_total = self._visible_hybrid_sets(part)
         if not sets_total:
             scope = "the solid (this part has no geometrical sets)"
+        elif not include_construction and not scope_info.get("elements"):
+            # The sets are there and NOTHING inside them could be read: say that,
+            # rather than print a solid-only sentence over a mesh that still holds
+            # construction geometry.
+            scope = (
+                f"the solid plus whatever is visible - {sets_total} geometrical "
+                f"set(s) exist but no element inside them could be hidden "
+                f"({scope_info.get('failed', 0)} visibility call(s) failed), so "
+                "these figures may include construction geometry; pass "
+                "include_construction=true to say so explicitly, or hide the set "
+                "by hand with catia_set_visibility")
+        elif not include_construction:
+            kept = scope_info.get("kept") or []
+            kept_note = (
+                " The element(s) carrying the solid stayed visible: "
+                + ", ".join(f"'{name}'" for name in kept[:4])
+                + (f" and {len(kept) - 4} more" if len(kept) > 4 else "")
+                if kept else
+                " No element inside them carries a solid, so what was measured is "
+                "the body.")
+            scope = (
+                f"the solid only - {scope_info.get('hidden', 0)} element(s) in "
+                f"{sets_total} geometrical set(s) were hidden for this "
+                f"measurement and {scope_info.get('restored', 0)} of "
+                f"{scope_info.get('elements', 0)} visibility flag(s) were put back "
+                f"afterwards.{kept_note}")
+            if not scope_info.get("readable", True):
+                scope += (
+                    " Some elements could not be read, so a few construction "
+                    "elements may still be in this mesh - pass "
+                    "include_construction=true to measure exactly what is on "
+                    "screen instead.")
         elif shown is None:
             scope = (f"the solid plus whatever is visible in {sets_total} "
                      f"geometrical set(s) - their visibility could not be read")
@@ -4856,7 +5388,16 @@ class MeasurementTools:
                      "the solid only (1 geometrical set, hidden)")
         else:
             scope = (f"the solid plus the visible elements of {shown} of "
-                     f"{sets_total} geometrical set(s)")
+                     f"{sets_total} geometrical set(s) - include_construction is "
+                     f"on, so this is what is on screen, not what the solid is")
+        # The copy route re-reads the SAVED file, so the flags set above never
+        # reach it. Saying nothing here would let a scope line claim a solid-only
+        # mesh that was actually the file's own visibility.
+        copy_note = ""
+        try:
+            copy_note = str(exported[4] or "") if exported else ""
+        except Exception:  # noqa: BLE001 - no export record to read
+            copy_note = ""
         report: dict[str, Any] = {
             "document": str(getattr(part.Parent, "Name", "<part>")),
             "curvature": captured.get("curvature"),
@@ -4867,6 +5408,7 @@ class MeasurementTools:
                        "automation (measured on B30 2026-11-03)."),
             **stats,
             "scope": scope,
+            **({"scope_note": copy_note} if copy_note else {}),
             "geometrical_sets": sets_total,
             "how_to_read": (
                 ("" if bounds is None else
@@ -4919,18 +5461,153 @@ class MeasurementTools:
         # The explanation existed in non_manifold_note, i.e. after the number
         # that caused the alarm; it goes first now, with the one call that
         # settles it.
-        if stats["non_manifold_edges"] and shown:
+        if stats["non_manifold_edges"] and include_construction and shown:
             report = {
                 "headline": (
-                    f"{stats['non_manifold_edges']} non-manifold edge(s) - but this "
-                    f"mesh includes the VISIBLE geometry of {shown} of {sets_total} "
-                    "geometrical set(s), so check that before treating it as a "
-                    "modelling fault: hide the set and measure again "
-                    "(catia_set_visibility(name='<the set>', show=false)). Reported "
-                    "2026-11-10 on a 5-sector part: 1373 non-manifold and 5 "
-                    "boundary edges with the set visible, 0 and 0 with it hidden, "
-                    "same solid (triangles 4611 -> 1930)."),
+                    f"{stats['non_manifold_edges']} non-manifold edge(s) - and "
+                    f"include_construction is on, so this mesh includes the "
+                    f"VISIBLE geometry of {shown} of {sets_total} geometrical "
+                    "set(s). Drop it (the default in 0.3.99 onwards) and the "
+                    "measurement is the solid alone. Reported 2026-11-10 on a "
+                    "5-sector part: 1373 non-manifold and 5 boundary edges with "
+                    "the set visible, 0 and 0 with it hidden, same solid "
+                    "(triangles 4611 -> 1930)."),
                 **report}
+        if brief:
+            # The whole report is ~4k tokens, and a run_plan that self-checks
+            # after every step pays that per step (2026-11-10 report, §5.3). The
+            # brief form keeps the numbers a caller branches on and drops the
+            # prose that explains how to read them.
+            keeps = ("document", "scope", "triangles", "boundary_edges",
+                     "non_manifold_edges", "vertices", "fold_deg", "creases",
+                     "curvature", "warnings", "headline")
+            short = {key: report[key] for key in keeps if key in report}
+            short["brief"] = ("numbers only - drop brief to get how_to_read, "
+                              "side_rule and the labelled vertex sample")
+            return json.dumps(short, indent=2)
+        return json.dumps(report, indent=2)
+
+    def _shape_audit(self, bins: int = 72, fold: int | None = None,
+                     document: str | None = None, top: int = 6) -> str:
+        """Is this the SHAPE that was asked for? r(theta), peaks, N-fold symmetry.
+
+        The gap the 2026-11-10 report described: a build can succeed at every step
+        and still be the wrong shape, and "volume is reasonable, one closed solid,
+        the thick surface worked" cannot see it. The tutorial it came from
+        describes eight earlier versions that were all of those things and all a
+        smooth shallow bowl.
+
+        The numbers are mesh samples, so read them as agreed precision: radius is
+        a LOWER bound (chording) and a feature narrower than one bin is smeared
+        across it.
+        """
+        bins = int(bins)
+        if not 8 <= bins <= 720:
+            raise ArgumentRejected(
+                f"bins must be between 8 and 720, not {bins}: below 8 a 5-lug "
+                "shape cannot be told from a 4-lug one, and above 720 the mesh has "
+                "fewer vertices per bin than the chording error.",
+                code="BAD_ARGUMENT", stage="validate")
+        if fold is not None:
+            fold = int(fold)
+            if fold < 2:
+                raise ArgumentRejected(
+                    f"fold must be at least 2, not {fold}.",
+                    code="BAD_ARGUMENT", stage="validate")
+            if bins % fold:
+                # An angular check needs the repeat to land on a bin boundary.
+                bins = (bins // fold) * fold
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        if document:
+            doc = self._resolve_open_document(document)
+            try:
+                part = self.conn.part_of(doc)
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    f"'{document}' is not a Part document ({exc}); the profile is "
+                    "read from one part's mesh."
+                ) from exc
+        captured: dict[str, Any] = {}
+
+        def grab(path: str) -> None:
+            captured["profile"] = _shape_profile(path, bins, 2000000, top)
+
+        records, info = _hide_construct_geometry(part,
+                                                 getattr(self.conn, "hso", None))
+        try:
+            self._mesh_export(part, None, grab)
+        finally:
+            if records:
+                _restore_visibility(records, getattr(self.conn, "hso", None))
+                try:
+                    self.conn.refresh_display()
+                except Exception:  # noqa: BLE001
+                    pass
+        profile = captured.get("profile")
+        if profile is None:
+            raise CodedError(
+                "no STL was produced, so there is no profile to read; the part has "
+                "to be measurable the way catia_get_bounding_box measures it, and "
+                "it must have a solid in it",
+                code="MESH_NOT_PRODUCED", stage="execute", modified=False,
+                next_actions=["catia_list_bodies shows whether the part has a "
+                              "solid at all"])
+        profile.pop("_profile", None)
+        by_bin = profile.pop("_r_by_bin")
+        kept = info.get("kept") or []
+        report: dict[str, Any] = {
+            "document": str(getattr(part.Parent, "Name", "<part>")),
+            **profile,
+            "scope": (
+                f"the solid only: {info.get('hidden', 0)} construction element(s) "
+                f"in {info.get('sets', 0)} geometrical set(s) were hidden for the "
+                f"measurement and the flags restored"
+                + (f"; {', '.join(repr(k) for k in kept[:3])} stayed visible because "
+                   f"it carries the solid" if kept else "")),
+            "how_to_read": (
+                "circumference.amplitude_mm is the whole point: it is how much the "
+                "outer radius varies going round the part. A shape that is supposed "
+                "to have N repeats shows N peaks and an amplitude of the size the "
+                "design says; a smooth bowl shows a handful of millimetres at most, "
+                "however correct its volume looks. peak_angles_deg says WHERE, so a "
+                "shape that is right but rotated is visible too. mesh_properties is "
+                "computed here from the same triangles, so it cross-checks "
+                "catia_get_inertia instead of repeating it - a volume that disagrees "
+                "by more than the chording error means one of the two measured "
+                "something else."),
+        }
+        if fold:
+            repeat = bins // fold
+            worst = (0.0, None)
+            deviations: list[float] = []
+            for i in range(repeat):
+                for k in range(1, fold):
+                    a = by_bin[i]
+                    b = by_bin[(i + k * repeat) % bins]
+                    if a is None or b is None:
+                        continue
+                    delta = abs(a - b)
+                    deviations.append(delta)
+                    if delta > worst[0]:
+                        worst = (delta, round((i + 0.5) * (360.0 / bins), 2))
+            if deviations:
+                mean = sum(deviations) / len(deviations)
+                report["fold_check"] = {
+                    "fold": fold,
+                    "max_deviation_mm": round(worst[0], 4),
+                    "mean_deviation_mm": round(mean, 4),
+                    # No angle when every repeat matches: "worst_at: null" beside
+                    # a deviation of 0.0000 mm reads as "unknown", which is the
+                    # opposite of what it measured (0.3.99 audit).
+                    **({"worst_at_theta_deg": worst[1]} if worst[1] is not None
+                       else {}),
+                    "verdict": (
+                        "the repeats agree" if worst[0] <= max(
+                            0.02 * report["circumference"]["amplitude_mm"], 0.05)
+                        else "the repeats do NOT agree - compare the peaks the "
+                             "shape should have with peak_angles_deg"),
+                }
         return json.dumps(report, indent=2)
 
     def _get_bounding_box(self, method: str = "auto",

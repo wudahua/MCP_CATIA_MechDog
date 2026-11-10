@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.98** · [what changed](CHANGELOG.md) ·
+**0.3.99** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -12,7 +12,7 @@ defects that make that loop lie to you. Most of the work since 0.3.0 came from
 people rebuilding real assemblies with it: the changelog is a list of things that
 produced a plausible number, a wrong number, or no explanation at all.
 
-**138 tools** (upstream 98 + 40 added, and nothing dropped any more: knowledge
+**139 tools** (upstream 98 + 41 added, and nothing dropped any more: knowledge
 came back in 0.3.63 and drafting in 0.3.64, each after its tools were measured on
 B30 rather than trusted). Nothing in the COM layer was rewritten — the value of upstream is
 the field-verified knowledge in its comments, so this fork is strictly add /
@@ -61,7 +61,7 @@ but the claim that it worked.
 same reason they always did: domain-neutral and cheap. See `FORK.md` §8 if you
 want to cut further.
 
-### Added (32 tools over upstream)
+### Added (33 tools over upstream)
 
 Five of them came with the fork, twenty-one were added while building parts
 from a spec (0.3.1: three, 0.3.2: four, 0.3.4: one, 0.3.5: one, 0.3.8: two, 0.3.17:
@@ -71,7 +71,7 @@ two - `catia_delete_body`, `catia_solid_loft`; 0.3.19: one - `catia_copy_compone
 `catia_gsd_rotate`, `catia_gsd_translate`; 0.3.82: three - `catia_sketch_copy`,
 `catia_gsd_circ_pattern`, `catia_gsd_plane_normal_to_curve`; 0.3.84: one -
 `catia_gsd_plane_angle`).
-98 + 40 added = 138: the 31 below, `catia_apply_design_table` under Knowledgeware,
+98 + 41 added = 139: the 31 below, `catia_apply_design_table` under Knowledgeware,
 `catia_drawing_set_sheet` and `catia_drawing_add_frame` under Drafting (0.3.65),
 the three colour tools in their own table below (0.3.79), and
 `catia_replace_component` (0.3.80), and `catia_split_solid` (0.3.94). 0.3.85 added arguments instead of tools:
@@ -96,7 +96,7 @@ several documents.
 | `catia_gsd_plane_normal_to_curve` | Plane normal to a curve with its origin ON that curve at a fraction of its length - the tutorial's "Normal to Curve + Set Origin on Curve". A tree element, unlike the frame sketch that used to be the only way; the point's measured coordinates are reported back |
 | `catia_gsd_plane_angle` | A datum plane rotated a given angle about an axis - the tutorial's 36-degree construction and the general 1/N-sector plane. A named, editable, referenceable tree element, unlike a frame sketch. The axis must LIE IN the reference plane (rotating a plane about its own normal leaves it where it was and CATIA answers with a generic failure), and the angle is in degrees |
 
-#### Added while building parts from a spec (22 tools)
+#### Added while building parts from a spec (23 tools)
 
 | Tool | Version | Why it exists |
 |---|---|---|
@@ -121,6 +121,7 @@ several documents.
 | `catia_gsd_spine` | 0.3.56 | 0.3.53 said the typelib "names no way to give it sections". It does: `HybridShapeSpine` declares 40 members including `AddSection`, `AddGuide`, `GetNumberOfSections` and `ModifySectionCurve`, and the old probe had only looked at `dir(spine)`. Measured: sections register, `UpdateObject` succeeds with two or more (one fails), and the curve is the spine - normal to the sections, not through their centres (three parallel rings gave 40.0000 mm and did not bend for a 30 mm sideways offset; a 45° tilted ring made it a 37.9224 mm curve that leaves that axis by 7.05 mm) |
 | `catia_gsd_rotate` | 0.3.60 | A five-lobe bottle base is one lobe plus four rotations of 72°, and there was no way to rotate a surface at all - `catia_circ_pattern` is a Part Design feature and wants a solid - so the lobe was REBUILT five times, once per position, which is four extra constructions of the same geometry and a shape whose positions could not be moved later. `AddNewRotate(element, axis, angle)` was in the typelib the whole time. Measured on B30 2026-11-04: a cylinder whose axis sits at (20,0) rotated +90° about z lands at (0,20), so the sign is counter-clockwise by the right-hand rule, and the original stays |
 | `catia_gsd_translate` | 0.3.60 | Same gap, same run. `AddNewTranslate(element, direction, distance)` measured on the same day: a cylinder spanning z 0..20 moved 30 mm along +z spans 30..50 and no longer meets z=0. The direction must be the Direction OBJECT, not a Reference - passing the reference raises “type mismatch, argument 2” - while `AddNewRotate` takes a Reference to an axis line, so the two members of one family disagree and neither argument kind is guessed |
+| `catia_shape_audit` | 0.3.99 | A five-lug bottle base reproduced a tutorial to within 3.15 % of its volume, with the wall thickness matching to 0.0001 mm, and the shape was still wrong - and the tutorial's own appendix describes eight earlier versions that passed every such check. Volume and area cannot see a shape; r(theta) can: bins every mesh vertex by angle and reports the amplitude, the peak angles and whether N repeats agree |
 | `catia_check_surface` | 0.3.51 | A surface task's acceptance criteria were "check with zebra stripes that the valley is smooth", and CATIA V5 gives automation no zebra, no curvature comb and no Match object (measured: the viewer answers `RenderingMode` and returns an unresolvable attribute for `Zebra` / `EnvironmentMapping` / `AnalysisMode`). The mesh can answer it anyway: the dihedral angle across every interior edge, so a G0 fold reads as degrees instead of needing a picture |
 
 ### Fixed (latent upstream bugs, reproduced on a live V5-6R2020 B30 session)
@@ -1029,7 +1030,7 @@ python -m venv .venv
 # offline test suite, no CATIA needed
 .venv/Scripts/python -m pytest tests -q
 
-# the smoke check: 138 tool definitions == 138 routes
+# the smoke check: 139 tool definitions == 139 routes
 .venv/Scripts/python tests/test_server.py
 ```
 
@@ -1224,7 +1225,7 @@ while a reply that only reports success cannot.
 | Generative Shape Design | 35 | wireframe and surfaces, extract, `boundary`, `heal`, `fillet_surface`, `spine`, `rotate`, `translate`, `circ_pattern` (rotate+join), `plane_normal_to_curve`, `plane_angle`, revolve + close surface, and `catia_surface_engrave` (a constant-depth groove along a curve on a curved face); a GSD element or set is removed with `catia_delete_feature` |
 | Assembly | **14** | upstream 9 + get/set component transform, rename, list constraints, copy component, replace component |
 | Appearance | **3** | `catia_colorize_assembly`, `catia_set_color`, `catia_get_color` - per-instance colour in an assembly, per-node in a part |
-| Measurement | 7 | inertia, distance, bounding box\*, parameters, `catia_check_surface` |
+| Measurement | 8 | inertia, distance, bounding box\*, parameters, `catia_check_surface`, `catia_shape_audit` |
 | Export | 4 | STEP / STL / IGES hand-off |
 | Knowledge | 6 | parameters, formulas, relations, design tables - upstream's five, measured and corrected, plus `catia_apply_design_table` |
 | Drawing | 13 | upstream's drafting module, measured, plus `catia_drawing_set_sheet` and `catia_drawing_add_frame`: new drawing, generative view (plane / face / body), projection, section, detail, text, table, generated and manual dimensions, paper size, border and title block |
@@ -1559,6 +1560,80 @@ Place the result with `catia_get_component_transform`.
   cannot name inside/outside that way. It reports the flag it used, the measured
   gap (0.4000 mm for a 0.4 mm offset, both directions) and the route that does
   answer it: cut toward the surface and read the volume.
+
+* **A loft's end conditions are a support, not a strength, and a datum plane is
+  one.** `HybridShapeLoft` exposes 78 members on B30 (read from its own type
+  information, 2026-11-10) and not one of them carries a tension, a factor, a
+  weight or a per-guide influence — so a tutorial's "Normal to Profile, strength
+  1.5" and "To Next Guide" cannot be set. What can: `start_tangent` /
+  `end_tangent`, and a PLANE is a legal support, which the schema used to
+  understate. Measured: two circles r=10 at z=0 and r=14 at z=40 loft to
+  3 030.971 mm² with no condition, 2 869.025 mm² with `start_tangent='xy'` and
+  3 202.807 mm² with `end_tangent='xy'`. Read that literally — tangency TO the
+  plane, so the surface leaves flat; "normal to profile" asks for the opposite
+  direction. `catia_gsd_multi_section_surface` accepts the three tutorial names as
+  aliases and refuses each with these numbers (`NO_TANGENT_FACTOR`,
+  `NO_NORMAL_TO_PROFILE`, `NO_GUIDE_INFLUENCE`) instead of leaving JSON Schema to
+  answer for the API.
+
+* **A sketch has no readable coordinates, so it cannot be read back.** `Point2D`
+  exposes no `X`/`Y` through automation and a sketch's own frame cannot be read
+  either (2026-11-10). Consequences, stated rather than hidden:
+  `catia_sketch_copy` replays the coordinates this session recorded when it drew
+  the sketch, so a sketch that came from disk, or one whose constraints solved to
+  other positions, cannot be copied faithfully — the reply says which case it is.
+  Ask CATIA about the built geometry instead: `catia_measure_distance`,
+  `catia_list_edges`, `catia_get_bounding_box`, `catia_shape_audit`.
+
+* **A mesh measurement is about what is VISIBLE, which is a choice the tool has to
+  make for you.** `catia_check_surface` and `catia_shape_audit` now hide the
+  geometrical sets, keep visible whatever carries the solid, and restore every
+  flag afterwards — so the numbers describe the SOLID. Measured on B30
+  2026-11-10: the same solid read 108 triangles and 0 non-manifold edges on its
+  own, and 540 triangles with 162 non-manifold edges with its construction
+  surfaces on screen. `include_construction=true` gives the second reading back,
+  and `scope` says which one you got. The screenshot side of the same problem:
+  `catia_screenshot(clean=true)` does the hiding, but the specification TREE
+  cannot be hidden from automation — `Viewer3D` has 58 members, no `HideTree`,
+  and `Width`/`Height` are read-only, so the picture is the 3D window's client
+  area whatever size was asked for. Press F3 in the UI for a report image.
+
+* **A loft's end conditions are a support, not a strength, and a datum plane is
+  one.** `HybridShapeLoft` exposes 78 members on B30 (read from its own type
+  information, 2026-11-10) and not one of them carries a tension, a factor, a
+  weight or a per-guide influence — so a tutorial's "Normal to Profile, strength
+  1.5" and "To Next Guide" cannot be set. What can: `start_tangent` /
+  `end_tangent`, and a PLANE is a legal support, which the schema used to
+  understate. Measured: two circles r=10 at z=0 and r=14 at z=40 loft to
+  3 030.971 mm² with no condition, 2 869.025 mm² with `start_tangent='xy'` and
+  3 202.807 mm² with `end_tangent='xy'`. Read that literally — tangency TO the
+  plane, so the surface leaves flat; "normal to profile" asks for the opposite
+  direction. `catia_gsd_multi_section_surface` accepts the three tutorial names as
+  aliases and refuses each with these numbers (`NO_TANGENT_FACTOR`,
+  `NO_NORMAL_TO_PROFILE`, `NO_GUIDE_INFLUENCE`) instead of leaving JSON Schema to
+  answer for the API.
+
+* **A sketch has no readable coordinates, so it cannot be read back.** `Point2D`
+  exposes no `X`/`Y` through automation and a sketch's own frame cannot be read
+  either (2026-11-10). Consequences, stated rather than hidden:
+  `catia_sketch_copy` replays the coordinates this session recorded when it drew
+  the sketch, so a sketch that came from disk, or one whose constraints solved to
+  other positions, cannot be copied faithfully — the reply says which case it is.
+  Ask CATIA about the built geometry instead: `catia_measure_distance`,
+  `catia_list_edges`, `catia_get_bounding_box`, `catia_shape_audit`.
+
+* **A mesh measurement is about what is VISIBLE, which is a choice the tool has to
+  make for you.** `catia_check_surface` and `catia_shape_audit` now hide the
+  geometrical sets, keep visible whatever carries the solid, and restore every
+  flag afterwards — so the numbers describe the SOLID. Measured on B30
+  2026-11-10: the same solid read 108 triangles and 0 non-manifold edges on its
+  own, and 540 triangles with 162 non-manifold edges with its construction
+  surfaces on screen. `include_construction=true` gives the second reading back,
+  and `scope` says which one you got. The screenshot side of the same problem:
+  `catia_screenshot(clean=true)` does the hiding, but the specification TREE
+  cannot be hidden from automation — `Viewer3D` has 58 members, no `HideTree`,
+  and `Width`/`Height` are read-only, so the picture is the 3D window's client
+  area whatever size was asked for. Press F3 in the UI for a report image.
 
 * **`AddNewSewSurface` is declared, accepts the call, and never updates.** Same
   shape of failure as the GSD pattern above, measured on B30 2026-11-10 before a
