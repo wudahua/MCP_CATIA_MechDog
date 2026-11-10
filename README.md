@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.97** · [what changed](CHANGELOG.md) ·
+**0.3.98** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -12,7 +12,7 @@ defects that make that loop lie to you. Most of the work since 0.3.0 came from
 people rebuilding real assemblies with it: the changelog is a list of things that
 produced a plausible number, a wrong number, or no explanation at all.
 
-**137 tools** (upstream 98 + 39 added, and nothing dropped any more: knowledge
+**138 tools** (upstream 98 + 40 added, and nothing dropped any more: knowledge
 came back in 0.3.63 and drafting in 0.3.64, each after its tools were measured on
 B30 rather than trusted). Nothing in the COM layer was rewritten — the value of upstream is
 the field-verified knowledge in its comments, so this fork is strictly add /
@@ -71,7 +71,7 @@ two - `catia_delete_body`, `catia_solid_loft`; 0.3.19: one - `catia_copy_compone
 `catia_gsd_rotate`, `catia_gsd_translate`; 0.3.82: three - `catia_sketch_copy`,
 `catia_gsd_circ_pattern`, `catia_gsd_plane_normal_to_curve`; 0.3.84: one -
 `catia_gsd_plane_angle`).
-98 + 39 added = 137: the 31 below, `catia_apply_design_table` under Knowledgeware,
+98 + 40 added = 138: the 31 below, `catia_apply_design_table` under Knowledgeware,
 `catia_drawing_set_sheet` and `catia_drawing_add_frame` under Drafting (0.3.65),
 the three colour tools in their own table below (0.3.79), and
 `catia_replace_component` (0.3.80), and `catia_split_solid` (0.3.94). 0.3.85 added arguments instead of tools:
@@ -1029,7 +1029,7 @@ python -m venv .venv
 # offline test suite, no CATIA needed
 .venv/Scripts/python -m pytest tests -q
 
-# the smoke check: 137 tool definitions == 137 routes
+# the smoke check: 138 tool definitions == 138 routes
 .venv/Scripts/python tests/test_server.py
 ```
 
@@ -1221,7 +1221,7 @@ while a reply that only reports success cannot.
 | Document | 12 | new/open/save/close/list + `catia_save_as_copy`; `catia_save_document` retries around dialogs |
 | Sketcher | 15 | lines, rectangles, circles, constraints; reopen a closed sketch and delete one element; `catia_sketch_copy` replays a profile onto another plane; `catia_sketch_strokes` draws a whole letter outline in one call |
 | Part Design | 26 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, solid loft, bodies (create / list / delete)… |
-| Generative Shape Design | 34 | wireframe and surfaces, extract, `boundary`, `heal`, `fillet_surface`, `spine`, `rotate`, `translate`, `circ_pattern` (rotate+join), `plane_normal_to_curve`, `plane_angle`, revolve + close surface; a GSD element or set is removed with `catia_delete_feature` |
+| Generative Shape Design | 35 | wireframe and surfaces, extract, `boundary`, `heal`, `fillet_surface`, `spine`, `rotate`, `translate`, `circ_pattern` (rotate+join), `plane_normal_to_curve`, `plane_angle`, revolve + close surface, and `catia_surface_engrave` (a constant-depth groove along a curve on a curved face); a GSD element or set is removed with `catia_delete_feature` |
 | Assembly | **14** | upstream 9 + get/set component transform, rename, list constraints, copy component, replace component |
 | Appearance | **3** | `catia_colorize_assembly`, `catia_set_color`, `catia_get_color` - per-instance colour in an assembly, per-node in a part |
 | Measurement | 7 | inertia, distance, bounding box\*, parameters, `catia_check_surface` |
@@ -1519,19 +1519,27 @@ Place the result with `catia_get_component_transform`.
 
 ## Known limits
 
-* **A curve projected onto a CURVED surface has no downstream consumer here.**
-  Measured on B30 2026-11-10, three ways: `catia_gsd_split(element=<the extracted
-  bottle skin>, cutter=<projected curve>)` fails, the same call with the
+* **A curve projected onto a CURVED surface cannot split or fill it — but it CAN
+  engrave it.** Measured on B30 2026-11-10, three ways: `catia_gsd_split(element=<the
+  extracted bottle skin>, cutter=<projected curve>)` fails, the same call with the
   projection's own extract fails, and a projected CIRCLE fails identically;
   `catia_gsd_fill(boundaries=[<that curve>])` answers `FILL_NOT_CLOSED`; and
   `catia_gsd_thick_surface` on the skin fails at every thickness tried (0.4/0,
   0.2/0.2, 0.1/0.1). The same closed curve on a PLANE patch splits cleanly
-  (1486.903 mm² kept), so this is the curved case, not the curve. That is why the
-  engraving chain "project -> split -> offset" stops at step two on a curved
-  surface, and why no `surface_engrave` tool exists: its middle step is the one
-  that fails. Note also that `gsd_split`'s "closest approach" number is a
-  MINIMUM - it is 0.0000 mm for a curve that merely touches the surface once, so
-  it cannot tell you whether the contour follows it.
+  (1486.903 mm² kept), so this is the curved case, not the curve. Note also that
+  `gsd_split`'s "closest approach" number is a MINIMUM - it is 0.0000 mm for a
+  curve that merely touches the surface once, so it cannot tell you whether the
+  contour follows it.
+
+  **The route that does work is `catia_surface_engrave`** (0.3.98): a plane normal
+  to the curve, a circle of radius = depth on it, a sweep of that circle along the
+  curve, `CloseSurface`, and `boolean(remove)`. Because the tube is CENTRED on a
+  curve that lies on the surface, half of it is inside the material, so the groove
+  depth is the radius — measured along the surface normal everywhere. Numbers from
+  B30: a r=4 trace on a r=40 cylinder gave a 5.9657 mm³ tube (2π²Rr² = 5.97) and
+  removed 2.974 mm³, which is the half. The guide has to be a CLOSED curve (an open
+  guide sweeps a pipe with two open ends and `CloseSurface` refuses it), and the
+  curve has to lie on the body — the tool cannot arrange that.
 
 * **A planar element only projects onto a support that crosses it at an angle.**
   Measured on B30 2026-11-10 with a 40×40 rectangle on an XY plane offset 40 mm:

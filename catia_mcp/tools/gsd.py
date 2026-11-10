@@ -15,6 +15,7 @@ All dimensions are in millimeters, angles in degrees.
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any
 
@@ -1093,6 +1094,75 @@ class GSDTools:
                 },
             },
             {
+                "name": "catia_surface_engrave",
+                "description": (
+                    "Engrave a CONSTANT-DEPTH groove along a curve that lies ON a "
+                    "surface - the 'cut text into a curved face' step. Depth is "
+                    "measured along the SURFACE NORMAL everywhere, which is what a "
+                    "planar pocket cannot do (its depth follows an axis). "
+                    "HOW IT WORKS, all measured on B30 2026-11-10: a datum plane "
+                    "normal to the curve, a circle of radius = depth on that plane, "
+                    "an explicit sweep of the circle along the curve (a tube), "
+                    "CloseSurface to make it a solid, and catia_boolean(remove). "
+                    "Because the tube is CENTRED on a curve that lies ON the surface, "
+                    "exactly half of it is inside the material, so the groove depth "
+                    "IS the radius. A r=4 trace on a r=40 cylinder gave a 5.9657 mm3 "
+                    "tube (2*pi^2*R*r^2 = 5.97) and removed 2.974 mm3 - the half. "
+                    "The reply prints the removed volume against that prediction, so a "
+                    "groove that did not follow the surface shows up in the same call. "
+                    "IT IS A GROOVE ALONG THE CURVE, NOT A FILLED GLYPH. To engrave a "
+                    "letter, give its OUTLINE (catia_sketch_strokes draws a whole "
+                    "outline in one call), project it onto the face with "
+                    "catia_gsd_project, and engrave along the projection. The curve "
+                    "must LIE ON the target body; the tool cannot make it do so."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "curve": {
+                            "type": "string",
+                            "description": (
+                                "The curve to engrave along - normally the element "
+                                "catia_gsd_project produced. It has to lie ON the "
+                                "target body, or the tube misses the material."
+                            ),
+                        },
+                        "depth": {
+                            "type": "number",
+                            "description": (
+                                "Groove depth in mm. This is also the sweep radius: "
+                                "half the tube ends up inside the material."
+                            ),
+                        },
+                        "target_body": {
+                            "type": "string",
+                            "description": (
+                                "Body to cut. Default: the body that is active now."
+                            ),
+                        },
+                        "position": {
+                            "type": "number",
+                            "default": 0.5,
+                            "description": (
+                                "Where along the curve the profile plane sits, as a "
+                                "fraction of its length (0.5 = the middle). It only "
+                                "orients the circle; a closed guide is closed at "
+                                "every position."
+                            ),
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": (
+                                "Base name for the four elements and the cutter body "
+                                "this call creates (the cutter body is consumed by "
+                                "the boolean, so only the tree elements survive)."
+                            ),
+                        },
+                    },
+                    "required": ["curve", "depth"],
+                },
+            },
+            {
                 "name": "catia_gsd_extrude",
                 "description": (
                     "Extrude a profile (curve/sketch) into a surface along a direction "
@@ -1788,6 +1858,8 @@ class GSDTools:
                 return self._multi_section_surface(arguments)
             case "catia_gsd_sweep":
                 return self._sweep(arguments)
+            case "catia_surface_engrave":
+                return self._surface_engrave(arguments)
             case "catia_gsd_extrude":
                 return self._extrude(arguments)
             case "catia_gsd_revolve":
@@ -4143,6 +4215,236 @@ class GSDTools:
         return self._finish(
             sweep, args.get("name"),
             f"Swept surface created: profile '{args['profile']}' along guide '{args['guide']}'.",
+        )
+
+    def _curve_length_mm(self, reference: Any) -> float | None:
+        """Length of a curve in mm, or None.
+
+        ``Measurable.Length`` gives a curve's perimeter in mm (unlike Area and
+        Volume, which are MKS) - the same reading ``_on_curve_note`` uses for a
+        normal plane's position. None, never a zero.
+        """
+        try:
+            spa = self.conn.active_document.GetWorkbench("SPAWorkbench")
+            return float(spa.GetMeasurable(reference).Length)
+        except Exception:  # noqa: BLE001 - an unreadable length is not 0 mm
+            return None
+
+    def _body_by_name(self, part: Any, name: str) -> Any:
+        for index in range(1, int(part.Bodies.Count) + 1):
+            body = part.Bodies.Item(index)
+            if str(body.Name) == str(name):
+                return body
+        names = ", ".join(str(part.Bodies.Item(i).Name)
+                          for i in range(1, int(part.Bodies.Count) + 1))
+        raise ArgumentRejected(
+            f"No body named '{name}'. Top-level bodies: {names or 'none'}.")
+
+    def _engrave_cleanup(self, created: list[str], body_name: str | None) -> str:
+        """Take back everything an engrave attempt made; say what survived."""
+        from catia_mcp.tools.part_design import PartDesignTools
+
+        pd = PartDesignTools(self.conn)
+        leftovers: list[str] = []
+        if body_name:
+            try:
+                pd.execute("catia_delete_body", {"name": body_name, "force": True})
+            except Exception:  # noqa: BLE001 - reported, not raised
+                leftovers.append(f"body '{body_name}'")
+        for name in reversed(created):
+            try:
+                pd.execute("catia_delete_feature", {"feature_name": name})
+            except Exception:  # noqa: BLE001 - reported, not raised
+                leftovers.append(f"'{name}'")
+        if leftovers:
+            return (" Cleanup could not remove " + ", ".join(leftovers)
+                    + " - the tree may still hold them.")
+        return " Nothing this call created was left behind."
+
+    def _surface_engrave(self, args: dict[str, Any]) -> str:
+        """A constant-depth groove along a curve that lies ON a surface.
+
+        THE ROUTE THREE 2026-11-10 REPORTS COULD NOT FIND. They needed "cut the
+        letter into the curved face" and every path via the surface was refused
+        (split of a projected curve, fill of it, Sew/Wrap never update), so 0.3.95
+        declined to wrap an engrave tool at all. That was right about the SURFACE
+        route and wrong about the capability: measured on B30 2026-11-10, this
+        chain runs end to end with tools that already existed -
+
+            plane normal to the curve -> circle of radius = depth on it
+            -> sweep that circle along the curve (a tube) -> CloseSurface
+            -> catia_boolean(remove)
+
+        and the numbers say why it works: the tube is CENTRED on a curve that lies
+        ON the surface, so exactly half of it is inside the material. A r=4 trace
+        on a r=40 cylinder produced a 5.9657 mm3 tube (2*pi^2*R*r^2 = 5.97) and
+        removed 2.974 mm3 - the half. The depth is therefore the RADIUS, measured
+        along the surface normal everywhere, which is the thing a planar pocket
+        cannot do (its depth follows an axis).
+        """
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        curve = args.get("curve")
+        if not curve:
+            raise ArgumentRejected(
+                "catia_surface_engrave needs 'curve': the element that lies ON the "
+                "surface - normally the one catia_gsd_project produced. Nothing was "
+                "created.", code="CURVE_REQUIRED", stage="validate")
+        curve = str(curve)
+        try:
+            depth = float(args["depth"])
+        except (TypeError, ValueError):
+            raise ArgumentRejected(
+                "catia_surface_engrave needs 'depth': the groove depth in mm, "
+                "which is also the sweep radius. Got "
+                f"{args.get('depth')!r}.")
+        if depth <= 0:
+            raise ArgumentOutOfRange(
+                f"depth must be positive; got {depth}. A groove of depth 0 would "
+                "remove nothing.", code="DEPTH_OUT_OF_RANGE", stage="validate")
+        position = float(args.get("position", 0.5))
+        if not 0.0 < position < 1.0:
+            raise ArgumentOutOfRange(
+                "position is a FRACTION of the curve's length (0.5 = its middle) "
+                f"and must lie strictly between 0 and 1; got {position}. It only "
+                "places the plane that orients the profile.",
+                code="POSITION_OUT_OF_RANGE", stage="validate")
+
+        target_name = args.get("target_body")
+        target = (self._body_by_name(part, str(target_name)) if target_name
+                  else self.conn.get_active_part_body())
+        curve_ref = self._ref(curve)
+        length = self._curve_length_mm(curve_ref)
+
+        base = str(args.get("name") or f"Engrave_{curve}")
+        taken = {str(part.Bodies.Item(i).Name)
+                 for i in range(1, int(part.Bodies.Count) + 1)}
+        body_name = base
+        suffix = 2
+        while body_name in taken:
+            body_name = f"{base}.{suffix}"
+            suffix += 1
+
+        created: list[str] = []
+        plane_name = f"{base}_N"
+        profile_name = f"{base}_P"
+        tube_name = f"{base}_T"
+        try:
+            try:
+                plane_reply = self._plane_normal_to_curve(
+                    {"curve": curve, "position": position, "name": plane_name})
+            except CodedError as error:
+                # A CIRCLE FROM catia_gsd_circle CANNOT CARRY A PARAMETER, and its
+                # extract cannot either (measured on B30 2026-11-10: both refuse
+                # UpdateObject, while a projected curve and a plain line work). The
+                # generic message would blame "this may not be a curve", which is
+                # wrong for a circle and sends the caller looking for the wrong
+                # problem.
+                if getattr(error, "code", "") != "POINT_ON_CURVE_FAILED":
+                    raise
+                raise PreconditionRejected(
+                    f"'{curve}' cannot carry a point-on-curve parameter, which this "
+                    "route needs: the profile plane is built normal to the curve at "
+                    "that point. Measured on B30 2026-11-10 - a curve that came from "
+                    "catia_gsd_project works, a catia_gsd_line works, and a circle "
+                    "built by catia_gsd_circle refuses, as does its extract. Project "
+                    "the curve onto the surface first: that is what makes the groove "
+                    "depth follow the normal anyway.",
+                    code="ENGRAVE_CURVE_UNPARAMETRISABLE", stage="execute",
+                    modified=False,
+                    next_actions=[
+                        "Build the curve with catia_gsd_project onto the face you "
+                        "want to engrave, then engrave along THAT element",
+                        "If the curve already exists as a circle, project it onto "
+                        "the surface to get a usable copy",
+                    ]) from error
+            created.append(plane_name)
+            # The point the plane tool made is named after the curve and the
+            # position, and it is the only thing the profile can be centred on
+            # that is guaranteed to lie ON the curve.
+            origin = re.search(r"origin '([^']+)'", plane_reply or "")
+            centre = origin.group(1) if origin else f"{curve}_at{position:g}"
+            created.append(centre)
+            self._circle({"center": centre, "support_plane": plane_name,
+                          "radius": depth, "name": profile_name})
+            created.append(profile_name)
+            self._sweep({"profile": profile_name, "guide": curve,
+                         "name": tube_name})
+            created.append(tube_name)
+
+            from catia_mcp.tools.part_design import PartDesignTools
+
+            pd = PartDesignTools(self.conn)
+            pd.execute("catia_new_body", {"name": body_name})
+            try:
+                self._close_surface({"surface": tube_name})
+            except Exception as error:  # noqa: BLE001 - this is the usual break
+                raise PreconditionRejected(
+                    f"The sweep along '{curve}' produced a surface that CloseSurface "
+                    f"will not close ({str(error).splitlines()[0][:120]}). A tube "
+                    "swept along a CLOSED curve is a ring and closes; one swept along "
+                    "an OPEN curve is a pipe with two open ends and does not - cap it "
+                    "first (catia_gsd_fill on each end) or engrave along a closed "
+                    "outline.", code="ENGRAVE_TUBE_NOT_CLOSED", stage="execute",
+                    modified=False) from error
+
+            pd.execute("catia_set_active_body", {"name": str(target.Name)})
+            before = pd._body_volume_mm3(part, target)
+            pd.execute("catia_boolean", {"operation": "remove",
+                                         "tool_body": body_name,
+                                         "target_body": str(target.Name)})
+            after = pd._body_volume_mm3(part, target)
+        except Exception as error:
+            note = self._engrave_cleanup(created, body_name)
+            # Keep the specific code the boolean or a GSD step already chose -
+            # TOOL_DOES_NOT_TOUCH ("'FarEngrave' is 200.0579 mm away") is a much
+            # better answer than a wrapper's ENGRAVE_FAILED. FeatureRejected is
+            # NOT a CodedError subclass (it carries .code without inheriting it),
+            # so the test is on the attribute, not the class.
+            if getattr(error, "code", None):
+                error.args = (str(error) + note,)
+                raise
+            raise PreconditionRejected(
+                f"Engraving along '{curve}' failed: "
+                f"{str(error).splitlines()[0][:160]}.{note}",
+                code="ENGRAVE_FAILED", stage="execute", modified=False,
+                next_actions=[
+                    "Check that the curve really lies ON the target body - a "
+                    "curve that floats above it removes nothing, and one that "
+                    "misses it entirely cannot be swept into a cutter",
+                    "Build the curve with catia_gsd_project onto the surface "
+                    "first; it is what makes the depth follow the normal",
+                ],
+            ) from error
+
+        removed = (before - after) if (before is not None and after is not None) else None
+        expected = (length * math.pi * depth * depth / 2.0) if length else None
+        body_line = (f"Removed {removed:.3f} mm3" if removed is not None
+                     else "Removed an amount that could not be measured")
+        if removed is not None and expected:
+            body_line += (f" (a {depth:g} mm tube centred on {length:.3f} mm of curve "
+                          f"holds half of itself in the material: {expected:.3f} mm3)")
+        verdict = ""
+        # No "removed nothing" branch here: catia_boolean(remove) already measures
+        # the body either side of itself and refuses with NO_MATERIAL, so anything
+        # reaching this line took material off. A second check would be dead code
+        # (0.3.96 removed one of those rather than keeping it as decoration).
+        if removed is not None and expected and removed < 0.25 * expected:
+            verdict = (
+                " WARNING: that is less than a quarter of what the geometry "
+                "predicts, so the curve probably does not follow this surface along "
+                "its whole length."
+            )
+        length_text = (f"{length:.3f} mm of it" if length is not None
+                       else "it")
+        return (
+            f"Engraved along '{curve}' into '{target.Name}': a {depth:g} mm deep "
+            f"groove over {length_text}. {body_line}.{verdict} The tube is centred "
+            "on the curve, which lies on the surface, so HALF of it is inside the "
+            f"material and the depth is the radius - {depth:g} mm along the surface "
+            "normal everywhere, which is what a planar pocket cannot do. This is a "
+            "groove ALONG the curve, not a filled glyph: for a letter, pass its "
+            "OUTLINE (catia_sketch_strokes draws one in a call) - not its middle."
         )
 
     def _extrude(self, args: dict[str, Any]) -> str:

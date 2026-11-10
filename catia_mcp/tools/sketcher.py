@@ -456,7 +456,12 @@ class SketcherTools:
                                 "its first point (default: false). This matters for lofts: "
                                 "a multi-entity outline - several lines, or a spline plus "
                                 "a closing line - is accepted by AddSectionToLoft and then "
-                                "fails at update."
+                                "fails at update. It is NOT a periodic spline: the sketch "
+                                "spline object ('Spline2D') has IsPeriodic read-only and "
+                                "no SetClosing, so repeating the first point is the only "
+                                "way to close one in a sketch (measured 2026-11-10). For a "
+                                "genuinely closed curve use catia_gsd_spline(closed=true), "
+                                "which calls HybridShapeSpline.SetClosing."
                             ),
                             "default": False,
                         },
@@ -2818,6 +2823,14 @@ class SketcherTools:
                 "beyond every source surface, with the solid volume correct to "
                 "+0.085 %. If the envelope is part of the specification, measure it "
                 "after the solid exists, not before.)"
+                " WHY THERE IS NO periodic OPTION HERE: the sketch spline object "
+                "('Spline2D', 46 members on B30) exposes IsPeriodic / Period / "
+                "Continuity as READ-ONLY and has no SetClosing, so a sketch spline "
+                "cannot be closed any other way (measured 2026-11-10). "
+                "catia_gsd_spline(closed=true) CAN: HybridShapeSpline.SetClosing(1) "
+                "closes a 3D spline properly - 61.2161 mm open vs 77.8649 mm closed "
+                "on four 20x15 rectangle corners - so use that when the curve has to "
+                "be genuinely closed (a sweep guide, a loft section)."
             )
         return f"Spline created through {len(points)} points: {pts_str}" + closed_note
 

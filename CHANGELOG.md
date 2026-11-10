@@ -2,6 +2,58 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.98] — 2026-11-10 · the engraving chain was there all along
+
+Three 2026-11-10 reports asked for "cut text into a curved face". Every route
+through the surface is refused (split of a projected curve, fill of it, Sew/Wrap
+never update), so 0.3.95 declined to wrap an engrave tool and wrote that refusal
+into the changelog: *shipping a tool whose middle step is known to fail would be
+the thing these reports keep paying for*. That reasoning was sound and the
+conclusion was wrong — wrong about the ROUTE, not about the surface.
+
+**`catia_surface_engrave` — and the measurement that makes it work.** One
+controlled run on B30 2026-11-10, one call, seven steps, no new COM member:
+
+    plane normal to the curve -> circle of radius = depth on that plane
+    -> sweep the circle along the curve (a tube) -> CloseSurface
+    -> catia_boolean(remove)
+
+    r=4 trace projected onto a r=40 cylinder
+    tube volume        5.9657 mm3   (2*pi^2*R*r^2 = 5.97)
+    removed            2.974 mm3    (exactly the half)
+
+The half is the whole idea: the tube is CENTRED on a curve that lies ON the
+surface, so exactly half of it is inside the material. The groove depth is the
+radius — measured along the surface NORMAL everywhere, which is precisely what a
+planar pocket cannot do, and what the tutorial asked for (0.3~0.5 mm 包覆深度).
+The reply prints the removed volume against that prediction, so a groove that
+stopped following the surface shows up in the same call rather than three steps
+later. It is a groove ALONG the curve, not a filled glyph: a letter is its
+outline, and `catia_sketch_strokes` already draws one in a call.
+
+Limits, both measured: the guide must be CLOSED (an open guide sweeps a pipe with
+two open ends and `CloseSurface` refuses it — `ENGRAVE_TUBE_NOT_CLOSED`), and the
+curve must lie on the body, which this cannot arrange. A failure cleans up after
+itself and says what it could not remove.
+
+**The periodic-spline entry 0.3.97 shipped was wrong, and it was two objects.**
+0.3.97 wrote that "a periodic flag is not among AddNewSpline's parameters" and
+stopped there. `AddNewSpline()` indeed takes no parameters — the flag lives on the
+OBJECT as `SetClosing(type)`, and `catia_gsd_spline(closed=true)` has been calling
+it since it was written. Measured on B30: four points at the corners of a 20×15
+rectangle give an open spline 61.2161 mm long, and `SetClosing(1)` makes it
+77.8649 mm. The object that genuinely cannot close is the SKETCH spline:
+`Spline2D` exposes 46 members, `IsPeriodic` / `Period` / `Continuity` are
+read-only, and there is no `SetClosing` at all. `capability_ceilings` now carries
+those as two entries with their own statuses, `catia_sketch_spline(closed=true)`
+says why it repeats its first point, and both point at `catia_gsd_spline` for a
+curve that has to be genuinely closed.
+
+1565 tests (+18), 138 tools, `scripts/b30_v0398_audit.py` on B30: one call engraves
+2.974 mm3 out of the cylinder against a 2.983 mm3 prediction, the curve that does
+not lie on the body leaves nothing behind, and `catia_diagnose` lists the sweep
+route as available.
+
 ## [0.3.97] — 2026-11-10 · the five leftovers, and a half-rule caught by its own audit
 
 The two 2026-11-10 reports on 0.3.94 were answered by 0.3.95 and 0.3.96. This is

@@ -117,6 +117,20 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
         ),
     },
     {
+        "member": "AddNewSweepExplicit + AddNewCloseSurface (engraving)",
+        "status": "AVAILABLE_WITH_LIMIT",
+        "detail": (
+            "This is the route that reaches 'cut text into a curved face', and it is "
+            "wrapped as catia_surface_engrave. Measured on B30 2026-11-10: a r=4 trace "
+            "projected onto a r=40 cylinder, a r=0.4 profile on a plane normal to it, "
+            "swept along the trace (tube 5.9657 mm3 = 2*pi^2*R*r^2), CloseSurface to a "
+            "solid, boolean remove - 2.974 mm3 off, exactly the half of the tube that "
+            "sits inside the material. Limits: the guide has to be CLOSED (an open "
+            "guide sweeps a pipe with two open ends and CloseSurface refuses it), and "
+            "the curve has to LIE ON the body, which this cannot arrange."
+        ),
+    },
+    {
         "member": "AddNewRib / AddNewStiffener",
         "status": "DECLARED_NOT_MEASURED",
         "detail": (
@@ -140,14 +154,29 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
         ),
     },
     {
-        "member": "AddNewSpline (periodic)",
+        "member": "HybridShapeSpline.SetClosing",
+        "status": "AVAILABLE_WITH_LIMIT",
+        "detail": (
+            "It WORKS, and this entry used to say the opposite. AddNewSpline() takes "
+            "no parameters at all, and 0.3.97 read that as 'there is no periodic "
+            "flag'. The flag lives on the OBJECT: SetClosing(type). Measured on B30 "
+            "2026-11-10, four points at the corners of a 20x15 rectangle: open 61.2161 "
+            "mm, SetClosing(1) or (2) 77.8649 mm - closed. catia_gsd_spline(closed="
+            "true) has used SetClosing(1) since it was written. The limit is that it "
+            "is a 3D GSD spline, not a sketch element."
+        ),
+    },
+    {
+        "member": "Spline2D (sketch) periodicity",
         "status": "NOT_IN_TYPELIB",
         "detail": (
-            "The spline member exists; a periodic flag is not among its "
-            "parameters on B30, which is why catia_sketch_spline(closed=true) "
-            "repeats the first point instead of closing with matching tangents. "
-            "The reply says so: a closed spline of this kind carries a seam, and "
-            "a fill or split may then report a gap that looks like bad geometry."
+            "A SKETCH spline cannot be periodic: Spline2D exposes 46 members on B30 "
+            "and IsPeriodic / Period / Continuity are READ-ONLY, with no SetClosing "
+            "at all (calling one answers 'CreateSpline.SetClosing', measured "
+            "2026-11-10). So catia_sketch_spline(closed=true) repeats its first point "
+            "- a closed curve with a seam, not a periodic one. When the curve has to "
+            "be genuinely closed (a sweep guide, a loft section), build it with "
+            "catia_gsd_spline(closed=true) instead."
         ),
     },
 ]
