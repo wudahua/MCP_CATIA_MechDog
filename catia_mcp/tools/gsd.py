@@ -5076,18 +5076,28 @@ class GSDTools:
                     f"argument. (Read from the document's VISIBLE mesh over "
                     f"{data['edges_measured']} interior edges; the estimate runs a "
                     f"few percent low.){skip}{scope}")
-        if radius is not None and side is not None and radius < total:
-            return (f" MEASURED: the split offset ({side:.3f} mm on the larger "
-                    f"side, {total:.3f} mm in all) already keeps each side under "
-                    f"the tightest smooth radius {radius:.3f} mm{where}, so "
-                    f"curvature does not explain this failure - look at a seam or "
-                    f"a self-intersection in the surface itself, not at its "
-                    f"radius.{skip}{scope}")
-        return (f" MEASURED: the tightest smooth radius in the visible mesh is "
-                f"{radius} mm{where}, which is NOT below the {total:.3f} mm offset - "
-                f"so on what this mesh resolves, curvature does not explain the "
-                f"failure. Look at a seam or a self-intersection in the surface "
-                f"itself, not at its radius.{skip}{scope}")
+        # ONE SIDE, ALWAYS (0.3.95). The old sentence compared the radius with
+        # `total` even when the caller had split it, so 0.1/0.1 was reported as
+        # "NOT below the 0.200 mm offset" while the rule this package states
+        # everywhere is "EACH SIDE's offset". A report quoted the two side by side
+        # (2026-11-10, P1-4); both now use the same number. The branch that read
+        # `radius < total` was unreachable anyway - whoever got there had already
+        # passed `radius < side` - so it is gone rather than fixed twice.
+        if radius is not None:
+            return (f" MEASURED: the tightest smooth radius in the visible mesh is "
+                    f"{radius:.3f} mm{where}, which is NOT below the "
+                    f"{worst_side:.3f} mm single-side offset"
+                    + (f" (of {total:.3f} mm total)" if side is not None else "")
+                    + ", so on what this mesh resolves, curvature does not explain "
+                    "the failure. Look at a seam or a self-intersection in the "
+                    "surface itself, not at its radius. NEXT STEP THAT RUNS: "
+                    "catia_check_surface on the surface reports its creases and "
+                    "non-manifold edges - a seam shows up as one of them, and an "
+                    "extract of a periodic loft face carries one. If it is a seam, "
+                    "take ONE piece of it with catia_gsd_boundary(edge=N) and "
+                    "thicken that piece instead of the whole face."
+                    f"{skip}{scope}")
+        return pointer
 
     def _visible_element_count(self, part: Any) -> int:
         """How many GSD elements are visible - i.e. what an STL export contains.

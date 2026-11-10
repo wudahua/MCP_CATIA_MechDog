@@ -2,6 +2,31 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.96] — 2026-11-10 · the thick-surface message measured the wrong quantity
+
+Split out of 0.3.95 rather than folded into it: that release was already tagged
+and published, and a published artefact does not get its history rewritten.
+
+**`catia_gsd_thick_surface` compared the radius with the TOTAL thickness.** A
+2026-11-10 report put three attempts side by side and the contradiction was in
+the numbers they pasted: `0.1 / 0.1` was answered with "NOT below the 0.200 mm
+offset" while the tool's own description - and every other message in this
+package - says the limit applies to **each side's** offset. So the one attempt
+where the caller had already done the right thing (split the wall in half) was
+measured against the sum, and the radius looked like the blocker when it was not.
+It now says `0.100 mm single-side offset (of 0.200 mm total)`.
+The branch that read `radius < total` when `side` was known was unreachable
+anyway - anything that reached it had already passed `radius < side` - so it is
+removed rather than repaired twice.
+
+**"Look at a seam" was not something anyone could run.** The sentence now names
+the tool that finds one: `catia_check_surface` reports creases and non-manifold
+edges (an extract of a periodic loft face carries a seam), and if it is a seam,
+`catia_gsd_boundary(edge=N)` takes one piece of that face to thicken instead of
+the whole thing.
+
+1527 tests (+3), 137 tools.
+
 ## [0.3.95] — 2026-11-10 · the copy that warned about the body it was in
 
 Two reports on 0.3.94. The first confirms every 0.3.93/0.3.94 stability fix (five

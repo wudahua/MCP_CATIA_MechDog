@@ -162,7 +162,12 @@ def test_a_split_offset_stops_blaming_the_radius(monkeypatch, tmp_path):
         get_active_part=lambda: types.SimpleNamespace(Name="P"))
     message = tools._offset_blocker(object(), 20.0, 0.25)
     assert "curvature does not explain" in message
-    assert "0.250 mm on the larger side" in message
+    # 0.3.95: ONE number, and it is the per-side offset. The old sentence this
+    # test pinned compared the radius against the TOTAL even when the caller had
+    # split it, so a 0.1/0.1 request was reported as "NOT below the 0.200 mm
+    # offset" while the rule is "each side" (reported 2026-11-10, P1-4).
+    assert "0.250 mm single-side offset" in message
+    assert "0.500 mm total" not in message
 
 
 def test_a_one_sided_offset_names_each_side_as_the_thing_to_split(monkeypatch,
