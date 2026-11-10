@@ -2,6 +2,76 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.94] — 2026-11-10 · the chain, measured instead of promised
+
+0.3.93 listed nine operations as "not done, needs a B30 session". That list was
+honest about not shipping untested wrappers and wrong about why: CATIA was
+running, so most of it could be settled in twenty minutes. This version settles
+it, ships the one that works, and replaces the guesses with numbers.
+
+**`catia_split_solid` — Part Design Split, verified before it was written.**
+`ShapeFactory.AddNewSplit(iSplittingElement, iSplitSide)` is declared, takes a
+surface or a datum plane, and works: a 100×100×10 block cut by a plane at Z=3
+kept 30000 mm³ with one value of `iSplitSide` and 70000 with the other, and the
+same block cut by a 400 mm extruded wall split 30000 / 70000. The tool exposes
+`keep='front'|'back'` instead of a number, because which half a number keeps
+depends on the cutter's own normal (both measurements above are consistent with
+"front = the side the normal points to", and neither number means anything to a
+caller who cannot see that normal), and every reply prints both volumes so a
+wrong half shows in the same call.
+
+**The rule that is not in any documentation, in the failure text.** The cutter
+must divide the body **completely**: the same wall shortened to 40 mm failed at
+update, and CATIA said only "方法 Update 失败". A partial patch leaves no valid
+second half. The tool says that, takes the dead feature back out, and points at
+`catia_boolean(remove)` for the "cut only here" case - which is what a Split is
+not. Three post-checks make it hard to be lied to: an unchanged volume is
+`SPLIT_NO_EFFECT`, an empty kept half is `SPLIT_KEPT_NOTHING`, and both roll the
+feature back so the tree keeps updating.
+
+**A cut is now judged BEFORE it is built.** 0.3.93 measured the target body after
+a `remove` and reported `NO_MATERIAL`. The distance between the two bodies is
+measurable *before* the feature exists, and the test is one-sided: a positive gap
+proves the intersection is empty, while 0 proves nothing (two bodies can touch at
+an edge and share no volume - the same reason "distance 0" was refused as "fits"
+in 0.3.89). A `remove` or `intersect` whose bodies are apart is now
+`TOOL_DOES_NOT_TOUCH` with the gap in millimetres, no feature created, nothing to
+roll back. `add` is never judged this way: two disjoint bodies join perfectly
+well.
+
+**`catia_sketch_copy(target_body=...)`.** The copy went into the active body,
+whatever the caller meant, so "draw the label on its own solid" needed a
+`catia_set_active_body` detour whose side effect had to be tracked. The body is
+named up front, the copy lands there, and the parent is read back afterwards
+because `InWorkObject` reports no error while CATIA keeps pointing somewhere else.
+
+**Three capabilities are now recorded as measured limits, not as guesses:**
+
+    AddNewSewSurface   declared, creates a feature, and fails at update in all
+                       eight geometries tried - a 400x400 wall and a 40x200 patch
+                       against a 100x100x10 block, a wall standing on the top
+                       face, a cap hanging over it, and a datum plane, with
+                       iSewingSide as 1/0 and as True/False. The engraving route
+                       does not go through Sew Surface on this build.
+    AddNewWrapCurve    declared and constructible (0 arguments), accepts
+                       reference curves and a direction, reports 2 curves - and
+                       then UpdateObject refuses it. Third member in this family
+                       after AddNewGSDCircPattern (0.3.85) and Sew Surface.
+    sketch text        not a gap in this fork: the Factory2D a sketch hands back
+                       declares 37 members and none of them creates text. Letter
+                       outlines have to arrive as geometry.
+
+**Left out on purpose, still.** `AddNewRib` / `AddNewStiffener` (declared, and a
+rib is a sweep whose profile must stay normal to the path - the trap that makes
+GSD sweeps fail, so it needs its own session), periodic splines (`AddNewSpline`
+is declared but the periodic flag is not in the typelib this fork reads, and
+closing a curve on itself achieves the same shape), and `Viewer.HideTree`.
+
+1490 tests before this version, `1508` after (+18), 136 tools. On B30 the tool
+itself passed 9/9 (`scripts/b30_v0394_audit.py`): both halves summing to the
+block, a partial wall refused with the tree still updatable, a cut 40 mm short
+refused before it was built, and the copy landing in the body it was told to.
+
 ## [0.3.93] — 2026-11-10 · the tools that broke the model and said they hadn't
 
 A report from a ~200-call session (a hand-built bottle with an engraved label). It

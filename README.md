@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.93** · [what changed](CHANGELOG.md) ·
+**0.3.94** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -12,7 +12,7 @@ defects that make that loop lie to you. Most of the work since 0.3.0 came from
 people rebuilding real assemblies with it: the changelog is a list of things that
 produced a plausible number, a wrong number, or no explanation at all.
 
-**135 tools** (upstream 98 + 37 added, and nothing dropped any more: knowledge
+**136 tools** (upstream 98 + 38 added, and nothing dropped any more: knowledge
 came back in 0.3.63 and drafting in 0.3.64, each after its tools were measured on
 B30 rather than trusted). Nothing in the COM layer was rewritten — the value of upstream is
 the field-verified knowledge in its comments, so this fork is strictly add /
@@ -61,7 +61,7 @@ but the claim that it worked.
 same reason they always did: domain-neutral and cheap. See `FORK.md` §8 if you
 want to cut further.
 
-### Added (30 tools over upstream)
+### Added (31 tools over upstream)
 
 Five of them came with the fork, twenty-one were added while building parts
 from a spec (0.3.1: three, 0.3.2: four, 0.3.4: one, 0.3.5: one, 0.3.8: two, 0.3.17:
@@ -71,10 +71,10 @@ two - `catia_delete_body`, `catia_solid_loft`; 0.3.19: one - `catia_copy_compone
 `catia_gsd_rotate`, `catia_gsd_translate`; 0.3.82: three - `catia_sketch_copy`,
 `catia_gsd_circ_pattern`, `catia_gsd_plane_normal_to_curve`; 0.3.84: one -
 `catia_gsd_plane_angle`).
-98 + 37 added = 135: the 30 below, `catia_apply_design_table` under Knowledgeware,
+98 + 38 added = 136: the 31 below, `catia_apply_design_table` under Knowledgeware,
 `catia_drawing_set_sheet` and `catia_drawing_add_frame` under Drafting (0.3.65),
 the three colour tools in their own table below (0.3.79), and
-`catia_replace_component` (0.3.80). 0.3.85 added arguments instead of tools:
+`catia_replace_component` (0.3.80), and `catia_split_solid` (0.3.94). 0.3.85 added arguments instead of tools:
 `catia_gsd_boundary(edge=N, propagation=…)` takes one loop of a border (a
 selector `AddNewBoundaryOfSurface` does not have), `catia_gsd_fill` accepts
 `Edge.N`, and `catia_gsd_circ_pattern(cap_center=true, cap_curve=…)` closes the
@@ -95,10 +95,11 @@ several documents.
 | `catia_gsd_plane_normal_to_curve` | Plane normal to a curve with its origin ON that curve at a fraction of its length - the tutorial's "Normal to Curve + Set Origin on Curve". A tree element, unlike the frame sketch that used to be the only way; the point's measured coordinates are reported back |
 | `catia_gsd_plane_angle` | A datum plane rotated a given angle about an axis - the tutorial's 36-degree construction and the general 1/N-sector plane. A named, editable, referenceable tree element, unlike a frame sketch. The axis must LIE IN the reference plane (rotating a plane about its own normal leaves it where it was and CATIA answers with a generic failure), and the angle is in degrees |
 
-#### Added while building parts from a spec (21 tools)
+#### Added while building parts from a spec (22 tools)
 
 | Tool | Version | Why it exists |
 |---|---|---|
+| `catia_split_solid` | 0.3.94 | Cut a solid with a surface and keep one half (CATIA's Split), for the engraving chain a 2026-11-10 report could not finish. `ShapeFactory.AddNewSplit(surface, side)` is declared *and* works - measured on B30 before the tool was written: a 100×100×10 block cut by a plane at Z=3 gave 30000 mm³ with one side value and 70000 with the other, and the same block cut by a 400 mm extruded wall gave 70000 / 30000. Two things a caller cannot guess are in the message instead: **the cutter must divide the body completely** (a 40 mm wall on the same block fails at update, and CATIA only says "method Update failed"), and `side` means "the side the cutter's normal points to", which is why the argument is `keep='front'|'back'` and the reply prints both volumes |
 | `catia_new_body` | 0.3.1 | A spec's part is often several solids. `catia_pad` used to always land in the body that was already in work, and there was no way back once work had moved past the second body |
 | `catia_copy_component` | 0.3.19 | A 24-instance assembly had to be built by calling `add_component` once per instance - N isolated processes, and N peer components instead of N instances of one reference. `Products.AddComponent(ref)` does it in one call (measured: the new instance's ReferenceProduct is the same product) |
 | `catia_solid_loft` | 0.3.17 | The surface route cannot make a thin solid - offsetting a 2.30 mm section by 1.27+1.27 self-intersects - and this server had claimed CATIA had no solid loft at all. `ShapeFactory.AddNewLoft` does exist: two circles gave a 18 765.8 mm³ solid in one update |
@@ -1027,7 +1028,7 @@ python -m venv .venv
 # offline test suite, no CATIA needed
 .venv/Scripts/python -m pytest tests -q
 
-# the smoke check: 135 tool definitions == 135 routes
+# the smoke check: 136 tool definitions == 136 routes
 .venv/Scripts/python tests/test_server.py
 ```
 
@@ -1218,7 +1219,7 @@ while a reply that only reports success cannot.
 |---|---|---|
 | Document | 12 | new/open/save/close/list + `catia_save_as_copy`; `catia_save_document` retries around dialogs |
 | Sketcher | 14 | lines, rectangles, circles, constraints; reopen a closed sketch and delete one element; `catia_sketch_copy` replays a profile onto another plane |
-| Part Design | 25 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, solid loft, bodies (create / list / delete)… |
+| Part Design | 26 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, solid loft, bodies (create / list / delete)… |
 | Generative Shape Design | 34 | wireframe and surfaces, extract, `boundary`, `heal`, `fillet_surface`, `spine`, `rotate`, `translate`, `circ_pattern` (rotate+join), `plane_normal_to_curve`, `plane_angle`, revolve + close surface; a GSD element or set is removed with `catia_delete_feature` |
 | Assembly | **14** | upstream 9 + get/set component transform, rename, list constraints, copy component, replace component |
 | Appearance | **3** | `catia_colorize_assembly`, `catia_set_color`, `catia_get_color` - per-instance colour in an assembly, per-node in a part |
@@ -1516,6 +1517,26 @@ context (that refusal is a modal dialog, and reads as a bare `[WinError 2]`).
 Place the result with `catia_get_component_transform`.
 
 ## Known limits
+
+* **`AddNewSewSurface` is declared, accepts the call, and never updates.** Same
+  shape of failure as the GSD pattern above, measured on B30 2026-11-10 before a
+  tool was written for it: `ShapeFactory.AddNewSewSurface(iSewingElement,
+  iSewingSide)` returns a feature that appears in the tree, and `part.Update()`
+  then fails in **every** geometry tried — a 400×400 mm planar wall and a 40×200
+  mm patch against a 100×100×10 block, a wall standing on the top face, a cap
+  hanging over it, and a datum plane, with `iSewingSide` as `1`/`0` and as
+  `True`/`False`. Eight attempts, three topologies, both argument types. So the
+  engraving route a 2026-11-10 report asked for does not go through Sew Surface on
+  this build; the two that do work are `catia_split_solid` (a cutter that divides
+  the body completely) and a solid tool body through `catia_boolean(remove)`.
+
+* **There is no text in a V5 sketch.** Not a missing feature of this fork: the
+  `Factory2D` a sketch hands back declares 37 members and none of them creates
+  text (`CreatePoint`, `CreateLine`, `CreateCircle`, `CreateSpline`,
+  `CreateEllipse`, `CreateParabola`, …). Letter outlines have to arrive as
+  geometry — a DXF import, or curves drawn elsewhere and projected — which is why
+  "engrave a label" is a curve-projection problem here and not a text problem. A
+  report in 2026-11-10 described this as a font gap; it is an object-model gap.
 
 * **A single-feature GSD pattern is declared and not callable here.** The member
   exists — `ShapeFactory.AddNewGSDCircPattern`, 14 arguments, and it returns an

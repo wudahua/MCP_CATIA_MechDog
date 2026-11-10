@@ -619,6 +619,17 @@ class SketcherTools:
                             "type": "string",
                             "description": "Name for the new sketch (default: a unique 草图.N)",
                         },
+                        "target_body": {
+                            "type": "string",
+                            "description": (
+                                "Body to put the copy in. Defaults to the active body. "
+                                "This is the 'draw the label on its own solid' case: "
+                                "the profile goes where you say instead of into "
+                                "whichever body happens to be active, and that body "
+                                "is left as the active one so the next "
+                                "pad/pocket lands on the copy."
+                            ),
+                        },
                     },
                     "required": ["source", "plane"],
                 },
@@ -1357,7 +1368,39 @@ class SketcherTools:
             except Exception:  # noqa: BLE001 - the copy is still worth trying
                 source_note = ""
 
+        # WHERE THE COPY LANDS (0.3.94). _create_sketch builds in the ACTIVE body,
+        # so copying a profile meant for another solid put it back in the one you
+        # were already in - the "label on its own body" case needed a
+        # catia_set_active_body detour whose side effect (which body is active
+        # afterwards) the caller then had to track. Here the body is named up
+        # front and read back after the fact.
+        body_note = ""
+        wanted_body = args.get("target_body")
+        if wanted_body:
+            part = self.conn.get_active_part()
+            body = self._named_body(part, str(wanted_body))
+            try:
+                part.InWorkObject = body
+            except Exception:  # noqa: BLE001 - the parent read below is the check
+                pass
+            self.conn.active_body = body
+            body_note = " in body '%s'" % body.Name
+
         self._create_sketch(plane=plane)
+        if wanted_body:
+            # Read the parent back: InWorkObject reports no error while CATIA
+            # keeps pointing somewhere else (measured 2026-10-26), and a copy in
+            # the wrong body is only noticed when the next pad lands there.
+            try:
+                actual = str(self._active_sketch.Parent.Name)
+            except Exception:  # noqa: BLE001 - unknown is not "wrong"
+                actual = ""
+            if actual and actual != str(body.Name):
+                body_note = (
+                    " in body '%s' - WARNING: the sketch reports its body as '%s', "
+                    "so the switch did not take; the copy is in the wrong body"
+                    % (body.Name, actual)
+                )
         target = str(self._active_sketch.Name)
         rename_note = ""
         wanted = args.get("name")
@@ -1390,7 +1433,7 @@ class SketcherTools:
         return (
             f"Sketch '{target}' created as a copy of '{source}' "
             f"({count} element(s), 2D coordinates {where}) on the new plane"
-            f"{source_note}{rename_note}. " + str(closed)
+            f"{body_note}{source_note}{rename_note}. " + str(closed)
             + self._copy_placement_note(target)
             + " The copy holds the coordinates that were PASSED IN, not the ones "
             "CATIA solved to: constraints on the original are not carried over, so "
@@ -1525,6 +1568,29 @@ class SketcherTools:
         except Exception:  # noqa: BLE001 - an unreadable tree answers "unknown"
             return names
         return names
+
+    def _named_body(self, part: Any, name: str) -> Any:
+        """An existing solid body by name, or a refusal that lists them.
+
+        Part design keeps its own copy of this: the two tool classes do not call
+        into each other (a Sketcher that needed PartDesignTools to name a body
+        would fail on any connection that built only one of them).
+        """
+        bodies = part.Bodies
+        for i in range(1, int(getattr(bodies, "Count", 0)) + 1):
+            candidate = bodies.Item(i)
+            if str(candidate.Name) == name:
+                return candidate
+        try:
+            return bodies.Item(name)
+        except Exception:  # noqa: BLE001 - the list is the useful part
+            names = ", ".join(str(bodies.Item(i).Name)
+                              for i in range(1, int(getattr(bodies, "Count", 0)) + 1))
+            raise ArgumentRejected(
+                f"No body named '{name}', so the copy has nowhere to go. Bodies: "
+                f"{names or 'none'}.",
+                code="BODY_NOT_FOUND", stage="validate",
+            ) from None
 
     def _make_sketch_name_unique(self, part: Any, sketch: Any) -> str:
         """Rename a new sketch whose name the PART already uses, and say so.

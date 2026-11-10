@@ -1258,6 +1258,67 @@ class PartDesignTools:
                 },
             },
             {
+                "name": "catia_split_solid",
+                "description": (
+                    "Split a solid body with a surface or a datum plane, keeping one "
+                    "side (Part Design 'Split'). The body keeps the result; the "
+                    "cutting element stays where it was, so unlike catia_boolean "
+                    "nothing is consumed. "
+                    "THE CUTTER MUST DIVIDE THE BODY COMPLETELY. A patch that "
+                    "covers only part of the cross-section leaves no valid second "
+                    "half and the update fails (measured on B30 2026-11-10: a "
+                    "40x200 mm wall failed on a 100x100x10 block, the same wall "
+                    "extended to 400x200 mm split it into 70000 and 30000 mm3). "
+                    "Extend the surface past the body on every side, or use one "
+                    "that closes around it - a local 'cut only here' is not a "
+                    "Split, it is catia_boolean(remove) with a solid tool body. "
+                    "WHICH HALF YOU GET: 'front' is the side the cutter's own "
+                    "normal points to (measured, not assumed: a plane offset +Z "
+                    "keeps Z below it, an extruded wall keeps the side its normal "
+                    "faces). The reply reports both volumes, so a wrong half is "
+                    "visible in the same call instead of three calls later; "
+                    "catia_delete_feature that node and re-run with the other value."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "cutter": {
+                            "type": "string",
+                            "description": (
+                                "Surface or plane to cut with, by tree name - a "
+                                "surface in a geometrical set, or a datum plane "
+                                "('xy'/'yz'/'zx' also work for the three origin "
+                                "planes). It must reach past the body on every "
+                                "side of the cut."
+                            ),
+                        },
+                        "keep": {
+                            "type": "string",
+                            "enum": ["front", "back"],
+                            "default": "front",
+                            "description": (
+                                "'front' = the side the cutter's normal points to, "
+                                "'back' = the other side. If the reply's volume is "
+                                "the half you did not want, delete the feature and "
+                                "run again with the other value."
+                            ),
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": (
+                                "Body to split. Defaults to the active body, which "
+                                "then becomes the in-work object."
+                            ),
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Optional feature name",
+                        },
+                    },
+                    "required": ["cutter"],
+                },
+            },
+            {
                 "name": "catia_list_edges",
                 "description": (
                     "List the edges of the final solid shape with three handles: "
@@ -1381,6 +1442,8 @@ class PartDesignTools:
                     arguments["name"], bool(arguments.get("show", False)))
             case "catia_boolean":
                 return self._boolean(arguments)
+            case "catia_split_solid":
+                return self._split_solid(arguments)
             case "catia_list_faces":
                 return self._list_faces(arguments.get("body_name"))
             case "catia_list_edges":
@@ -1881,6 +1944,26 @@ class PartDesignTools:
     def _body_volume_mm3(self, part: Any, body: Any) -> float | None:
         """Measure the body's solid volume in mm3, or None if unavailable."""
         return self._volume_probe(part, body)[0]
+
+    def _body_gap_mm(self, part: Any, one: Any, other: Any) -> float | None:
+        """Closest distance between two bodies in mm, or None if unmeasurable.
+
+        Already in mm: GetCOG and GetMinimumDistance come back in the document's
+        length unit while Volume and Area are MKS (field-verified 2026-10-13).
+        None is not "touching" - the caller has to keep the two apart, because a
+        distance that could not be read must not refuse a legitimate cut.
+        """
+        try:
+            doc = part.Parent
+            try:
+                spa = doc.GetWorkbench("SPAWorkbench")
+            except AttributeError:
+                spa = self.conn.app.GetWorkbench("SPAWorkbench")
+            return float(spa.GetMeasurable(
+                part.CreateReferenceFromObject(one)).GetMinimumDistance(
+                    part.CreateReferenceFromObject(other)))
+        except Exception:  # noqa: BLE001 - unmeasurable is a valid answer
+            return None
 
     @staticmethod
     def _body_is_empty(body: Any) -> bool:
@@ -6248,6 +6331,40 @@ class PartDesignTools:
         # is accepted for add/remove/assemble and then does nothing, and
         # AddNewIntersect rejects it outright with a type mismatch.
         volume_before = self._body_volume_mm3(part, target)
+
+        # A CUT WHOSE TOOL BODY NEVER REACHES THE TARGET CANNOT CUT (0.3.94).
+        #
+        # 0.3.93 found this out AFTER the fact - it compared volumes and reported
+        # NO_MATERIAL, which is honest but leaves the caller with a call that had
+        # to fail to learn that. The distance is measurable BEFORE anything is
+        # built, and the test is one-sided: a positive gap proves the
+        # intersection is empty, while 0 proves nothing (two bodies can touch at
+        # an edge or a face and still share no volume - the same reason "distance
+        # 0" was not accepted as "fits" for the split cutter in 0.3.89). So only
+        # the positive case refuses here; everything else goes on to be measured.
+        if operation in ("remove", "intersect"):
+            gap = self._body_gap_mm(part, target, tool)
+            if gap is not None and gap > 1e-6:
+                raise FeatureRejected(
+                    f"Nothing to {operation}: '{tool.Name}' is {gap:.4f} mm away "
+                    f"from '{target.Name}' at its closest point, so the two do not "
+                    "touch and the result would be "
+                    + ("an unchanged body" if operation == "remove"
+                       else "an EMPTY body")
+                    + ". No feature was created - this was measured before "
+                    "anything was built. A cut that stops a fraction of a "
+                    "millimetre short looks exactly like this.",
+                    rolled_back=False, code="TOOL_DOES_NOT_TOUCH",
+                    next_actions=[
+                        f"Measure it: catia_measure_distance between the two "
+                        f"bodies, or catia_get_bounding_box on '{tool.Name}' and "
+                        f"'{target.Name}' and compare the extents",
+                        "If the tool body was meant to cut into a face, check the "
+                        "pad direction and height that built it "
+                        "(catia_list_features reports its depth), not the boolean",
+                    ],
+                )
+
         part.InWorkObject = target
         feature = getattr(part.ShapeFactory, method)(tool)
         if args.get("name"):
@@ -6344,6 +6461,229 @@ class PartDesignTools:
             f"Boolean '{operation}': '{tool.Name}' into '{target.Name}' "
             f"(feature '{feature.Name}').{volume_note} Active body is now "
             f"'{target.Name}'."
+        )
+
+    def _split_solid(self, args: dict[str, Any]) -> str:
+        """Cut a solid body in two with a surface and keep one half.
+
+        Measured on B30 2026-11-10 before this was written, because the two
+        things a caller cannot guess are exactly the two things that decide
+        whether the call works:
+
+        * the cutter must divide the body COMPLETELY. A wall 40 mm wide against a
+          100 mm block failed at update, the same wall extended to 400 mm split
+          it into 70000 / 30000 mm3. CATIA's message is the bare "method Update
+          failed", so this tool has to say it instead.
+        * `iSplitSide` is 0 or 1 and which half each one keeps depends on the
+          cutter's own normal: a plane offset +Z with side 0 kept Z 0..3 of a
+          0..10 block, an extruded wall with side 0 kept the side its normal
+          faces. Hence 'front'/'back' rather than a number, and both volumes in
+          the reply.
+        """
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        body = (self._body_named(part, str(args["body"])) if args.get("body")
+                else self._prepare_body(part))
+        cutter_ref, cutter_note = self._cutter_reference(part, str(args["cutter"]))
+        keep = str(args.get("keep") or "front").strip().lower()
+        if keep not in ("front", "back"):
+            raise ArgumentRejected(
+                f"keep must be 'front' or 'back', not '{args.get('keep')}'. "
+                "'front' is the side the cutter's own normal points to.",
+                code="BAD_ARGUMENT", stage="validate",
+            )
+        side = 0 if keep == "front" else 1
+
+        volume_before, why_not = self._volume_probe(part, body)
+        try:
+            part.InWorkObject = body
+        except Exception:  # noqa: BLE001 - read back below via the outcome
+            pass
+        try:
+            feature = part.ShapeFactory.AddNewSplit(cutter_ref, side)
+        except Exception as error:  # noqa: BLE001 - reported with the facts
+            raise FeatureRejected(
+                f"CATIA refused to create a Split of '{body.Name}' with "
+                f"'{args['cutter']}' ({cutter_note}). Nothing was changed. "
+                f"Original error: {error}",
+                rolled_back=False, code="SPLIT_FAILED",
+                next_actions=[
+                    "Confirm the cutter is a SURFACE or a PLANE, not a curve or a "
+                    "solid: catia_gsd_list_elements lists what the geometrical "
+                    "sets hold",
+                    "A closed shape (CloseSurface) and a datum plane both cut; a "
+                    "wire does not",
+                ],
+            ) from error
+        if args.get("name"):
+            try:
+                feature.Name = str(args["name"])
+            except Exception:  # noqa: BLE001 - the feature keeps its own name
+                pass
+
+        try:
+            part.Update()
+        except Exception as error:  # noqa: BLE001 - rolled back below
+            removed = self._remove_feature(part, feature, body)
+            culprits = failing_elements(part)
+            self._note_part_error(str(error))
+            others = [c for c in culprits if str(c) != str(feature.Name)]
+            raise FeatureRejected(
+                f"The Split with '{args['cutter']}' was created but the part does "
+                "not update, so the split was NOT made. "
+                + (f"The cutter does not divide '{body.Name}' completely - that is "
+                   "the failure mode measured on this build: a patch covering part "
+                   "of the cross-section leaves no valid second half. Extend the "
+                   "surface past the body on every side of the cut. "
+                   if not others else
+                   f"{describe(others)} also fails on its own, so the part was "
+                   "already broken before this call - fix that first. ")
+                + ("The feature was taken back out."
+                   if removed else
+                   "The dead feature could NOT be deleted: the part is in error "
+                   "until it is; close the document without saving.")
+                + f" Original error: {error}",
+                rolled_back=bool(removed), code="SPLIT_FAILED",
+                next_actions=[
+                    "Look at the cutter's extent against the body's: "
+                    "catia_get_bounding_box on the body, then check the surface "
+                    "reaches past it on every side",
+                    "If only PART of the body should be cut away, this is not a "
+                    "Split - build a solid tool body and use "
+                    "catia_boolean(remove)",
+                ],
+            ) from error
+
+        volume_after, _ = self._volume_probe(part, body)
+        if (volume_before is not None and volume_after is not None
+                and abs(volume_after - volume_before) < 1e-6):
+            removed = self._remove_feature(part, feature, body)
+            raise FeatureRejected(
+                f"The Split changed nothing: '{body.Name}' still measures "
+                f"{volume_after:.1f} mm3, exactly as before the call. A cutter "
+                "that does not pass through the body at all produces a valid "
+                "feature with nothing to cut (measured 2026-11-10), which is why "
+                "this is checked by volume and not by the return value. The "
+                "feature was "
+                + ("taken back out." if removed else
+                   "left in the tree (it could not be deleted)."),
+                rolled_back=bool(removed), code="SPLIT_NO_EFFECT",
+                next_actions=[
+                    f"Measure it: catia_measure_distance('{args['cutter']}', "
+                    f"'{body.Name}') - a surface that never meets the body reads "
+                    "a positive gap",
+                    "catia_get_bounding_box on both, and compare the extents",
+                ],
+            )
+        if volume_before and volume_after is not None and volume_after <= 1e-9:
+            removed = self._remove_feature(part, feature, body)
+            raise FeatureRejected(
+                f"The Split kept the wrong half: '{body.Name}' now measures "
+                f"0.0 mm3 - everything was on the side keep='{keep}' discards. "
+                "The feature was "
+                + ("taken back out; run the same call with keep="
+                   + ("'back'." if keep == "front" else "'front'.")
+                   if removed else "left in the tree (it could not be deleted)."),
+                rolled_back=bool(removed), code="SPLIT_KEPT_NOTHING",
+                next_actions=[f"Retry with keep=" +
+                              ("'back'" if keep == "front" else "'front'")],
+            )
+
+        self._note_part_error(None)
+        self.conn.active_body = body
+        volumes = ""
+        if volume_before is not None and volume_after is not None:
+            share = (volume_after / volume_before * 100) if volume_before else 0.0
+            volumes = (f' Volume of \'{body.Name}\': {volume_before:.1f} -> '
+                       f'{volume_after:.1f} mm3 ({share:.1f}% of the body kept).')
+        else:
+            volumes = " Volume not measured (" + str(why_not) + ")."
+        return (
+            f"Split '{body.Name}' with '{args['cutter']}' ({cutter_note}), keeping "
+            f"the '{keep}' side"
+            + (" - the side the cutter's normal points to" if keep == "front"
+               else " - the side the cutter's normal points away from")
+            + f" (feature '{feature.Name}').{volumes} The cutter is still in its "
+            "geometrical set. If that is the wrong half, "
+            f"catia_delete_feature(feature_name='{feature.Name}') and run again "
+            f"with keep='{'back' if keep == 'front' else 'front'}'."
+        )
+
+    def _body_named(self, part: Any, name: str) -> Any:
+        """An existing body by name, or a refusal that lists them."""
+        bodies = part.Bodies
+        for i in range(1, int(getattr(bodies, "Count", 0)) + 1):
+            candidate = bodies.Item(i)
+            if str(candidate.Name) == name:
+                return candidate
+        try:
+            return bodies.Item(name)
+        except Exception:  # noqa: BLE001 - the list is the useful part
+            names = ", ".join(str(bodies.Item(i).Name)
+                              for i in range(1, int(getattr(bodies, "Count", 0)) + 1))
+            raise ArgumentRejected(
+                f"No body named '{name}'. Bodies: {names or 'none'}.",
+                code="BODY_NOT_FOUND", stage="validate",
+            ) from None
+
+    def _cutter_reference(self, part: Any, name: str) -> tuple[Any, str]:
+        """A reference to a surface or plane, plus where it was found.
+
+        Surfaces live in geometrical sets, not in bodies, and a Split with a
+        body-shaped reference fails at the factory. The three origin planes are
+        accepted by the same aliases the GSD tools use, because 'zx' is what a
+        caller says and 'PlaneZX' is what CATIA calls it.
+        """
+        key = name.strip()
+        alias = {"xy": "PlaneXY", "yz": "PlaneYZ", "zx": "PlaneZX",
+                 "planexy": "PlaneXY", "planeyz": "PlaneYZ", "planezx": "PlaneZX",
+                 "x": "PlaneYZ", "y": "PlaneZX", "z": "PlaneXY"}
+        lowered = key.lower().replace(" ", "")
+        if lowered in alias:
+            plane = getattr(part.OriginElements, alias[lowered])
+            return part.CreateReferenceFromObject(plane), \
+                f"the origin plane {alias[lowered]}"
+
+        found: list[tuple[Any, str]] = []
+        seen: list[str] = []
+
+        def walk(sets: Any, path: str) -> None:
+            for i in range(1, int(getattr(sets, "Count", 0)) + 1):
+                try:
+                    geoset = sets.Item(i)
+                except Exception:  # noqa: BLE001 - a nested set that will not open
+                    continue
+                where = f"{path}{getattr(geoset, 'Name', '?')}"
+                try:
+                    shapes = geoset.HybridShapes
+                except Exception:  # noqa: BLE001 - empty set
+                    shapes = None
+                for j in range(1, int(getattr(shapes, "Count", 0)) + 1):
+                    try:
+                        element = shapes.Item(j)
+                        element_name = str(element.Name)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    seen.append(element_name)
+                    if element_name == key:
+                        found.append((element, where))
+                try:
+                    walk(geoset.HybridBodies, where + "/")
+                except Exception:  # noqa: BLE001 - leaf set
+                    pass
+
+        walk(part.HybridBodies, "")
+        if found:
+            element, where = found[0]
+            return (part.CreateReferenceFromObject(element),
+                    f"the element '{key}' in geometrical set '{where}'")
+        raise ArgumentRejected(
+            f"No surface or plane named '{key}' to cut with. A Split needs a "
+            "GSD surface or a datum plane; geometrical sets in this part hold: "
+            f"{', '.join(seen[:12]) if seen else 'nothing'}"
+            + (" ..." if len(seen) > 12 else "")
+            + ". The three origin planes answer to 'xy', 'yz' and 'zx'.",
+            code="CUTTER_NOT_FOUND", stage="validate",
         )
 
     def _topo_measure(self, part: Any) -> Any:
