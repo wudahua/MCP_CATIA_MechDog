@@ -1260,10 +1260,14 @@ class PartDesignTools:
             {
                 "name": "catia_split_solid",
                 "description": (
-                    "Split a solid body with a surface or a datum plane, keeping one "
-                    "side (Part Design 'Split'). The body keeps the result; the "
-                    "cutting element stays where it was, so unlike catia_boolean "
-                    "nothing is consumed. "
+                    "CUTS A BODY IN TWO AND KEEPS ONE HALF - it is NOT a local cut, "
+                    "not an engraving and not a pocket. (CATIA's Chinese UI calls "
+                    "both this and the surface split '分割'; if you want a hole, a "
+                    "label or a pattern cut into a face, this is the wrong tool - "
+                    "use catia_boolean(remove) with a solid tool body.) It takes a "
+                    "surface or a datum plane and keeps one side (Part Design "
+                    "'Split'). The body keeps the result; the cutting element stays "
+                    "where it was, so unlike catia_boolean nothing is consumed. "
                     "THE CUTTER MUST DIVIDE THE BODY COMPLETELY. A patch that "
                     "covers only part of the cross-section leaves no valid second "
                     "half and the update fails (measured on B30 2026-11-10: a "
@@ -5671,6 +5675,21 @@ class PartDesignTools:
             "total_volume_mm3": round(total_volume, 1),
             "total_faces": total_faces,
         }
+        # A STALE HANDLE IS NOT A SILENT "NO ACTIVE BODY" (0.3.95). A boolean
+        # consumes its tool body; with conn.active_body still pointing at the
+        # consumed one, every entry above reads active:false and the caller is
+        # left holding three bodies and no idea where the next feature lands
+        # (reported 2026-11-10, P2-3: 「全部 active: false，且没有任何一个叫
+        # 几何体.5 的 body 被列出」).
+        payload["active_body"] = active_name or None
+        if active_name and not any(entry["active"] for entry in out):
+            payload["active_body_missing"] = True
+            payload["active_body_note"] = (
+                f"the session's active body is '{active_name}', which is NOT in "
+                "this list - a boolean consumes its tool body, and the handle was "
+                "left on the consumed one. Nothing here says which body the next "
+                "feature would go into; pick one with "
+                "catia_set_active_body(name=...).")
         # WHOSE NUMBERS THESE ARE (0.3.93). A part whose update failed keeps
         # answering with the last valid volume and face count - no error, no
         # stale flag, just numbers that describe the state BEFORE the change the
@@ -6327,6 +6346,15 @@ class PartDesignTools:
                 "tool_body and target_body are the same body - a boolean needs two."
             )
 
+        # THE NAME THE CALLER USED, KEPT APART FROM CATIA'S (0.3.95). A tool body
+        # consumed by the boolean answers with an internal name afterwards
+        # ('TouchTool' read back as '几何体.5'), and a message that silently
+        # swaps them reads like a different body was operated on (reported
+        # 2026-11-10, P2-2).
+        requested_tool = str(args["tool_body"])
+        tool_names_note = ("" if requested_tool == str(tool.Name) else
+                           f" (CATIA now calls it '{tool.Name}')")
+
         # These four take the Body itself, not a Reference: passing a Reference
         # is accepted for add/remove/assemble and then does nothing, and
         # AddNewIntersect rejects it outright with a type mismatch.
@@ -6346,9 +6374,9 @@ class PartDesignTools:
             gap = self._body_gap_mm(part, target, tool)
             if gap is not None and gap > 1e-6:
                 raise FeatureRejected(
-                    f"Nothing to {operation}: '{tool.Name}' is {gap:.4f} mm away "
-                    f"from '{target.Name}' at its closest point, so the two do not "
-                    "touch and the result would be "
+                    f"Nothing to {operation}: '{requested_tool}'{tool_names_note} is "
+                    f"{gap:.4f} mm away from '{target.Name}' at its closest point, "
+                    "so the two do not touch and the result would be "
                     + ("an unchanged body" if operation == "remove"
                        else "an EMPTY body")
                     + ". No feature was created - this was measured before "
@@ -6356,9 +6384,9 @@ class PartDesignTools:
                     "millimetre short looks exactly like this.",
                     rolled_back=False, code="TOOL_DOES_NOT_TOUCH",
                     next_actions=[
-                        f"Measure it: catia_measure_distance between the two "
-                        f"bodies, or catia_get_bounding_box on '{tool.Name}' and "
-                        f"'{target.Name}' and compare the extents",
+                        "catia_list_bodies shows each body's own volume and feature "
+                        "count: if the tool body holds what you built, the problem "
+                        "is where it sits, not whether it exists",
                         "If the tool body was meant to cut into a face, check the "
                         "pad direction and height that built it "
                         "(catia_list_features reports its depth), not the boolean",
@@ -6390,35 +6418,49 @@ class PartDesignTools:
                 and volume_after is not None
                 and volume_before - volume_after <= 1e-6):
             gone = self._remove_feature(part, feature, target)
+            # THE TOOL BODY IS GONE, SO THE HANDLE MUST MOVE (0.3.95). A boolean
+            # consumes its tool body; leaving `active_body` pointing at the
+            # consumed one made every later call route into a body CATIA no
+            # longer lists, and `catia_list_bodies` then reported all bodies
+            # `active: false` with no explanation (reported 2026-11-10, P2-3).
+            self.conn.active_body = target
+            try:
+                part.InWorkObject = target
+            except Exception:  # noqa: BLE001 - the next call reports it
+                pass
             error = FeatureRejected(
                 f"The boolean removed no material: '{target.Name}' still measures "
                 f"{volume_after:.1f} mm3, the same as before the call "
-                f"({volume_before:.1f} mm3), so '{tool.Name}' does not overlap "
-                f"it. The feature was "
+                f"({volume_before:.1f} mm3), so '{requested_tool}'"
+                f"{tool_names_note} shares no VOLUME with it. The feature was "
                 + ("taken back out of the tree" if gone else
                    "left in the tree (it could NOT be deleted - close the document "
                    "without saving)")
                 + ". CATIA accepted it because a boolean with an empty "
                 "intersection is a valid feature; the volume is what disagrees. "
-                "Check the tool body's extent against the target's - a cut that "
-                "stops a fraction of a millimetre short looks exactly like this.",
+                "\"Shares no volume\" is not the same as \"does not touch\": two "
+                "bodies that meet along a face measure 0.0000 mm apart and still "
+                "remove nothing, which is exactly what the pre-flight distance "
+                "check lets through. The tool body was consumed by the call.",
                 rolled_back=bool(gone),
                 code="NO_MATERIAL",
                 next_actions=[
-                    "Measure before cutting: catia_get_bounding_box(component="
-                    f"'{tool.Name}') and compare it with the target's, or "
-                    "catia_measure_distance between the two bodies - the two are "
-                    "not touching",
+                    "catia_list_bodies lists the bodies that are left and each "
+                    "one's volume; the tool body is NOT among them any more (a "
+                    "boolean consumes it)",
                     "If the tool body was meant to cut into a face, check the pad "
                     "direction and height that built it (catia_list_features "
                     "reports its depth), not the boolean",
                 ])
             error.modified = False
-            error.data = {"operation": operation, "tool_body": str(tool.Name),
+            error.data = {"operation": operation,
+                          "tool_body_requested": requested_tool,
+                          "tool_body_internal": str(tool.Name),
                           "target_body": str(target.Name),
                           "volume_before_mm3": round(volume_before, 1),
                           "volume_after_mm3": round(volume_after, 1),
-                          "rolled_back": bool(gone)}
+                          "rolled_back": bool(gone),
+                          "tool_body_consumed": True}
             raise error
 
         # UpdateObject checks the feature, NOT the tree. A boolean can be accepted
@@ -6593,9 +6635,16 @@ class PartDesignTools:
         self.conn.active_body = body
         volumes = ""
         if volume_before is not None and volume_after is not None:
+            # BOTH SIDES, because the description promises both (0.3.95). 0.3.94
+            # printed before -> after and a percentage, so the other half had to
+            # be subtracted by the caller - the report asked for the number the
+            # promise implies (2026-11-10, P3-4).
             share = (volume_after / volume_before * 100) if volume_before else 0.0
-            volumes = (f' Volume of \'{body.Name}\': {volume_before:.1f} -> '
-                       f'{volume_after:.1f} mm3 ({share:.1f}% of the body kept).')
+            kept = volume_after
+            discarded = volume_before - volume_after
+            volumes = (f" Volume of '{body.Name}': {volume_before:.1f} mm3 before; "
+                       f"kept {kept:.1f} mm3, discarded {discarded:.1f} mm3 "
+                       f"({share:.1f}% kept).")
         else:
             volumes = " Volume not measured (" + str(why_not) + ")."
         return (

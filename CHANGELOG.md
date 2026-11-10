@@ -2,6 +2,101 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.95] — 2026-11-10 · the copy that warned about the body it was in
+
+Two reports on 0.3.94. The first confirms every 0.3.93/0.3.94 stability fix (five
+P0s, 4/4 on the distance checks, `stale` first in the payload) and then finds the
+one thing 0.3.94 got wrong about itself: **its own new feature warned on every
+call while doing exactly what it was asked.**
+
+**`catia_sketch_copy(target_body=...)` reported the wrong body.** 0.3.94 read
+`sketch.Parent.Name` and compared it to the body's. `Sketch.Parent` is not the
+body: measured on B30 the chain is
+
+    草图.1 -> Sketches -> 零件几何体 -> Bodies -> Part -> document
+
+so the comparison was against the string `"Sketches"` and could never match. The
+copy landed in the right body (their pad built 50000 mm3 there), and the reply
+said "the copy is in the wrong body", 2/2. The question is membership - "is this
+sketch in THIS body" - so it is now asked of that body's own `Sketches`
+collection: **identity across every body first, name second**, because a part can
+hold two sketches called `草图.1` after a rollback and a name match in body order
+answers confidently with the wrong one. An unreadable collection answers `None`
+("unknown"), which never becomes a warning.
+
+The audit that passed 9/9 in 0.3.94 asked whether the geometry landed in the body,
+which it did - it never asked what the reply said. `scripts/b30_v0395_audit.py`
+now asserts `"WARNING" not in reply` on the good path, and the new tests cover
+the wrong-body case, the right-body case and the unreadable case separately.
+
+**`catia_sketch_strokes` — the bottleneck behind "there is no text tool".** A
+glyph outline is 8-20 segments and every sketch tool draws one element per call,
+so a letter was dozens of hand-computed calls (their "A" needed 7 control points,
+and `catia_sketch_spline` then interpolated it into an omega). This tool takes the
+whole outline at once, as the `[[x,y],...]` lists any font or DXF outline arrives
+in, and draws STRAIGHT segments - no interpolation, so corners stay corners; a
+stroke that repeats its first point is closed; a degenerate segment refuses the
+WHOLE batch before anything is drawn, because a zero-length line is accepted by
+CATIA and breaks the profile three steps later. Segments are recorded as `line`
+records, so a batch-drawn glyph is still copyable by `catia_sketch_copy`.
+It is not a text tool: a font is data, and a hand-written font would be a guess
+dressed as a feature. What was missing - and is now there - is the one call that
+turns an outline into sketch geometry.
+
+**The arc's angle form described a pair that is not an arc.** "from 90° to 0° -
+swept 90° counter-clockwise" is self-contradictory: 90 -> 0 is clockwise. The
+geometry was right, the sentence was not. The direction now comes from the arc
+that was actually drawn, and a `major=true` clockwise arc still says clockwise.
+
+**A boolean that removes nothing keeps both names.** The tool body is consumed by
+the call, so `str(tool.Name)` afterwards is CATIA's internal name
+(`'TouchTool'` read back as `'几何体.3'`) - and the message silently substituted
+it, which reads like a different body was cut. `data` now carries
+`tool_body_requested` and `tool_body_internal`, `tool_body_consumed: true`, and
+the message uses the caller's name with CATIA's in brackets. The `next_actions`
+lost `catia_get_bounding_box(component=...)` - that argument is for assembly
+instances and cannot measure a body (their P2-2) - and the wording is now "shares
+no VOLUME" instead of "does not overlap", because two bodies that meet along a
+face measure 0.0000 mm apart and still remove nothing.
+
+**The consumed tool body no longer leaves a stale handle.** After `NO_MATERIAL`
+the session's active body still pointed at the body the boolean had consumed, so
+`catia_list_bodies` reported three bodies with every `active: false` and did not
+list the one the handle named. The rollback now moves the handle to the target,
+and `list_bodies` publishes `active_body` plus `active_body_missing` with a
+sentence naming the problem instead of leaving the caller to guess.
+
+**`gsd_split`'s number was a minimum pretending to be a diagnosis.** Three
+cutters (a projected curve, its extract, and a projected circle) got "closest
+approach 0.0000 mm" three times, and the report spent three controlled experiments
+rebuilding a cutter that lay on the surface by construction. A minimum is 0 for a
+curve that touches the surface in ONE place, so it cannot answer "does the contour
+follow it" - and this build has no way to sample along a curve (`
+AddNewPointOnCurveFromPercent` does not update, measured 2026-11-09). The message
+now says exactly that, states which combinations the measurements do separate
+(plane patch: works; join/array: take the piece first; curve projected onto a
+NON-PLANAR surface: unsupported on B30, three ways measured), and points at the
+four routes that work.
+
+**`catia_split_solid` says what it is not.** First sentence now: it cuts a body in
+two and keeps one half, it is NOT a local cut / engraving / pocket, and CATIA's
+Chinese UI calls both it and the surface split 分割. Its reply also prints the
+discarded half (`kept 49000.0 mm3, discarded 48500.0 mm3`), which the description
+had promised since 0.3.94 while the code printed a percentage.
+
+Not done, with the reason measured rather than assumed: a "surface engrave" tool
+(projected curve -> patch -> offset -> solid cutter) needs a way to cut a patch
+out of a CURVED surface, and on this build `gsd_split` rejects a curve projected
+onto one, `fill` rejects the projected closed curve, and `AddNewSewSurface` /
+`AddNewWrapCurve` never update (0.3.94). Shipping a tool whose middle step is
+known to fail would be the thing these three reports keep paying for.
+
+1524 tests (+14), 137 tools, `scripts/b30_v0395_audit.py` 7/7 on B30: the copy
+warns about nothing and is in `CopyTarget`'s own sketch list, an 8-segment glyph
+drawn in one call pockets 2900.0 mm3, `90 -> 0` reads "clockwise", a touching tool
+body answers `NO_MATERIAL` with `requested=TouchTool internal=几何体.3`, and
+`list_bodies` reports `active_body=零件几何体` with no `active_body_missing`.
+
 ## [0.3.94] — 2026-11-10 · the chain, measured instead of promised
 
 0.3.93 listed nine operations as "not done, needs a B30 session". That list was

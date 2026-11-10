@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.94** · [what changed](CHANGELOG.md) ·
+**0.3.95** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -12,7 +12,7 @@ defects that make that loop lie to you. Most of the work since 0.3.0 came from
 people rebuilding real assemblies with it: the changelog is a list of things that
 produced a plausible number, a wrong number, or no explanation at all.
 
-**136 tools** (upstream 98 + 38 added, and nothing dropped any more: knowledge
+**137 tools** (upstream 98 + 39 added, and nothing dropped any more: knowledge
 came back in 0.3.63 and drafting in 0.3.64, each after its tools were measured on
 B30 rather than trusted). Nothing in the COM layer was rewritten — the value of upstream is
 the field-verified knowledge in its comments, so this fork is strictly add /
@@ -61,7 +61,7 @@ but the claim that it worked.
 same reason they always did: domain-neutral and cheap. See `FORK.md` §8 if you
 want to cut further.
 
-### Added (31 tools over upstream)
+### Added (32 tools over upstream)
 
 Five of them came with the fork, twenty-one were added while building parts
 from a spec (0.3.1: three, 0.3.2: four, 0.3.4: one, 0.3.5: one, 0.3.8: two, 0.3.17:
@@ -71,7 +71,7 @@ two - `catia_delete_body`, `catia_solid_loft`; 0.3.19: one - `catia_copy_compone
 `catia_gsd_rotate`, `catia_gsd_translate`; 0.3.82: three - `catia_sketch_copy`,
 `catia_gsd_circ_pattern`, `catia_gsd_plane_normal_to_curve`; 0.3.84: one -
 `catia_gsd_plane_angle`).
-98 + 38 added = 136: the 31 below, `catia_apply_design_table` under Knowledgeware,
+98 + 39 added = 137: the 31 below, `catia_apply_design_table` under Knowledgeware,
 `catia_drawing_set_sheet` and `catia_drawing_add_frame` under Drafting (0.3.65),
 the three colour tools in their own table below (0.3.79), and
 `catia_replace_component` (0.3.80), and `catia_split_solid` (0.3.94). 0.3.85 added arguments instead of tools:
@@ -91,6 +91,7 @@ several documents.
 | `catia_get_component_transform` | The same placement in both conventions, plus where local X/Y/Z point in the assembly |
 | `catia_rename_component` | A readable assembly tree. `Part.Name` is read-only on V5-6R2020, so every part arrives as `Part1.1 / Part2.1 / …`; the instance name is writable |
 | `catia_sketch_copy` | The "copy the profile, paste it on the next plane" step. Replays a sketch's recorded geometry into a new sketch on another plane - a main plane, a frame, or **a datum plane by name** - coordinates unchanged; redrawing by hand is what leaves two copies that are not coordinate-identical, and a loft section is sensitive to that. Refused for a sketch reopened from disk, because the record is the only source of coordinates. **The record now follows a delete** (0.3.90): measured 2026-11-09, two lines with the second deleted still left BOTH in the record, so the copy came back with twice the source's outline - the shape of a report's "2 spline(s)". A shape made of several elements (a rectangle is four lines) cannot be replayed after one side goes, so the record is dropped whole and the reply says `catia_sketch_copy` will refuse that sketch |
+| `catia_sketch_strokes` | Draws a whole letter outline (or any set of polylines) in ONE call, as straight segments. A glyph is 8-20 segments and the one-element tools force one call per segment, so a 2026-11-10 report computed control points by hand for dozens of calls per letter. It does not interpolate: `catia_sketch_spline` through the same points rounds every corner - that is what turned their hand-built "A" into an omega. Each stroke that repeats its first point is closed, degenerate segments are refused before anything is drawn, and the segments are recorded as lines so `catia_sketch_copy` can replay them |
 | `catia_gsd_circ_pattern` | Repeats one surface/curve N times around an axis and joins the copies in one call. **Not a CATIA GSD pattern**: this build's `HybridShapeFactory` declares 160 members and none contains "Pattern" (measured 2026-11-08), so the tree gets N-1 rotations plus a join, and the reply says so |
 | `catia_gsd_plane_normal_to_curve` | Plane normal to a curve with its origin ON that curve at a fraction of its length - the tutorial's "Normal to Curve + Set Origin on Curve". A tree element, unlike the frame sketch that used to be the only way; the point's measured coordinates are reported back |
 | `catia_gsd_plane_angle` | A datum plane rotated a given angle about an axis - the tutorial's 36-degree construction and the general 1/N-sector plane. A named, editable, referenceable tree element, unlike a frame sketch. The axis must LIE IN the reference plane (rotating a plane about its own normal leaves it where it was and CATIA answers with a generic failure), and the angle is in degrees |
@@ -1028,7 +1029,7 @@ python -m venv .venv
 # offline test suite, no CATIA needed
 .venv/Scripts/python -m pytest tests -q
 
-# the smoke check: 136 tool definitions == 136 routes
+# the smoke check: 137 tool definitions == 137 routes
 .venv/Scripts/python tests/test_server.py
 ```
 
@@ -1218,7 +1219,7 @@ while a reply that only reports success cannot.
 | Group | Tools | Notes |
 |---|---|---|
 | Document | 12 | new/open/save/close/list + `catia_save_as_copy`; `catia_save_document` retries around dialogs |
-| Sketcher | 14 | lines, rectangles, circles, constraints; reopen a closed sketch and delete one element; `catia_sketch_copy` replays a profile onto another plane |
+| Sketcher | 15 | lines, rectangles, circles, constraints; reopen a closed sketch and delete one element; `catia_sketch_copy` replays a profile onto another plane; `catia_sketch_strokes` draws a whole letter outline in one call |
 | Part Design | 26 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, solid loft, bodies (create / list / delete)… |
 | Generative Shape Design | 34 | wireframe and surfaces, extract, `boundary`, `heal`, `fillet_surface`, `spine`, `rotate`, `translate`, `circ_pattern` (rotate+join), `plane_normal_to_curve`, `plane_angle`, revolve + close surface; a GSD element or set is removed with `catia_delete_feature` |
 | Assembly | **14** | upstream 9 + get/set component transform, rename, list constraints, copy component, replace component |
@@ -1517,6 +1518,20 @@ context (that refusal is a modal dialog, and reads as a bare `[WinError 2]`).
 Place the result with `catia_get_component_transform`.
 
 ## Known limits
+
+* **A curve projected onto a CURVED surface has no downstream consumer here.**
+  Measured on B30 2026-11-10, three ways: `catia_gsd_split(element=<the extracted
+  bottle skin>, cutter=<projected curve>)` fails, the same call with the
+  projection's own extract fails, and a projected CIRCLE fails identically;
+  `catia_gsd_fill(boundaries=[<that curve>])` answers `FILL_NOT_CLOSED`; and
+  `catia_gsd_thick_surface` on the skin fails at every thickness tried (0.4/0,
+  0.2/0.2, 0.1/0.1). The same closed curve on a PLANE patch splits cleanly
+  (1486.903 mm² kept), so this is the curved case, not the curve. That is why the
+  engraving chain "project -> split -> offset" stops at step two on a curved
+  surface, and why no `surface_engrave` tool exists: its middle step is the one
+  that fails. Note also that `gsd_split`'s "closest approach" number is a
+  MINIMUM - it is 0.0000 mm for a curve that merely touches the surface once, so
+  it cannot tell you whether the contour follows it.
 
 * **`AddNewSewSurface` is declared, accepts the call, and never updates.** Same
   shape of failure as the GSD pattern above, measured on B30 2026-11-10 before a

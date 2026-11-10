@@ -211,7 +211,13 @@ def test_a_remove_that_changed_nothing_is_refused():
     assert error.data["volume_before_mm3"] == 168607.5
     assert error.data["volume_after_mm3"] == 168607.5
     assert "removed no material" in str(error)
-    assert "does not overlap" in str(error)
+    # 0.3.95 changed the clause: "does not overlap" claimed more than the
+    # measurement shows - two bodies can touch along a face and still remove
+    # nothing (reported 2026-11-10, P2-2).
+    assert "shares no VOLUME" in str(error)
+    assert error.data["tool_body_requested"] == "Tool"
+    assert error.data["tool_body_internal"] == "Tool"
+    assert error.data["tool_body_consumed"] is True
     # The dead node does not stay in the tree.
     assert removed == made
 

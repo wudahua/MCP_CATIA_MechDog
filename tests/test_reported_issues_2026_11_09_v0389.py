@@ -116,15 +116,22 @@ def test_the_failed_update_reports_the_distance_and_refuses_to_guess():
     assert error.code == "SPLIT_FAILED"
     assert error.modified is False
     assert "0.0000 mm" in text
-    # Both situations, and no claim about which one this is.
-    assert "will not pretend to know which" in text
-    assert "LIE ON" in text and "JOIN or array result" in text
+    # 0.3.95: the number is a MINIMUM and the message says so. A 2026-11-10
+    # report with three cutters got "closest approach 0.0000" three times and
+    # rebuilt a cutter that already lay on the surface - a minimum cannot
+    # answer "does the whole contour follow the element".
+    assert "MINIMUM" in text
+    assert "NOT prove the contour" in text
+    assert "no way to sample along a curve" in text
+    # The cases the measurements DO separate, named.
+    assert "join or an array" in text
+    assert "measured-unsupported combination" in text
     # The measured control cases, so the caller does not repeat the experiment.
     assert "1486.903" in text
-    assert "40x40 PLANE patch" in text
+    assert "PLANE patch" in text
     # And the route that needs no coplanar centre.
     assert "cap_center=true" in text
-    assert "OWN border shape" in text
+    assert "OWN border" in text
     # The error state is itself a cause of a second failure.
     assert "do not read a second failure as a second cause" in text
 

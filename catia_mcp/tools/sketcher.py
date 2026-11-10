@@ -634,6 +634,57 @@ class SketcherTools:
                     "required": ["source", "plane"],
                 },
             },
+            {
+                "name": "catia_sketch_strokes",
+                "description": (
+                    "Draw MANY polylines in ONE call. A letter outline is 8-20 "
+                    "segments and a word is several letters, so the one-element "
+                    "call is the bottleneck: a 2026-11-10 report spent dozens of "
+                    "calls per glyph computing control points by hand. This takes "
+                    "the whole outline at once - the shape of the data any font or "
+                    "DXF outline arrives in - and draws it as STRAIGHT segments. It "
+                    "does NOT interpolate: catia_sketch_spline through the same "
+                    "points rounds the corners (that is what turned a hand-built "
+                    "'A' into an omega), so a glyph drawn here keeps its corners "
+                    "exactly as given. Each stroke is a list of [x, y] points in "
+                    "the sketch's own 2D coordinates; repeat the first point at the "
+                    "end to close one. Handy companions: catia_sketch_rectangle for "
+                    "a box, and catia_close_sketch reports the outline it built."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "strokes": {
+                            "type": "array",
+                            "description": (
+                                "One entry per polyline: [[x0,y0],[x1,y1],...]. Each "
+                                "needs at least 2 points; repeat the first point at "
+                                "the end to close the loop."
+                            ),
+                            "items": {
+                                "type": "array",
+                                "items": {
+                                    "type": "array",
+                                    "items": {"type": "number"},
+                                    "minItems": 2,
+                                    "maxItems": 2,
+                                },
+                                "minItems": 2,
+                            },
+                        },
+                        "construction": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Draw as construction geometry: guides that do not "
+                                "become part of the profile (excluded from the "
+                                "outline echo and from pad/pocket)."
+                            ),
+                        },
+                    },
+                    "required": ["strokes"],
+                },
+            },
         ]
 
     def execute(self, tool_name: str, arguments: dict[str, Any]) -> str | dict[str, Any]:
@@ -692,6 +743,9 @@ class SketcherTools:
                                             arguments.get("sketch_name"))
             case "catia_sketch_copy":
                 return self._copy_sketch(arguments)
+            case "catia_sketch_strokes":
+                return self._draw_strokes(arguments["strokes"],
+                                          bool(arguments.get("construction", False)))
             case _:
                 raise ArgumentRejected(f"Unknown sketcher tool: {tool_name}")
 
@@ -1388,18 +1442,23 @@ class SketcherTools:
 
         self._create_sketch(plane=plane)
         if wanted_body:
-            # Read the parent back: InWorkObject reports no error while CATIA
-            # keeps pointing somewhere else (measured 2026-10-26), and a copy in
-            # the wrong body is only noticed when the next pad lands there.
-            try:
-                actual = str(self._active_sketch.Parent.Name)
-            except Exception:  # noqa: BLE001 - unknown is not "wrong"
-                actual = ""
-            if actual and actual != str(body.Name):
+            # ASK THE BODY, NOT THE SKETCH (0.3.95). 0.3.94 read
+            # `sketch.Parent.Name` and compared it to the body's - but on B30
+            # `Sketch.Parent` is the **Sketches collection**, whose Name is
+            # literally "Sketches" (measured 2026-11-10: 草图.1 -> Sketches ->
+            # 零件几何体 -> Bodies -> Part -> document), so the comparison could
+            # never match and every single call ended with "the copy is in the
+            # wrong body" while the copy was exactly where it was asked to go
+            # (reported 2/2, with the pad landing in the right body at the right
+            # volume). The question is membership - "is it in THIS body" - so it
+            # is asked of that body's own collection.
+            owner = self._body_holding(self.conn.get_active_part(),
+                                       self._active_sketch)
+            if owner is not None and owner != str(body.Name):
                 body_note = (
-                    " in body '%s' - WARNING: the sketch reports its body as '%s', "
-                    "so the switch did not take; the copy is in the wrong body"
-                    % (body.Name, actual)
+                    " in body '%s' - WARNING: the copy is in '%s' instead, so the "
+                    "switch did not take; do not pad from it until it is moved"
+                    % (body.Name, owner)
                 )
         target = str(self._active_sketch.Name)
         rename_note = ""
@@ -1568,6 +1627,55 @@ class SketcherTools:
         except Exception:  # noqa: BLE001 - an unreadable tree answers "unknown"
             return names
         return names
+
+    def _body_holding(self, part: Any, sketch: Any) -> str | None:
+        """Name of the body whose ``Sketches`` collection holds this sketch.
+
+        NOT ``sketch.Parent.Name``: that is the collection ("Sketches"), one level
+        below the body. Membership is the question a caller's "which body did it
+        land in" actually asks, so it is asked of each body's own collection -
+        identity first, name second, because a part can hold two sketches with the
+        same name after a rollback.
+
+        None means "could not tell", which is not "wrong body": an unreadable
+        answer must never turn into a warning.
+        """
+        try:
+            wanted = str(sketch.Name)
+        except Exception:  # noqa: BLE001
+            return None
+        try:
+            bodies = part.Bodies
+        except Exception:  # noqa: BLE001
+            return None
+        rows: list[tuple[str, Any]] = []
+        for i in range(1, int(getattr(bodies, "Count", 0)) + 1):
+            try:
+                body = bodies.Item(i)
+                sketches = body.Sketches
+            except Exception:  # noqa: BLE001
+                continue
+            for j in range(1, int(getattr(sketches, "Count", 0)) + 1):
+                try:
+                    rows.append((str(body.Name), sketches.Item(j)))
+                except Exception:  # noqa: BLE001
+                    continue
+        # IDENTITY FIRST, ACROSS ALL BODIES. A part can hold two sketches with the
+        # same name after a rollback, and a name match taken in body order would
+        # answer with whichever came first - the wrong body, confidently.
+        for name, entry in rows:
+            try:
+                if entry == sketch:
+                    return name
+            except Exception:  # noqa: BLE001
+                continue
+        for name, entry in rows:
+            try:
+                if str(entry.Name) == wanted:
+                    return name
+            except Exception:  # noqa: BLE001
+                continue
+        return None
 
     def _named_body(self, part: Any, name: str) -> Any:
         """An existing solid body by name, or a refusal that lists them.
@@ -2334,6 +2442,92 @@ class SketcherTools:
         kind = "Construction line" if construction else "Line"
         return f"{kind} created from ({x1}, {y1}) to ({x2}, {y2}) mm"
 
+    def _draw_strokes(self, strokes: list[list[list[float]]],
+                      construction: bool = False) -> str:
+        """Draw many polylines as straight segments, in one call.
+
+        WHY THIS EXISTS: a glyph outline is 8-20 segments and the one-element
+        tools force one call per segment, so a letter was dozens of calls of
+        hand-computed control points (2026-11-10 report, §3.1). The report asked
+        for a text tool; a text tool needs a font, and a hand-written font would
+        be a guess dressed as a feature - this is the part that is certain: the
+        whole outline arrives as data and goes into the sketch unchanged.
+
+        STRAIGHT segments, not a spline: catia_sketch_spline through the same
+        points interpolates and rounds every corner, which is exactly how their
+        hand-built "A" turned into an omega. A stroke that repeats its first
+        point comes out closed.
+
+        Degenerate segments are refused BEFORE drawing anything, so a bad point
+        list cannot leave half a letter in the sketch.
+        """
+        self._ensure_sketch_open()
+        if not strokes:
+            raise ArgumentRejected(
+                "catia_sketch_strokes needs at least one stroke, e.g. "
+                "[[[0,0],[10,0],[10,10]]].",
+                code="BAD_ARGUMENT", stage="validate",
+            )
+        cleaned: list[list[tuple[float, float]]] = []
+        for index, stroke in enumerate(strokes, start=1):
+            if not isinstance(stroke, (list, tuple)) or len(stroke) < 2:
+                raise ArgumentRejected(
+                    f"Stroke {index} has {len(stroke) if hasattr(stroke, '__len__') else '?'} "
+                    "point(s); a polyline needs at least 2. Nothing was drawn.",
+                    code="BAD_ARGUMENT", stage="validate",
+                )
+            points: list[tuple[float, float]] = []
+            for point in stroke:
+                if not isinstance(point, (list, tuple)) or len(point) != 2:
+                    raise ArgumentRejected(
+                        f"Stroke {index} has a point that is not an [x, y] pair: "
+                        f"{point!r}. Nothing was drawn.",
+                        code="BAD_ARGUMENT", stage="validate",
+                    )
+                points.append((float(point[0]), float(point[1])))
+            for (x1, y1), (x2, y2) in zip(points, points[1:]):
+                if abs(x2 - x1) < 1e-9 and abs(y2 - y1) < 1e-9:
+                    raise ArgumentRejected(
+                        f"Stroke {index} repeats the point ({x1:g}, {y1:g}) on "
+                        "consecutive entries, which draws a zero-length line - "
+                        "CATIA accepts it and the profile then fails three steps "
+                        "later. Nothing was drawn; remove the duplicate.",
+                        code="DEGENERATE_SEGMENT", stage="validate",
+                    )
+            cleaned.append(points)
+
+        factory = self._active_factory
+        segments = 0
+        for points in cleaned:
+            for (x1, y1), (x2, y2) in zip(points, points[1:]):
+                line = factory.CreateLine(x1, y1, x2, y2)
+                if construction:
+                    try:
+                        line.Construction = True
+                    except Exception:  # noqa: BLE001 - the line is still drawn
+                        pass
+                else:
+                    # Recorded per SEGMENT, as a "line": that is the kind the
+                    # replay path (catia_sketch_copy) and the outline echo already
+                    # understand, so a batch-drawn glyph is copyable and its span
+                    # bookkeeping stays exact. A new record kind here would have
+                    # been an unhandled branch three functions away.
+                    self._note_ends((x1, y1), (x2, y2))
+                    self._note_element("line", x1=x1, y1=y1, x2=x2, y2=y2)
+                segments += 1
+
+        xs = [x for points in cleaned for x, _ in points]
+        ys = [y for points in cleaned for _, y in points]
+        closed = sum(1 for points in cleaned if points[0] == points[-1])
+        return (
+            f"{len(cleaned)} stroke(s) drawn as {segments} straight line(s)"
+            + (" as construction geometry" if construction else "")
+            + f", covering X {min(xs):g}..{max(xs):g} and Y {min(ys):g}..{max(ys):g} mm"
+            + (f"; {closed} of them closed" if closed else "")
+            + ". A stroke that repeats its first point is closed; nothing was "
+            "smoothed, so corners stay corners."
+        )
+
     def _draw_rectangle(self, x1: float, y1: float, x2: float, y2: float) -> str:
         self._ensure_sketch_open()
         factory = self._active_factory
@@ -2383,6 +2577,7 @@ class SketcherTools:
         # R20 API reference). An arc is an open circle: CreateCircle takes
         # optional start/end parameters in radians that leave it open.
         notes: list[str] = []
+        angle_form = False
         if p1 is not None or p2 is not None:
             if p1 is None or p2 is None:
                 raise ArgumentRejected(
@@ -2487,11 +2682,20 @@ class SketcherTools:
                 start_rad, end_rad = first_rad, first_rad + sweep
             else:
                 start_rad, end_rad = second_rad, second_rad + sweep
+            # THE REPLY DESCRIBED A PAIR THAT IS NOT AN ARC (0.3.95). It said
+            # "from 90 deg to 0 deg - swept 90 counter-clockwise", and 90 -> 0
+            # is clockwise; the two clauses contradicted each other in the same
+            # sentence, while the geometry was right (reported 2026-11-10, P2-1).
+            # The direction now comes from the arc that was actually drawn.
+            angle_form = True
+            angle_direction = ("counter-clockwise" if ccw_wanted else "clockwise")
+            angle_from, angle_to = start_angle, end_angle
         else:
             raise ArgumentRejected(
                 "catia_sketch_arc needs either start_angle and end_angle, or p1 "
                 "and p2."
             )
+
         # CreateCircle requires endParam strictly greater than startParam;
         # normalize sweeps that wrap past 0 degrees.
         while end_rad <= start_rad:
@@ -2508,7 +2712,9 @@ class SketcherTools:
         # swept 36.3 counter-clockwise") and then add a bracket apologising for
         # it, which reads as "the endpoints were swapped" to anything that
         # stitches a profile by order (reported 2026-11-06, P3-7). Say both.
-        if direction == "cw" and p1 is not None:
+        if angle_form:
+            span = (f"from {angle_from:g}° {angle_direction} to {angle_to:g}°")
+        elif direction == "cw" and p1 is not None:
             span = (f"from p1 ({p1[0]:g}, {p1[1]:g}) to p2 ({p2[0]:g}, {p2[1]:g}), "
                     f"which is clockwise from p1 to p2, {abs(sweep):.4f}° (stored "
                     f"as {end_angle:.4f}° -> {start_angle:.4f}°, swept "

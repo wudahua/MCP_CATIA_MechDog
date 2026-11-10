@@ -4328,33 +4328,45 @@ class GSDTools:
             after = self._cutter_gap(elem_ref, cutter_ref)
             measured = (f"{after:.4f} mm" if after is not None
                         else "not measurable after the failure")
+            # THE NUMBER THAT USED TO LEAD THIS MESSAGE WAS A MINIMUM (0.3.95).
+            # A 2026-11-10 report with three cutters (a projected curve, its
+            # extract, and a projected circle) got "closest approach 0.0000 mm"
+            # three times and spent three controlled experiments rebuilding a
+            # cutter that was already lying on the surface by construction - the
+            # projected curve touches the surface, and the minimum is 0 whether
+            # or not the whole contour follows it. A minimum cannot answer the
+            # question. The maximum deviation along the contour would, and there
+            # is no way to sample a curve on this build (AddNewPointOnCurveFromPercent
+            # does not update - measured 2026-11-09), so this message now says
+            # what the number can and cannot mean instead of implying it decides.
             raise PreconditionRejected(
                 f"CATIA rejected the split of '{args['element']}' by "
                 f"'{args['cutter']}' at update, and the attempt was removed from "
-                f"the tree again. Measured after the refusal: the closest "
-                f"approach between the two is {measured}. "
-                "TWO DIFFERENT situations produce this, and this message will not "
-                "pretend to know which: (a) the cutter does not LIE ON the element "
-                "along its whole contour - a planar closed curve over a CURVED "
-                "surface touches it in places and leaves it in between, and only a "
-                "curve lying on the surface everywhere gives a usable contour; (b) "
-                "the element is a JOIN or array result - take the piece BEFORE the "
-                "join, the same limit catia_gsd_boundary(edge=N) reports. "
-                "All measured on B30 2026-11-09 on a 40x40 PLANE patch: a r=6 "
-                "circle lying on it splits cleanly (1486.903 mm2 kept), the same "
-                "circle 3 mm above it fails exactly like this, and a circle over a "
-                "five-lobe loft fails too - so 'it works on a patch' is not a "
-                "promise about a curved surface. "
-                "WHAT TO DO: measure a few points of the cutter against the "
-                "element with catia_measure_distance; anything other than 0.0000 mm "
-                "means the contour does not exist and no argument will produce it. "
-                "To cap a hole where the centre is NOT flat, use "
+                f"the tree again. The closest approach between the two measures "
+                f"{measured} AFTER the refusal - and that is a MINIMUM, so it is 0 "
+                "for a curve that merely touches the element in one place. It does "
+                "NOT prove the contour follows the element, and this build offers "
+                "no way to sample along a curve to find out. What the measurements "
+                "do separate: "
+                "a closed curve lying on a PLANE patch splits cleanly (1486.903 "
+                "mm2 kept, 2026-11-09); the same circle 3 mm above that patch "
+                "fails, and a circle over a five-lobe loft fails, and on 2026-11-10 "
+                "a curve projected onto a NON-PLANAR surface failed THREE ways - "
+                "the projection itself, an extract of it, and a projected circle. "
+                "So: if the cutter came from catia_gsd_project onto a curved "
+                "surface, this is the measured-unsupported combination on B30 and "
+                "no argument will turn it into a split. "
+                "What works instead: (a) split a PLANAR patch; (b) take the piece "
+                "BEFORE a join or an array (the same limit catia_gsd_boundary"
+                "(edge=N) reports); (c) to cap a hole whose centre is not flat, "
                 "catia_gsd_circ_pattern(cap_center=true, cap_curve=<the hole's own "
-                "edge>) - it caps with the hole's OWN border shape and needs no "
-                "coplanar disc. Nothing this call created was left behind. One "
-                "more measurement: after a failed update even an unrelated point "
-                "refuses to update in this document, so do not read a second "
-                "failure as a second cause.",
+                "edge>) - it caps with the hole's OWN border and needs no coplanar "
+                "disc; (d) to remove material inside a curve on a curved surface, a "
+                "solid tool body through catia_boolean(remove) - with the caveat "
+                "that its depth follows an axis, not the surface normal. "
+                "Nothing this call created was left behind. One more measurement: "
+                "after a failed update even an unrelated point refuses to update in "
+                "this document, so do not read a second failure as a second cause.",
                 code="SPLIT_FAILED", stage="execute", modified=False,
                 next_actions=[
                     "Measure a few points of the cutter against the element "

@@ -161,8 +161,12 @@ def test_a_split_reports_both_volumes_and_the_side_it_kept():
     reply = tools._split_solid({"cutter": "Wall"})
 
     assert log["split"] == [("ref:Wall", 0)]      # 'front' -> iSplitSide 0
-    assert "100000.0 -> 70000.0 mm3" in reply
-    assert "70.0%" in reply                        # the share, so a wrong half shows
+    # 0.3.95 prints the half that was DISCARDED too: the description promised
+    # "both volumes" and 0.3.94 left the caller to subtract them.
+    assert "100000.0 mm3 before" in reply
+    assert "kept 70000.0 mm3" in reply
+    assert "discarded 30000.0 mm3" in reply
+    assert "70.0% kept" in reply
     assert "keep='back'" in reply                  # ...and how to flip it
     assert "still in its geometrical set" in reply
 
@@ -337,11 +341,21 @@ def test_a_union_is_never_judged_by_distance():
 # ── the copy knows which body it belongs in ────────────────────────────
 
 
-def _copy_tools(parent_name="Label"):
+def _copy_tools(lands_in="Label"):
+    """`lands_in` is the body the copy actually ends up in.
+
+    The tool now asks each body's own Sketches collection, so the fake needs one:
+    0.3.94 read `sketch.Parent.Name`, which on B30 answers "Sketches" - the
+    collection - and therefore warned on every call (reported 2026-11-10).
+    """
     from catia_mcp.tools.sketcher import SketcherTools
 
     bodies = [_Body("PartBody"), _Body("Label")]
-    bodies[0].Shapes = _Shapes([])
+    for body in bodies:
+        body.Shapes = _Shapes([])
+        body._sketches = []
+        body.Sketches = types.SimpleNamespace(
+            Count=0, Item=lambda i, b=body: b._sketches[i - 1])
 
     class Conn:
         active_body = None
@@ -375,15 +389,19 @@ def _copy_tools(parent_name="Label"):
     tools._copy_placement_note = lambda target: ""
 
     def create(plane=None):
-        tools._active_sketch = types.SimpleNamespace(
-            Name="Section.2", Parent=types.SimpleNamespace(Name=parent_name))
+        owner = part.Bodies.Item(lands_in)
+        sketch = types.SimpleNamespace(Name="Section.2",
+                                       Parent=types.SimpleNamespace(Name="Sketches"))
+        owner._sketches.append(sketch)
+        owner.Sketches.Count = len(owner._sketches)
+        tools._active_sketch = sketch
 
     tools._create_sketch = create
     return tools, part, Conn
 
 
 def test_a_copy_can_be_put_in_another_body_and_says_which():
-    tools, part, connector = _copy_tools(parent_name="Label")
+    tools, part, connector = _copy_tools(lands_in="Label")
     reply = tools._copy_sketch({"source": "Src", "plane": "xy",
                                 "target_body": "Label"})
     assert "in body 'Label'" in reply
@@ -393,12 +411,32 @@ def test_a_copy_can_be_put_in_another_body_and_says_which():
 
 def test_a_copy_that_landed_in_the_wrong_body_is_not_reported_as_fine():
     """InWorkObject reports no error while CATIA keeps pointing somewhere else
-    (measured 2026-10-26), so the parent is read back."""
-    tools, part, _ = _copy_tools(parent_name="PartBody")
+    (measured 2026-10-26), so the body that actually holds the sketch is read."""
+    tools, part, _ = _copy_tools(lands_in="PartBody")
     reply = tools._copy_sketch({"source": "Src", "plane": "xy",
                                 "target_body": "Label"})
     assert "WARNING" in reply
-    assert "wrong body" in reply
+    assert "the copy is in 'PartBody' instead" in reply
+
+
+def test_a_copy_that_landed_where_it_was_asked_says_nothing_alarming():
+    """The reported bug: the geometry was right and every call warned anyway."""
+    tools, part, _ = _copy_tools(lands_in="Label")
+    reply = tools._copy_sketch({"source": "Src", "plane": "xy",
+                                "target_body": "Label"})
+    assert "WARNING" not in reply
+    assert "in body 'Label'" in reply
+
+
+def test_an_unreadable_body_says_nothing_rather_than_warning():
+    """Unknown is not wrong: a body whose Sketches cannot be read must not
+    produce the warning that broke the tool's credibility."""
+    tools, part, _ = _copy_tools(lands_in="Label")
+    part.Bodies.Item("Label").Sketches = types.SimpleNamespace(
+        Count=0, Item=lambda i: (_ for _ in ()).throw(RuntimeError("no")))
+    reply = tools._copy_sketch({"source": "Src", "plane": "xy",
+                                "target_body": "Label"})
+    assert "WARNING" not in reply
 
 
 def test_an_unknown_target_body_lists_the_bodies():
