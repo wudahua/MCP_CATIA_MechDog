@@ -2,6 +2,64 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.92] — 2026-11-10 · the branch that answered a contradiction with a Save
+
+Two reports. The first confirms the guide diagnostics work (their words: better
+than what they suggested) and then isolates the last P0 residue with the
+instrumentation 0.3.91 added. The second builds the tutorial's Step 5 properly
+(three guides, all 0.0000 mm) and finds no new defect.
+
+**The bare Save is now unreachable for a document that has no path.** Their
+envelope — `SAVE_FAILED`, `data.call = "Document.Save"`, `attempts: 3`,
+`data.save_route` with nothing but `enter`, on ONE folder while four similar ones
+saved — is reproduced here against the doubles, and it comes from a single
+contradiction inside one call: `_document_at_path()` says an open document's
+FullName IS the target, while `_document_has_path()` says this document has no
+path. The old code answered that disagreement by calling `doc.Save()`, which
+cannot give a pathless document a path, and it did so with nothing but `enter` on
+the route. Two hardenings and one condition:
+
+    _same_file          now requires BOTH FullNames to be non-empty and ABSOLUTE.
+                        `str(None)` is "None" and a bare name resolves against the
+                        server's own working directory; either one turns "no file"
+                        into "the same file".
+    _document_at_path   skips a document whose FullName is not an absolute path -
+                        it cannot be the holder of a target it does not name.
+    bare-Save branch    requires has_path as well. Same-file-but-pathless falls
+                        through to the staged route, which is what the description
+                        has promised since 0.3.89.
+
+**The route now records its decision** (their first suggestion — and the reason
+this report had to *infer* a branch at all). Right after `enter`,
+`route_decision` names the branch (`bare Save` / `staged first save` / `direct
+SaveAs` / `refused: ...`) with the four facts behind it — `has_path`, `same_file`,
+`file_exists`, `holder`. The bare-Save branch also logs `bare_save` with its
+`attempts` and its error, so `attempts: 3` no longer travels alone (their second
+suggestion). Their third — a regression case with that exact path — is
+`tests/test_reported_issues_2026_11_10_v0392.py`, which drives the contradictory
+state and asserts the staged route runs and no bare Save is called.
+
+I am NOT claiming the folder is fixed: I cannot produce their CATIA state, and
+the two reads that must disagree are both CATIA's. What is fixed is that the state
+can no longer produce a Save, and that the next envelope names what it saw.
+
+**`check_surface` puts the visibility hint first.** Their 1373 → 0 non-manifold
+counts with the GSD set shown/hidden is the same story as the 2026-11-03 warning,
+except the explanation sat in `non_manifold_note`, after the number that caused
+the alarm. When the mesh includes visible GSD geometry the reply now opens with
+the count, what it probably is, the one call that settles it, and their measured
+before/after — quoted as theirs, since I did not measure it.
+
+**Not done, on purpose**: `cap_shape='circle'` (their P2). It is not a flag - a
+round cover needs the centre region cut flat first, and the measurements in their
+own v6/v7 reports (0.0065 mm at r=8, 0.0000 mm at r=5.5 still not cuttable) are
+the evidence that the interpolated surface does not hand over a planar contour.
+Adding a flag that would usually fail is worse than the sentence that already says
+not to try. The end-condition limit and the build limits they list need no code
+either; both are CATIA's.
+
+1475 tests (+11), 135 tools.
+
 ## [0.3.91] — 2026-11-10 · "tried" is not "worked", and F: is not a fact
 
 A report that ran the suite on a machine with **no F: drive** (C:/D:/E: only).

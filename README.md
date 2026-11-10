@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.91** · [what changed](CHANGELOG.md) ·
+**0.3.92** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -805,7 +805,13 @@ that route also separates the staged route's two SaveAs calls (`staging_save`,
 "the document was saved to %TEMP% and the move was refused too" even when %TEMP%
 had refused the file. A folder that cannot be created is now `SAVE_FAILED` with
 `data.call = "os.makedirs"` rather than an escaped `OSError` reported as
-`COM_ERROR`. The one
+`COM_ERROR`. Since 0.3.92 the route also opens with `route_decision` — the branch
+taken (`bare Save`, `staged first save`, `direct SaveAs`, `refused: …`) and the
+four facts behind it (`has_path`, `same_file`, `file_exists`, `holder`) — and a
+document with **no path can never be sent to a bare Save**, whatever an
+inconsistent `FullName` read says: that call cannot give it a path, so it takes
+the staged route (`_same_file` and `_document_at_path` now both require an
+absolute FullName). The one
 bare-Save branch left in that path ("the target is this document's own file")
 compares **FullName**, not `Name`: CATIA gives two open documents the same name,
 and a document with no path can never be "the same file".

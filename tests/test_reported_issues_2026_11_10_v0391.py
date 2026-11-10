@@ -139,9 +139,9 @@ def test_a_staging_save_that_failed_is_not_reported_as_saved_to_temp(monkeypatch
     assert "方法 SaveAs 失败" in route["temp_error"]
 
     steps = [step["step"] for step in error.data["save_route"]]
-    assert steps == ["enter", "staging_save", "staging", "save_as"]
-    assert error.data["save_route"][1]["ok"] is False
-    assert error.data["save_route"][2]["where"] == "temp file"
+    assert steps == ["enter", "route_decision", "staging_save", "staging", "save_as"]
+    assert error.data["save_route"][2]["ok"] is False
+    assert error.data["save_route"][3]["where"] == "temp file"
 
 
 def test_a_refused_move_does_say_the_temp_save_happened(monkeypatch, tmp_path):
@@ -168,7 +168,8 @@ def test_a_refused_move_does_say_the_temp_save_happened(monkeypatch, tmp_path):
     assert "WAS saved to %TEMP%" in str(error)
     assert "not the 'first SaveAs' limitation" in str(error)
     steps = [step["step"] for step in error.data["save_route"]]
-    assert steps == ["enter", "staging_save", "staging_move", "staging", "save_as"]
+    assert steps == ["enter", "route_decision", "staging_save", "staging_move",
+                     "staging", "save_as"]
 
 
 def test_an_untried_staging_route_says_it_was_not_tried(monkeypatch, tmp_path):

@@ -85,10 +85,17 @@ class DocumentTools:
                     "too, the direct SaveAs is still attempted and the reply says "
                     "both. "
                     "A FAILED SAVE NOW CARRIES ITS ROUTE: data.save_route lists "
-                    "every step this call took (enter, staging, save_as), with "
-                    "each COM answer and the temp path used - so 'the staged "
-                    "branch never ran' and 'its second step failed' can be told "
-                    "apart from the envelope instead of re-derived from prose. "
+                    "every step this call took (enter, route_decision, "
+                    "staging_save, staging_move, bare_save, save_as), with each COM "
+                    "answer and the temp path used - so 'the staged branch never "
+                    "ran' and 'its second step failed' can be told apart from the "
+                    "envelope instead of re-derived from prose. route_decision "
+                    "names the branch AND the facts it was chosen on (has_path, "
+                    "same_file, file_exists, holder), because a 2026-11-10 report "
+                    "had to infer the branch from a data.call. A document with no "
+                    "path can never be sent to a bare Save: that call cannot give "
+                    "it one, so it goes through the staged route whatever the "
+                    "session says about its FullName. "
                     "A non-ASCII FILE NAME is refused outright (PATH_NOT_ASCII) - "
                     "this build cannot write or open one. The failure text carries "
                     "CATIA's own error; read it before assuming a permission "
@@ -911,11 +918,18 @@ class DocumentTools:
         the target.
         """
         try:
-            one = str(first.FullName)
-            two = str(second.FullName)
+            one = str(first.FullName or "")
+            two = str(second.FullName or "")
         except Exception:  # noqa: BLE001 - never saved: no file to compare
             return False
-        if not one or not two:
+        # EMPTY IS NOT A NAME (0.3.92). `str(None)` is "None", which is non-empty
+        # and would make two pathless documents compare equal at abspath("None");
+        # a relative FullName ("Part1.CATPart") would compare at the server's
+        # working directory. Both turn "no file" into "the same file", and that
+        # is the branch that sent a never-saved document to a bare Save it could
+        # not survive (2026-11-10 report: SAVE_FAILED, data.call="Document.Save",
+        # route=[enter], on one folder only).
+        if not one or not two or not os.path.isabs(one) or not os.path.isabs(two):
             return False
         return (os.path.normcase(os.path.abspath(one))
                 == os.path.normcase(os.path.abspath(two)))
@@ -1044,10 +1058,17 @@ class DocumentTools:
         for i in range(1, int(getattr(docs, "Count", 0)) + 1):
             doc = docs.Item(i)
             try:
-                if os.path.normcase(os.path.abspath(str(doc.FullName))) == wanted:
-                    return doc
+                full = str(doc.FullName or "")
             except Exception:  # noqa: BLE001 - never saved
                 continue
+            # Only an ABSOLUTE FullName names a file (0.3.92). `str(None)` is
+            # "None" and a bare name would be resolved against this server's
+            # working directory, and either one can make a document that has no
+            # file look like the holder of the target.
+            if not full or not os.path.isabs(full):
+                continue
+            if os.path.normcase(os.path.abspath(full)) == wanted:
+                return doc
         return None
 
     def _save_via_ascii_staging(self, doc: Any, file_path: str) -> str:
@@ -1137,9 +1158,10 @@ class DocumentTools:
         # next report settles it by reading instead of by re-deriving.
         self._save_trace: list[dict[str, Any]] = []
         if file_path:
+            has_path = self._document_has_path(doc)
             self._save_trace.append({
                 "step": "enter", "path": str(file_path),
-                "has_path": self._document_has_path(doc),
+                "has_path": has_path,
                 "folder_ascii": self._path_is_ascii(os.path.dirname(str(file_path))
                                                     or "."),
             })
@@ -1150,21 +1172,41 @@ class DocumentTools:
             # the holder instead of retrying into the same wall.
             holder = self._document_at_path(file_path)
             existing = self._existing_file_note(file_path)
-            if holder is not None:
-                # IDENTITY IS THE FILE, NOT THE NAME (0.3.90). This compared
-                # `holder.Name == doc.Name`, and CATIA happily gives two open
-                # documents the same name - the very reason `document=` by name is
-                # refused elsewhere in this file. So "asking to save a document
-                # onto its own file" could fire for a document that merely shared a
-                # name, and it then called a bare Save, which cannot give a
-                # never-saved document a path. That is the only bare Save this
-                # entry point could reach, and a report kept meeting it on ONE
-                # folder while every neighbouring folder worked (2026-11-09).
-                same = self._same_file(holder, doc)
-                if same:
-                    # Asking to save a document onto its own file is a Save.
-                    name = dialogs.save(doc)
-                    return f"Document '{name}' saved"
+            same = holder is not None and self._same_file(holder, doc)
+            # WHICH BRANCH, AND ON WHAT FACTS (0.3.92). A 2026-11-10 report got a
+            # SAVE_FAILED whose data.call was a bare doc.Save() and whose
+            # data.save_route held nothing but `enter`, on ONE folder while four
+            # structurally similar ones saved. That envelope is reproducible from
+            # this file's branches with a single contradiction inside it: the
+            # target reads as this document's own FullName (so `same` is True)
+            # while the document reports no path (so `has_path` is False). Two
+            # reads of one fact disagree, and the old code answered by calling
+            # Save - which cannot give a pathless document a path, and left no
+            # trace of why. The decision is now a step of its own, and a document
+            # without a path can never take the bare-Save branch again.
+            if same and has_path:
+                branch = ("bare Save: the target is this document's own file and it "
+                          "HAS a path, so Save writes to that file")
+            elif same and not has_path:
+                branch = ("staged first save: the target reads as this document's own "
+                          "FullName but this document reports NO path, so a bare Save "
+                          "could not write it")
+            elif holder is not None:
+                branch = "refused: the file is held by another open document"
+            elif existing and not overwrite:
+                branch = "refused: the file exists and overwrite is false"
+            elif not has_path:
+                branch = "staged first save: this document has never been saved"
+            else:
+                branch = ("direct SaveAs: this document already has a path and the "
+                          "target is free")
+            self._save_trace.append({
+                "step": "route_decision", "branch": branch,
+                "has_path": has_path, "same_file": bool(same),
+                "file_exists": bool(existing), "overwrite": bool(overwrite),
+                "holder": (str(holder.Name) if holder is not None else None),
+            })
+            if holder is not None and not same:
                 users = self._component_usage().get(str(holder.Name)) or []
                 raise ArgumentRejected(
                     # Report what is there FIRST, whichever guard fires: the two
@@ -1182,10 +1224,26 @@ class DocumentTools:
                     "Close that document (or the assembly that references it) and "
                     "save again, or write to a different path."
                 )
-            replaced = self._existing_file_note(file_path)
-            if replaced and not overwrite:
+            if same and has_path:
+                # Asking to save a document onto its own file is a Save.
+                try:
+                    name = dialogs.save(doc)
+                except Exception as error:  # noqa: BLE001 - the caller reports it
+                    # "attempts: 3" used to travel alone, with a route that said
+                    # nothing about it (reported 2026-11-10: an envelope whose
+                    # route had one step for a call that retried three times).
+                    self._trace({"step": "bare_save", "ok": False,
+                                 "document": str(doc.Name),
+                                 "attempts": int(((getattr(error, "data", None) or {}
+                                                   ).get("attempts")) or 0) or None,
+                                 "error": self._first_line(error)})
+                    raise
+                self._trace({"step": "bare_save", "ok": True,
+                             "document": str(name)})
+                return f"Document '{name}' saved"
+            if existing and not overwrite:
                 raise ArgumentRejected(
-                    f"'{file_path}' already exists ({replaced}) and is not this "
+                    f"'{file_path}' already exists ({existing}) and is not this "
                     "document's file. Saving there would replace it, and a "
                     "verification run that did exactly that lost a finished part "
                     "(reported 2026-10-25). Pass overwrite=true if you mean to "
@@ -1233,8 +1291,8 @@ class DocumentTools:
                     # verification run silently replaced a finished part), so it
                     # has to survive the staged route - the last SaveAs is the one
                     # that touched the file either way.
-                    note = (f" (replaced the existing file: {replaced})"
-                            if replaced else
+                    note = (f" (replaced the existing file: {existing})"
+                            if existing else
                             " (new file - nothing was overwritten)")
                     return (
                         f"Document saved as: {target}{note} (through an ASCII "
@@ -1290,7 +1348,7 @@ class DocumentTools:
             # Always say whether the path was free. A caller in a finished-parts
             # directory should never have to check the folder afterwards to know
             # whether it just replaced something (reported 2026-10-25).
-            note = (f" (replaced the existing file: {replaced})" if replaced
+            note = (f" (replaced the existing file: {existing})" if existing
                     else " (new file - nothing was overwritten)")
             return f"Document saved as: {target}{note}"
         if not self._document_has_path(doc):

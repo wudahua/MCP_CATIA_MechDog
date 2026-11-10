@@ -4910,6 +4910,26 @@ class MeasurementTools:
                 f"the mesh was larger than the {cap} triangle cap and only the "
                 f"first {cap} were read, so these figures describe part of the "
                 f"model; raise 'cap' to inspect all of it"]
+        # A three-digit non-manifold count on a finished solid reads as "my model
+        # is broken", while it is usually the auxiliary GSD geometry lying on top
+        # of the solid - which the export includes whenever the set is VISIBLE
+        # (2026-11-10 report: 1373 non-manifold and 5 boundary edges with the set
+        # visible, 0 and 0 with it hidden, triangles 4611 -> 1930, same solid).
+        # The explanation existed in non_manifold_note, i.e. after the number
+        # that caused the alarm; it goes first now, with the one call that
+        # settles it.
+        if stats["non_manifold_edges"] and shown:
+            report = {
+                "headline": (
+                    f"{stats['non_manifold_edges']} non-manifold edge(s) - but this "
+                    f"mesh includes the VISIBLE geometry of {shown} of {sets_total} "
+                    "geometrical set(s), so check that before treating it as a "
+                    "modelling fault: hide the set and measure again "
+                    "(catia_set_visibility(name='<the set>', show=false)). Reported "
+                    "2026-11-10 on a 5-sector part: 1373 non-manifold and 5 "
+                    "boundary edges with the set visible, 0 and 0 with it hidden, "
+                    "same solid (triangles 4611 -> 1930)."),
+                **report}
         return json.dumps(report, indent=2)
 
     def _get_bounding_box(self, method: str = "auto",
