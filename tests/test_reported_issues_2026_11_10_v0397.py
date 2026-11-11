@@ -267,7 +267,8 @@ def test_offset_surface_appends_the_note_and_keeps_the_message() -> None:
 def test_capability_ceilings_use_the_stated_vocabulary() -> None:
     allowed = {"UNSUPPORTED_ON_B30", "NOT_IN_TYPELIB",
                "DECLARED_NOT_MEASURED", "AVAILABLE_WITH_LIMIT",
-               "MEASURED_UNEXPLAINED"}
+               "MEASURED_UNEXPLAINED",
+               "SEEN_ONCE_NOT_REPRODUCED"}
     assert _CAPABILITY_CEILINGS
     for entry in _CAPABILITY_CEILINGS:
         assert set(entry) == {"member", "status", "detail"}

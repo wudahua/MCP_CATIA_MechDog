@@ -172,21 +172,28 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
         ),
     },
     {
-        "member": "engraving after a document is saved, closed and reopened",
-        "status": "MEASURED_UNEXPLAINED",
+        "member": "a groove after a document is saved, closed and reopened",
+        "status": "SEEN_ONCE_NOT_REPRODUCED",
         "detail": (
-            "An engrave that works in the session that built the projection does not "
-            "necessarily work after the file has been reopened. Measured on B30 "
-            "2026-11-11 on a lofted r=40 cylinder closed into a solid: a r=6 sketch "
-            "circle projected onto it, engrave depth 0.6, removed 9.991 mm3 (a 0.6 mm "
-            "tube over 17.783 mm predicts 10.056). The document was saved, closed and "
-            "reopened, and the SAME projection object - still 17.7831 mm long, still "
-            "0.0000 mm from the body - removed NOTHING; a projection made after the "
-            "reopen failed as well, and part.Update() then failed too. Which of the "
-            "two changes across a reopen is unknown, so this is not reported as a "
-            "cause anywhere in the code, only as this measurement. Until it is "
-            "explained: make the projection and the engrave in the SAME session, and "
-            "treat a NO_MATERIAL on a reopened file as this, not as a bad curve."
+            "SEEN ONCE, AND NOT REPRODUCED. On 2026-11-11 an engrave on a lofted "
+            "cylinder closed into a solid removed 9.991 mm3 before the file was "
+            "saved, closed and reopened, and nothing at all after it - although the "
+            "projection was still 17.7831 mm long and still 0.0000 mm from the body. "
+            "That single observation was published with the advice 'make the "
+            "projection and the engrave in the SAME session'. "
+            "Re-measured on 2026-11-11 for 0.3.105, five cells, two geometries, a "
+            "fresh document each time: a 100x100x20 pad with a line on its top face, "
+            "depth 2, removed 376.9911 mm3 before the reopen and 376.9911 mm3 after; "
+            "the same lofted bottle with a projected 32.111 mm glyph, depth 0.4, "
+            "removed 7.9958 mm3 before and 7.9958 mm3 after. part.Update() before "
+            "the engrave changed nothing, so 'the reopened tree has not been "
+            "recomputed' is not the explanation either. Reopening is not the "
+            "variable. The advice is therefore WITHDRAWN: nothing in this package "
+            "asks for the two calls to share a session, and a NO_MATERIAL on a "
+            "reopened file is reported as NO_MATERIAL like any other. If it is ever "
+            "seen again, keep the catia_surface_engrave reply and read the removed "
+            "volume against the cutter's volume - that is what separates a fragment "
+            "from a curve that is not on the body."
         ),
     },
     {

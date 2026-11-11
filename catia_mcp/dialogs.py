@@ -142,6 +142,22 @@ def _normalize(path: str) -> str:
     return os.path.normpath(os.path.abspath(path))
 
 
+class Answered:
+    """How many message boxes a :func:`watch` block answered, and that is all.
+
+    Only the COUNT is kept because it is the only thing this side can observe
+    honestly. WHAT THE BOX SAID IS NOT AVAILABLE: its text belongs to a Win32
+    dialog in another process, and reading it would be a guess dressed up as a
+    measurement. So a caller may say "one box was answered here" and must not say
+    which warning it was.
+    """
+
+    __slots__ = ("clicks",)
+
+    def __init__(self) -> None:
+        self.clicks = 0
+
+
 @contextlib.contextmanager
 def watch(interval: float = 0.25, prefer: tuple[str, ...] | None = None):
     """Dismiss message boxes *while* a blocking COM call is in flight.
@@ -152,12 +168,17 @@ def watch(interval: float = 0.25, prefer: tuple[str, ...] | None = None):
     message, so this context manager polls for CATIA message boxes and answers
     them for the duration of the ``with`` block.
 
+    Yields an :class:`Answered` so the caller can report that a box appeared. An
+    unanswered box freezes the whole session, so "the call worked but CATIA asked
+    something first" is a fact worth passing on - and it is the only fact here.
+
     Deliberately narrow: only ``#32770`` message boxes are answered. CATIA's own
     ``CATDlgDialog`` windows are left alone, because those include panels a human
     may have opened deliberately in the running session.
     """
+    answered = Answered()
     if not _ENABLED:
-        yield
+        yield answered
         return
 
     stop = threading.Event()
@@ -166,7 +187,8 @@ def watch(interval: float = 0.25, prefer: tuple[str, ...] | None = None):
     def loop() -> None:
         while not stop.is_set():
             try:
-                dismiss(rounds=1, wait=0, prefer=prefer, pid=target_pid, classes=("#32770",))
+                answered.clicks += dismiss(rounds=1, wait=0, prefer=prefer,
+                                           pid=target_pid, classes=("#32770",))
             except Exception:
                 pass
             stop.wait(interval)
@@ -174,7 +196,7 @@ def watch(interval: float = 0.25, prefer: tuple[str, ...] | None = None):
     worker = threading.Thread(target=loop, name="catia-dialog-watch", daemon=True)
     worker.start()
     try:
-        yield
+        yield answered
     finally:
         stop.set()
         worker.join(timeout=2.0)

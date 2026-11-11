@@ -411,10 +411,28 @@ def test_the_ceiling_lists_which_curves_carry_the_parameter() -> None:
         assert said in detail, said
 
 
-def test_the_reopen_failure_is_published_as_unexplained() -> None:
+def test_the_reopen_claim_is_marked_seen_once_not_reproduced() -> None:
+    """0.3.105 withdraws the "same session" advice 0.3.101 published.
+
+    Five controlled cells on two geometries - 376.9911 mm3 before and after a
+    reopen on a pad with a line on it, 7.9958 mm3 before and after on a lofted
+    bottle with a projected glyph - could not reproduce the failure the advice was
+    based on, and part.Update() first changed nothing either. A ceiling that keeps
+    saying "unknown, so keep them in one session" is a claim without a measurement.
+    """
     entry = next(e for e in _CAPABILITY_CEILINGS
-                 if e["status"] == "MEASURED_UNEXPLAINED")
-    assert "9.991" in entry["detail"] and "unknown" in entry["detail"].lower()
+                 if "saved, closed and reopened" in e["member"])
+    assert entry["status"] == "SEEN_ONCE_NOT_REPRODUCED"
+    detail = entry["detail"]
+    for said in ("9.991", "376.9911", "7.9958", "WITHDRAWN", "NOT REPRODUCED"):
+        assert said in detail, said
+
+
+def test_the_only_mention_of_one_session_is_the_retraction() -> None:
+    """Quoting a withdrawn instruction is fine; leaving it standing is not."""
+    for entry in _CAPABILITY_CEILINGS:
+        if "SAME session" in entry["detail"]:
+            assert "WITHDRAWN" in entry["detail"], entry["member"]
 
 
 def test_the_engrave_schema_names_the_curves_it_accepts() -> None:

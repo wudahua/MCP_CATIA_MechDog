@@ -2,6 +2,57 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.105] — 2026-11-11 · answer the box, and withdraw what five cells deny
+
+Two of the three open items from the 2026-11-11 report, and the third one turned
+out to be the opposite of what it looked like.
+
+**The modal dialog is answered, not chased.** `Application` has 82 members and not
+one of them suppresses an operation warning - only `DisplayFileAlerts`, which
+covers load/save prompts. So "watch it happen on the reporter's file" was never a
+fix: an unanswered box blocks the STA worker that runs every tool call, which is
+why 2026-10-24 lost 2 h 14 min to one. `dialogs.watch()` already exists and can
+answer `#32770` boxes from a side thread; it was used for assembly insertion only.
+`catia_surface_engrave` now runs inside it - the call that creates a body, sweeps,
+closes a surface, runs a boolean that CONSUMES the tool body and then deletes four
+elements by name - and the reply reports how many boxes were answered.
+
+Verified against a real box, not by reading the code: a `SaveAs` onto an existing
+path raises `#32770` titled 另存为, the blocked call stays blocked, `watch()`
+answers it, `clicks` is 1 and the call returns. The note prints only the COUNT and
+says so: this side sends the button message and never reads the dialog's text, so
+it cannot claim which warning appeared, and it tells the caller to check the tree
+with `catia_list_features` before trusting the result.
+
+**"Keep the projection and the engrave in one session" is WITHDRAWN.** 0.3.101
+published that from a single observation and promoted it to a ceiling. Re-measured
+in five controlled cells, two geometries, a fresh document each time:
+
+| geometry | before the reopen | after save/close/reopen |
+|---|---|---|
+| 100x100x20 pad, line on its top face, depth 2 | 376.9911 mm3 | **376.9911 mm3** |
+| lofted bottle, projected 32.111 mm glyph, depth 0.4 | 7.9958 mm3 | **7.9958 mm3** |
+
+`part.Update()` before the engrave changed nothing either, so "the reopened tree
+has not been recomputed" is not the explanation. Reopening is not the variable. The
+row is downgraded from `MEASURED_UNEXPLAINED` to `SEEN_ONCE_NOT_REPRODUCED`, the
+advice is gone, and `NO_MATERIAL` on a reopened file now means what it says. This
+is the same error as 0.3.100's `catia_gsd_translate` suggestion: an instruction
+that survived because nobody had measured it.
+
+**The projection grid, in one place, because advice written from memory has now
+been wrong twice.** README carries every element/support pair that has actually
+been tried, with the number: 80 mm rectangle onto a 45-degree plane 20.000 ->
+68.284 mm; 63.947 mm glyph onto a lofted bottle 4.000 mm (6.3 %) before 0.3.102 and
+32.111 mm (48.2 %) after; 26.164 mm glyph onto a padded cylinder's solid face
+13.6 %, onto a curve extracted from that same face 13.6 % (extracting changes
+nothing), onto a `zx` offset sketch 16.0 % and a `frame` sketch 15.1 %. The reading
+is stated plainly: a curved support always accepts the projection and always keeps
+little of it, so text that has to be legible on a curved face is COMPUTED on the
+surface and swept as an open spline, not projected onto it.
+
+140 tools, 1682 tests, `scripts/b30_v0405_audit.py` 7/7.
+
 ## [0.3.104] — 2026-11-11 · a cut that went somewhere else is not a groove
 
 The 2026-11-11 report engraved three strokes into a bottle and read, three

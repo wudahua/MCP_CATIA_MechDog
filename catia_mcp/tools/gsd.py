@@ -19,6 +19,7 @@ import math
 import re
 from typing import Any
 
+from catia_mcp import dialogs
 from catia_mcp.connection import CATIAConnection
 from catia_mcp.sketch_frames import ORIGIN_AXIS, plane_angle_frame, point_world
 from catia_mcp.results import (ArgumentOutOfRange, ArgumentRejected,
@@ -184,6 +185,32 @@ _PROJECT_FRAGMENT_SHARE = 25.0
 #                          the model changed and the surface looks untouched.
 _ENGRAVE_BURIED_RATIO = 1.3
 _ENGRAVE_FLOATING_RATIO = 0.5
+
+
+def _answered_boxes(reply: str, clicks: int) -> str:
+    """Say that CATIA put a message box up during the call, if it did.
+
+    A modal box blocks the STA worker that runs every tool call, so one unanswered
+    box ends the session - not the call, the session (2026-10-24: 2 h 14 min). The
+    2026-11-11 report lost a run to ``选定的元素不可用于此操作`` the same way. So
+    ``catia_surface_engrave`` answers them while it works and reports the count.
+
+    It reports ONLY the count. The text of the box belongs to another process and
+    is not read back, so this must never claim to know which warning appeared -
+    "something was answered" and "the operation was fine" are different claims,
+    and the caller is told to look at the tree before trusting the result.
+    """
+    if clicks <= 0:
+        return reply
+    count = "1 message box" if clicks == 1 else f"{clicks} message boxes"
+    return reply + (
+        f" NOTE: CATIA raised {count} during this call and this tool answered "
+        "it, because an unanswered box freezes the whole session, not just this "
+        "call. WHAT IT SAID COULD NOT BE READ BACK, so this is not a report that "
+        "the operation was clean: check the tree with catia_list_features, and if "
+        "the answer above does not match what you expected, assume the box was "
+        "about this cut."
+    )
 
 
 def _engrave_outcome(removed: float | None, expected: float | None,
@@ -2052,7 +2079,15 @@ class GSDTools:
             case "catia_gsd_sweep":
                 return self._sweep(arguments)
             case "catia_surface_engrave":
-                return self._surface_engrave(arguments)
+                # This is the most dialog-prone call in the package: it creates a
+                # body, sweeps, closes a surface, runs a boolean that CONSUMES the
+                # tool body, and then deletes four elements by name. Measured on
+                # B30 2026-11-11 that a delete in the wrong order raises a modal
+                # 警告, and a modal on this thread stops every later call, so the
+                # boxes are answered while the work runs and the count is reported.
+                with dialogs.watch() as boxes:
+                    reply = self._surface_engrave(arguments)
+                return _answered_boxes(reply, boxes.clicks)
             case "catia_gsd_extrude":
                 return self._extrude(arguments)
             case "catia_gsd_revolve":

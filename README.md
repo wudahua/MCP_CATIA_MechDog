@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.104** · [what changed](CHANGELOG.md) ·
+**0.3.105** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1558,14 +1558,17 @@ Place the result with `catia_get_component_transform`.
   test — 0.3.100's `next_actions` said it was and sent a reporter down a branch
   that fails.
 
-  **Do the projection and the engrave in ONE session.** Measured on B30
-  2026-11-11 on a lofted r=40 cylinder closed into a solid: a r=6 sketch circle
-  projected onto it, engraved 0.6 mm deep, removed 9.991 mm³ (predicted 10.056).
-  The document was saved, closed and reopened, and the SAME projection — still
-  17.7831 mm long, still 0.0000 mm from the body — removed NOTHING; a projection
-  made after the reopen failed as well and `part.Update()` then failed too. Which
-  of the two changes across a reopen is unknown, so no cause is claimed: it is
-  published as `MEASURED_UNEXPLAINED` in `capability_ceilings`.
+  **Reopening is NOT a reason to keep the calls in one session.** 0.3.101 said it
+  was, from one observation: on a lofted r=40 cylinder closed into a solid, a
+  projected r=6 circle engraved 0.6 mm deep removed 9.991 mm³, and after
+  save/close/reopen the SAME projection (still 17.7831 mm long, still 0.0000 mm
+  from the body) removed nothing. Re-measured for 0.3.105 — five cells, two
+  geometries, a fresh document each time: a 100×100×20 pad with a line on its top
+  face gave **376.9911 mm³ before and 376.9911 mm³ after** the reopen; the lofted
+  bottle with a projected 32.111 mm glyph gave **7.9958 mm³ before and
+  7.9958 mm³ after**. `part.Update()` first changed nothing either. So the advice
+  is withdrawn, `NO_MATERIAL` on a reopened file means what it says, and the
+  observation is recorded as *seen once, not reproduced* rather than explained.
 
 * **The first projection in a document answers with a fragment; the second
   answers with the real curve.** Measured on B30 2026-11-11 with eight
@@ -1577,6 +1580,33 @@ Place the result with `catia_get_component_transform`.
   **68.284 mm** on the second — and 68.284 is exactly `2·(20 + 20·cos45)`. A
   straight cylinder is the one shape where both passes agree (17.783 mm), so the
   second pass has never measured less than the first.
+
+  **What has actually been projected, and onto what** (B30, 2026-11-11 unless
+  noted). This table exists because the advice in this file was twice written from
+  memory instead of from a measurement — "extract the face and project onto that"
+  was offered as a fix for a failure it does not fix, and "move the element closer
+  with `catia_gsd_translate`" makes the result worse. Read a row before advising
+  anyone:
+
+  | element | support | landed | carries a point-on-curve parameter |
+  |---|---|---|---|
+  | planar sketch | `xy` / `yz` / `zx`, or a solid's flat face | refused — parallel or perpendicular is degenerate | — |
+  | 80 mm rectangle | plane tilted 45° (`catia_gsd_plane_angle`) | 20.000 mm, then **68.284 mm** = `2·(20+20·cos45)` | yes |
+  | 63.947 mm glyph outline | lofted bottle face | **4.000 mm (6.3 %)** before 0.3.102, **32.111 mm (48.2 %)** after | yes |
+  | 26.164 mm glyph | padded cylinder, SOLID face `Face.3` | 13.6 % | yes |
+  | 26.164 mm glyph | curve extracted from that same face | 13.6 % — extracting changes nothing | yes |
+  | 26.164 mm glyph | lofted bottle, sketch on `zx` offset −40 | 16.0 % | yes |
+  | 26.164 mm glyph | lofted bottle, sketch on a `frame` plane | 15.1 % | yes |
+  | `catia_gsd_line`, its extract, an OPEN spline | curved face | lands | yes |
+  | a CLOSED spline | curved face | lands | **no** — and neither does its projection |
+  | `catia_gsd_circle`, its extract | curved face | lands | **no** — same |
+
+  The practical reading: **a curved support always accepts the projection and
+  always keeps little of it** (13–48 %), so a glyph that has to be legible on a
+  curved face must be COMPUTED on that surface — take the 3D points from the
+  surface's own equation and sweep an OPEN spline through them — not projected
+  onto it. A solid face needs no `catia_gsd_extract` first; the "surface" the tool
+  wants is whatever `_ref` can resolve, and a `Face.N` resolves.
 
   **Do not move the element with `catia_gsd_translate` before projecting.** A
   translated copy of that sketch landed **3.5 %** where the sketch itself landed
