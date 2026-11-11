@@ -171,6 +171,28 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
         ),
     },
     {
+        "member": "catia_gsd_project - the first projection in a document",
+        "status": "AVAILABLE_WITH_LIMIT",
+        "detail": (
+            "The FIRST projection made in a document answers with a fragment; the "
+            "next one answers with the real curve, and every later one repeats it. "
+            "Measured on B30 2026-11-11 with EIGHT projections in a row in one "
+            "document, same source and same target: a sketch outline gave 2.200 mm "
+            "and then 32.111 mm seven times; a translated COPY of the same sketch "
+            "gave 2.316 mm all eight times and never improved, reaching 29.951 mm "
+            "only once the sketch itself had been projected. Two-call experiments "
+            "were not enough to see this - three separate runs disagreed with each "
+            "other - which is why the eight-in-a-row shape is recorded here. "
+            "0.3.102 projects twice and keeps the second pass, and its low-share "
+            "warning now tells callers NOT to move the element with "
+            "catia_gsd_translate: 0.3.100 suggested exactly that, and measured, a "
+            "copy lands 3.5 % where the sketch lands 48.2 %. A straight cylinder is "
+            "the one shape where both passes agree (17.783 mm), so the second pass "
+            "has never measured less than the first in any case tried. WHY CATIA "
+            "answers differently the first time is unknown."
+        ),
+    },
+    {
         "member": "ShapeFactory.AddNewGSDCircPattern (surface pattern)",
         "status": "UNSUPPORTED_ON_B30",
         "detail": (

@@ -2,6 +2,59 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.102] — 2026-11-11 · the first projection in a document is a fragment
+
+Asked what was left of the 2026-11-11 report, one item was still open: its P2
+"try `catia_gsd_translate` to move the element closer, that is the direction
+0.3.100 suggests". It was measured, and **the suggestion is wrong**.
+
+A glyph outline on a plane parallel to a lofted bottle face, produced from five
+distances, looked like a success story — 3.3 % at the original distance, then
+44.9 % 5 mm closer, 43.1 % at 8, 43.3 % at 10, 43.7 % at 12. Not monotone, which
+is what made it worth checking: the copy really was 3.4580 mm from the face in
+the 5 mm case and the share did not track the distance at all.
+
+What it tracks is the ORDER of projections in the document. Eight in a row, same
+source, same target, one document each:
+
+| source | pass 1 | passes 2–8 |
+|---|---|---|
+| a sketch | 2.200 mm (3.3 %) | **32.111 mm (48.2 %)** |
+| a translated copy | 2.316 mm (3.5 %) | 2.316 mm (3.5 %) — never improves |
+| a copy, after the sketch was projected once | 29.951 mm (44.9 %) | 44.9 % |
+
+So a translated copy is the WORST thing to project: 3.5 % against the sketch's
+48.2 %, and it stays there for eight tries. 0.3.100's advice sent callers
+straight into that. The low-share warning now says the opposite, with these
+numbers.
+
+And the first projection made in a document answers with a fragment; every later
+one repeats the real value. `catia_gsd_project` therefore **projects twice and
+keeps the second**, deleting the first again. The rectangle-on-a-45°-plane case
+is what makes this unambiguous rather than a bottle oddity: the first pass
+measured **20.000 mm** and the second **68.284 mm**, and 68.284 is exactly the
+perimeter a 20×20 square has on a 45° plane (2·(20 + 20·cos45)). The 0.3.97 note
+that "a plane tilted 45 degrees worked" was true about the call succeeding —
+nothing measured the length until 0.3.100.
+
+Both passes are kept in the reply: `the first pass measured 2.200 mm, the second
+32.111 mm`, or `Both passes of this projection measured the same, 17.783 mm` on a
+straight cylinder — the one shape where they agree, so the second pass has never
+measured *less* than the first in any case tried. The thrown-away element is
+deleted and its absence checked, and if it cannot be removed the reply says so.
+
+**It took three attempts to measure this**, which is worth recording: two-call
+experiments disagreed with each other three separate times (3.3 %, then 48.2 %,
+then 3.3 % for the same sketch), and a two-pass implementation measured 2.200 mm
+twice until the probe went through the same `_completed` path a standalone call
+uses. Only the eight-in-a-row shape shows the plateau. The mechanism is unknown
+and is not claimed anywhere in the code.
+
+Acceptance: `scripts/b30_v0402_audit.py` 9/9 on B30 — 48.2 % on the loft with
+both passes printed, one element added (not two), both-passes-agree on the
+cylinder, 68.284 mm on the 45° plane, 3.5 % for a copy plus the warning, and the
+resulting curve engraved **7.9958 mm³**.
+
 ## [0.3.101] — 2026-11-11 · the guard worked in the session that made the curve, and nowhere else
 
 0.3.100 put the completeness guard on `catia_gsd_project` and it worked — in the

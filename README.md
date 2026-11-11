@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.101** · [what changed](CHANGELOG.md) ·
+**0.3.102** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1565,6 +1565,25 @@ Place the result with `catia_get_component_transform`.
   made after the reopen failed as well and `part.Update()` then failed too. Which
   of the two changes across a reopen is unknown, so no cause is claimed: it is
   published as `MEASURED_UNEXPLAINED` in `capability_ceilings`.
+
+* **The first projection in a document answers with a fragment; the second
+  answers with the real curve.** Measured on B30 2026-11-11 with eight
+  projections in a row in one document, same source and target: a sketch outline
+  gave **2.200 mm** and then **32.111 mm** seven times. `catia_gsd_project`
+  therefore projects twice and keeps the second, and both numbers appear in the
+  reply. The case that makes this a rule rather than a quirk of one bottle: a
+  20×20 rectangle onto a plane tilted 45° gave **20.000 mm** on the first pass and
+  **68.284 mm** on the second — and 68.284 is exactly `2·(20 + 20·cos45)`. A
+  straight cylinder is the one shape where both passes agree (17.783 mm), so the
+  second pass has never measured less than the first.
+
+  **Do not move the element with `catia_gsd_translate` before projecting.** A
+  translated copy of that sketch landed **3.5 %** where the sketch itself landed
+  **48.2 %**, and it stayed at 3.5 % through eight tries; it only becomes usable
+  once the sketch it came from has been projected (44.9 %). 0.3.100's low-share
+  warning suggested exactly that translation and was measured to make the curve
+  worse. Why CATIA answers differently the first time is unknown and is not
+  claimed anywhere in the code.
 
 * **A planar element only projects onto a support that crosses it at an angle.**
   Measured on B30 2026-11-10 with a 40×40 rectangle on an XY plane offset 40 mm:

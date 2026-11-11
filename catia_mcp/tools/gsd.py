@@ -2552,6 +2552,17 @@ class GSDTools:
         except Exception:  # noqa: BLE001 - unanswerable is not clean
             return False
 
+    def _drop_probe(self, part: Any, shape: Any, name: str) -> bool:
+        """Remove the throw-away first-pass projection; say whether it worked.
+
+        ``name`` is passed in because a deleted COM object cannot be asked for its
+        own name afterwards, and "I called delete" is not "it is gone".
+        """
+        self._drop_element(shape)
+        if not name:
+            return True
+        return self._name_gone(part, name)
+
     def _free_name(self, part: Any, wanted: str) -> tuple[str, bool]:
         """``(name, verified)``: ``wanted``, or ``wanted.2`` / ``.3`` … if taken.
 
@@ -3550,8 +3561,51 @@ class GSDTools:
         self.conn.ensure_connected()
         elem_ref = self._ref(args["element"])
         support_ref = self._ref(args["support"])
-        projection = self._factory().AddNewProject(elem_ref, support_ref)
+
+        # TWO PASSES, AND THE FIRST ONE IS THROWN AWAY. Measured on B30
+        # 2026-11-11, eight projections in a row in one document, same source and
+        # same target (probe L):
+        #
+        #   a sketch, 8 times   2.200 / 32.111 / 32.111 ... 32.111 mm
+        #   a copy,   8 times   2.316 / 2.316 ... 2.316 mm
+        #   copy after the sketch was projected: 29.951 mm, all eight
+        #
+        # So the FIRST projection in a document is a fragment and every later one
+        # repeats its value - the second pass is not "warming up", it is the
+        # answer. Eight repeats is what makes that a rule rather than a lucky
+        # sample: three separate runs of the two-call experiment had disagreed,
+        # because a probe run of eight is the only shape that shows the plateau.
+        #
+        # A translated copy is the exception: it stays at its fragment value even
+        # after eight tries, and only becomes usable once the SKETCH it came from
+        # has been projected. That is why the warning below now tells callers not
+        # to reach for catia_gsd_translate - 0.3.100 suggested exactly that, and
+        # measured, it makes the curve worse, not better.
+        #
+        # The probe goes through _completed (InWorkObject, update, refresh) and
+        # the source is measured BEFORE the second pass: a hand-rolled
+        # UpdateObject with the measurement afterwards produced 2.200 mm twice
+        # (probe J, 2026-11-11). Both are kept because they are the version that
+        # was measured to work, not because the mechanism is understood.
+        probe = None
+        probe_name = ""
+        probe_length: float | None = None
+        part = None
         try:
+            factory = self._factory()
+            geoset = self._get_geoset()
+            part = self.conn.get_active_part()
+            probe = factory.AddNewProject(elem_ref, support_ref)
+            geoset.AppendHybridShape(probe)
+            probe_name = str(getattr(probe, "Name", "") or "")
+            try:
+                self._completed(probe, None, "", geoset)
+                probe_length = self._curve_length_mm(
+                    part.CreateReferenceFromObject(probe))
+            except Exception:  # noqa: BLE001 - a probe, not the call itself
+                pass
+            source, origin, exact = self._source_length_mm(str(args["element"]))
+            projection = factory.AddNewProject(elem_ref, support_ref)
             reply = self._finish(
                 projection, args.get("name"),
                 f"Projection of '{args['element']}' onto '{args['support']}' "
@@ -3571,7 +3625,24 @@ class GSDTools:
                     part.CreateReferenceFromObject(projection))
             except Exception:  # noqa: BLE001 - an unreadable length is not 0 mm
                 projected = None
-            source, origin, exact = self._source_length_mm(str(args["element"]))
+            probe_gone = self._drop_probe(part, probe, probe_name)
+            passes = ""
+            if probe_length is not None and projected is not None:
+                if probe_length < projected * 0.95:
+                    passes = (f" This call projected TWICE and kept the second: "
+                              f"the first pass measured {probe_length:.3f} mm, the "
+                              f"second {projected:.3f} mm. Measured on B30 "
+                              "2026-11-11 over eight projections of one sketch: "
+                              "2.200 mm, then 32.111 mm eight times - the first "
+                              "projection in a document is a fragment and every "
+                              "later one repeats the real value.")
+                else:
+                    passes = (" Both passes of this projection measured the same, "
+                              f"{probe_length:.3f} mm.")
+            if not probe_gone:
+                passes += (" NOTE: the first pass could not be removed again and "
+                           "may still be in the tree - delete the shorter of the "
+                           "two if you see it.")
             warning = ""
             if projected is None:
                 warning = (" WARNING: COMPLETENESS UNKNOWN - the projection's own "
@@ -3601,9 +3672,16 @@ class GSDTools:
                                  "catia_surface_engrave sweeps a tube along it and "
                                  "will then find no material, and the 0.0000 mm "
                                  "distance is a MINIMUM, so it only says the "
-                                 "fragment touches. Move the element closer to the "
-                                 "support (catia_gsd_translate), or project onto a "
-                                 "surface that wraps the target more fully.")
+                                 "fragment touches. Do NOT reach for "
+                                 "catia_gsd_translate here: measured on B30 "
+                                 "2026-11-11, projecting a translated COPY of a "
+                                 "sketch landed 3.5 % of it while the sketch itself "
+                                 "landed 48.2 % on the same face, and the copy "
+                                 "stayed a fragment through eight tries. 0.3.100 "
+                                 "suggested moving the element closer, and that was "
+                                 "measured to make the curve worse. Project the "
+                                 "SKETCH onto the face, or onto a surface that "
+                                 "wraps the target more fully.")
                 elif source:
                     # SOME of the element's curves answered and some did not, so
                     # the total is a LOWER bound - which makes this share an
@@ -3636,8 +3714,12 @@ class GSDTools:
                              "fragment - so check the groove's depth and length in "
                              "its reply rather than assuming the whole element "
                              "landed.")
-            return warning + reply + note
+            return warning + reply + note + passes
         except Exception as error:  # noqa: BLE001 - the diagnostic is the point
+            # Whatever went wrong the probe must not survive it, including a
+            # failure before the second pass was even attempted.
+            if probe is not None and part is not None:
+                self._drop_probe(part, probe, probe_name)
             # A PROJECTION RUNS ALONG THE SUPPORT'S NORMAL, AND A PLANAR ELEMENT
             # NEEDS A SUPPORT THAT CROSSES IT AT AN ANGLE (0.3.97). The first
             # draft of this message blamed the PARALLEL case only - which the

@@ -187,6 +187,9 @@ def _project_tools(source, exact, projected, element="草图.45"):
     tools._ref = lambda name, *a, **k: None  # type: ignore[method-assign]
     tools._factory = lambda: types.SimpleNamespace(  # type: ignore[method-assign]
         AddNewProject=lambda a, b: types.SimpleNamespace())
+    tools._get_geoset = lambda: types.SimpleNamespace(  # type: ignore[method-assign]
+        AppendHybridShape=lambda shape: None)
+    tools._completed = lambda shape, name, message, geoset: message  # type: ignore[method-assign]
     tools._finish = lambda shape, name, message: message  # type: ignore[method-assign]
     tools._curve_length_mm = lambda reference: projected  # type: ignore[method-assign]
     tools._source_length_mm = lambda name: (source, "measured on the sketch's 2 curves",
@@ -194,7 +197,8 @@ def _project_tools(source, exact, projected, element="草图.45"):
     tools.conn = types.SimpleNamespace(
         ensure_connected=lambda: None,
         get_active_part=lambda: types.SimpleNamespace(
-            CreateReferenceFromObject=lambda obj: obj))
+            CreateReferenceFromObject=lambda obj: obj,
+            FindObjectByName=lambda name: None))   # so the probe reads "gone"
     return tools
 
 

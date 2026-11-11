@@ -110,10 +110,14 @@ def test_project_still_reports_success_plainly() -> None:
     tools._ref = lambda name, *a, **k: None  # type: ignore[method-assign]
     tools._factory = lambda: types.SimpleNamespace(  # type: ignore[method-assign]
         AddNewProject=lambda a, b: types.SimpleNamespace())
+    tools._get_geoset = lambda: types.SimpleNamespace(  # type: ignore[method-assign]
+        AppendHybridShape=lambda shape: None)
+    tools._completed = lambda shape, name, message, geoset: message  # type: ignore[method-assign]
     tools.conn = types.SimpleNamespace(
         ensure_connected=lambda: None,
         get_active_part=lambda: types.SimpleNamespace(
-            CreateReferenceFromObject=lambda obj: obj))
+            CreateReferenceFromObject=lambda obj: obj,
+            FindObjectByName=lambda name: None))
     reply = tools._project({"element": "草图.8", "support": "yz"})
     assert reply.startswith("Projection of '草图.8' onto 'yz' created.")
     assert "63.960 mm long" in reply
@@ -130,10 +134,14 @@ def test_project_warns_when_only_part_of_the_element_landed() -> None:
     tools._ref = lambda name, *a, **k: None  # type: ignore[method-assign]
     tools._factory = lambda: types.SimpleNamespace(  # type: ignore[method-assign]
         AddNewProject=lambda a, b: types.SimpleNamespace())
+    tools._get_geoset = lambda: types.SimpleNamespace(  # type: ignore[method-assign]
+        AppendHybridShape=lambda shape: None)
+    tools._completed = lambda shape, name, message, geoset: message  # type: ignore[method-assign]
     tools.conn = types.SimpleNamespace(
         ensure_connected=lambda: None,
         get_active_part=lambda: types.SimpleNamespace(
-            CreateReferenceFromObject=lambda obj: obj))
+            CreateReferenceFromObject=lambda obj: obj,
+            FindObjectByName=lambda name: None))
     reply = tools._project({"element": "草图.45", "support": "Face.13"})
     assert reply.startswith(" WARNING")
     assert "4.000 mm" in reply and "63.960 mm" in reply
