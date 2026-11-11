@@ -359,7 +359,9 @@ def _new_part_tools(path):
         part_of=lambda d: _NewPart(),
         refresh_display=lambda: None,
     )
-    tools._save_document = lambda p: f"Saved '{p}'"
+    # _new_part passes overwrite through since 0.3.106, so a one-argument stub
+    # turns every save into a CodedError about the lambda.
+    tools._save_document = lambda p, overwrite=False: f"Saved '{p}'"
     return tools
 
 

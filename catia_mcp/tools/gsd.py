@@ -24,7 +24,7 @@ from catia_mcp.connection import CATIAConnection
 from catia_mcp.sketch_frames import ORIGIN_AXIS, plane_angle_frame, point_world
 from catia_mcp.results import (ArgumentOutOfRange, ArgumentRejected,
                                CodedError, PreconditionRejected)
-from catia_mcp.topo_search import search_topology
+from catia_mcp.topo_search import search_topology, topology_cells
 
 # Origin plane aliases (same convention as sketcher.py)
 PLANE_MAP = {
@@ -200,8 +200,13 @@ def _answered_boxes(reply: str, clicks: int) -> str:
     "something was answered" and "the operation was fine" are different claims,
     and the caller is told to look at the tree before trusting the result.
     """
-    if clicks <= 0:
+    if clicks < 0:
         return reply
+    if clicks == 0:
+        # A heartbeat, asked for by the 2026-11-11 report: with nothing printed,
+        # a caller cannot tell "the watcher ran and found nothing" from "the
+        # watcher was never armed", and this task lost two runs to modal boxes.
+        return reply + " (dialogs answered: 0)"
     count = "1 message box" if clicks == 1 else f"{clicks} message boxes"
     return reply + (
         f" NOTE: CATIA raised {count} during this call and this tool answered "
@@ -1383,6 +1388,111 @@ class GSDTools:
                 },
             },
             {
+                "name": "catia_curve_on_surface",
+                "description": (
+                    "PUT A PLANAR OUTLINE ON A CURVED FACE, point by point, and say "
+                    "how far each point had to move. This is the step the "
+                    "2026-11-11 report called the one structural gap left after "
+                    "seven reports: 'computed on the surface' needed the surface's "
+                    "own equation, so the caller had to know the formula, map the "
+                    "glyph by hand, guess an offset, and then calibrate by carving, "
+                    "reading removed/predicted, deleting and re-carving. MEASURED "
+                    "END TO END on B30 2026-11-11: a 18-point 'C' placed on a plane "
+                    "in front of a closed lofted bottle was snapped onto the skin "
+                    "and threaded into one open spline; catia_surface_engrave then "
+                    "removed 3.026 mm3 against a 3.042 mm3 prediction - ratio 0.99 "
+                    "with NO offset tuning at all. The glyph that used to need one "
+                    "fixed offset and came back 0.93/1.45/1.40/1.20/1.42/1.24 needs "
+                    "one call per stroke now. WHAT THE SNAP ACTUALLY DOES, measured: "
+                    "each point lands on the NEAREST point of the target body's "
+                    "surface (a point already on it moved 0.0022 mm). The direction "
+                    "argument and WHICH face you name were both measured to make no "
+                    "difference - four directions (+Y/-Y/+Z/+X) and three faces of "
+                    "one body all moved the same point 26.0052 mm - so this tool "
+                    "takes no direction and uses the first face of the body. That "
+                    "also means a point cannot be told which of two nearby walls to "
+                    "land on: put it closer to the one you mean. A SOLID BODY IS NOT "
+                    "A VALID SUPPORT (every point fails 'UpdateObject 失败'), which "
+                    "is why 'support' is resolved to a face."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "strokes": {
+                            "type": "array",
+                            "description": (
+                                "2D polylines in the sketch plane of 'plane', e.g. "
+                                "[[[0,0],[10,0],[10,10]], ...]. One spline is built "
+                                "per stroke. catia_text_strokes can supply these."
+                            ),
+                        },
+                        "points": {
+                            "type": "array",
+                            "description": (
+                                "One 3D polyline: [[x,y,z], ...]. Use this instead of "
+                                "'strokes' when the coordinates are already in world "
+                                "mm."
+                            ),
+                        },
+                        "plane": {
+                            "type": "string",
+                            "description": (
+                                "Which plane the 2D 'strokes' are measured in: xy, yz, "
+                                "zx. Ignored when 'points' is used."
+                            ),
+                        },
+                        "offset": {
+                            "type": "number",
+                            "description": (
+                                "Distance of that plane from the origin along its "
+                                "normal, in mm - so a glyph can be put in FRONT of the "
+                                "body rather than cut by it. Default 0."
+                            ),
+                        },
+                        "support": {
+                            "type": "string",
+                            "description": (
+                                "The body, face or surface to land on. A body name is "
+                                "resolved to one of its faces (a body reference itself "
+                                "is refused by CATIA); omit it for the active body. "
+                                "Measured: which face is not what decides the landing."
+                            ),
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": "Which solid body, when the part has more "
+                                           "than one. Default: the active body.",
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": (
+                                "Base name for the splines; they get .1, .2, ... when "
+                                "there is more than one stroke."
+                            ),
+                        },
+                        "closed": {
+                            "type": "boolean",
+                            "description": (
+                                "Close each spline with SetClosing(1) - a GSD spline can "
+                                "do that, unlike a sketch Spline2D. Default false: an "
+                                "open stroke is what engraving wants."
+                            ),
+                            "default": False,
+                        },
+                        "measure_moved": {
+                            "type": "boolean",
+                            "description": (
+                                "Measure how far each point travelled, and report "
+                                "min/max/mean. Default true; it is one measurement per "
+                                "point, so a long outline takes noticeably longer."
+                            ),
+                            "default": True,
+                        },
+                    },
+                    "required": [],
+                },
+            },
+            {
                 "name": "catia_gsd_extrude",
                 "description": (
                     "Extrude a profile (curve/sketch) into a surface along a direction "
@@ -2087,6 +2197,10 @@ class GSDTools:
                 # boxes are answered while the work runs and the count is reported.
                 with dialogs.watch() as boxes:
                     reply = self._surface_engrave(arguments)
+                return _answered_boxes(reply, boxes.clicks)
+            case "catia_curve_on_surface":
+                with dialogs.watch() as boxes:
+                    reply = self._curve_on_surface(arguments)
                 return _answered_boxes(reply, boxes.clicks)
             case "catia_gsd_extrude":
                 return self._extrude(arguments)
@@ -5304,6 +5418,261 @@ class GSDTools:
             f"groove over {length_text}. {body_line}.{verdict}{tail} This is a "
             "groove ALONG the curve, not a filled glyph: for a letter, pass its "
             "OUTLINE (catia_sketch_strokes draws one in a call) - not its middle."
+        )
+
+    # ── putting an outline ON a curved face ───────────────────────────
+    def _stroke_points_3d(self, args: dict[str, Any]
+                          ) -> tuple[list[list[list[float]]], str]:
+        """The polylines to snap, in world mm, and where they came from.
+
+        Two entry shapes, because a caller has one or the other: coordinates that
+        are already in world mm (``points``), or an outline in a sketch plane
+        (``strokes`` + ``plane``/``offset``). The second one is the point of the
+        whole tool: a glyph is 2D, and mapping it onto a surface by hand is what
+        the 2026-11-11 report did with the surface's own equation.
+        """
+        strokes = args.get("strokes")
+        points = args.get("points")
+        if strokes and points:
+            raise ArgumentRejected(
+                "Pass either 'strokes' (2D, in the plane) or 'points' (3D, world "
+                "mm), not both - one of the two decides the other's frame. "
+                "Nothing was created.", code="BAD_ARGUMENT", stage="validate")
+
+        if points:
+            cleaned: list[list[float]] = []
+            for entry in points:
+                try:
+                    xyz = [float(value) for value in entry]
+                except (TypeError, ValueError):
+                    raise ArgumentRejected(
+                        f"'points' entries must be [x, y, z] in mm; got {entry!r}. "
+                        "Nothing was created.", code="BAD_ARGUMENT",
+                        stage="validate")
+                if len(xyz) != 3:
+                    raise ArgumentRejected(
+                        f"'points' entries must be [x, y, z] in mm; got {entry!r}. "
+                        "Nothing was created.", code="BAD_ARGUMENT",
+                        stage="validate")
+                cleaned.append(xyz)
+            if len(cleaned) < 2:
+                raise ArgumentRejected(
+                    "A spline needs at least 2 points; got "
+                    f"{len(cleaned)}. Nothing was created.",
+                    code="BAD_ARGUMENT", stage="validate")
+            return [cleaned], "coordinates taken as world mm"
+
+        if not strokes:
+            raise ArgumentRejected(
+                "catia_curve_on_surface needs 'strokes' (2D outlines in a plane) or "
+                "'points' (one 3D polyline). Nothing was created.",
+                code="BAD_ARGUMENT", stage="validate")
+
+        plane = str(args.get("plane") or "").strip().lower()
+        try:
+            offset = float(args.get("offset") or 0.0)
+        except (TypeError, ValueError):
+            raise ArgumentRejected(
+                f"'offset' must be a number of mm; got {args.get('offset')!r}. "
+                "Nothing was created.", code="BAD_ARGUMENT", stage="validate")
+        placement = {"base": plane, "distance": offset}
+        if point_world(placement, 0.0, 0.0) is None:
+            raise ArgumentRejected(
+                f"'plane' has to be one of xy, yz, zx when 'strokes' is used; got "
+                f"{args.get('plane')!r}. That is the frame the 2D numbers are "
+                "measured in, so it cannot be guessed. Nothing was created.",
+                code="PLANE_REQUIRED", stage="validate")
+
+        polylines: list[list[list[float]]] = []
+        for number, stroke in enumerate(strokes, start=1):
+            row: list[list[float]] = []
+            for entry in stroke or []:
+                try:
+                    world = point_world(placement, float(entry[0]),
+                                        float(entry[1]))
+                except (TypeError, ValueError, IndexError, KeyError):
+                    raise ArgumentRejected(
+                        f"stroke {number} has a point that is not [u, v]: "
+                        f"{entry!r}. Nothing was created.",
+                        code="BAD_ARGUMENT", stage="validate")
+                if world is None:
+                    raise ArgumentRejected(
+                        f"stroke {number} could not be placed in plane '{plane}'. "
+                        "Nothing was created.", code="PLANE_REQUIRED",
+                        stage="validate")
+                row.append(world)
+            if len(row) < 2:
+                raise ArgumentRejected(
+                    f"stroke {number} has {len(row)} point(s); a spline needs at "
+                    "least 2. Nothing was created.", code="BAD_ARGUMENT",
+                    stage="validate")
+            polylines.append(row)
+        return polylines, (f"2D points in plane '{plane}' at offset {offset:g} mm, "
+                           "turned into world mm by the plane's own frame")
+
+    def _surface_support_ref(self, part: Any, args: dict[str, Any]
+                             ) -> tuple[Any, str]:
+        """The reference to land points on, and what it is.
+
+        A BODY REFERENCE IS REFUSED by CATIA here - measured 2026-11-11: every
+        point against an active-body reference failed with ``方法 UpdateObject
+        失败`` while the same points against any of that body's faces worked. So a
+        body name is turned into one of its faces instead of being passed on.
+        """
+        wanted = args.get("support")
+        if wanted:
+            name = str(wanted)
+            try:
+                body_names = {str(part.Bodies.Item(i).Name)
+                              for i in range(1, int(part.Bodies.Count) + 1)}
+            except Exception:  # noqa: BLE001 - a part that will not be listed
+                body_names = set()
+            if name in body_names:
+                cells = topology_cells(self.conn, part.Bodies.Item(name), "Face")
+                if cells:
+                    # A cell object is not reference-able (CreateReferenceFromObject
+                    # on it raises); Face.1 is the name every other tool resolves.
+                    return (self._ref("Face.1"),
+                            f"the first face of body '{name}' (a body reference "
+                            "itself is refused)")
+            try:
+                return self._ref(name), f"'{name}'"
+            except Exception as error:  # noqa: BLE001 - reported below
+                raise ArgumentRejected(
+                    f"'{name}' could not be resolved as a support ({error}). "
+                    "Nothing was created.", code="SUPPORT_NOT_FOUND",
+                    stage="execute") from error
+
+        body = self._body_by_name(part, str(args["body"])) if args.get("body") \
+            else self.conn.get_active_part_body()
+        cells = topology_cells(self.conn, body, "Face")
+        if not cells:
+            raise PreconditionRejected(
+                f"Body '{body.Name}' has no faces to land on yet - build a solid "
+                "first. Nothing was created.", stage="execute")
+        return (self._ref("Face.1"),
+                f"the first face of the active body '{body.Name}'")
+
+    def _moved_mm(self, before: Any, after: Any) -> float | None:
+        """How far a point travelled, or None when it cannot be measured."""
+        try:
+            spa = self.conn.active_document.GetWorkbench("SPAWorkbench")
+            return float(spa.GetMeasurable(before).GetMinimumDistance(after))
+        except Exception:  # noqa: BLE001 - an unmeasurable pair is not a zero
+            return None
+
+    def _curve_on_surface(self, args: dict[str, Any]) -> str:
+        """Snap an outline onto a body's surface, one point at a time, and spline it.
+
+        THE MEASUREMENT THIS RESTS ON (B30, 2026-11-11). ``AddNewPointOnSurface
+        WithReference(face, point, direction, 0)`` moves the point to the NEAREST
+        point of that surface: a point already on it moved 0.0022 mm. What does
+        NOT matter, measured four ways: the direction (+Y / -Y / +Z / +X all moved
+        the same point 26.0052 mm) and which face of the body was named (Face.1,
+        Face.2, Face.3 - same 26.0052). So this tool takes no direction, and the
+        support is only used to choose the BODY.
+
+        Why that is enough: a glyph sits on a plane in front of the body, so its
+        nearest surface is the front skin, which is where the caller wants it.
+        Where it is NOT enough, and the reply says so: a point inside a thin body
+        can be nearer the far wall.
+
+        END TO END, same day: 18 points of a 'C' placed on a plane at y=-60 in
+        front of a closed lofted bottle, snapped, threaded into one open spline,
+        then catia_surface_engrave at 0.4 mm removed 3.026 mm3 against a 3.042 mm3
+        prediction - ratio 0.99, with no offset tuning.
+        """
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        polylines, where = self._stroke_points_3d(args)
+        support_ref, support_note = self._surface_support_ref(part, args)
+        factory = self._factory()
+        geoset = self._get_geoset()
+        closed = bool(args.get("closed", False))
+        measure = bool(args.get("measure_moved", True))
+        base = str(args.get("name") or "OnSurface")
+        if closed and args.get("measure_moved") is None:
+            measure = True
+
+        created: list[Any] = []
+        spline_names: list[str] = []
+        moved: list[float] = []
+        total_points = sum(len(line) for line in polylines)
+        try:
+            direction = factory.AddNewDirectionByCoord(0.0, 0.0, 1.0)
+            geoset.AppendHybridShape(direction)
+            part.UpdateObject(direction)
+            for number, polyline in enumerate(polylines, start=1):
+                refs = []
+                for xyz in polyline:
+                    point = factory.AddNewPointCoord(*xyz)
+                    geoset.AppendHybridShape(point)
+                    part.UpdateObject(point)
+                    created.append(point)
+                    point_ref = part.CreateReferenceFromObject(point)
+                    on = factory.AddNewPointOnSurfaceWithReference(
+                        support_ref, point_ref, direction, 0)
+                    geoset.AppendHybridShape(on)
+                    part.UpdateObject(on)
+                    created.append(on)
+                    on_ref = part.CreateReferenceFromObject(on)
+                    refs.append(on_ref)
+                    if measure:
+                        gap = self._moved_mm(point_ref, on_ref)
+                        if gap is not None:
+                            moved.append(gap)
+                spline = factory.AddNewSpline()
+                for ref in refs:
+                    spline.AddPoint(ref)
+                if closed:
+                    spline.SetClosing(1)
+                wanted = base if len(polylines) == 1 else f"{base}.{number}"
+                try:
+                    spline.Name = wanted
+                except Exception:  # noqa: BLE001 - the generated name still works
+                    pass
+                geoset.AppendHybridShape(spline)
+                created.append(spline)
+                part.UpdateObject(spline)
+                spline_names.append(str(spline.Name))
+        except Exception as error:  # noqa: BLE001 - nothing may survive a refusal
+            dropped = 0
+            for shape in reversed(created):
+                try:
+                    self._drop_element(shape)
+                    dropped += 1
+                except Exception:  # noqa: BLE001 - counted, not raised
+                    pass
+            raise CodedError(
+                f"Putting the outline on the surface failed at "
+                f"{len(spline_names)} spline(s) in ({error}). {dropped} element(s) "
+                "this call created were removed again.",
+                code="SNAP_FAILED", stage="execute",
+            ) from error
+
+        stats = ""
+        if moved:
+            low, high = min(moved), max(moved)
+            mean = sum(moved) / len(moved)
+            stats = (f" Each of the {len(moved)} point(s) travelled {low:.4f} to "
+                     f"{high:.4f} mm (mean {mean:.4f}) to reach it")
+            stats += (" - a spread this wide means the plane the outline came from "
+                      "is not parallel to the skin, which is normal on a shaped "
+                      "face." if high - low > 1.0 else ".")
+        elif measure:
+            stats = (" How far the points moved could not be measured, so how far "
+                     "the outline was from the surface is unknown.")
+
+        named = ", ".join(f"'{name}'" for name in spline_names)
+        return (
+            f"Snapped {total_points} point(s) from {where} onto {support_note}, "
+            f"and built {len(spline_names)} open spline(s): {named}."
+            f"{stats} NEXT: catia_surface_engrave(curve=<one of those names>, "
+            "depth=...) cuts it. Two facts worth knowing before you rely on it: "
+            "each point landed on the NEAREST part of that surface, so a point "
+            "inside a thin body can come back on the far wall; and the spline is "
+            "only as faithful as the point spacing - a long straight run needs no "
+            "extra points, a tight curve does."
         )
 
     def _extrude(self, args: dict[str, Any]) -> str:

@@ -172,6 +172,33 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
         ),
     },
     {
+        "member": "AddNewPointOnSurfaceWithReference (putting a point on a surface)",
+        "status": "AVAILABLE_WITH_LIMIT",
+        "detail": (
+            "This is the primitive the 2026-11-11 report was missing, and it is "
+            "wrapped as catia_curve_on_surface. MEASURED on B30 2026-11-11: "
+            "AddNewPointOnSurfaceWithReference(face, point, direction, 0) puts the "
+            "point on the NEAREST point of that surface - a point already on the "
+            "surface moved 0.0022 mm, and a point 5 mm outside a r=30 cylinder "
+            "landed exactly on it. Three things do NOT work the way the signature "
+            "suggests: (1) the DIRECTION is ignored - +Y, -Y, +Z and +X all moved "
+            "the same point 26.0052 mm; (2) WHICH FACE you name is ignored too - "
+            "Face.1, Face.2 and Face.3 of one body gave the same 26.0052 mm, so the "
+            "support only selects the BODY; (3) a SOLID BODY reference is refused "
+            "outright (every point failed 'UpdateObject 失败'), so it has to be a "
+            "face or a surface. What follows from (1) and (2) is worth stating "
+            "plainly: a point cannot be told which of two nearby walls to land on, "
+            "so it has to be placed nearer the one that is meant. Coordinates "
+            "cannot be read back (GetCoordinates fails on a plain point and returns "
+            "zeros on a point-on-surface), which is why the tool reports how far "
+            "each point MOVED, measured with the SPA workbench, instead of where it "
+            "ended up. End to end: an 18-point 'C' snapped from a plane 60 mm in "
+            "front of a closed lofted bottle, threaded into one open spline, "
+            "engraved 0.4 mm deep - removed 3.026 mm3 against a 3.042 mm3 "
+            "prediction, ratio 0.99, with no offset tuning."
+        ),
+    },
+    {
         "member": "a groove after a document is saved, closed and reopened",
         "status": "SEEN_ONCE_NOT_REPRODUCED",
         "detail": (

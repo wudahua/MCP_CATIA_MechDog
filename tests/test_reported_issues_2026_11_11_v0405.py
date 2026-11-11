@@ -26,8 +26,14 @@ from catia_mcp.tools.gsd import GSDTools, _answered_boxes
 
 
 # ── the note ──────────────────────────────────────────────────────────
-def test_a_call_with_no_box_says_nothing_extra() -> None:
-    assert _answered_boxes("Engraved.", 0) == "Engraved."
+def test_a_call_with_no_box_still_says_the_watcher_ran() -> None:
+    """A heartbeat, asked for by the 2026-11-11 report: with nothing printed, "the
+    watcher ran and found nothing" and "the watcher was never armed" look the
+    same, and that report lost two runs to modal boxes."""
+    note = _answered_boxes("Engraved.", 0)
+    assert note.startswith("Engraved.")
+    assert "dialogs answered: 0" in note
+    assert "NOTE" not in note
 
 
 def test_one_box_is_reported_with_its_number() -> None:
@@ -96,11 +102,13 @@ def test_the_engrave_runs_inside_the_watcher(monkeypatch) -> None:
     assert "1 message box" in reply
 
 
-def test_a_clean_engrave_is_not_padded_with_a_note(monkeypatch) -> None:
+def test_a_clean_engrave_gets_the_heartbeat_and_no_warning(monkeypatch) -> None:
     monkeypatch.setattr(gsd_module.dialogs, "watch", _fake_watch(0))
     reply = _tools_with_engrave("Engraved.").execute(
         "catia_surface_engrave", {"curve": "C", "depth": 0.4})
-    assert reply == "Engraved."
+    assert reply.startswith("Engraved.")
+    assert "dialogs answered: 0" in reply
+    assert "NOTE: CATIA raised" not in reply
 
 
 def test_the_watcher_is_asked_for_every_engrave(monkeypatch) -> None:

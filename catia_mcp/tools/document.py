@@ -119,6 +119,17 @@ class DocumentTools:
                                 "do if CATIA refuses the first save there."
                             ),
                         },
+                        "overwrite": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Replace an existing file at file_path. Without it "
+                                "the call reports the existing file instead of "
+                                "overwriting it - and until 0.3.106 that refusal "
+                                "told callers to pass this parameter while the "
+                                "schema did not have it."
+                            ),
+                        },
                     },
                 },
             },
@@ -367,7 +378,8 @@ class DocumentTools:
                 return self.conn.disconnect()
             case "catia_new_part":
                 return self._new_part(arguments.get("name"),
-                                      arguments.get("file_path"))
+                                      arguments.get("file_path"),
+                                      bool(arguments.get("overwrite", False)))
             case "catia_new_product":
                 return self._new_product(arguments.get("name"),
                                          arguments.get("file_path"))
@@ -466,7 +478,8 @@ class DocumentTools:
                 "document= by name.")
 
     def _new_part(self, name: str | None = None,
-                  file_path: str | None = None) -> str:
+                  file_path: str | None = None,
+                  overwrite: bool = False) -> str:
         self.conn.ensure_connected()
         docs = self.conn.documents
         # Refuse BEFORE adding a document, because the failure is unrecoverable
@@ -533,7 +546,12 @@ class DocumentTools:
             # there is no file (reported 2026-10-25). Saving here means the
             # document has a path from its first feature on.
             try:
-                saved = " " + self._save_document(str(file_path))
+                # `overwrite` used to stop here, and it was not even in the schema:
+                # the refusal that says "Pass overwrite=true if you mean to replace
+                # it" told callers to pass something they had no way to pass (found
+                # 2026-11-11 while writing a probe, which then stopped on its own
+                # leftovers exactly as the 0.3.104 audit had to work around).
+                saved = " " + self._save_document(str(file_path), overwrite)
                 # SaveAs renames the document to the file name; a stale remembered
                 # name would send drafting to a part that no longer exists.
                 self.conn.last_part_name = str(doc.Name)

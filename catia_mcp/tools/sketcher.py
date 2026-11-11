@@ -13,6 +13,68 @@ from catia_mcp.connection import CATIAConnection
 from catia_mcp.fonts import supported as font_charset
 from catia_mcp.fonts import text_to_strokes
 from catia_mcp.results import CodedError
+
+
+def _stroke_data(strokes: list[list[list[float]]], include: bool,
+                 limit: int = 600) -> str:
+    """The polylines as data, so a caller can put them somewhere else.
+
+    ``catia_text_strokes`` draws into a sketch and used to answer with counts
+    only, so the 2026-11-11 report had to import ``catia_mcp.fonts`` to get the
+    same numbers - which works for a caller who can read this repository and not
+    for one talking over MCP. The limit keeps a long title from turning a reply
+    into a wall of numbers; what is left over is COUNTED, never dropped silently.
+    """
+    if not include:
+        return ""
+    printed: list[str] = []
+    used = 0
+    left = 0
+    for stroke in strokes:
+        if used + len(stroke) > limit:
+            left += len(stroke)
+            continue
+        printed.append("[" + ", ".join(f"[{float(x):.4f}, {float(y):.4f}]"
+                                       for x, y in stroke) + "]")
+        used += len(stroke)
+    text = (" POINTS (sketch mm, same coordinates the sketch got): "
+            + ", ".join(printed) + ".")
+    if left:
+        text += (f" {left} further point(s) were not printed because this reply "
+                 f"stops at {limit}; call catia_text_strokes on fewer characters or "
+                 "read catia_mcp.fonts.text_to_strokes directly for all of them.")
+    return text
+
+
+def _stroke_data(strokes: list[list[list[float]]], include: bool,
+                 limit: int = 600) -> str:
+    """The polylines as data, so a caller can put them somewhere else.
+
+    ``catia_text_strokes`` draws into a sketch and used to answer with counts
+    only, so the 2026-11-11 report had to import ``catia_mcp.fonts`` to get the
+    same numbers - which works for a caller who can read this repository and not
+    for one talking over MCP. The limit keeps a long title from turning a reply
+    into a wall of numbers; what is left over is COUNTED, never dropped silently.
+    """
+    if not include:
+        return ""
+    printed: list[str] = []
+    used = 0
+    left = 0
+    for stroke in strokes:
+        if used + len(stroke) > limit:
+            left += len(stroke)
+            continue
+        printed.append("[" + ", ".join(f"[{float(x):.4f}, {float(y):.4f}]"
+                                       for x, y in stroke) + "]")
+        used += len(stroke)
+    text = (" POINTS (sketch mm, same coordinates the sketch got): "
+            + ", ".join(printed) + ".")
+    if left:
+        text += (f" {left} further point(s) were not printed because this reply "
+                 f"stops at {limit}; call catia_text_strokes on fewer characters or "
+                 "read catia_mcp.fonts.text_to_strokes directly for all of them.")
+    return text
 from catia_mcp.sketch_frames import plane_angle_frame, point_world
 from catia_mcp.results import (
     ArgumentOutOfRange,
@@ -327,6 +389,43 @@ class SketcherTools:
                         "radius": {"type": "number", "description": "Radius in mm"},
                     },
                     "required": ["radius"],
+                },
+            },
+            {
+                "name": "catia_sketch_ellipse",
+                "description": (
+                    "Draw a full ellipse in the active sketch: centre, semi-major, "
+                    "semi-minor, and the angle of the major axis. The 2026-11-11 "
+                    "report built a slanted handle hole from a 28-point polyline "
+                    "because 'no ellipse primitive exists' - it does: Factory2D has "
+                    "CreateClosedEllipse(cx, cy, majorX, majorY, majorR, minorR) and "
+                    "CreateEllipse with start/end parameters as well (37 members, "
+                    "read on B30). This wraps the closed one, so the hole is one "
+                    "curve instead of 28 flat walls."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "cx": {"type": "number", "description": "Centre X (mm)",
+                               "default": 0},
+                        "cy": {"type": "number", "description": "Centre Y (mm)",
+                               "default": 0},
+                        "major": {"type": "number",
+                                  "description": "Semi-major radius in mm (the long "
+                                                 "one)."},
+                        "minor": {"type": "number",
+                                  "description": "Semi-minor radius in mm (the short "
+                                                 "one)."},
+                        "angle": {"type": "number",
+                                  "description": ("Direction of the MAJOR axis, in "
+                                                  "degrees counter-clockwise from "
+                                                  "+X. Default 0."),
+                                  "default": 0},
+                        "construction": {"type": "boolean", "default": False,
+                                         "description": "Draw as construction "
+                                                        "geometry."},
+                    },
+                    "required": ["major", "minor"],
                 },
             },
             {
@@ -750,6 +849,18 @@ class SketcherTools:
                                 "you might be thinking of."
                             ),
                         },
+                        "include_points": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Also return the polylines themselves, in mm, so a "
+                                "caller can put them ON a surface ("
+                                "catia_curve_on_surface) instead of guessing where "
+                                "the glyph is. The 2026-11-11 report had to import "
+                                "catia_mcp.fonts directly to get these; up to 600 "
+                                "points are printed, then a count of the rest."
+                            ),
+                        },
                         "spacing": {
                             "type": "number",
                             "description": (
@@ -821,6 +932,12 @@ class SketcherTools:
                     arguments.get("cx", 0), arguments.get("cy", 0),
                     arguments["radius"],
                 )
+            case "catia_sketch_ellipse":
+                return self._draw_ellipse(
+                    arguments.get("cx", 0), arguments.get("cy", 0),
+                    arguments["major"], arguments["minor"],
+                    arguments.get("angle", 0),
+                    bool(arguments.get("construction", False)))
             case "catia_sketch_arc":
                 return self._draw_arc(
                     arguments["cx"], arguments["cy"], arguments["radius"],
@@ -2727,6 +2844,8 @@ class SketcherTools:
             "reports that the curve cannot carry a point, move the text so part of "
             "it runs off the face, or cut a closed letter as two open strokes. The "
             "numbers and what is NOT explained are in catia_diagnose's ceilings."
+            + _stroke_data(result.strokes,
+                           bool(args.get("include_points", False)))
         )
 
     def _draw_rectangle(self, x1: float, y1: float, x2: float, y2: float) -> str:
@@ -2764,6 +2883,62 @@ class SketcherTools:
         self._note_element("circle", cx=cx, cy=cy, radius=radius,
                            sweep_rad=2 * math.pi)
         return f"Circle created at ({cx}, {cy}) with radius {radius} mm"
+
+    def _draw_ellipse(self, cx: float, cy: float, major: float, minor: float,
+                      angle: float, construction: bool) -> str:
+        """A full ellipse: ``CreateClosedEllipse`` with the major axis direction.
+
+        Why it is worth a tool: the 2026-11-11 report approximated a slanted handle
+        hole with 28 straight segments, so the hole wall was 28 flats and the
+        screenshots showed the facets. ``Factory2D`` has both
+        ``CreateClosedEllipse(iCenterX, iCenterY, iMajorX, iMajorY, iMajorRadius,
+        iMinorRadius)`` and ``CreateEllipse`` with start/end parameters - the
+        argument ``(iMajorX, iMajorY)`` is the DIRECTION of the major axis, which is
+        why an angle becomes ``(cos, sin)`` rather than being ignored.
+        """
+        self._ensure_sketch_open()
+        try:
+            cx, cy = float(cx), float(cy)
+            major, minor = float(major), float(minor)
+            angle = float(angle or 0.0)
+        except (TypeError, ValueError) as error:
+            raise ArgumentRejected(
+                f"cx, cy, major, minor and angle have to be numbers; got "
+                f"{cx!r}, {cy!r}, {major!r}, {minor!r}, {angle!r}.",
+                code="BAD_ARGUMENT", stage="validate") from error
+        if major <= 0 or minor <= 0:
+            raise ArgumentOutOfRange(
+                f"major and minor have to be positive radii in mm; got {major:g} "
+                f"and {minor:g}. An ellipse with a zero radius is a line.",
+                code="RADIUS_OUT_OF_RANGE", stage="validate")
+        if major < minor:
+            raise ArgumentRejected(
+                f"major ({major:g}) is shorter than minor ({minor:g}); 'major' is "
+                "the LONG semi-axis and it sets the direction of the ellipse. Pass "
+                f"major={minor:g}, minor={major:g} if that is what you meant.",
+                code="BAD_ARGUMENT", stage="validate")
+
+        import math
+
+        factory = self._active_factory
+        radians = math.radians(angle)
+        ux, uy = math.cos(radians), math.sin(radians)
+        curve = factory.CreateClosedEllipse(cx, cy, ux, uy, major, minor)
+        if construction:
+            try:
+                curve.Construction = True
+            except Exception:  # noqa: BLE001 - drawn solid is better than nothing
+                pass
+        self._profile_closed_curves = getattr(
+            self, "_profile_closed_curves", 0) + (0 if construction else 1)
+        # Arc length of an ellipse is not elementary; the note keeps the axes so a
+        # later caller can re-derive it instead of trusting a rounded number.
+        self._note_element("ellipse", cx=cx, cy=cy, major=major, minor=minor,
+                           angle=angle, construction=construction)
+        where = " as construction geometry" if construction else ""
+        return (f"Ellipse created at ({cx:g}, {cy:g}){where}: semi-major {major:g} mm "
+                f"along {angle:g} deg from +X, semi-minor {minor:g} mm. One curve, "
+                "not a polyline - a hole cut from it has one smooth wall.")
 
     def _draw_arc(
         self, cx: float, cy: float, radius: float,

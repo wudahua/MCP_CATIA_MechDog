@@ -2,6 +2,67 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.106] — 2026-11-12 · the outline goes on the face, because the primitive was there
+
+The 2026-11-11 report (seventh in the series) put it exactly: "0.3.105's README
+wrote the conclusion correctly - text that has to be legible on a curved face is
+COMPUTED on the surface - but the COMPUTED step has no tool". It quantified the
+cost: six strokes of one word at one fixed offset came back 0.93 / 1.45 / 1.40 /
+1.20 / 1.42 / 1.24, moving another 0.5 mm took the whole thing from buried to
+floating, and the fix was three deletions, three rebuilt splines and four re-cuts.
+
+**`catia_curve_on_surface` closes it.** Each point is snapped with
+`AddNewPointOnSurfaceWithReference`, the stroke is threaded into one open spline,
+and the reply says how far every point travelled. Measured end to end on B30: an
+18-point `C` placed on a plane 60 mm in front of a closed lofted bottle moved
+**26.053-26.137 mm** and `catia_surface_engrave` at 0.4 mm then removed **3.026 mm³
+against a 3.042 mm³ prediction - ratio 0.995, with no tuning at all**. What the
+report spent four calls calibrating is now one call per stroke.
+
+Three things about the primitive had to be measured before the tool could be
+described honestly, and all three contradict what the signature suggests:
+
+| what the signature suggests | what was measured |
+|---|---|
+| `direction` aims the ray | ignored: +Y, -Y, +Z, +X all moved the same point **26.0052 mm** |
+| naming a face picks the wall | ignored: Face.1, Face.2, Face.3 gave the same **26.0052 mm** |
+| a body reference is a support | refused: every point failed `UpdateObject 失败` |
+
+So a point lands on the NEAREST point of the body's surface (one already on it
+moved 0.0022 mm), the support only selects the body, and a point inside a thin
+body can come back on the far wall. The reply says all of that. Coordinates cannot
+be read back either - `GetCoordinates` fails on a plain point and returns zeros on
+a point-on-surface - so the tool reports measured displacement rather than a
+position it would have to invent.
+
+**Two claims in the report were wrong, both in the tool's favour.**
+`catia_sketch_ellipse` did not exist because nobody had wrapped it, not because
+Factory2D lacks it: `CreateClosedEllipse(cx, cy, majorX, majorY, majorR, minorR)`
+is right there among its 37 members. A 30×10 ellipse at 30° pads to
+**4712.3890 mm³ = π·30·10·5** with a 52.82 × 34.64 bounding box, i.e. one smooth
+wall instead of the report's 28 flats. And `catia_text_strokes` now hands its
+points back (`include_points`), so a caller no longer has to import
+`catia_mcp.fonts` to get the numbers over MCP.
+
+**One real defect found while writing the probes.** `catia_new_part`'s refusal
+said "Pass overwrite=true if you mean to replace it" and the tool had no such
+parameter - the flag never reached `_save_document`, and my own probe stopped on
+its own leftovers exactly as the 0.3.104 audit had to work around. It does now,
+and 0.3.104's audit can drop its workaround.
+
+**Also from the report:** `catia_surface_engrave` prints `dialogs answered: 0`
+instead of staying silent when nothing was raised - "the watcher ran and found
+nothing" and "the watcher was never armed" used to look identical, and that task
+lost two runs to modal boxes.
+
+Not done, and still open by name: the fillet all-edges fallback and the
+self-intersection pre-check from the eighth report, CJK glyphs, and the fact that
+`catia_sketch_spline` cannot mix straight and curved stretches in one profile.
+The eighth report's account of the drawing being misunderstood for seven rounds is
+noted; none of its tool-level measurements are affected.
+
+142 tools, 1700 tests, `scripts/b30_v0406_audit.py` 7/7 (twice).
+
 ## [0.3.105] — 2026-11-11 · answer the box, and withdraw what five cells deny
 
 Two of the three open items from the 2026-11-11 report, and the third one turned
