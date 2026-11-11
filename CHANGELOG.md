@@ -2,6 +2,56 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.103] — 2026-11-11 · text from a font in the box, and the Rib that adds nothing
+
+`catia_text_strokes` draws a string into the open sketch. The 2026-11-11 report
+put the gap as "the title's text still needs its point sets handed over by
+hand": `catia_sketch_strokes` had taken a whole outline since 0.3.95, and what
+was missing was the outlines. `Factory2D` has no `CreateText` (37 members,
+measured 2026-11-10), so they can only be geometry - and they are now computed
+from the **Hershey simplex** set, which ships in `catia_mcp/fonts.py`.
+
+**Why a single-line face.** Simplex draws one stroke per stem. An outline face
+gives every stem two walls a fraction of a millimetre apart, and a groove 0.4 mm
+deep cannot resolve two walls that close: it comes out as one ragged slot. It is
+also the ancestor of the SHX lettering CATIA's own drafting uses.
+
+Measured on B30: a 10 mm capital is exactly 10.000 mm tall, `'g'` descends
+7 units below the baseline, `'A'` is 18/21 of its height wide, and the
+coordinates read back out of the sketch are the ones the font computed. ASCII
+32-126 only: a character with no glyph is **skipped and named**, never replaced
+by a box that would engrave as something nobody asked for.
+
+**What the caller meets next, and now gets told.** Projecting a glyph and then
+engraving the projection refuses a parameter point for some letters. 9 of 12
+tried took it (H, E, T, L, A, V, C, S, G); O, 0 and D did not. It is not the
+point count - a regular n-gon passed at 7, 9, 11, 13, 15, 17, 19 and 21 vertices,
+`'S'` at 20 passed while `'D'` at 14 failed, and a Douglas-Peucker-simplified `'O'`
+failed at 8 segments. **Coverage is what moves it**: the same `'O'` on the same
+face failed at 81.4 % landed and passed at 57.2 %. The likely reason - a
+projection that covers almost everything comes back closed, and a closed curve
+takes no parameter, exactly as `catia_gsd_circle`'s own circle refuses - is
+**not confirmed** and is recorded as a possibility in the ceilings, not as a
+cause. `catia_text_strokes` repeats the numbers in its reply, because the caller
+walks into this on the next call.
+
+**`AddNewRib` was measured, and no tool was written.** It exists on
+`ShapeFactory` - `AddNewRib(iSketch, iCenterCurve)`, `AddNewStiffener(iSketch)`,
+plus `*FromRef` variants and `AddNewSlot` - and it does update into a solid:
+1175.0633 mm³ on a quarter arc with a r=3 profile plane crossing it. But
+`catia_gsd_sweep` + `catia_gsd_close_surface` on the same frame measured **the
+same 1175.0633 mm³**, so a Rib wrapper would save one call and add a
+prerequisite check to a feature that already has two ways to fail quietly: a
+profile plane TANGENT to the centre curve updates "successfully" into a
+0.0000 mm³ body, and one on the xz plane is refused outright.
+
+So the 2026-11-11 report's "the ring handle is still a 9 mm plate" is a
+modelling detour rather than a missing capability - sweep + close makes that
+tube today - and the ceilings now say so with the numbers instead of
+`DECLARED_NOT_MEASURED`.
+
+140 tools, 1638 tests, `scripts/b30_v0403_audit.py` 9/9.
+
 ## [0.3.102] — 2026-11-11 · the first projection in a document is a fragment
 
 Asked what was left of the 2026-11-11 report, one item was still open: its P2

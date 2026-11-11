@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.102** · [what changed](CHANGELOG.md) ·
+**0.3.103** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -12,7 +12,7 @@ defects that make that loop lie to you. Most of the work since 0.3.0 came from
 people rebuilding real assemblies with it: the changelog is a list of things that
 produced a plausible number, a wrong number, or no explanation at all.
 
-**139 tools** (upstream 98 + 41 added, and nothing dropped any more: knowledge
+**140 tools** (upstream 98 + 42 added, and nothing dropped any more: knowledge
 came back in 0.3.63 and drafting in 0.3.64, each after its tools were measured on
 B30 rather than trusted). Nothing in the COM layer was rewritten — the value of upstream is
 the field-verified knowledge in its comments, so this fork is strictly add /
@@ -61,7 +61,7 @@ but the claim that it worked.
 same reason they always did: domain-neutral and cheap. See `FORK.md` §8 if you
 want to cut further.
 
-### Added (33 tools over upstream)
+### Added (34 tools over upstream)
 
 Five of them came with the fork, twenty-one were added while building parts
 from a spec (0.3.1: three, 0.3.2: four, 0.3.4: one, 0.3.5: one, 0.3.8: two, 0.3.17:
@@ -96,7 +96,7 @@ several documents.
 | `catia_gsd_plane_normal_to_curve` | Plane normal to a curve with its origin ON that curve at a fraction of its length - the tutorial's "Normal to Curve + Set Origin on Curve". A tree element, unlike the frame sketch that used to be the only way; the point's measured coordinates are reported back |
 | `catia_gsd_plane_angle` | A datum plane rotated a given angle about an axis - the tutorial's 36-degree construction and the general 1/N-sector plane. A named, editable, referenceable tree element, unlike a frame sketch. The axis must LIE IN the reference plane (rotating a plane about its own normal leaves it where it was and CATIA answers with a generic failure), and the angle is in degrees |
 
-#### Added while building parts from a spec (23 tools)
+#### Added while building parts from a spec (24 tools)
 
 | Tool | Version | Why it exists |
 |---|---|---|
@@ -122,6 +122,7 @@ several documents.
 | `catia_gsd_rotate` | 0.3.60 | A five-lobe bottle base is one lobe plus four rotations of 72°, and there was no way to rotate a surface at all - `catia_circ_pattern` is a Part Design feature and wants a solid - so the lobe was REBUILT five times, once per position, which is four extra constructions of the same geometry and a shape whose positions could not be moved later. `AddNewRotate(element, axis, angle)` was in the typelib the whole time. Measured on B30 2026-11-04: a cylinder whose axis sits at (20,0) rotated +90° about z lands at (0,20), so the sign is counter-clockwise by the right-hand rule, and the original stays |
 | `catia_gsd_translate` | 0.3.60 | Same gap, same run. `AddNewTranslate(element, direction, distance)` measured on the same day: a cylinder spanning z 0..20 moved 30 mm along +z spans 30..50 and no longer meets z=0. The direction must be the Direction OBJECT, not a Reference - passing the reference raises “type mismatch, argument 2” - while `AddNewRotate` takes a Reference to an axis line, so the two members of one family disagree and neither argument kind is guessed |
 | `catia_shape_audit` | 0.3.99 | A five-lug bottle base reproduced a tutorial to within 3.15 % of its volume, with the wall thickness matching to 0.0001 mm, and the shape was still wrong - and the tutorial's own appendix describes eight earlier versions that passed every such check. Volume and area cannot see a shape; r(theta) can: bins every mesh vertex by angle and reports the amplitude, the peak angles and whether N repeats agree |
+| `catia_text_strokes` | 0.3.103 | Text into a sketch, from a font that ships with the server. `Factory2D` has no `CreateText` (37 members, measured 2026-11-10), so a glyph can only be geometry; `catia_sketch_strokes` already took a whole outline, and what was missing was the outlines. The face is **Hershey simplex**, single-line - one stroke per stem, because a 0.4 mm groove cannot resolve two walls of the same stem and comes out as one ragged slot. `height` is the cap height; ASCII 32-126 only, and a character with no glyph is skipped and named rather than drawn as a box. **Then the caller meets this**: engraving a glyph *through a projection* refuses a parameter point depending on how much of it lands - the same `'O'` failed at 81.4 % and passed at 57.2 %, 9 of 12 letters passing at their default placement. The reason is not confirmed; the numbers are in `catia_diagnose`'s ceilings, and the reply repeats them |
 | `catia_check_surface` | 0.3.51 | A surface task's acceptance criteria were "check with zebra stripes that the valley is smooth", and CATIA V5 gives automation no zebra, no curvature comb and no Match object (measured: the viewer answers `RenderingMode` and returns an unresolvable attribute for `Zebra` / `EnvironmentMapping` / `AnalysisMode`). The mesh can answer it anyway: the dihedral angle across every interior edge, so a G0 fold reads as degrees instead of needing a picture |
 
 ### Fixed (latent upstream bugs, reproduced on a live V5-6R2020 B30 session)
@@ -1220,7 +1221,7 @@ while a reply that only reports success cannot.
 | Group | Tools | Notes |
 |---|---|---|
 | Document | 12 | new/open/save/close/list + `catia_save_as_copy`; `catia_save_document` retries around dialogs |
-| Sketcher | 15 | lines, rectangles, circles, constraints; reopen a closed sketch and delete one element; `catia_sketch_copy` replays a profile onto another plane; `catia_sketch_strokes` draws a whole letter outline in one call |
+| Sketcher | 16 | lines, rectangles, circles, constraints; reopen a closed sketch and delete one element; `catia_sketch_copy` replays a profile onto another plane; `catia_sketch_strokes` draws a whole letter outline in one call, and `catia_text_strokes` supplies those outlines from a built-in single-line font |
 | Part Design | 26 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, solid loft, bodies (create / list / delete)… |
 | Generative Shape Design | 35 | wireframe and surfaces, extract, `boundary`, `heal`, `fillet_surface`, `spine`, `rotate`, `translate`, `circ_pattern` (rotate+join), `plane_normal_to_curve`, `plane_angle`, revolve + close surface, and `catia_surface_engrave` (a constant-depth groove along a curve on a curved face); a GSD element or set is removed with `catia_delete_feature` |
 | Assembly | **14** | upstream 9 + get/set component transform, rename, list constraints, copy component, replace component |

@@ -265,13 +265,32 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
     },
     {
         "member": "AddNewRib / AddNewStiffener",
-        "status": "DECLARED_NOT_MEASURED",
+        "status": "AVAILABLE_WITH_LIMIT",
         "detail": (
-            "Declared on the type library (read there by a 2026-11-10 report). No "
-            "tool is wrapped and nobody has measured whether they update on B30, "
-            "so treat this as unknown rather than either way - a rib request "
-            "currently has to go around as a pad, which is a flat plate, not a "
-            "round tube."
+            "Measured on B30 2026-11-11. They are ShapeFactory methods, not Body "
+            "ones: AddNewRib(iSketch, iCenterCurve), AddNewStiffener(iSketch), and "
+            "a *FromRef variant of each plus AddNewSlot. A Rib DOES work - an arc "
+            "centre line on xy with a r=3 circle on a plane that CROSSES it gave "
+            "UpdateObject OK, part.Update() OK, 1175.0633 mm3, and saved - so "
+            "'unknown' was the wrong answer. "
+            "WHAT IT BUYS: nothing this repo lacks. The same frame through "
+            "catia_gsd_sweep + catia_gsd_close_surface measured the SAME "
+            "1175.0633 mm3, i.e. one solid, so a Rib wrapper would save one call "
+            "and add a prerequisite check. That is why no tool is wrapped. "
+            "HOW IT FAILS, which is the reason to say so here: with the profile "
+            "plane TANGENT to the centre curve, UpdateObject reports success and "
+            "the body measures 0.0000 mm3 - a silent empty feature; with the "
+            "profile on the xz plane it refuses with CATIA's generic COM error "
+            "because the sketch frame there reads back as unknown. So the profile "
+            "plane must CROSS the centre curve, through the crossing point. "
+            "ONE NUMBER NOT EXPLAINED: a r=3 circle swept along a 62.8319 mm arc "
+            "should be 1776.5288 mm3 as section times length, and measured "
+            "1175.0633 - 34 % less, by both routes. The mechanism was not "
+            "established, so it is recorded rather than explained. "
+            "A 2026-11-11 report said 'the ring handle is still a 9 mm plate, not a "
+            "round tube'; that is a modelling detour, not this gap - sweep + close "
+            "makes the tube today (see catia_surface_engrave's route for the "
+            "pattern)."
         ),
     },
     {
@@ -282,8 +301,44 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
             "(measured 2026-11-10). This is not a missing wrapper: a glyph outline "
             "is GEOMETRY that has to be imported or computed, and "
             "catia_drawing_add_text draws on a drawing sheet, never in 3D. "
-            "catia_sketch_strokes takes a whole outline in one call as polylines - "
-            "the geometry half of the problem, with the font left to the caller."
+            "catia_sketch_strokes takes a whole outline in one call as polylines, "
+            "and since 0.3.103 the font is no longer the caller's problem either: "
+            "catia_text_strokes computes the outlines from the Hershey simplex set "
+            "that ships with this server (ASCII 32-126, single-line). What is "
+            "still missing is any script outside ASCII - no CJK, no accents."
+        ),
+    },
+    {
+        "member": "AddNewPointOnCurveFromPercent on a PROJECTED GLYPH",
+        "status": "MEASURED_UNEXPLAINED",
+        "detail": (
+            "This is what stops engraved text, and it is measured rather than "
+            "guessed. A glyph goes into a sketch (catia_text_strokes), is projected "
+            "onto a lofted face with catia_gsd_project, and then the engrave route "
+            "asks for a point ON that projection - which fails for some glyphs and "
+            "not others. B30 2026-11-11, one fresh document per letter, same face "
+            "and same sketch plane: OK for H, E, T, L, A, V, C, S, G; FAILED for O, "
+            "0, D. "
+            "IT IS NOT THE POINT COUNT. A regular n-gon projected onto the same "
+            "face took the point at 7, 9, 11, 13, 15, 17, 19 and 21 vertices, and "
+            "'S' (20 points) and 'G' (21) passed while 'D' (14) failed. It is not "
+            "the shape either: Douglas-Peucker-simplified 'O' failed at 20, 20, 18, "
+            "14, 8 and 8 segments. "
+            "WHAT DOES MOVE IT IS WHERE THE TEXT SITS, i.e. HOW MUCH OF IT LANDS. "
+            "The same 21-point 'O' on the same face: origin (0, 0) 81.4 % landed "
+            "FAILED; (5, 0) 82.8 % FAILED; (-9, 0) 57.2 % OK; (-9, -10) 57.6 % OK; "
+            "(-20, 0) 18.2 % OK. So a projection that covers almost the whole glyph "
+            "is the case that refuses. "
+            "THE LIKELY REASON IS NOT CONFIRMED, and is written here as a "
+            "possibility, not a cause: a projection landing 80 %+ may come back as "
+            "a CLOSED curve, and a closed curve takes no parameter - catia_gsd_"
+            "circle's own circle refuses the same call (measured 2026-11-10), and "
+            "the 47.2 % projection of a closed outline that DID engrave was an open "
+            "fragment. Nothing here measured the closure of the projection directly, "
+            "so treat that as the next thing to test, not as the answer. "
+            "WHAT TO DO WITH IT: place text so part of it runs off the face, or cut "
+            "a closed letter (O, 0, D, any ring) as two open strokes. catia_text_"
+            "strokes repeats this in its reply because the caller hits it next."
         ),
     },
     {

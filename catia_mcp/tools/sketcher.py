@@ -10,6 +10,8 @@ import json
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
+from catia_mcp.fonts import supported as font_charset
+from catia_mcp.fonts import text_to_strokes
 from catia_mcp.results import CodedError
 from catia_mcp.sketch_frames import plane_angle_frame, point_world
 from catia_mcp.results import (
@@ -702,6 +704,92 @@ class SketcherTools:
                     "required": ["strokes"],
                 },
             },
+            {
+                "name": "catia_text_strokes",
+                "description": (
+                    "Draw TEXT into the open sketch, from a font that ships with "
+                    "this server. This closes the gap the 2026-11-11 report named: "
+                    "catia_sketch_strokes takes a whole outline, and what was "
+                    "missing was the outlines - every glyph had to be typed in as "
+                    "point sets by hand. "
+                    "The face is the HERSHEY SIMPLEX set, which is a SINGLE-LINE "
+                    "font: one stroke per stem. That matters more than it sounds. "
+                    "An outline face gives every stem two walls a fraction of a "
+                    "millimetre apart, and a groove 0.4 mm deep cannot resolve two "
+                    "walls that close - it comes out as one ragged slot. It is also "
+                    "the ancestor of the SHX lettering CATIA's own drafting uses, so "
+                    "the result reads as engineering lettering. "
+                    "'height' is the CAP HEIGHT (an H), which is what a drawing "
+                    "means by '10 mm text', and the baseline lands on 'origin'. "
+                    "Everything is straight segments, one stroke per line of the "
+                    "glyph, never a spline - a spline through the same points rounds "
+                    "the corners, which is how an earlier hand-built 'A' became an "
+                    "omega. "
+                    "ASCII 32-126 ONLY. A character with no glyph is SKIPPED and "
+                    "NAMED in the reply, never replaced by a box, because a box "
+                    "would engrave as something you did not ask for. "
+                    "Next steps for engraved text: catia_close_sketch, then "
+                    "catia_gsd_project onto the face, then catia_surface_engrave."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": (
+                                "The text. A newline starts a second line, whose "
+                                "baseline sits 'line_spacing' below the first."
+                            ),
+                        },
+                        "height": {
+                            "type": "number",
+                            "default": 10.0,
+                            "description": (
+                                "Cap height in millimetres - the height of an H. "
+                                "Not the width, and not the point size of any font "
+                                "you might be thinking of."
+                            ),
+                        },
+                        "spacing": {
+                            "type": "number",
+                            "description": (
+                                "Clear gap between one glyph's box and the next, in "
+                                "mm. Default 20 % of 'height'; the bearings alone are "
+                                "1-2 font units, which reads as letters touching."
+                            ),
+                        },
+                        "origin": {
+                            "type": "array",
+                            "items": {"type": "number"},
+                            "minItems": 2,
+                            "maxItems": 2,
+                            "default": [0, 0],
+                            "description": (
+                                "Where the first baseline starts, as [x, y] in the "
+                                "sketch's own 2D millimetres. The glyphs sit to the "
+                                "RIGHT of it and rise ABOVE it."
+                            ),
+                        },
+                        "line_spacing": {
+                            "type": "number",
+                            "description": (
+                                "Baseline-to-baseline distance for a second line, in "
+                                "mm. Default 1.6 x height."
+                            ),
+                        },
+                        "construction": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Draw as construction geometry: visible guides that "
+                                "are excluded from the outline and from pad/pocket. "
+                                "Off for text you mean to cut."
+                            ),
+                        },
+                    },
+                    "required": ["text"],
+                },
+            },
         ]
 
     def execute(self, tool_name: str, arguments: dict[str, Any]) -> str | dict[str, Any]:
@@ -763,6 +851,8 @@ class SketcherTools:
             case "catia_sketch_strokes":
                 return self._draw_strokes(arguments["strokes"],
                                           bool(arguments.get("construction", False)))
+            case "catia_text_strokes":
+                return self._draw_text(arguments)
             case _:
                 raise ArgumentRejected(f"Unknown sketcher tool: {tool_name}")
 
@@ -2543,6 +2633,100 @@ class SketcherTools:
             + (f"; {closed} of them closed" if closed else "")
             + ". A stroke that repeats its first point is closed; nothing was "
             "smoothed, so corners stay corners."
+        )
+
+    def _draw_text(self, args: dict[str, Any]) -> str:
+        """Text as strokes, from a font that is in the box rather than in CATIA.
+
+        ``Factory2D`` has no ``CreateText`` (37 members, measured on B30
+        2026-11-10), so a glyph can only arrive as geometry. ``_draw_strokes``
+        already takes a whole outline; what this adds is the outlines, and it is
+        pure arithmetic - no COM is touched until the strokes are handed over, so
+        a string with nothing drawable in it fails before anything is drawn.
+
+        The font is single-line on purpose: a groove a fraction of a millimetre
+        deep cannot resolve two walls of one stem, so an outline face would come
+        out as one ragged slot. See ``catia_mcp.fonts`` for the licence text.
+        """
+        self._ensure_sketch_open()
+        raw = args.get("text")
+        if not isinstance(raw, str) or not raw.strip():
+            raise ArgumentRejected(
+                'catia_text_strokes needs some text, e.g. {"text": "CATIA"}. '
+                "Nothing was drawn.",
+                code="BAD_ARGUMENT", stage="validate",
+            )
+        height = float(args.get("height", 10.0))
+        if height <= 0:
+            raise ArgumentRejected(
+                f"height must be positive; got {height:g}. It is the CAP HEIGHT "
+                "in millimetres (an H), not the width of the text. Nothing was "
+                "drawn.",
+                code="BAD_ARGUMENT", stage="validate",
+            )
+        origin = args.get("origin")
+        if origin is None:
+            origin = [0.0, 0.0]
+        if not isinstance(origin, (list, tuple)) or len(origin) != 2:
+            raise ArgumentRejected(
+                "origin must be an [x, y] pair in the sketch's own mm; got "
+                f"{origin!r}. Nothing was drawn.",
+                code="BAD_ARGUMENT", stage="validate",
+            )
+        spacing = args.get("spacing")
+        line_spacing = args.get("line_spacing")
+        result = text_to_strokes(
+            raw,
+            height_mm=height,
+            spacing_mm=None if spacing is None else float(spacing),
+            origin=(float(origin[0]), float(origin[1])),
+            line_spacing_mm=None if line_spacing is None else float(line_spacing),
+        )
+        if not result.strokes:
+            named = (", ".join(repr(char) for char in result.missing)
+                     if result.missing else "every character")
+            raise PreconditionRejected(
+                f"Not one character of {raw!r} has a glyph in this font "
+                f"({named}). The face is Hershey simplex: ASCII 32-126 only, no "
+                "CJK and no accented letters. Nothing was drawn - a placeholder "
+                "box would engrave as something you did not ask for. Available: "
+                f"{font_charset()}",
+                code="TEXT_NO_GLYPHS", stage="execute", modified=False,
+                next_actions=[
+                    "Write the text in ASCII letters, digits and punctuation",
+                    "If it must be another script, build the outlines yourself "
+                    "and hand them to catia_sketch_strokes",
+                ],
+            )
+        drawn = self._draw_strokes(result.strokes,
+                                   bool(args.get("construction", False)))
+        origin_x, origin_y = float(origin[0]), float(origin[1])
+        note = (
+            f"Text {raw!r}: {result.glyphs} glyph(s) in {result.lines} line(s), "
+            f"{len(result.strokes)} stroke(s), {height:g} mm cap height, "
+            f"{result.width_mm:.3f} mm wide, baseline at ({origin_x:g}, "
+            f"{origin_y:g}) in this sketch's own mm."
+        )
+        if result.missing:
+            note += (
+                f" SKIPPED {len(result.missing)} character(s) with no glyph here: "
+                + ", ".join(repr(char) for char in result.missing)
+                + " - ASCII 32-126 only, so the text is that much shorter and "
+                "nothing was drawn in their place."
+            )
+        return (
+            note
+            + " Hershey simplex, single-line: one stroke per stem, which is what a "
+            "sub-millimetre groove can resolve. "
+            + drawn
+            + " BEFORE ENGRAVING THIS, one measured catch: projecting a glyph and "
+            "then engraving the projection can refuse a parameter point. Measured "
+            "on B30 2026-11-11 over 12 letters, 9 took the point and 3 ('O', '0', "
+            "'D') did not - and the same 'O' passed at 57 % coverage and failed at "
+            "81 %. So coverage, not the glyph, is what moves: if the engrave "
+            "reports that the curve cannot carry a point, move the text so part of "
+            "it runs off the face, or cut a closed letter as two open strokes. The "
+            "numbers and what is NOT explained are in catia_diagnose's ceilings."
         )
 
     def _draw_rectangle(self, x1: float, y1: float, x2: float, y2: float) -> str:
