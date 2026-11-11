@@ -298,7 +298,7 @@ def test_every_ceiling_still_carries_a_status_and_a_detail() -> None:
     from catia_mcp.tools.diagnostics import _CAPABILITY_CEILINGS
 
     allowed = {"UNSUPPORTED_ON_B30", "NOT_IN_TYPELIB", "DECLARED_NOT_MEASURED",
-               "AVAILABLE_WITH_LIMIT"}
+               "AVAILABLE_WITH_LIMIT", "MEASURED_UNEXPLAINED"}
     for entry in _CAPABILITY_CEILINGS:
         assert entry["status"] in allowed, entry["member"]
         assert len(entry["detail"]) > 60, entry["member"]

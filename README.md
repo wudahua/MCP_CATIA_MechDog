@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.100** · [what changed](CHANGELOG.md) ·
+**0.3.101** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1538,9 +1538,33 @@ Place the result with `catia_get_component_transform`.
   curve that lies on the surface, half of it is inside the material, so the groove
   depth is the radius — measured along the surface normal everywhere. Numbers from
   B30: a r=4 trace on a r=40 cylinder gave a 5.9657 mm³ tube (2π²Rr² = 5.97) and
-  removed 2.974 mm³, which is the half. The guide has to be a CLOSED curve (an open
-  guide sweeps a pipe with two open ends and `CloseSurface` refuses it), and the
-  curve has to lie on the body — the tool cannot arrange that.
+  removed 2.974 mm³, which is the half. The curve has to lie on the body — the
+  tool cannot arrange that — and it has to carry a point-on-curve parameter:
+
+  | guide | works? | measured 2026-11-11, one fresh document per case |
+  |---|---|---|
+  | `catia_gsd_line`, or its extract | **yes** | 50 mm segment on a generator, 0.5 mm deep, removed 19.5829 mm³ (predicted 19.635) |
+  | an OPEN `catia_gsd_spline` | **yes** | 65.682 mm, removed 25.6436 mm³ (predicted 25.793) |
+  | a SKETCH outline projected onto the face | **yes** | the route this tool is built for |
+  | `catia_gsd_circle`, or its extract | no | `ENGRAVE_CURVE_UNPARAMETRISABLE` |
+  | a CLOSED `catia_gsd_spline` | no | same |
+  | the projection of any of those | no | a closed spline's projection refuses too |
+
+  **An OPEN guide is fine** — this used to say the opposite, and that was wrong:
+  `CloseSurface` closes the two ends of the swept pipe itself. What refuses is a
+  CLOSED curve, because the route needs a point-on-curve and a closed curve will
+  not carry one. Note also that "it came from `catia_gsd_project`" is NOT the
+  test — 0.3.100's `next_actions` said it was and sent a reporter down a branch
+  that fails.
+
+  **Do the projection and the engrave in ONE session.** Measured on B30
+  2026-11-11 on a lofted r=40 cylinder closed into a solid: a r=6 sketch circle
+  projected onto it, engraved 0.6 mm deep, removed 9.991 mm³ (predicted 10.056).
+  The document was saved, closed and reopened, and the SAME projection — still
+  17.7831 mm long, still 0.0000 mm from the body — removed NOTHING; a projection
+  made after the reopen failed as well and `part.Update()` then failed too. Which
+  of the two changes across a reopen is unknown, so no cause is claimed: it is
+  published as `MEASURED_UNEXPLAINED` in `capability_ceilings`.
 
 * **A planar element only projects onto a support that crosses it at an angle.**
   Measured on B30 2026-11-10 with a 40×40 rectangle on an XY plane offset 40 mm:

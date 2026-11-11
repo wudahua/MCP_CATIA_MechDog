@@ -1197,7 +1197,25 @@ class GSDTools:
                     "body, and removed no material at all. When that happens this "
                     "tool now reports the tube's volume, its swept length and its "
                     "distance to the body, because the boolean consumes the cutter "
-                    "and those numbers are otherwise unrecoverable."
+                    "and those numbers are otherwise unrecoverable. "
+                    "WHICH CURVES IT ACCEPTS, measured on B30 2026-11-11 with one "
+                    "fresh document per case: catia_gsd_line, the extract of a "
+                    "gsd_line, an OPEN catia_gsd_spline, and a SKETCH outline "
+                    "projected onto the face. A catia_gsd_circle, the extract of "
+                    "one, a CLOSED spline, and the projection of any of those are "
+                    "refused with ENGRAVE_CURVE_UNPARAMETRISABLE - the route needs a "
+                    "point-on-curve on the guide, and a closed curve will not carry "
+                    "one. The guide being OPEN is fine: CloseSurface closes the ends "
+                    "of the swept pipe, measured 2026-11-11 (a 50 mm segment on a "
+                    "generator, 0.5 mm deep, removed 19.5829 mm3 of a predicted "
+                    "19.635). "
+                    "DO THE PROJECTION AND THE ENGRAVE IN ONE SESSION: an engrave "
+                    "that removed 9.991 mm3 in the session that made its projection "
+                    "removed NOTHING after the document was saved, closed and "
+                    "reopened, with the curve still measuring 17.7831 mm and 0.0000 "
+                    "mm from the body. A condition of the reopened file is what "
+                    "changes, not the curve - the cause is not known (measured "
+                    "2026-11-11), so it is measured here and not explained."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1207,7 +1225,11 @@ class GSDTools:
                             "description": (
                                 "The curve to engrave along - normally the element "
                                 "catia_gsd_project produced. It has to lie ON the "
-                                "target body, or the tube misses the material."
+                                "target body, or the tube misses the material. It "
+                                "also has to carry a point-on-curve parameter: a "
+                                "gsd_line, an OPEN gsd_spline or a PROJECTED SKETCH "
+                                "outline do; a circle, a closed spline and the "
+                                "projection of either do not (measured 2026-11-11)."
                             ),
                         },
                         "depth": {
@@ -2518,6 +2540,18 @@ class GSDTools:
         except Exception:  # noqa: BLE001
             pass
 
+    def _name_gone(self, part: Any, name: str) -> bool:
+        """Is ``name`` really out of the tree? False when the part cannot answer.
+
+        Used right after a delete, because "I called delete" is not "it is gone".
+        An unreadable answer counts as NOT gone: the cost of that mistake is a
+        wrong claim that the part is clean, which is the mistake being fixed.
+        """
+        try:
+            return part.FindObjectByName(str(name)) is None
+        except Exception:  # noqa: BLE001 - unanswerable is not clean
+            return False
+
     def _free_name(self, part: Any, wanted: str) -> tuple[str, bool]:
         """``(name, verified)``: ``wanted``, or ``wanted.2`` / ``.3`` … if taken.
 
@@ -3385,13 +3419,93 @@ class GSDTools:
             f"3D circle created: radius {radius} mm on '{args['support_plane']}'.",
         )
 
-    def _source_length_mm(self, element_name: str) -> tuple[float | None, str]:
-        """Length of the element being projected, and where the number came from.
+    def _sketch_outline_length_mm(
+            self, element_name: str) -> tuple[float, int, int] | None:
+        """Length of a SKETCH's outline, measured element by element.
 
-        A closed SKETCH has no measurable ``Length`` at all (Measurable on a
-        sketch raises on B30, measured 2026-11-10), so a sketch falls back to the
-        outline this session recorded when it drew it - and a sketch that came
-        from a reopened file has neither. None, never a guess.
+        A sketch has no measurable ``Length`` of its own - ``GetMeasurable`` on a
+        sketch raises on B30 (2026-11-10) - and the session record only exists
+        for a sketch THIS server drew. So a sketch that came back with a
+        reopened file used to answer "I cannot tell you", and the projection's
+        completeness check quietly did nothing in exactly the case users hit
+        (reopen yesterday's part and keep working) - reported 2026-11-11.
+
+        The curves INSIDE the sketch can be measured one at a time. Measured on
+        B30 2026-11-11, all against hand values: a 40x10 rectangle (100.000)
+        read 100.0000 from four lines; a circle r=10 read 62.8319
+        (2*pi*r=62.8319); a 90-degree arc r=10 read 15.7080; an open 4-point
+        spline read 73.7960; a closed spline through a 30x20 rectangle read
+        113.760. The absolute axis and the points refused, and a CONSTRUCTION
+        line measured 10.000 but is excluded here because it is not part of the
+        outline.
+
+        Returns ``(total, curves_read, curves_unread)``, or None when the part
+        holds no such sketch. ``curves_unread`` is not cosmetic: an unread curve
+        makes the total a LOWER bound, which makes the projected share an UPPER
+        bound - the direction that hides a fragment - so the caller must not
+        present the ratio as exact when this is non-zero.
+        """
+        part = self.conn.get_active_part()
+        try:
+            sketch = part.FindObjectByName(str(element_name))
+        except Exception:  # noqa: BLE001 - an unresolvable name is not a sketch
+            return None
+        if sketch is None or not hasattr(sketch, "GeometricElements"):
+            return None
+        try:
+            count = int(sketch.GeometricElements.Count)
+        except Exception:  # noqa: BLE001
+            return None
+        try:
+            spa = self.conn.active_document.GetWorkbench("SPAWorkbench")
+        except Exception:  # noqa: BLE001
+            return None
+        total = 0.0
+        read = unread = 0
+        for index in range(1, count + 1):
+            try:
+                element = sketch.GeometricElements.Item(index)
+            except Exception:  # noqa: BLE001 - skip what will not be read
+                continue
+            # A CURVE ANSWERS StartPoint/EndPoint AND A POINT DOES NOT - measured
+            # 2026-11-11 on a sketch holding a line, a circle, an arc and a
+            # spline: all four curves answered both, the absolute axis and the
+            # four spline control points answered neither. A CLOSED spline
+            # answers them too, so this is not a test for "open".
+            try:
+                element.StartPoint
+                element.EndPoint
+            except Exception:  # noqa: BLE001 - axis or point: not the outline
+                continue
+            try:
+                if element.Construction:
+                    continue
+            except Exception:  # noqa: BLE001 - unknown reads as "count it"
+                pass
+            try:
+                reference = part.CreateReferenceFromObject(element)
+                total += float(spa.GetMeasurable(reference).Length)
+                read += 1
+            except Exception:  # noqa: BLE001 - told, not hidden
+                unread += 1
+        return (total, read, unread) if read else None
+
+    def _source_length_mm(
+            self, element_name: str) -> tuple[float | None, str, bool]:
+        """Length of the element being projected, where it came from, and whether
+        it is exact.
+
+        Three sources, in the order that trusts the model most:
+
+        1. the element measures directly (a GSD curve, a line) - exact;
+        2. the element is a SKETCH, and its own curves measure one by one -
+           exact only when every curve answered (``exact`` False otherwise: the
+           sum is then a lower bound and the share an upper bound);
+        3. the coordinates this session recorded while drawing it - exact, but
+           only for a sketch drawn here, which is the case the 2026-11-11 report
+           showed to be the RARE one in real use.
+
+        None (and ``exact`` False) when none of them answers. Never a guess.
         """
         name = str(element_name)
         try:
@@ -3401,11 +3515,18 @@ class GSDTools:
         if reference is not None:
             length = self._curve_length_mm(reference)
             if length is not None:
-                return length, "curve"
+                return length, "measured on the curve itself", True
+        measured = self._sketch_outline_length_mm(name)
+        if measured is not None:
+            total, read, unread = measured
+            if total > 0:
+                where = ("measured on the sketch's %d curve%s"
+                         % (read, "" if read == 1 else "s"))
+                return total, where, unread == 0
         try:
             document = str(self.conn.active_document.Name)
         except Exception:  # noqa: BLE001
-            return None, ""
+            return None, "", False
         outlines = getattr(self.conn, "sketch_outlines", None) or {}
         record = outlines.get(f"{document}::{name}") or {}
         total = 0.0
@@ -3422,8 +3543,8 @@ class GSDTools:
                     found = True
             except (KeyError, TypeError, ValueError):
                 continue
-        return (total, "outline this session drew") if found and total > 0 else (
-            None, "")
+        return ((total, "the outline this session drew", True)
+                if found and total > 0 else (None, "", False))
 
     def _project(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
@@ -3450,19 +3571,22 @@ class GSDTools:
                     part.CreateReferenceFromObject(projection))
             except Exception:  # noqa: BLE001 - an unreadable length is not 0 mm
                 projected = None
-            source, origin = self._source_length_mm(str(args["element"]))
+            source, origin, exact = self._source_length_mm(str(args["element"]))
             warning = ""
             if projected is None:
-                note = (" ITS LENGTH COULD NOT BE MEASURED, so this call cannot "
-                        "say how much of the element landed - measure it with "
-                        "catia_measure_distance against the support before using "
-                        "it downstream.")
+                warning = (" WARNING: COMPLETENESS UNKNOWN - the projection's own "
+                           "length could not be measured. ")
+                note = (" This call cannot say how much of the element landed, and "
+                        "everything downstream uses THIS curve: catia_surface_engrave "
+                        "sweeps a tube along it and finds no material when it is only "
+                        "a fragment. Measure it against the support before relying "
+                        "on it.")
             else:
                 note = f" MEASURED: the projected curve is {projected:.3f} mm long"
-                if source:
-                    share = projected / source * 100.0 if source else 0.0
-                    note += (f", {share:.1f} % of the {source:.3f} mm {origin} "
-                             "it came from.")
+                if source and exact:
+                    share = projected / source * 100.0
+                    note += (f", {share:.1f} % of the {source:.3f} mm it was "
+                             f"projected from ({origin}).")
                     if share < _PROJECT_FRAGMENT_SHARE:
                         # BEFORE the success sentence, because a caller that
                         # reads the first line and stops would otherwise take
@@ -3480,11 +3604,38 @@ class GSDTools:
                                  "fragment touches. Move the element closer to the "
                                  "support (catia_gsd_translate), or project onto a "
                                  "surface that wraps the target more fully.")
+                elif source:
+                    # SOME of the element's curves answered and some did not, so
+                    # the total is a LOWER bound - which makes this share an
+                    # UPPER bound. The direction matters: a share that is too
+                    # high HIDES a fragment, so it cannot be reported as a
+                    # measurement, only as a ceiling.
+                    share = projected / source * 100.0
+                    warning = (" WARNING: COMPLETENESS UNKNOWN - at most "
+                               f"{share:.1f} % of the element landed. ")
+                    note += (f", at most {share:.1f} % of the {source:.3f} mm in "
+                             f"the parts of it that could be measured ({origin}); "
+                             "a curve that would not answer makes that source a "
+                             "LOWER bound, so the real share can be smaller and the "
+                             "fragment bigger. Everything downstream uses THIS "
+                             "curve, not the one you drew - catia_surface_engrave "
+                             "sweeps a tube along it and finds no material when it "
+                             "is a fragment. Measure the projected curve against "
+                             "the support, or reproject from an element whose "
+                             "length this server can read (a GSD curve), before "
+                             "relying on the groove.")
                 else:
-                    note += ("; the element's own length could not be read (a "
-                             "closed sketch has no measurable Length, and this "
-                             "session did not draw it), so compare that number "
-                             "with what you drew before relying on it.")
+                    warning = (" WARNING: COMPLETENESS UNKNOWN - the element's own "
+                               "length could not be read at all. ")
+                    note += (" This call therefore cannot say how much of the "
+                             "element landed: a sketch has no measurable Length of "
+                             "its own, none of the curves inside it answered, and "
+                             "this session did not draw it. Everything downstream "
+                             "uses THIS curve - catia_surface_engrave sweeps a tube "
+                             "along it and finds no material when it is a "
+                             "fragment - so check the groove's depth and length in "
+                             "its reply rather than assuming the whole element "
+                             "landed.")
             return warning + reply + note
         except Exception as error:  # noqa: BLE001 - the diagnostic is the point
             # A PROJECTION RUNS ALONG THE SUPPORT'S NORMAL, AND A PLANAR ELEMENT
@@ -4505,7 +4656,8 @@ class GSDTools:
         raise ArgumentRejected(
             f"No body named '{name}'. Top-level bodies: {names or 'none'}.")
 
-    def _engrave_cleanup(self, created: list[str], body_name: str | None) -> str:
+    def _engrave_cleanup(self, created: list[str], body_name: str | None,
+                         body_was_created: bool = True) -> str:
         """Take back everything an engrave attempt made; say what is ACTUALLY left.
 
         Two defects of the 2026-11-10 bottle report are fixed here, and both were
@@ -4521,15 +4673,23 @@ class GSDTools:
           it, which is what raises CATIA's modal 警告 (『已移除授权输入
           "参考点"』). `created` is ordered by dependency, so reversing it deletes
           dependents first: tube, profile, plane, point.
+
+        The 2026-11-11 report found the other half of the same defect, and it is
+        why this now checks three things instead of one: an engrave refused at
+        ``ENGRAVE_CURVE_UNPARAMETRISABLE`` replied "Nothing this call created was
+        left behind ... Bodies now: 零件几何体" while the point-on-curve element it
+        had added ('OvalOnSkin3D_at0.5') was still in the tree, and
+        ``catia_update_part`` named that element as what stops every later update
+        - 2/2 reproducible. Only BODIES were checked. So: every name is looked up
+        AGAIN after its delete, the body is looked up again too, and the part is
+        asked to update - a tree that will not update cannot be called clean even
+        when every name is gone.
         """
         from catia_mcp.tools.part_design import PartDesignTools
 
         pd = PartDesignTools(self.conn)
         part = self.conn.get_active_part()
-        failed: list[str] = []
         consumed = False
-
-        unverified: list[str] = []
 
         def exists(name: str) -> bool | None:
             """Is it in the tree? None when the part cannot answer."""
@@ -4538,44 +4698,102 @@ class GSDTools:
             except Exception:  # noqa: BLE001 - a part that will not be asked
                 return None
 
-        if body_name:
+        if body_name and body_was_created:
             if not self._body_exists(part, body_name):
                 # Already consumed by the boolean - nothing to delete, and
-                # nothing to report as a failure either.
+                # nothing to report as a failure either. Only a body this call
+                # actually made can be described this way: when the refusal
+                # happens BEFORE catia_new_body there is no cutter at all, and
+                # saying "consumed by the boolean" would explain away an
+                # element that is simply absent.
                 consumed = True
             else:
                 try:
                     pd.execute("catia_delete_body",
                                {"name": body_name, "force": True})
-                except Exception:  # noqa: BLE001 - reported, not raised
-                    failed.append(f"body '{body_name}'")
+                except Exception:  # noqa: BLE001 - the check below is the answer
+                    pass
         for name in reversed(created):
-            present = exists(name)
-            if present is False:
+            if exists(name) is False:
                 continue                      # it went with the body
             try:
                 pd.execute("catia_delete_feature", {"feature_name": name})
-            except Exception:  # noqa: BLE001 - reported, not raised
-                if present is None:
-                    unverified.append(f"'{name}'")
-                else:
-                    failed.append(f"'{name}'")
+            except Exception:  # noqa: BLE001 - the check below is the answer
+                pass
+
+        # "I CALLED DELETE" IS NOT "IT IS GONE". Ask again, in the same
+        # dependents-first order, before this speaks about the tree at all.
+        still: list[str] = []
+        unchecked: list[str] = []
+        for name in reversed(created):
+            present = exists(name)
+            if present is None:
+                unchecked.append(f"'{name}'")
+            elif present:
+                still.append(f"'{name}'")
+        body_still = bool(body_name) and self._body_exists(part, body_name)
+
+        # AND THE TREE HAS TO STILL UPDATE. A leftover element that cannot update
+        # is worse than one that can: CATIA stops every later update at it. The
+        # 2026-11-11 report is exactly this pair - "Nothing this call created was
+        # left behind" in the same reply that left 'OvalOnSkin3D_at0.5' in the
+        # tree, and catia_update_part naming it as the blocker 2/2.
+        culprits = self._tree_update_culprits(part)
 
         bodies = [str(part.Bodies.Item(i).Name)
                   for i in range(1, int(getattr(part.Bodies, "Count", 0)) + 1)]
         body_text = (" Bodies now: " + (", ".join(bodies) if bodies else "none")
                      + ".")
-        if not failed and not unverified:
+
+        if (not body_still and not still and not unchecked
+                and culprits is None):
             return (" Nothing this call created was left behind"
                     + (" (the cutter body had already been consumed by the "
                        "boolean, so there was nothing to delete)" if consumed else "")
-                    + "." + body_text)
-        if failed:
-            return (" These are still in the tree: " + ", ".join(failed)
-                    + "." + body_text)
-        return (" These could not be checked - their delete failed and this part "
-                "cannot answer for a name: " + ", ".join(unverified)
-                + "." + body_text)
+                    + ", and the part still updates." + body_text)
+
+        parts: list[str] = []
+        if body_still:
+            parts.append(f"The cutter body '{body_name}' is still in the tree")
+        if still:
+            parts.append("The delete ran but these are STILL in the tree: "
+                         + ", ".join(still))
+        if unchecked:
+            parts.append("These could not be checked - their delete failed and this "
+                         "part cannot answer for a name: " + ", ".join(unchecked))
+        if culprits:
+            from catia_mcp.update_errors import describe
+
+            parts.append("And the part no longer updates: " + describe(culprits)
+                         + " - every later update stops there, so delete "
+                         + ("it" if len(culprits) == 1 else "them")
+                         + " with catia_delete_feature and update again")
+        elif culprits == []:
+            parts.append("And the part no longer updates, though no single element "
+                         "reproduces it on its own, so the tree is not clean either "
+                         "way")
+        return " " + " ".join(part + "." for part in parts) + body_text
+
+    def _tree_update_culprits(self, part: Any) -> list[str] | None:
+        """None when the part updates, else the names that fail on their own.
+
+        ``part.Update()`` is the only thing that can vouch for the tree, and the
+        walk behind ``failing_elements`` costs one COM call per element (measured
+        2026-11-03: 49.9 s over 91 elements), so it only runs when the update has
+        already failed. An empty list means "it fails but no element does on its
+        own" - a relation between features, which this cannot name.
+        """
+        try:
+            part.Update()
+            return None
+        except Exception:  # noqa: BLE001 - the walk below is the answer
+            pass
+        from catia_mcp.update_errors import failing_elements
+
+        try:
+            return failing_elements(part)
+        except Exception:  # noqa: BLE001 - unnameable is still "not clean"
+            return []
 
     def _body_exists(self, part: Any, name: str) -> bool:
         try:
@@ -4651,6 +4869,10 @@ class GSDTools:
             suffix += 1
 
         created: list[str] = []
+        # Whether a cutter body was ever made. The refusal can happen earlier (a
+        # curve that cannot carry a point), and then there is nothing for the
+        # boolean to have consumed - the cleanup must not say there was.
+        body_created = False
         # THE POINT COMES BEFORE THE PLANE IN THIS LIST, and the list is deleted
         # in reverse. The plane holds the point as an input, so removing the point
         # first makes CATIA raise a modal 警告 ('已移除授权输入 "参考点"') - which is
@@ -4665,29 +4887,50 @@ class GSDTools:
                 plane_reply = self._plane_normal_to_curve(
                     {"curve": curve, "position": position, "name": plane_name})
             except CodedError as error:
-                # A CIRCLE FROM catia_gsd_circle CANNOT CARRY A PARAMETER, and its
-                # extract cannot either (measured on B30 2026-11-10: both refuse
-                # UpdateObject, while a projected curve and a plain line work). The
-                # generic message would blame "this may not be a curve", which is
-                # wrong for a circle and sends the caller looking for the wrong
-                # problem.
+                # WHICH CURVES CAN CARRY A POINT-ON-CURVE PARAMETER, measured on
+                # B30 2026-11-11 one fresh document per case (a failed update is
+                # document-wide, so eleven cases in one part measured the first
+                # failure eleven times). WORK: gsd_line, extract of a gsd_line,
+                # an OPEN gsd_spline, and a SKETCH outline projected onto a face.
+                # REFUSE: gsd_circle, its extract, a CLOSED gsd_spline, and the
+                # projection of any of those - including a closed spline's, so
+                # "it came from catia_gsd_project" is NOT the test. The 0.3.100
+                # message said the projection was what mattered; the 2026-11-11
+                # report followed that advice and got refused, so it is written
+                # as the matrix now.
                 if getattr(error, "code", "") != "POINT_ON_CURVE_FAILED":
                     raise
+                modified = bool(getattr(error, "modified", False))
+                stranded = re.search(r"already added \('([^']+)'\)", str(error))
                 raise PreconditionRejected(
                     f"'{curve}' cannot carry a point-on-curve parameter, which this "
                     "route needs: the profile plane is built normal to the curve at "
-                    "that point. Measured on B30 2026-11-10 - a curve that came from "
-                    "catia_gsd_project works, a catia_gsd_line works, and a circle "
-                    "built by catia_gsd_circle refuses, as does its extract. Project "
-                    "the curve onto the surface first: that is what makes the groove "
-                    "depth follow the normal anyway.",
+                    "that point. Which curves do, measured on B30 2026-11-11 one "
+                    "fresh document per case: a catia_gsd_line yes, the extract of "
+                    "one yes, an OPEN 3D spline yes, and a SKETCH outline projected "
+                    "onto the face yes. A catia_gsd_circle no, its extract no, a "
+                    "CLOSED spline no, and the projection of any of those onto a "
+                    "face no - including a closed spline's projection, so 'it came "
+                    "from catia_gsd_project' is not what decides. What the working "
+                    "ones share is an OPEN curve, or a sketch outline projected "
+                    "onto the surface."
+                    + (f" The point this call added ('{stranded.group(1)}') could "
+                       "not be removed - delete it with catia_delete_feature "
+                       "before updating the part." if modified and stranded else
+                       "" if not modified else
+                       " A point this call added may still be in the tree - check "
+                       "before the next update."),
                     code="ENGRAVE_CURVE_UNPARAMETRISABLE", stage="execute",
-                    modified=False,
+                    modified=modified,
                     next_actions=[
-                        "Build the curve with catia_gsd_project onto the face you "
-                        "want to engrave, then engrave along THAT element",
-                        "If the curve already exists as a circle, project it onto "
-                        "the surface to get a usable copy",
+                        "Draw the outline in a SKETCH and project THAT onto the "
+                        "face: a projected sketch outline carries the parameter "
+                        "(measured 2026-11-11) and is the route this tool is built "
+                        "for",
+                        "Or engrave along a catia_gsd_line / an OPEN catia_gsd_spline: "
+                        "both carry it. A CLOSED curve does not - that includes "
+                        "catia_gsd_circle and catia_gsd_spline(closed=true), and "
+                        "their projections",
                     ]) from error
             # The point the plane tool made is named after the curve and the
             # position, and it is the only thing the profile can be centred on
@@ -4707,16 +4950,22 @@ class GSDTools:
 
             pd = PartDesignTools(self.conn)
             pd.execute("catia_new_body", {"name": body_name})
+            body_created = True
             try:
                 self._close_surface({"surface": tube_name})
             except Exception as error:  # noqa: BLE001 - this is the usual break
                 raise PreconditionRejected(
                     f"The sweep along '{curve}' produced a surface that CloseSurface "
-                    f"will not close ({str(error).splitlines()[0][:120]}). A tube "
-                    "swept along a CLOSED curve is a ring and closes; one swept along "
-                    "an OPEN curve is a pipe with two open ends and does not - cap it "
-                    "first (catia_gsd_fill on each end) or engrave along a closed "
-                    "outline.", code="ENGRAVE_TUBE_NOT_CLOSED", stage="execute",
+                    f"will not close ({str(error).splitlines()[0][:120]}). OPEN "
+                    "guides are normally FINE - CloseSurface closes the two ends of "
+                    "the pipe by itself, measured on B30 2026-11-11 with a 50 mm "
+                    "segment (19.5829 mm3 removed) and a 65.682 mm open spline "
+                    "(25.6436 mm3) - so this is about the surface the sweep "
+                    "actually made, not about the curve being open. An earlier "
+                    "version of this message blamed open guides and was wrong. "
+                    "Check that the sweep produced a real pipe (its area, or its "
+                    "distance to the body) before retrying.",
+                    code="ENGRAVE_TUBE_NOT_CLOSED", stage="execute",
                     modified=False) from error
 
             # MEASURE THE CUTTER BEFORE THE BOOLEAN EATS IT. catia_boolean
@@ -4760,7 +5009,7 @@ class GSDTools:
                                          "target_body": str(target.Name)})
             after = pd._body_volume_mm3(part, target)
         except Exception as error:
-            note = self._engrave_cleanup(created, body_name)
+            note = self._engrave_cleanup(created, body_name, body_created)
             # Keep the specific code the boolean or a GSD step already chose -
             # TOOL_DOES_NOT_TOUCH ("'FarEngrave' is 200.0579 mm away") is a much
             # better answer than a wrapper's ENGRAVE_FAILED. FeatureRejected is
@@ -5600,13 +5849,29 @@ class GSDTools:
         try:
             part.UpdateObject(point)
         except Exception as error:  # noqa: BLE001 - the point is the blocker
+            # THE POINT IS ALREADY IN THE TREE WHEN THIS RAISES. It was appended
+            # and named a few lines up, so a caller that only sees the exception
+            # is left with an element that cannot update - and CATIA stops every
+            # later update at it. The 2026-11-11 report hit exactly this: the
+            # engrave said "Nothing this call created was left behind", the point
+            # stayed, and catia_update_part then named it as the blocker, 2/2.
+            self._drop_element(point)
+            gone = self._name_gone(part, point_name)
             raise PreconditionRejected(
                 f"CATIA refused a point at {position:g} along '{curve}' "
                 f"({str(error).splitlines()[0][:120]}). A plane normal to a curve "
                 "needs a point ON that curve, so the plane was not attempted. "
-                "'" + curve + "' may not be a curve - a surface or a plane cannot "
-                "carry a parameter.",
+                + (f"The point this call had already added ('{point_name}') was "
+                   "removed again, so the tree is as it was."
+                   if gone else
+                   f"THE POINT THIS CALL ADDED ('{point_name}') COULD NOT BE "
+                   "REMOVED or could not be checked for - if it is still in the "
+                   "tree it will stop every later update. Look for it and delete "
+                   "it with catia_delete_feature if present.")
+                + " '" + curve + "' may not be a curve - a surface or a plane "
+                "cannot carry a parameter.",
                 code="POINT_ON_CURVE_FAILED", stage="execute",
+                modified=not gone,
             ) from error
 
         where = self._on_curve_note(part, curve_ref, position)

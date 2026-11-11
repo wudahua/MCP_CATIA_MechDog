@@ -2,6 +2,86 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.101] — 2026-11-11 · the guard worked in the session that made the curve, and nowhere else
+
+0.3.100 put the completeness guard on `catia_gsd_project` and it worked — in the
+one situation the acceptance script tested, where the sketch had been drawn
+minutes earlier by the same session. The report did the ordinary thing instead:
+reopen yesterday's part and project the sketch that is already there. The reply
+came back `Projection ... created. MEASURED: the projected curve is 4.000 mm
+long; the element's own length could not be read ... so compare that number with
+what you drew` — no share, no warning, no mention that the engrave downstream
+would find nothing. The guard was reading a Python-side record of sketches *this
+session* drew, and a sketch from disk has none.
+
+**A sketch's own curves measure one by one, so the guard does not need the
+record.** `Measurable.Length` on a sketch raises on B30, but the curves inside
+`sketch.GeometricElements` answer. Measured 2026-11-11 against hand values: a
+40×10 rectangle (100.000) read **100.0000** from four lines, a circle r=10 read
+62.8319 (2πr=62.8319), a 90° arc r=10 read 15.7080, an open 4-point spline read
+73.7960, a closed spline through a 30×20 rectangle read 113.760. The absolute
+axis and the spline's control points refuse and are skipped — they are recognised
+by not answering `StartPoint`/`EndPoint`, which a CLOSED spline does answer, so
+this is not a test for "open". Construction geometry measures but is excluded:
+counting it would grow the denominator and warn about a complete projection.
+After a real Save/Close/Open with the session record emptied by hand, the same
+rectangle still read **100.0000 from 4 curves, 0 unread**, and the projection
+reported `97.5 % of the 100.000 mm`.
+
+The reply now has three states, and the partial one is the important one: an
+unread curve makes the total a LOWER bound, which makes the share an UPPER
+bound — the direction that HIDES a fragment — so it says `COMPLETENESS UNKNOWN -
+at most 20.0 % of the element landed` rather than presenting a ceiling as a
+measurement.
+
+**The point a refused engrave had already added is taken back out.**
+`ENGRAVE_CURVE_UNPARAMETRISABLE` replied `Nothing this call created was left
+behind ... Bodies now: 零件几何体` while `X_at0.5` was still in the tree, and
+`catia_update_part` then named exactly that element as what stops every later
+update — 2/2 reproducible. The cause is one line of ordering:
+`catia_gsd_plane_normal_to_curve` adds the point-on-curve, updates it, and the
+outer tool recorded the point's name only AFTER the call returned, so a failure
+inside it left an element nothing knew about. The point is now removed by the
+function that made it, the reply says which of the two happened ("was removed
+again" / "COULD NOT BE REMOVED"), and `modified` reflects it instead of a
+hardcoded `False`.
+
+**And "nothing was left behind" is now backed by two checks instead of none.**
+Every name is looked up AGAIN after its delete, the cutter body too, and the part
+is asked to `Update()`. A tree that will not update cannot be called clean even
+when every name is gone, so the sentence now ends `, and the part still updates.`
+— and when it does not, the culprit is named with the same walk
+`catia_update_part` uses. Only `Bodies` had been checked before; that is why the
+2026-11-11 reply could describe a clean part it had just broken.
+
+**Two statements this package was shipping turned out to be wrong**, both
+measured on B30 2026-11-11 with one fresh document per case (a failed update is
+document-wide, so several cases in one part measure the first failure over and
+over):
+
+- *"the guide has to be CLOSED — an open guide sweeps a pipe with two open ends
+  and CloseSurface refuses it"* — **false**. An open 50 mm segment lying on a
+  generator, 0.5 mm deep, removed **19.5829 mm3** of a predicted 19.635; an open
+  65.682 mm spline removed **25.6436** of a predicted 25.793. `CloseSurface`
+  closes the ends itself. The message that used to blame open guides now says so.
+- *"a curve that came from `catia_gsd_project` works"* — **false**, and the
+  0.3.100 `next_actions` sent the reporter down it. What decides is whether the
+  curve is OPEN or a SKETCH outline projected onto the face: `gsd_line` YES, its
+  extract YES, an OPEN `gsd_spline` YES, a projected SKETCH outline YES;
+  `gsd_circle` NO, its extract NO, a CLOSED `gsd_spline` NO, and the projection
+  of any of those NO — a closed spline's projection refused too. Both the error
+  and `capability_ceilings` now carry the matrix.
+
+**One thing found while measuring cannot be explained yet, so it is only
+published.** An engrave that removed 9.991 mm3 in the session that built its
+projection removed **nothing** after that document was saved, closed and
+reopened: the same projection object still measured 17.7831 mm and still sat
+0.0000 mm from the body, a projection made after the reopen failed as well, and
+`part.Update()` then failed too. Which of the two changes across a reopen is
+unknown, so no cause is claimed anywhere in the code — it is a
+`MEASURED_UNEXPLAINED` entry in `capability_ceilings` and a sentence in the tool
+description: do the projection and the engrave in one session.
+
 ## [0.3.100] — 2026-11-10 · the projection kept 6 % of the letter, and every reply said "created"
 
 The bottle report ran `catia_surface_engrave` four times on a real lofted body

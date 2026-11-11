@@ -49,10 +49,41 @@ class _Bodies:
             return types.SimpleNamespace(Name=self._names[key - 1])
         return types.SimpleNamespace(Name=key)
 
+    def remove(self, name: str) -> None:
+        if name in self._names:
+            self._names.remove(name)
+        self.Count = len(self._names)
+
+
+class _Part:
+    """A part that answers for NAMES and can be asked to update.
+
+    0.3.101 made the cleanup look every name up again after deleting it and then
+    ask the part to update, so a part that cannot answer either question would
+    make the new checks untestable - and a reply that says "nothing was left
+    behind" without those two answers is what the 2026-11-11 report caught.
+    """
+
+    def __init__(self, body_names, tree_names):
+        self.Bodies = _Bodies(body_names)
+        self.tree = set(tree_names)
+        self.broken = False
+        self.updates = 0
+
+    def FindObjectByName(self, name):
+        name = str(name)
+        return types.SimpleNamespace(Name=name) if name in self.tree else None
+
+    def Update(self):
+        self.updates += 1
+        if self.broken:
+            raise RuntimeError("方法 Update 失败")
+
 
 class _Conn:
-    def __init__(self, body_names=("零件几何体",)):
-        self._part = types.SimpleNamespace(Bodies=_Bodies(body_names))
+    def __init__(self, body_names=("零件几何体",), tree_names=()):
+        self._part = _Part(body_names,
+                           set(body_names) | {str(n) for n in tree_names})
         self.active_document = types.SimpleNamespace(Name="P.CATPart")
 
     def ensure_connected(self):
@@ -154,22 +185,29 @@ def test_body_lookup_is_by_name() -> None:
 
 
 class _FakePD:
-    def __init__(self, conn, fail_on=()):
+    def __init__(self, fail_on=(), part=None):
         self.fail_on = set(fail_on)
         self.calls = []
+        self.part = part
 
     def execute(self, name, args):
         self.calls.append((name, args))
         target = args.get("name") or args.get("feature_name")
         if target in self.fail_on:
             raise CodedError(f"cannot remove '{target}'", code="DELETE_FAILED")
+        if self.part is not None and target:
+            # a real delete takes the name out of the tree; the cleanup's second
+            # look-up is what this makes observable
+            self.part.tree.discard(str(target))
+            if name == "catia_delete_body":
+                self.part.Bodies.remove(str(target))
         return "removed"
 
 
 @pytest.fixture()
 def fake_pd(monkeypatch):
-    def install(fail_on=()):
-        holder = _FakePD(None, fail_on)
+    def install(fail_on=(), part=None):
+        holder = _FakePD(fail_on, part)
         monkeypatch.setattr(part_design, "PartDesignTools",
                             lambda conn: holder)
         return holder
@@ -177,9 +215,10 @@ def fake_pd(monkeypatch):
 
 
 def test_cleanup_removes_the_body_then_the_elements(fake_pd) -> None:
-    holder = fake_pd()
-    tools = GSDTools(connection=_Conn(
-        body_names=("零件几何体", "Engrave_Trace")))
+    conn = _Conn(body_names=("零件几何体", "Engrave_Trace"),
+                 tree_names=("Engrave_Trace_N", "Engrave_Trace_P"))
+    holder = fake_pd(part=conn.get_active_part())
+    tools = GSDTools(connection=conn)
     note = tools._engrave_cleanup(["Engrave_Trace_N", "Engrave_Trace_P"],
                                   "Engrave_Trace")
     assert "left behind" in note and "could not" not in note
@@ -193,11 +232,12 @@ def test_cleanup_admits_what_it_could_not_remove(fake_pd) -> None:
     reported as UNVERIFIED, not as "may still hold them" - the 2026-11-10 report
     got that sentence while `catia_list_bodies` showed one body, because the
     boolean had already consumed the cutter."""
-    fake_pd(fail_on={"Engrave_Trace_P"})
-    tools = GSDTools(connection=_Conn())
+    conn = _Conn(tree_names=("Engrave_Trace_N", "Engrave_Trace_P"))
+    fake_pd(fail_on={"Engrave_Trace_P"}, part=conn.get_active_part())
+    tools = GSDTools(connection=conn)
     note = tools._engrave_cleanup(["Engrave_Trace_N", "Engrave_Trace_P"],
                                   "Engrave_Trace")
-    assert "could not be checked" in note
+    assert "STILL in the tree" in note
     assert "Engrave_Trace_P" in note
     assert "Bodies now" in note
 
@@ -207,8 +247,9 @@ def test_a_consumed_cutter_body_is_not_reported_as_still_there(fake_pd) -> None:
     tool body (tool_body_consumed: true), so deleting it BY NAME failed and the
     reply said "could not remove body ... may still hold them" while the tree had
     one body."""
-    holder = fake_pd()
-    tools = GSDTools(connection=_Conn(body_names=("零件几何体",)))
+    conn = _Conn(body_names=("零件几何体",), tree_names=("Engrave_Trace_N",))
+    holder = fake_pd(part=conn.get_active_part())
+    tools = GSDTools(connection=conn)
     note = tools._engrave_cleanup(["Engrave_Trace_N"], "Engrave_Trace")
     assert "could not" not in note.lower()
     assert "already been consumed" in note

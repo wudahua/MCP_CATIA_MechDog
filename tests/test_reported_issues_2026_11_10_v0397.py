@@ -106,7 +106,7 @@ def test_project_still_reports_success_plainly() -> None:
     tools = _gsd()
     tools._finish = lambda shape, name, message: message  # type: ignore[method-assign]
     tools._curve_length_mm = lambda reference: 63.96  # type: ignore[method-assign]
-    tools._source_length_mm = lambda name: (63.96, "outline")  # type: ignore[method-assign]
+    tools._source_length_mm = lambda name: (63.96, "outline", True)  # type: ignore[method-assign]
     tools._ref = lambda name, *a, **k: None  # type: ignore[method-assign]
     tools._factory = lambda: types.SimpleNamespace(  # type: ignore[method-assign]
         AddNewProject=lambda a, b: types.SimpleNamespace())
@@ -126,7 +126,7 @@ def test_project_warns_when_only_part_of_the_element_landed() -> None:
     tools = _gsd()
     tools._finish = lambda shape, name, message: message  # type: ignore[method-assign]
     tools._curve_length_mm = lambda reference: 4.0  # type: ignore[method-assign]
-    tools._source_length_mm = lambda name: (63.96, "outline")  # type: ignore[method-assign]
+    tools._source_length_mm = lambda name: (63.96, "outline", True)  # type: ignore[method-assign]
     tools._ref = lambda name, *a, **k: None  # type: ignore[method-assign]
     tools._factory = lambda: types.SimpleNamespace(  # type: ignore[method-assign]
         AddNewProject=lambda a, b: types.SimpleNamespace())
@@ -250,7 +250,8 @@ def test_offset_surface_appends_the_note_and_keeps_the_message() -> None:
 
 def test_capability_ceilings_use_the_stated_vocabulary() -> None:
     allowed = {"UNSUPPORTED_ON_B30", "NOT_IN_TYPELIB",
-               "DECLARED_NOT_MEASURED", "AVAILABLE_WITH_LIMIT"}
+               "DECLARED_NOT_MEASURED", "AVAILABLE_WITH_LIMIT",
+               "MEASURED_UNEXPLAINED"}
     assert _CAPABILITY_CEILINGS
     for entry in _CAPABILITY_CEILINGS:
         assert set(entry) == {"member", "status", "detail"}

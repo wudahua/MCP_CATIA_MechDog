@@ -125,9 +125,22 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
             "projected onto a r=40 cylinder, a r=0.4 profile on a plane normal to it, "
             "swept along the trace (tube 5.9657 mm3 = 2*pi^2*R*r^2), CloseSurface to a "
             "solid, boolean remove - 2.974 mm3 off, exactly the half of the tube that "
-            "sits inside the material. Limits: the guide has to be CLOSED (an open "
-            "guide sweeps a pipe with two open ends and CloseSurface refuses it), and "
-            "the curve has to LIE ON the body, which this cannot arrange. "
+            "sits inside the material. "
+            "THE GUIDE MAY BE OPEN - an earlier version of this entry said it had to "
+            "be closed, and that was wrong. Measured on B30 2026-11-11 on a solid "
+            "r=40 cylinder: a 50 mm segment lying on a generator, 0.5 mm deep, removed "
+            "19.5829 mm3 (pi*r^2*L/2 = 19.635); an OPEN spline of 65.682 mm removed "
+            "25.6436 (predicted 25.793). CloseSurface closes the two ends of the "
+            "swept pipe by itself. The curve still has to LIE ON the body, which this "
+            "tool cannot arrange. "
+            "WHICH CURVES CAN CARRY THE POINT-ON-CURVE PARAMETER THIS ROUTE NEEDS, "
+            "measured 2026-11-11 one FRESH DOCUMENT per case (a failed update is "
+            "document-wide, so several cases in one part measure the first failure "
+            "over and over): catia_gsd_line YES, extract of a gsd_line YES, an OPEN "
+            "gsd_spline YES, a SKETCH outline projected onto a face YES; "
+            "catia_gsd_circle NO, its extract NO, a CLOSED gsd_spline NO, and the "
+            "projection of any of those onto a face NO - a closed spline's projection "
+            "refused too, so 'it came from catia_gsd_project' is not what decides. "
             "HOW FAR THAT HAS BEEN VERIFIED, because the 2026-11-10 bottle "
             "report is the case outside it: the acceptance geometry is an "
             "ANALYTIC cylinder r=40 with a r=4 trace projected onto it. On a "
@@ -137,6 +150,24 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
             "4 mm long. So treat this as available on a surface a projection can "
             "cover, not as available everywhere: read the WARNING that "
             "catia_gsd_project now prints before building anything on the curve."
+        ),
+    },
+    {
+        "member": "engraving after a document is saved, closed and reopened",
+        "status": "MEASURED_UNEXPLAINED",
+        "detail": (
+            "An engrave that works in the session that built the projection does not "
+            "necessarily work after the file has been reopened. Measured on B30 "
+            "2026-11-11 on a lofted r=40 cylinder closed into a solid: a r=6 sketch "
+            "circle projected onto it, engrave depth 0.6, removed 9.991 mm3 (a 0.6 mm "
+            "tube over 17.783 mm predicts 10.056). The document was saved, closed and "
+            "reopened, and the SAME projection object - still 17.7831 mm long, still "
+            "0.0000 mm from the body - removed NOTHING; a projection made after the "
+            "reopen failed as well, and part.Update() then failed too. Which of the "
+            "two changes across a reopen is unknown, so this is not reported as a "
+            "cause anywhere in the code, only as this measurement. Until it is "
+            "explained: make the projection and the engrave in the SAME session, and "
+            "treat a NO_MATERIAL on a reopened file as this, not as a bad curve."
         ),
     },
     {
