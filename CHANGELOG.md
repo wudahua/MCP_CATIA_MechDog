@@ -2,6 +2,65 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.104] — 2026-11-11 · a cut that went somewhere else is not a groove
+
+The 2026-11-11 report engraved three strokes into a bottle and read, three
+times, "Engraved ... a 0.4 mm deep groove over 11.203 mm of it. Removed 5.624 mm3
+(a 0.4 mm tube ... holds half of itself in the material: 2.816 mm3). The tube is
+centred on the curve, which lies on the surface, so HALF of it is inside". The
+measurement was right; the sentence about what it meant was wrong. 5.624 against
+2.816 is a ratio of 2.00, which means the WHOLE tube was inside the material:
+what was cut is a cavity under the surface, and the surface looks untouched.
+
+**The judgement now exists.** `_engrave_outcome` reads removed against
+predicted and returns one of three bands, and the half-inside sentence is
+printed only in the middle one:
+
+| ratio | verdict |
+|---|---|
+| under 0.5 | **FLOATING** - above the material or grazing it, so the groove is shallow or short |
+| 0.5 .. 1.3 | the ordinary reply; a note when it is off 1 by more than 15 % |
+| over 1.3 | **BURIED** - an invisible cavity; the model changed and the face did not |
+
+BURIED also says how far to move the curve out (at least one radius, and expect
+to need more, because a curve computed from a formula is only as good as the
+surface that formula describes) and names the boolean feature, so the cavity can
+be taken back out. That last part is the report's §2.5: it asked to delete
+`GlyphA_Engrave0` - the name it had passed as `name` - got "Deleted 0 element(s)",
+and found the real nodes were 移除.2 .. 移除.7. The reply now says
+"'移除.5': catia_delete_feature('移除.5') takes it back out".
+
+The prediction itself had to change too. It was `length * pi * r^2 / 2`, and
+`length` is not always readable: a 60 mm SKETCH line left it None, so the ratio
+check was skipped and the old sentence came out anyway (measured while fixing
+this). It now comes from the cutter's own volume, which was already measured
+before the boolean ate it - so the check works even when the curve is a sketch.
+
+**The projection ceiling was wrong in one direction and the report in the
+other.** The report hit PROJECT_FAILED on three configurations and concluded the
+tool refuses a solid face; re-run here, a curved support accepted every one of
+them - zx offset -40, a frame sketch, a padded cylinder's side face, and a curve
+extracted from that face - at 13.6 to 16.0 %. What fails is a PLANAR element on
+a PARALLEL PLANAR support. But the report's underlying complaint stands and is
+now written down: a curved support accepts the projection and KEEPS LITTLE, and
+13-16 % of a glyph engraves as nothing. So the failure advice no longer says
+"extract the face, then project onto that element" as if it were a fix, and no
+longer ends with "move the element to it with catia_gsd_translate" - 0.3.102
+measured that a translated copy keeps 3.5 % where the sketch keeps 48.2 %. It
+now says what to do instead: compute the curve ON the surface and sweep an OPEN
+spline, which is the route the report made work by hand.
+
+**Not reproduced.** The report's `catia_measure_distance` number (25.6670 mm
+between a spline sitting on the face and that face) and the modal
+「选定的元素不可用于此操作」 did not happen here: on a spline 5 mm above a pad, the
+tool answered 5.0000 mm to the top face, 25.0000 to the bottom and 30.4138 /
+45.2239 to the sides - all correct - and `GetMeasurable` resolved the spline
+itself (Length 45.90 mm, Area and Volume both refusing, where the solid is the
+other way round). No guard was added, because nothing here can tell a correct
+reading from the reported one.
+
+140 tools, 1654 tests, `scripts/b30_v0404_audit.py` 6/6.
+
 ## [0.3.103] — 2026-11-11 · text from a font in the box, and the Rib that adds nothing
 
 `catia_text_strokes` draws a string into the open sketch. The 2026-11-11 report

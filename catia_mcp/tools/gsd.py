@@ -161,6 +161,84 @@ POINT_OR_NAME = {
 # got: 4.000 mm of a 63.947 mm outline = 6.3 %, one segment of seven.
 _PROJECT_FRAGMENT_SHARE = 25.0
 
+# HOW MUCH OF THE PREDICTED GROOVE THE MEASUREMENT HAS TO AGREE WITH.
+#
+# A tube centred ON a surface loses half of itself, so removed / predicted is 1
+# when the curve lies on the material. Two ways it goes wrong, and the second is
+# the dangerous one:
+#
+#   removed ~ 0            grazing or floating - the 2026-11-10 report, answered
+#                          NO_MATERIAL, which is honest
+#   0.5 .. 1.3             usable: the curve follows the surface closely enough.
+#                          Measured 0.997 on a r=40 cylinder (2026-11-10), 0.997
+#                          on an open line, and 0.69..0.89 on hand-calibrated
+#                          points shifted 0.6 mm outward (2026-11-11) - all of
+#                          those grooves were visible
+#   removed ~ 2 (>= 1.3)   BURIED: the whole tube was inside the material, so
+#                          what was cut is an invisible cavity under the surface.
+#                          Measured 5.624 mm3 against a 2.816 mm3 prediction on a
+#                          lofted bottle face (2026-11-11) while the reply said
+#                          "a 0.4 mm deep groove ... HALF of it is inside" - every
+#                          word of that was true only in the case that did not
+#                          happen. This is worse than removing nothing, because
+#                          the model changed and the surface looks untouched.
+_ENGRAVE_BURIED_RATIO = 1.3
+_ENGRAVE_FLOATING_RATIO = 0.5
+
+
+def _engrave_outcome(removed: float | None, expected: float | None,
+                     depth: float) -> tuple[str, str, str]:
+    """Judge a cut by what it removed, and say only what that supports.
+
+    Returns ``(kind, verdict, tail)``: ``kind`` is one of ``ok``, ``buried``,
+    ``floating`` or ``unknown``. ``verdict`` is a warning or note (empty when
+    there is nothing to say) and ``tail`` is the sentence about the depth, which
+    is TRUE ONLY in the ``ok`` band - it says the tube is half inside the
+    material, and that is exactly what is false when the curve is buried.
+
+    Pure, so the numbers can be tested without a CATIA session: the report that
+    produced this (2026-11-11) paired 2.00 with the sentence "HALF of it is
+    inside the material", and no test could have caught that while the judgement
+    lived inline in a 400-line function.
+    """
+    if removed is None or not expected:
+        return ("unknown", "",
+                " The depth is the tube's radius only when the curve really lies "
+                "on the surface; this call could not measure enough to say whether "
+                "it did.")
+    ratio = removed / expected
+    if ratio > _ENGRAVE_BURIED_RATIO:
+        return ("buried", (
+            f" WARNING: THE CURVE IS BURIED IN THE MATERIAL. Removed/predicted "
+            f"is {ratio:.2f}, so the WHOLE tube was inside the body: what this "
+            "call cut is a CAVITY UNDER THE SURFACE, not a visible groove. The "
+            "model HAS changed and the surface looks untouched. The depth is "
+            "NOT the radius here. A tube centred on the surface loses half of "
+            f"itself; this one lost all of it, so the curve sits at least one "
+            f"radius ({depth:g} mm) below the surface it was meant to lie on. "
+            f"Move the curve OUT along the local normal by at least {depth:g} "
+            "mm - and expect to need more, because a curve computed from a "
+            "formula is only as good as the surface that formula describes."),
+            "")
+    if ratio < _ENGRAVE_FLOATING_RATIO:
+        return ("floating", (
+            f" WARNING: THE CURVE IS FLOATING. Removed/predicted is {ratio:.2f}, "
+            f"under the {_ENGRAVE_FLOATING_RATIO:g} a curve lying on the surface "
+            "would give: it is above the material or only grazing it, so the "
+            "groove is shallower than asked for or stops part-way along. "
+            "Compare the swept length with the element the curve came from "
+            "before relying on the depth."), "")
+    note = ""
+    if abs(ratio - 1.0) > 0.15:
+        note = (f" NOTE: removed/predicted is {ratio:.2f}, so the curve does not "
+                "follow the surface perfectly along its whole length; the groove "
+                "is visible but its depth varies.")
+    return ("ok", note, (
+        " The tube is centred on the curve, which lies on the surface, so "
+        "HALF of it is inside the material and the depth is the radius - "
+        f"{depth:g} mm along the surface normal everywhere, which is what a "
+        "planar pocket cannot do."))
+
 
 class GSDTools:
     """Tools for Generative Shape Design (wireframe & surface) in CATIA V5."""
@@ -1180,8 +1258,18 @@ class GSDTools:
                     "exactly half of it is inside the material, so the groove depth "
                     "IS the radius. A r=4 trace on a r=40 cylinder gave a 5.9657 mm3 "
                     "tube (2*pi^2*R*r^2 = 5.97) and removed 2.974 mm3 - the half. "
-                    "The reply prints the removed volume against that prediction, so a "
-                    "groove that did not follow the surface shows up in the same call. "
+                    "The reply JUDGES the removed volume against that prediction "
+                    "instead of merely printing it: under half of it the curve is "
+                    "called FLOATING (above the material or grazing it, so the "
+                    "groove is shallow or short), over 1.3x it is called BURIED - "
+                    "the whole tube was inside, so what was cut is an invisible "
+                    "cavity under the surface and the model changed while the face "
+                    "looks untouched - and only in between does the reply say the "
+                    "depth is the radius. Measured on B30 2026-11-11 on a lofted "
+                    "face: 5.624 mm3 removed against 2.816 predicted, ratio 2.00, "
+                    "which is the buried case; the reply used to describe it as a "
+                    "0.4 mm deep groove. The reply also names the boolean feature, "
+                    "so a cut that has to come out can be deleted by name. "
                     "IT IS A GROOVE ALONG THE CURVE, NOT A FILLED GLYPH. To engrave a "
                     "letter, give its OUTLINE (catia_sketch_strokes draws a whole "
                     "outline in one call), project it onto the face with "
@@ -3754,17 +3842,30 @@ class GSDTools:
                 "call created was left behind.",
                 code="PROJECT_FAILED", stage="execute", modified=False,
                 next_actions=[
-                    "Project onto a support that is NEITHER parallel NOR "
-                    "perpendicular to the element - on B30 a plane tilted 45 "
-                    "degrees (catia_gsd_plane_angle) worked where 'xy', 'yz' and "
-                    "'zx' all failed (measured 2026-11-10)",
-                    "A NON-PLANAR support is fine and is usually what you want: "
-                    "projecting onto an extracted curved face succeeded in the "
-                    "2026-11-10 acceptance (extract the face, then project onto "
-                    "that element)",
-                    "If the target really is a parallel plane, there is no "
-                    "projection to make: move the element to it with "
-                    "catia_gsd_translate, or extrude it there with "
+                    "PARALLEL is what fails. A PLANAR support has to be skewed to "
+                    "a planar element: a plane tilted 45 degrees about X worked "
+                    "where 'xy', 'yz' and 'zx' all failed (measured 2026-11-10). A "
+                    "CURVED support has no such problem and accepted zx, a frame "
+                    "sketch and a solid face alike (measured 2026-11-11)",
+                    "A non-planar support works, but READ THE SHARE BEFORE USING "
+                    "IT. The same 26.164 mm glyph kept 13.6 % on a padded "
+                    "cylinder's side face, 15.1 % from a frame sketch and 16.0 % "
+                    "from zx, against one loft (measured 2026-11-11). A projection "
+                    "lands only where the surface FACES the element, so most of a "
+                    "planar outline can miss a curved face entirely - and a "
+                    "fragment under 25 % engraves as nothing (0.3.100)",
+                    "If the share is small and you need a groove, the only route "
+                    "measured to work on a non-analytic lofted face is to compute "
+                    "the curve ON that surface: catia_gsd_spline(points=..., "
+                    "closed=false) from the section geometry you know, OPEN "
+                    "because a closed spline's projection refuses a parameter, "
+                    "then catia_surface_engrave it. That removed 2.054 mm3 where "
+                    "projecting made none (2026-11-11). Moving the element closer "
+                    "with catia_gsd_translate does NOT help - the same report "
+                    "measured a translated copy at 3.5 % where the sketch itself "
+                    "kept 48.2 % (0.3.102)",
+                    "If the target really is a parallel plane there is no "
+                    "projection to make: extrude the element onto it with "
                     "catia_gsd_extrude",
                 ],
             ) from error
@@ -4955,6 +5056,10 @@ class GSDTools:
         # curve that cannot carry a point), and then there is nothing for the
         # boolean to have consumed - the cleanup must not say there was.
         body_created = False
+        # The boolean's own reply names the feature CATIA actually created, and
+        # this is the only chance to keep it: the caller needs it to undo a groove
+        # that turned out to be a cavity (2026-11-11, §2.5).
+        boolean_reply: str | None = None
         # THE POINT COMES BEFORE THE PLANE IN THIS LIST, and the list is deleted
         # in reverse. The plane holds the point as an input, so removing the point
         # first makes CATIA raise a modal 警告 ('已移除授权输入 "参考点"') - which is
@@ -5086,9 +5191,10 @@ class GSDTools:
                    if tube_gap is not None and tube_gap < 0.05 else "."))
             pd.execute("catia_set_active_body", {"name": str(target.Name)})
             before = pd._body_volume_mm3(part, target)
-            pd.execute("catia_boolean", {"operation": "remove",
-                                         "tool_body": body_name,
-                                         "target_body": str(target.Name)})
+            boolean_reply = pd.execute(
+                "catia_boolean", {"operation": "remove",
+                                  "tool_body": body_name,
+                                  "target_body": str(target.Name)})
             after = pd._body_volume_mm3(part, target)
         except Exception as error:
             note = self._engrave_cleanup(created, body_name, body_created)
@@ -5114,31 +5220,53 @@ class GSDTools:
             ) from error
 
         removed = (before - after) if (before is not None and after is not None) else None
-        expected = (length * math.pi * depth * depth / 2.0) if length else None
+        # THE PREDICTION COMES FROM THE CUTTER, NOT FROM THE LENGTH. The cutter
+        # body was measured before the boolean ate it, so its volume is what was
+        # actually swept; length * pi * r^2 is only that estimate, and it is not
+        # even available when the curve is a sketch whose length cannot be read
+        # (measured 2026-11-11: a 60 mm sketch line left `length` None, the ratio
+        # check silently skipped, and the reply still claimed "HALF of it is
+        # inside the material" for a cut that removed the whole tube).
+        if tube_volume is not None and tube_volume > 0:
+            expected = tube_volume / 2.0
+        elif length:
+            expected = length * math.pi * depth * depth / 2.0
+        else:
+            expected = None
+
+        # THE BOOLEAN'S OWN NAME FOR WHAT IT MADE. Until 0.3.104 the reply called
+        # the groove "a 0.4 mm deep groove" and never said which feature held it,
+        # so taking one back out meant guessing or running list_features: the
+        # 2026-11-11 report asked to delete 'GlyphA_Engrave0' (the name it passed
+        # as `name`), got "Deleted 0 element(s)", and found the real nodes were
+        # 移除.2 .. 移除.7.
+        boolean_feature = None
+        found = re.search(r"\(feature '([^']+)'\)", str(boolean_reply or ""))
+        if found:
+            boolean_feature = found.group(1)
+        undo = (f" The feature this call created is '{boolean_feature}': "
+                f"catia_delete_feature('{boolean_feature}') takes it back out."
+                if boolean_feature else
+                " catia_list_features shows the feature this call created.")
+
         body_line = (f"Removed {removed:.3f} mm3" if removed is not None
                      else "Removed an amount that could not be measured")
         if removed is not None and expected:
-            body_line += (f" (a {depth:g} mm tube centred on {length:.3f} mm of curve "
-                          f"holds half of itself in the material: {expected:.3f} mm3)")
-        verdict = ""
+            body_line += (f" against the {expected:.3f} mm3 a {depth:g} mm tube "
+                          "lying half in the material predicts")
+
         # No "removed nothing" branch here: catia_boolean(remove) already measures
         # the body either side of itself and refuses with NO_MATERIAL, so anything
         # reaching this line took material off. A second check would be dead code
         # (0.3.96 removed one of those rather than keeping it as decoration).
-        if removed is not None and expected and removed < 0.25 * expected:
-            verdict = (
-                " WARNING: that is less than a quarter of what the geometry "
-                "predicts, so the curve probably does not follow this surface along "
-                "its whole length."
-            )
+        kind, verdict, tail = _engrave_outcome(removed, expected, depth)
+        if kind in ("buried", "floating"):
+            verdict += undo
         length_text = (f"{length:.3f} mm of it" if length is not None
                        else "it")
         return (
             f"Engraved along '{curve}' into '{target.Name}': a {depth:g} mm deep "
-            f"groove over {length_text}. {body_line}.{verdict} The tube is centred "
-            "on the curve, which lies on the surface, so HALF of it is inside the "
-            f"material and the depth is the radius - {depth:g} mm along the surface "
-            "normal everywhere, which is what a planar pocket cannot do. This is a "
+            f"groove over {length_text}. {body_line}.{verdict}{tail} This is a "
             "groove ALONG the curve, not a filled glyph: for a letter, pass its "
             "OUTLINE (catia_sketch_strokes draws one in a call) - not its middle."
         )

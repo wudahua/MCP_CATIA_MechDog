@@ -175,8 +175,16 @@ def test_project_failure_names_both_degenerate_cases() -> None:
     assert "45 degrees" in message
     assert "yz" in message and "zx" in message
     assert "Nothing this call created was left behind" in message
-    assert any("NEITHER parallel NOR perpendicular" in action
+    assert any("PARALLEL is what fails" in action
                for action in error.next_actions)
+    # 0.3.104: the advice used to end with "move the element to it with
+    # catia_gsd_translate". 0.3.102 measured that a translated copy keeps 3.5 %
+    # where the sketch keeps 48.2 %, so the advice now says the opposite - and a
+    # regression here would send callers back into the worse route.
+    assert any("catia_gsd_translate does NOT help" in action
+               for action in error.next_actions)
+    assert not any("move the element to it with catia_gsd_translate" in action
+                   for action in error.next_actions)
 
 
 def test_project_failure_without_a_distance_does_not_invent_one() -> None:
