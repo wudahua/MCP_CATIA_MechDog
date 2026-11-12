@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import time
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
@@ -3018,8 +3019,10 @@ class PartDesignTools:
                          if entry["length"] is not None)
         too_short = [value for value in lengths if value < 2 * radius]
 
+        started = time.perf_counter()
         reply = self._fillet_many(radius, specs, propagation,
                                   sequential_retry=sequential)
+        elapsed = time.perf_counter() - started
         head = (f"Every edge of '{body.Name}' ({total} edge(s)): enumerated "
                 "rather than taken from the feature, because CATIA's "
                 "whole-feature fillet call does not build on B30 (measured: "
@@ -3056,7 +3059,10 @@ class PartDesignTools:
                      "catia_fillet(edge_names=[...]) retries each one on its "
                      "own and names what failed. Raise max_edges only if you "
                      "accept the time.")
-        return head + reply
+        # The reply used to end with names and no clock, so a caller could not
+        # size the next call - reported 2026-11-12 after 147 edges (46 built,
+        # 101 refused) came back from a long call with no elapsed time at all.
+        return head + reply + f" Took {elapsed:.1f} s."
 
     @staticmethod
     def _anchor_args(args: dict[str, Any]) -> tuple[list[list[float]], float]:
@@ -3511,8 +3517,10 @@ class PartDesignTools:
                          if entry["length"] is not None)
         too_short = [value for value in lengths if value < 2 * length]
 
+        started = time.perf_counter()
         reply = self._chamfer_many(length, angle, specs,
                                    sequential_retry=sequential)
+        elapsed = time.perf_counter() - started
         head = (f"Every edge of '{body.Name}' ({total} edge(s)): enumerated "
                 "rather than taken from the feature, because CATIA's "
                 "whole-feature chamfer call does not build on B30 (measured: "
@@ -3538,7 +3546,7 @@ class PartDesignTools:
                 "rebuild plus a separate feature. ")
             head += ("NEXT: choose the edges yourself and send a bounded batch - "
                      "catia_list_edges shows length and bounding faces.")
-        return head + reply
+        return head + reply + f" Took {elapsed:.1f} s."
 
     def _chamfer_many(self, length: float, angle: float, specs: list[Any],
                       sequential_retry: bool = True) -> str:
@@ -4990,6 +4998,35 @@ class PartDesignTools:
             sel.Clear()
             sel.Add(feature)
             sel.Delete()
+        except Exception as error:  # noqa: BLE001 - the diagnostic is the point
+            # THE ELEMENT WAS FOUND BUT CATIA WOULD NOT TAKE IT. A feature that
+            # failed its update leaves its sketch behind in a state the tree
+            # still lists and the selection cannot delete; measured 2026-11-12,
+            # catia_delete_feature('草图.11') answered a bare COM_ERROR with no
+            # element and no next step, three calls after a pad had already
+            # reported UNVERIFIED and a cascade had taken its neighbour.
+            self.conn.refresh_display()
+            try:
+                remaining = self._sketch_names()
+            except Exception:                                 # noqa: BLE001
+                remaining = []
+            still_there = target in remaining
+            raise CodedError(
+                f"'{target}' is listed in the tree, but CATIA refused to delete "
+                f"it ({str(error).splitlines()[0][:160]}). This is what a feature "
+                "that failed its update leaves behind: the object is a dead "
+                "reference, so the selection cannot take it and the tree still "
+                "shows it. "
+                + (f"It is still listed among the sketches after the attempt. "
+                   if still_there else
+                   "It is NOT listed among the sketches any more, so it may "
+                   "already be gone - the delete failed on a stale handle. ")
+                + "NEXT: catia_update_part names the element that fails on its "
+                "own if there is one, and catia_list_features shows what is left. "
+                "Do not keep retrying the same name; re-open the document if the "
+                "tree and the geometry disagree.",
+                code="DELETE_FAILED", stage="execute", modified=False,
+            ) from error
         finally:
             try:
                 sel.Clear()

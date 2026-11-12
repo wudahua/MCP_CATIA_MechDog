@@ -218,7 +218,7 @@ def _near_any_end(point: tuple[float, float], segment: dict[str, Any],
                for end in (segment["a"], segment["b"]))
 
 
-def crossings(segments: list[dict[str, Any]], tol: float = 1e-6,
+def crossings(segments: list[dict[str, Any]], tol: float = 1e-3,
               limit: int = 20) -> list[dict[str, Any]]:
     """Every place two segments cross, excluding where they simply meet.
 
@@ -226,6 +226,17 @@ def crossings(segments: list[dict[str, Any]], tol: float = 1e-6,
     outline is a chain, so touching ends are the normal case. A crossing AT an
     endpoint of only one of the two (a T junction) is kept: that is a real
     defect and it is how a callout line through a face reads.
+
+    WHY ``tol`` IS 1e-3 AND NOT 1e-6. It was 1e-6, and the 2026-11-12 report got
+    four "crossings" that all sat on ONE point, (84.0001, 25.9999) - the shared
+    shoulder-to-hook corner of a 21-element profile whose largest junction gap
+    was 0.0004 mm. Two effects put ~1e-4 between the computed intersection and
+    the endpoint the record holds: the junction itself is not exact, and the
+    point comes out of an arc/arc solve rather than out of the same arithmetic
+    that produced the endpoints. At 1e-6 a legal G0 seam therefore read as a
+    crossing. 1e-3 mm is two and a half times the widest seam measured and far
+    below any real T junction (a segment ending ON another segment, not beside
+    it), so it separates the two cases instead of guessing between them.
     """
     found: list[dict[str, Any]] = []
     for i in range(len(segments)):

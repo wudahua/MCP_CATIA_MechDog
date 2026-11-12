@@ -869,7 +869,12 @@ class SketcherTools:
                     "0.05 mm gap is caught here, with both coordinates named, before "
                     "the pad is attempted. Segments are drawn in the order given and "
                     "each 'arc' starts at start_angle (or p1) and ends at end_angle "
-                    "(or p2), so give them in the order the outline runs."
+                    "(or p2), so give them in the order the outline runs. It sweeps "
+                    "along 'direction' and takes the SHORT way round (<= 180 deg) "
+                    "unless major=true - so a clockwise arc given as start=0, "
+                    "end=90 with direction cw is drawn 90 deg the other way, not 270. "
+                    "When the endpoints are what you know, pass p1/p2: they cannot "
+                    "be read backwards the way a start/end pair can."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -883,7 +888,17 @@ class SketcherTools:
                                 "or {\"type\": \"arc\", \"center\": [x, y], \"radius\": "
                                 "r, \"start_angle\": a, \"end_angle\": b, "
                                 "\"direction\": \"cw\"|\"ccw\", \"major\": false} - an "
-                                "arc may give p1/p2 instead of the two angles."
+                                "arc may give p1/p2 instead of the two angles. HOW AN "
+                                "ARC IS PLACED: it STARTS at start_angle (or p1) and "
+                                "SWEEPS toward end_angle (or p2) along 'direction'; it "
+                                "takes the SHORT way round (<= 180 deg) unless "
+                                "major=true, so a direction that would sweep more than "
+                                "half a circle is reversed and the reply says so. "
+                                "Angles may be negative or beyond 360. PREFER p1/p2 "
+                                "for a profile: the endpoints are what you actually "
+                                "know, and the angles are derived from them - the "
+                                "2026-11-12 report opened 15 of 21 junctions by "
+                                "swapping start/end on the clockwise arcs."
                             ),
                             "items": {
                                 "type": "object",
@@ -2962,11 +2977,21 @@ class SketcherTools:
             if segment["kind"] == "line":
                 self._draw_line(*segment["p1"], *segment["p2"])
             else:
+                # THE ENDPOINT FORM NEVER REACHED _draw_arc. _plan_segment turns
+                # p1/p2 into angles and then clears them to None, and its result
+                # carries no 'p1' key - so this call handed _draw_arc three
+                # Nones and it answered "needs either start_angle and end_angle,
+                # or p1 and p2". Measured 2026-11-12 on a 4-element stadium: the
+                # documented endpoint form refused before drawing anything. The
+                # plan's own 'start'/'end' are those endpoints.
+                angle_form = (segment.get("start_angle") is not None
+                              and segment.get("end_angle") is not None)
                 self._draw_arc(
                     segment["center"][0], segment["center"][1],
                     segment["radius"],
                     segment.get("start_angle"), segment.get("end_angle"),
-                    p1=segment.get("p1"), p2=segment.get("p2"),
+                    p1=None if angle_form else segment["start"],
+                    p2=None if angle_form else segment["end"],
                     direction=segment["direction"],
                     major=segment["major"],
                 )

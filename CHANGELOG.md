@@ -2,6 +2,69 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.112] — 2026-11-12 · the profile's endpoint form never reached the arc tool
+
+The 2026-11-12 ninth report rebuilt the siphon bottle with 21 elements (3 lines,
+18 arcs): 381 edges became **147**, the shortest went 0.5770 → 2.2048 mm, and
+R1.0 that had rounded 0 of 381 rounded **46 of 147**. The rebuild worked. Four
+things around it did not, and one of them was found while checking the report's
+own suggestion.
+
+**The endpoint form of an arc in `catia_sketch_profile` was documented and
+refused.** The schema said "an arc may give p1/p2 instead of the two angles";
+`_plan_segment` converts p1/p2 into angles and then sets them to `None`, and its
+result carries no `p1` key — so `_draw_profile` handed `_draw_arc` three `None`s
+and it answered "needs either start_angle and end_angle, or p1 and p2". Measured
+on B30 2026-11-12 on a 4-element stadium: the documented form threw before
+drawing anything. The plan's own `start`/`end` are those endpoints, and the angle
+form still goes the angle way. The reporter never hit it because it used angles —
+which is exactly the form §2.1 asks to replace.
+
+**The self-intersection check called a legal seam a crossing** (§2.2). Its
+tolerance was `1e-6`; the report's largest junction gap is `0.0004 mm` and a
+computed arc/arc intersection lands ~`1e-4` from the endpoint the record holds.
+So four "crossings" were reported, all on ONE legal shoulder-to-hook corner at
+`(84.0001, 25.9999)`, while shapely found none. `crossings()` now defaults to
+`1e-3`: two and a half times the widest seam measured, and far below any real T
+junction. Reproduced and fixed in three cells — a 0.0004 mm corner reports 0
+crossings where the old tolerance reported 1, an arc running into a line the
+same, and a real figure-eight still reports 1.
+
+**The angle convention is now stated where it is read** (§2.1). The report opened
+15 of 21 junctions by swapping start/end on its clockwise arcs. `catia_sketch_arc`
+always said the rule; `catia_sketch_profile`'s `segments` entry did not, and that
+is the tool the caller reads. It now says: the arc STARTS at start_angle and
+SWEEPS toward end_angle along `direction`, takes the SHORT way round (≤ 180°)
+unless `major=true`, accepts negative angles, and — the reporter's own
+suggestion — PREFER `p1/p2`, because the endpoints are what you know and the
+angles are derived from them.
+
+**A dead handle answered a bare COM error** (§2.3). After a pad reported
+UNVERIFIED, `catia_delete_feature('草图.11')` found the sketch in the tree and
+then threw `方法 Add 失败` with no code and no next step. The selection calls are
+now wrapped: `DELETE_FAILED`, the element named, whether it is still listed
+afterwards, and the two things that answer it (`catia_update_part` names the
+element that fails on its own; `catia_list_features` shows what is left).
+
+**The all-edges fillet now says how long it took** (§3). 147 edges came back from
+a long call with 46 built and 101 refused, and not one clock reading.
+
+NOT DONE, AND WHY: §3 also asks for the refusal REASON per edge ("was it a shared
+vertex, or a neighbour that already has a fillet"). `_edge_table` holds an edge's
+length and its two bounding faces — not its endpoints — so "shares a vertex with
+an edge that took" cannot be decided from what the tool can read. Guessing it
+would be the same class of claim these reports keep catching.
+
+§0 needed nothing: the sketch-coordinate ceiling is already recorded as
+`NOT_IN_TYPELIB` and the report's advice is to leave it.
+
+New acceptance script `scripts/b30_v0412_audit.py`, 6/6 — the 0.0004 mm seam
+(0 crossings, then pads to 28566.4 mm³ against 28566.37 analytic), the
+figure-eight (1), the short/major arc pair measured by arc length (15.7080 /
+47.1239 mm for r=10), and the clock.
+
+1762 tests, 143 tools.
+
 ## [0.3.111] — 2026-11-12 · the real part: 381 edges, and the count arrived after the cost
 
 The 2026-11-11 eighth report's own model, `SiphonBottle.CATPart`, was run end to
