@@ -317,7 +317,12 @@ class PartDesignTools:
                             "type": "string",
                             "description": (
                                 "Cut direction: 'normal' (default), 'reverse', "
-                                "or 'both' (same as symmetric=true)."
+                                "or 'both' (same as symmetric=true). 'both' makes "
+                                "TWO FEATURES, not one: a two-sided cut is built "
+                                "as two one-sided ones, so the tree gains e.g. "
+                                "'凹槽.1' and '凹槽.2' and any bookkeeping by feature "
+                                "count is off by one. catia_list_features shows both "
+                                "names, and the reply says 'two one-sided cuts'."
                             ),
                             "enum": ["normal", "reverse", "both"],
                             "default": "normal",
@@ -4999,13 +5004,42 @@ class PartDesignTools:
             sel.Add(feature)
             sel.Delete()
         except Exception as error:  # noqa: BLE001 - the diagnostic is the point
-            # THE ELEMENT WAS FOUND BUT CATIA WOULD NOT TAKE IT. A feature that
-            # failed its update leaves its sketch behind in a state the tree
-            # still lists and the selection cannot delete; measured 2026-11-12,
-            # catia_delete_feature('草图.11') answered a bare COM_ERROR with no
-            # element and no next step, three calls after a pad had already
-            # reported UNVERIFIED and a cascade had taken its neighbour.
+            # THE ELEMENT WAS FOUND BUT CATIA WOULD NOT TAKE IT. Two different
+            # things do this and the reply used to assert one of them:
+            #
+            #   * the sketch is OPEN in edit mode - CATIA refuses outright, and
+            #     closing it makes the same delete work (measured 2026-11-12:
+            #     DELETE_FAILED while editing 草图.1, "Deleted sketch '草图.1'"
+            #     immediately after catia_close_sketch). This is the common one:
+            #     the 2026-11-12 report hit it by drawing text and deleting the
+            #     sketch without closing it, and was told it had a dead reference
+            #     and should consider re-opening the document - advice that costs
+            #     the caller their work.
+            #   * a feature that failed its update leaves a dead reference the
+            #     tree still lists and the selection cannot take (measured
+            #     2026-11-12, three calls after a pad reported UNVERIFIED).
+            #
+            # Which one it is can be read when this session opened the sketch:
+            # InWorkObject stays on the body while a sketch is in edit mode, so
+            # the skim of the COM tree does not answer it - CATIAConnection
+            # carries the name instead.
             self.conn.refresh_display()
+            open_sketch = getattr(self.conn, "open_sketch", None)
+            if open_sketch and str(open_sketch) == str(target):
+                raise CodedError(
+                    f"SKETCH_IS_OPEN: '{target}' is the sketch this session is "
+                    "editing, and CATIA will not delete a sketch while it is "
+                    f"open ({str(error).splitlines()[0][:120]}). Nothing was "
+                    "deleted. Close it with catia_close_sketch and send the same "
+                    "call again - measured on B30 2026-11-12, that is all it "
+                    "takes. Do NOT close or re-open the document: that loses the "
+                    "sketch and anything not saved.",
+                    code="SKETCH_IS_OPEN", stage="execute", modified=False,
+                    next_actions=[
+                        "catia_close_sketch, then catia_delete_feature again with "
+                        "the same name",
+                    ],
+                ) from error
             try:
                 remaining = self._sketch_names()
             except Exception:                                 # noqa: BLE001
@@ -5013,18 +5047,20 @@ class PartDesignTools:
             still_there = target in remaining
             raise CodedError(
                 f"'{target}' is listed in the tree, but CATIA refused to delete "
-                f"it ({str(error).splitlines()[0][:160]}). This is what a feature "
-                "that failed its update leaves behind: the object is a dead "
-                "reference, so the selection cannot take it and the tree still "
-                "shows it. "
+                f"it ({str(error).splitlines()[0][:160]}). This call did NOT have "
+                "that sketch open, so the likeliest cause is what a failed update "
+                "leaves behind: a dead reference, which the tree still lists and "
+                "the selection cannot take. "
                 + (f"It is still listed among the sketches after the attempt. "
                    if still_there else
                    "It is NOT listed among the sketches any more, so it may "
                    "already be gone - the delete failed on a stale handle. ")
                 + "NEXT: catia_update_part names the element that fails on its "
                 "own if there is one, and catia_list_features shows what is left. "
-                "Do not keep retrying the same name; re-open the document if the "
-                "tree and the geometry disagree.",
+                "If a sketch of that name is open in CATIA's window, close it "
+                "first - an open sketch cannot be deleted. Do not keep retrying "
+                "the same name; re-open the document if the tree and the geometry "
+                "disagree.",
                 code="DELETE_FAILED", stage="execute", modified=False,
             ) from error
         finally:

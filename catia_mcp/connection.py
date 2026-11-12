@@ -35,6 +35,14 @@ class CATIAConnection:
         # by tree position, not creation order, so "the last sketch" cannot be
         # read back from the collection - see PartDesignTools._get_last_sketch.
         self.last_sketch: Any | None = None
+        # The sketch this session is EDITING, if any: the name string, or None.
+        # CATIA will not delete a sketch while it is open (measured 2026-11-12:
+        # the same catia_delete_feature succeeded the moment the sketch was
+        # closed) and offers no property to ask - Part.InWorkObject stays on the
+        # body while a sketch is in edit mode. So the sketcher records it here
+        # and PartDesignTools reads it, which is how a delete can say
+        # "close it first" instead of guessing "dead reference".
+        self.open_sketch: str | None = None
         # Solid body new features should go into. None = the part's MainBody.
         self.active_body: Any | None = None
         # Name of the last Part document this session created or opened. Drafting

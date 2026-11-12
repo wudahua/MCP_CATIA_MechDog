@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.112** · [what changed](CHANGELOG.md) ·
+**0.3.113** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -904,6 +904,51 @@ and the reply names both sweeps so the choice is visible. `major=true` keeps the
 rather than swept a full turn, and an exact half circle says that direction
 decides nothing there.
 
+### An arc's endpoint is where the circle puts it
+
+```
+catia_sketch_profile {segments: [73 elements, arc ends 0.004–0.096 mm off their circles]}
+-> "every one of the 73 junction(s) meets within 0.0000 mm, so it should close"
+catia_close_sketch
+-> "not closed - 60 loose endpoint(s) in 30 break(s), smallest gap 0.0043 mm"
+```
+
+Both sentences were true about their own arithmetic. CATIA creates an arc from
+**centre + radius + angles**, so the point it draws is the *radial projection* of
+your `p1` onto that circle; the profile check compared the `p1` it was given,
+while `close_sketch` compared what was drawn. A fitted arc whose endpoints sit a
+few hundredths off the circle therefore reads as closed in one tool and as 30
+seams in the other — and the pad is the one that decides.
+
+`catia_sketch_profile` now rebuilds each arc's circle **through its two endpoints
+and its own midpoint**, so the ends that get drawn are the ends you asked for.
+Measured on B30 2026-11-13 with ends 0.05 mm off the circle: junction `0.0000 mm`,
+`close_sketch` reports `closed: true` with no breaks, and the pad closes at
+5736.1 mm³ against a nominal 5716.8 (+0.34 %, the radius having grown
+R20.0000 → R20.1720 to take up the error). The reply names every circle it
+changed; a change over 5 % is refused as bad data and the reply says where the
+ends will land instead. Arc endpoints that already sit on the circle are left
+alone and nothing is said.
+
+Measured cost of the change: 0.05 mm of endpoint error costs ~3.4× that in
+radius (0.05 → 0.172 mm). For a profile that has to close, that is the cheaper
+of the two errors.
+
+### A T junction is not a self-crossing
+
+```
+'line #21' ends on 'line #22' at (52.7619, 20.0000)
+```
+
+That is the crossbar of the `I` in `CATIA` meeting its own stem — the third time
+a report read "THE OUTLINE CROSSES ITSELF" for geometry that crosses nothing. The
+check now separates three cases: a point in the interior of **both** segments is
+`crossing` (the real defect, and still the hard warning), a point at an endpoint
+of **one** is `touch` (a T junction or a hairline overshoot — nothing is crossed,
+but the outline is branched, so it is not one closed region for a pad), and a
+point at an endpoint of both is a corner and not reported at all. `describe()`
+gives each its own sentence, and the structured reply carries `kind` per entry.
+
 ### Which way a `frame` normal points
 
 `normal = u × v`, right-hand rule, and the sketch's H/V axes are `u` and `v`
@@ -1272,7 +1317,7 @@ while a reply that only reports success cannot.
 | Group | Tools | Notes |
 |---|---|---|
 | Document | 12 | new/open/save/close/list + `catia_save_as_copy`; `catia_save_document` retries around dialogs |
-| Sketcher | 18 | lines, rectangles, circles, constraints; reopen a closed sketch and delete one element; `catia_sketch_copy` replays a profile onto another plane; `catia_sketch_strokes` draws a whole letter outline in one call, and `catia_text_strokes` supplies those outlines from a built-in single-line font (and can hand the points back); `catia_sketch_ellipse` draws a slanted ellipse in one curve; `catia_sketch_profile` draws a MIXED outline - straight runs and arcs, each with its own primitive - in one call, and reports every junction |
+| Sketcher | 18 | lines, rectangles, circles, constraints; reopen a closed sketch and delete one element; `catia_sketch_copy` replays a profile onto another plane; `catia_sketch_strokes` draws a whole letter outline in one call, and `catia_text_strokes` supplies those outlines from a built-in single-line font (it can hand the points back, and always reports the box the text occupies; its baseline runs along the sketch's own +H); `catia_sketch_ellipse` draws a slanted ellipse in one curve; `catia_sketch_profile` draws a MIXED outline - straight runs and arcs, each with its own primitive - in one call, and checks the junctions on the endpoints that will be DRAWN (it rebuilds each arc's circle through them) |
 | Part Design | 26 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, solid loft, bodies (create / list / delete)… |
 | Generative Shape Design | 36 | wireframe and surfaces, extract, `boundary`, `heal`, `fillet_surface`, `spine`, `rotate`, `translate`, `circ_pattern` (rotate+join), `plane_normal_to_curve`, `plane_angle`, revolve + close surface, and `catia_surface_engrave` (a constant-depth groove along a curve on a curved face); a GSD element or set is removed with `catia_delete_feature` |
 | Assembly | **14** | upstream 9 + get/set component transform, rename, list constraints, copy component, replace component |

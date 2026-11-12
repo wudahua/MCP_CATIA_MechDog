@@ -506,14 +506,93 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
             "MEASURED on B30 2026-11-12, a 60x40 stadium as two 60 mm lines and two "
             "r=20 half circles gave catia_close_sketch the answer '2 arc(s), 2 "
             "line(s), outline 245.664 mm', and the 10 mm pad came out at 36566.37 "
-            "mm3 - exactly 60*40*10 + pi*20^2*10. The limit is the junctions: each "
-            "segment's endpoints come from its own arguments, so they have to "
-            "agree to a hundredth of a millimetre or so. A 0.05 mm gap is caught "
-            "before the pad with both coordinates named; CATIA still builds it "
-            "sometimes, and the pad then reports UNVERIFIED rather than a volume. "
-            "An arc's sweep can also be flipped by the short-way-round rule, in "
-            "which case catia_sketch_arc says so in its own reply and the junction "
-            "report shows the mismatch - read the two together."
+            "mm3 - exactly 60*40*10 + pi*20^2*10. "
+            "THE JUNCTION CHECK HAD TWO STANDARDS UNTIL 0.3.113, and the repair is "
+            "the thing to know here. An arc is created from centre + radius + "
+            "angles, so CATIA starts it at the RADIAL PROJECTION of the caller's "
+            "p1 onto that circle. This tool compared the p1 it was GIVEN; "
+            "catia_close_sketch compares what was DRAWN. Measured on B30 "
+            "2026-11-12: a 73-segment fitted profile answered 'every one of the 73 "
+            "junction(s) meets within 0.0000 mm' and then 'not closed - 60 loose "
+            "endpoint(s) in 30 break(s), smallest gap 0.0043, widest 0.0960'. "
+            "Reproduced 2026-11-13 on a 4-element stadium whose arc ends sat "
+            "0.05 mm off the circle: 0.0000 mm here, '8 loose endpoint(s) in 4 "
+            "break(s), 0.0500 mm' there. Now the planner rebuilds each arc's "
+            "circle through its two endpoints and its own midpoint, so the ends "
+            "that are drawn ARE the ends that were asked for: the 0.05 mm cell "
+            "went to a 0.0000 mm junction and a pad that closed (5736.1 mm3 "
+            "against the nominal 5716.8, +0.34 %, the radius having grown "
+            "R20.0000 -> R20.1720 to take up the error). The reply states every "
+            "circle it changed. A rebuild that would move the radius more than "
+            "5 % is NOT made - that is bad data, not rounding - and the reply says "
+            "where the ends will land instead. A junction gap wider than "
+            "'tolerance' is still reported with both coordinates named, so what "
+            "this tool says and what close_sketch says can no longer disagree. "
+            "An arc's sweep can still be flipped by the short-way-round rule, in "
+            "which case catia_sketch_arc says so in its own reply - read the two "
+            "together."
+        ),
+    },
+    {
+        "member": "catia_fillet - rounding a C0 edge chain as ONE feature",
+        "status": "UNSUPPORTED_ON_B30",
+        "detail": (
+            "Asked for by the 2026-11-12 report for a 73-segment outline: 146 "
+            "edges around its two faces, and consecutive segments meet at C0 "
+            "(each arc was fitted separately, so the tangents do not match). No "
+            "parameter of this project takes an edge chain, and the two routes "
+            "that do exist were both measured, both on 2026-11-12. "
+            "(a) The WHOLE-FEATURE call - handing the factory a reference to the "
+            "feature - fails AT CONSTRUCTION on every shape tried: a 2-edge "
+            "cylinder, a 12-edge rectangle, a 54- and a 246-edge polyline, "
+            "whatever the reference kind or the propagation. Four cells, four "
+            "failures, which is why catia_fillet now enumerates the body's edges. "
+            "(b) One edge at a time: on an 80x40x20 box, 12 edges and five radii "
+            "from R0.25 to R3.0, exactly FOUR edges took every time - the ones "
+            "that share no vertex with another that took - so the corners are "
+            "left with gaps. propagation='tangency' is passed through, but it "
+            "follows TANGENT continuity, which a fitted outline does not have. "
+            "Whether CATIA offers a chain selection that follows G0 is UNKNOWN: "
+            "it has not been probed, and this entry says so rather than claiming "
+            "an API is absent. What does work on such a part is removing the "
+            "corners in the sketch - 0.3.108's catia_sketch_profile draws the arcs "
+            "directly, which took one real bottle from 381 edges to 147 and from "
+            "0/381 rounded at R1.0 to 46/147 (reported 2026-11-12)."
+        ),
+    },
+    {
+        "member": "the elements one catia_surface_engrave stroke leaves behind",
+        "status": "UNSUPPORTED_ON_B30",
+        "detail": (
+            "There is no cleanup entry: the tool has no cleanup parameter and this "
+            "project has no purge-by-prefix tool. Each stroke leaves about 7 "
+            "elements in the geometrical set - the normal plane, the r=depth "
+            "circle, the sweep, the CloseSurface, the boolean's intermediaries and "
+            "a point - so 10 strokes of 'CATIA' left 84 elements in GSD_Set and "
+            "catia_screenshot(clean=true) hid 125 construction elements for the "
+            "capture (reported 2026-11-12). Removing them means "
+            "catia_delete_feature by name, and catia_gsd_list_elements is where "
+            "the names are. Recorded rather than built because a prefix-based "
+            "purge has to guess which of those elements the caller still needs, "
+            "and a wrong guess deletes geometry something else was built on."
+        ),
+    },
+    {
+        "member": "the text of a CATIA message box",
+        "status": "NOT_IN_TYPELIB",
+        "detail": (
+            "catia_surface_engrave and catia_curve_on_surface answer the boxes "
+            "themselves - an unanswered one freezes the whole session, not just "
+            "the call - and report HOW MANY they answered. What the box SAID is "
+            "not readable: it is a Win32 dialog owned by another process, and the "
+            "only call that would return its text, WM_GETTEXT across processes, is "
+            "exactly what a modal box does not answer while it waits for a click. "
+            "Application.Caption returns the application's title, not the box's, so "
+            "it is not a substitute. Since 0.3.113 the reply carries a "
+            "DEGRADED(result unverified) marker plus what to re-check "
+            "(catia_gsd_list_elements, for the count and names the call should have "
+            "added), because 'one box was answered' and 'the call was clean' are "
+            "different claims."
         ),
     },
 ]

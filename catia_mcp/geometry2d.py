@@ -203,15 +203,6 @@ def _arc_arc(one: dict[str, Any], other: dict[str, Any]) -> list[tuple[float, fl
     return hits
 
 
-def _shared_end(one: dict[str, Any], other: dict[str, Any],
-                tol: float) -> bool:
-    for left in (one["a"], one["b"]):
-        for right in (other["a"], other["b"]):
-            if math.hypot(left[0] - right[0], left[1] - right[1]) <= tol:
-                return True
-    return False
-
-
 def _near_any_end(point: tuple[float, float], segment: dict[str, Any],
                   tol: float) -> bool:
     return any(math.hypot(point[0] - end[0], point[1] - end[1]) <= tol
@@ -220,23 +211,35 @@ def _near_any_end(point: tuple[float, float], segment: dict[str, Any],
 
 def crossings(segments: list[dict[str, Any]], tol: float = 1e-3,
               limit: int = 20) -> list[dict[str, Any]]:
-    """Every place two segments cross, excluding where they simply meet.
+    """Every place two segments meet apart from a shared corner.
 
-    ``tol`` is the distance under which an endpoint counts as shared - an
-    outline is a chain, so touching ends are the normal case. A crossing AT an
-    endpoint of only one of the two (a T junction) is kept: that is a real
-    defect and it is how a callout line through a face reads.
+    Each entry carries ``kind``:
 
-    WHY ``tol`` IS 1e-3 AND NOT 1e-6. It was 1e-6, and the 2026-11-12 report got
-    four "crossings" that all sat on ONE point, (84.0001, 25.9999) - the shared
-    shoulder-to-hook corner of a 21-element profile whose largest junction gap
-    was 0.0004 mm. Two effects put ~1e-4 between the computed intersection and
-    the endpoint the record holds: the junction itself is not exact, and the
-    point comes out of an arc/arc solve rather than out of the same arithmetic
-    that produced the endpoints. At 1e-6 a legal G0 seam therefore read as a
-    crossing. 1e-3 mm is two and a half times the widest seam measured and far
-    below any real T junction (a segment ending ON another segment, not beside
-    it), so it separates the two cases instead of guessing between them.
+    ``"crossing"``
+        The intersection is in the INTERIOR of both segments - the outline
+        really crosses over itself. This is the defect.
+    ``"touch"``
+        The intersection sits at an ENDPOINT of one of them: a T junction, or a
+        segment ending a hair past where the next one starts. Nothing is crossed
+        over; material simply joins there. Normal for text strokes (the serif
+        bar of an ``I`` ends on its stem), and not wrong for a profile either -
+        but a T junction makes the outline branched, so it is not one closed
+        region and a pad on it does something other than what was drawn.
+
+    Why the two are separated (2026-11-12 report): all of its four "crossings"
+    were legal seams at one shoulder corner, and the letter ``I`` in ``CATIA``
+    reported ``line #21 crosses line #22`` where the serif bar ends on the stem.
+    One category called "crosses itself" cannot describe both, and the hard
+    sentence ("a self-crossing profile has no single inside") is false for the
+    second.
+
+    ``tol`` is the distance under which a point counts as being AT an endpoint.
+    It was 1e-6, which the same report caught: the seam there was 0.0043 mm and a
+    computed arc/arc intersection lands ~1e-4 from the endpoint the record
+    holds, so a legal G0 seam read as a crossing. 1e-3 mm is two and a half times
+    the widest seam measured when this was set (0.0004 mm) and far below any real
+    T junction's own error - in a real T the point IS an endpoint, to within the
+    arithmetic, so widening it cannot hide one.
     """
     found: list[dict[str, Any]] = []
     for i in range(len(segments)):
@@ -255,15 +258,17 @@ def crossings(segments: list[dict[str, Any]], tol: float = 1e-3,
                 points = _arc_arc(one, other)
             if not points:
                 continue
-            shared = _shared_end(one, other, tol)
             for point in points:
-                if shared and (_near_any_end(point, one, tol)
-                               or _near_any_end(point, other, tol)):
+                at_one = _near_any_end(point, one, tol)
+                at_other = _near_any_end(point, other, tol)
+                if at_one and at_other:
+                    # A shared corner: this is what a chain looks like.
                     continue
                 found.append({
                     "a": one["source"], "b": other["source"],
                     "label_a": one["label"], "label_b": other["label"],
                     "point": (round(point[0], 4), round(point[1], 4)),
+                    "kind": "touch" if (at_one or at_other) else "crossing",
                 })
                 if len(found) >= limit:
                     return found
@@ -272,21 +277,41 @@ def crossings(segments: list[dict[str, Any]], tol: float = 1e-3,
 
 def describe(found: list[dict[str, Any]], segment_count: int,
              limit: int = 20) -> str:
-    """One sentence per crossing, or a statement that there were none."""
-    if not found:
+    """One sentence per case, keeping crossings and T junctions apart."""
+    real = [item for item in found if item.get("kind") == "crossing"]
+    touches = [item for item in found if item.get("kind") == "touch"]
+
+    parts: list[str] = []
+    if not real and not touches:
         return (f" The outline does not cross itself ({segment_count} "
                 "segment(s) checked, from the elements this session drew).")
-    parts = [
-        f"'{item['label_a']}' crosses '{item['label_b']}' at "
-        f"({item['point'][0]:.4f}, {item['point'][1]:.4f})"
-        for item in found[:6]
-    ]
-    more = "" if len(found) <= 6 else f"; and {len(found) - 6} more"
-    return (
-        f" WARNING: THE OUTLINE CROSSES ITSELF in {len(found)} place(s): "
-        + "; ".join(parts) + more
-        + ". A self-crossing profile has no single inside, so pad and pocket "
-        "either refuse it or build something that is not what was drawn - fix "
-        "the crossing before the feature, not after. (Checked from the elements "
-        "this session drew; CATIA cannot hand sketch coordinates back.)"
-    )
+    if real:
+        listed = [
+            f"'{item['label_a']}' crosses '{item['label_b']}' at "
+            f"({item['point'][0]:.4f}, {item['point'][1]:.4f})"
+            for item in real[:6]
+        ]
+        more = "" if len(real) <= 6 else f"; and {len(real) - 6} more"
+        parts.append(
+            f" WARNING: THE OUTLINE CROSSES ITSELF in {len(real)} place(s): "
+            + "; ".join(listed) + more
+            + ". A self-crossing profile has no single inside, so pad and pocket "
+            "either refuse it or build something that is not what was drawn - fix "
+            "the crossing before the feature, not after.")
+    if touches:
+        listed = [
+            f"'{item['label_a']}' ends on '{item['label_b']}' at "
+            f"({item['point'][0]:.4f}, {item['point'][1]:.4f})"
+            for item in touches[:6]
+        ]
+        more = "" if len(touches) <= 6 else f"; and {len(touches) - 6} more"
+        parts.append(
+            f" NOTE: {len(touches)} place(s) where one element ENDS on another: "
+            + "; ".join(listed) + more
+            + ". That is a T junction (or an element ending a hair past the next "
+            "one's start), not a self-crossing - nothing is crossed over, so this "
+            "is not why a pad would fail. It does mean the outline is BRANCHED "
+            "rather than one closed loop, which is fine for engraving along the "
+            "strokes and is not fine as a pad profile.")
+    return "".join(parts) + (" (Checked from the elements this session drew; "
+                             "CATIA cannot hand sketch coordinates back.)")

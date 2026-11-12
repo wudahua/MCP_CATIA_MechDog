@@ -208,13 +208,21 @@ def _answered_boxes(reply: str, clicks: int) -> str:
         # watcher was never armed", and this task lost two runs to modal boxes.
         return reply + " (dialogs answered: 0)"
     count = "1 message box" if clicks == 1 else f"{clicks} message boxes"
+    # DEGRADED is a marker a caller can grep, asked for by the 2026-11-12 report:
+    # "读不回来之后没有任何降级信号". The sentence stays, because a machine flag
+    # with no instruction is no better than none - but the flag is what lets an
+    # automated caller branch without parsing English.
     return reply + (
-        f" NOTE: CATIA raised {count} during this call and this tool answered "
-        "it, because an unanswered box freezes the whole session, not just this "
-        "call. WHAT IT SAID COULD NOT BE READ BACK, so this is not a report that "
-        "the operation was clean: check the tree with catia_list_features, and if "
-        "the answer above does not match what you expected, assume the box was "
-        "about this cut."
+        f" DEGRADED(result unverified): CATIA raised {count} during this call and "
+        "this tool answered it, because an unanswered box freezes the whole "
+        "session, not just this call. WHAT IT SAID COULD NOT BE READ BACK - the "
+        "text lives in a Win32 dialog owned by another process, and the only API "
+        "that would return it (WM_GETTEXT across processes) is exactly what the "
+        "box does not answer while it waits for a click. So this is not a report "
+        "that the operation was clean. VERIFY before relying on the result above: "
+        "catia_gsd_list_elements (or catia_list_features) for how many elements "
+        "and which names this call should have added; if the count is short, "
+        "re-send the call rather than assuming it half-worked."
     )
 
 
@@ -262,9 +270,23 @@ def _engrave_outcome(removed: float | None, expected: float | None,
             "before relying on the depth."), "")
     note = ""
     if abs(ratio - 1.0) > 0.15:
-        note = (f" NOTE: removed/predicted is {ratio:.2f}, so the curve does not "
-                "follow the surface perfectly along its whole length; the groove "
-                "is visible but its depth varies.")
+        # A SHORTFALL HAS TWO CAUSES AND THIS CALL CANNOT PICK BETWEEN THEM.
+        # The old sentence picked one ("the curve does not follow the surface"),
+        # and the 2026-11-12 report hit the other: on a PLANE the curve cannot
+        # leave the surface at all, so the 0.81 it measured was the letter A's
+        # crossbar running into the slot its own two diagonals had already cut -
+        # strokes of one glyph overlap. Naming both is what the measurement
+        # supports; naming one is how a caller ends up chasing a projection that
+        # was never wrong.
+        note = (f" NOTE: removed/predicted is {ratio:.2f}. Two things produce a "
+                "shortfall and this call cannot tell them apart: the curve may "
+                "leave the surface somewhere along its length, OR part of the "
+                "groove may fall where material was already gone - strokes of the "
+                "same glyph crossing does exactly that, and a plane cannot make "
+                "the first cause happen at all. If the curve was placed with "
+                "catia_curve_on_surface and reported 0.0000 mm of movement, the "
+                "second is the one to suspect; read the depth, not this ratio, as "
+                "the result.")
     return ("ok", note, (
         " The tube is centred on the curve, which lies on the surface, so "
         "HALF of it is inside the material and the depth is the radius - "

@@ -14,7 +14,15 @@ from catia_mcp.connection import CATIAConnection
 from catia_mcp.fonts import supported as font_charset
 from catia_mcp.fonts import text_to_strokes
 from catia_mcp.geometry2d import crossings, describe, segments_of
-from catia_mcp.results import ArgumentRejected, ArgumentOutOfRange, CodedError
+from catia_mcp.results import (
+    ArgumentOutOfRange,
+    ArgumentRejected,
+    CodedError,
+    PreconditionRejected,
+    operation_result,
+)
+from catia_mcp.sketch_frames import plane_angle_frame, point_world
+from catia_mcp.topo_search import topology_reference
 
 
 def _pair(value: Any, complaint: str) -> list[float]:
@@ -48,10 +56,104 @@ def _point_gap(first: Sequence[float], second: Sequence[float]) -> float:
     return math.dist(first, second)
 
 
+def _sweep_choice(a1: float, a2: float, direction: str,
+                  major: bool) -> tuple[float, float, bool]:
+    """Which way round an arc runs, from the angles of its two endpoints.
+
+    ``(start_rad, sweep_rad, chosen_ccw)``. Two callers need this exact rule and
+    they must not drift apart: :meth:`SketcherTools._draw_arc` to build the
+    circle, and :meth:`SketcherTools._plan_segment` to know where the arc's
+    MIDPOINT is - an arc's circle is rebuilt through its two endpoints and that
+    mid point, and the mid point depends on which way round it goes.
+
+    The rule: `direction` picks the way, but a sweep past half a circle flips it
+    unless `major` says the long way is what was meant. Reported 2026-11-01: two
+    endpoints 4.39 degrees apart answered "355.6117 degrees counter-clockwise".
+    """
+    ccw = (a2 - a1) % (2 * math.pi)
+    chosen_ccw = direction != "cw"
+    sweep = ccw if chosen_ccw else (2 * math.pi - ccw)
+    if not major and sweep > math.pi + 1e-9:
+        chosen_ccw = not chosen_ccw
+        sweep = 2 * math.pi - sweep
+    start = a1 if chosen_ccw else a2
+    return start, sweep, chosen_ccw
+
+
+def _circle_through(first: Sequence[float], mid: Sequence[float],
+                    second: Sequence[float]) -> tuple[list[float], float] | None:
+    """The circle through three points, or None when they are collinear.
+
+    WHY THIS EXISTS (2026-11-12 report, P0-1). A CATIA arc is created from
+    centre + radius + angles, so a caller's ``p1`` is not where the arc starts:
+    the drawn start is ``centre + radius * unit(p1 - centre)``, the RADIAL
+    PROJECTION of the point onto the circle. A least-squares arc fit puts p1 a
+    few hundredths off that circle, so a 73-segment profile that answered "every
+    junction meets within 0.0000 mm" was 30 seams wide when measured on what was
+    actually drawn - 0.0043 to 0.0960 mm. Rebuilding the circle through the two
+    endpoints and the old arc's midpoint keeps the shape (the reporter measured
+    0.112 mm of deviation) and makes "the end you gave" and "the end that was
+    drawn" the same point.
+    """
+    ax, ay = float(first[0]), float(first[1])
+    bx, by = float(mid[0]), float(mid[1])
+    cx, cy = float(second[0]), float(second[1])
+    determinant = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if abs(determinant) < 1e-12:
+        return None
+    aa = ax * ax + ay * ay
+    bb = bx * bx + by * by
+    cc = cx * cx + cy * cy
+    ux = (aa * (by - cy) + bb * (cy - ay) + cc * (ay - by)) / determinant
+    uy = (aa * (cx - bx) + bb * (ax - cx) + cc * (bx - ax)) / determinant
+    radius = math.hypot(ax - ux, ay - uy)
+    if not math.isfinite(radius) or radius <= 0:
+        return None
+    return [ux, uy], radius
+
+
+def _project_to_circle(point: Sequence[float], center: Sequence[float],
+                       radius: float) -> list[float]:
+    """Where CATIA will actually put ``point`` when it draws on this circle."""
+    dx, dy = float(point[0]) - center[0], float(point[1]) - center[1]
+    distance = math.hypot(dx, dy)
+    if distance < 1e-12:
+        return [center[0] + radius, center[1]]
+    scale = radius / distance
+    return [center[0] + dx * scale, center[1] + dy * scale]
+
+
 def _fmt_point(point: Sequence[float]) -> str:
     return f"({point[0]:.4f}, {point[1]:.4f})"
 
 
+def _mm(value: float) -> str:
+    """Three decimals, and never ``-0.000``: a round-off just below zero is zero.
+
+    The first run of the 0.3.113 audit asserted ``centred on (0.000, 0.000)`` and
+    got ``centred on (-0.000, 0.000)`` - a correct number written so that a
+    caller comparing text sees a minus sign.
+    """
+    if abs(value) < 5e-4:
+        return "0.000"
+    return f"{value:.3f}"
+
+
+def _stroke_box(strokes: list[list[list[float]]]
+                ) -> tuple[float, float, float, float]:
+    """``(h_min, h_max, v_min, v_max)`` over every point of the strokes.
+
+    Returned on EVERY catia_text_strokes call, not only with include_points: the
+    report of 2026-11-12 measured 32.6 mm of text against a 32 mm pocket and
+    found it out by printing 36 points and taking min/max by hand.
+    """
+    xs = [float(point[0]) for stroke in strokes for point in stroke]
+    ys = [float(point[1]) for stroke in strokes for point in stroke]
+    if not xs:
+        return (0.0, 0.0, 0.0, 0.0)
+    return (min(xs), max(xs), min(ys), max(ys))
+
+
 def _stroke_data(strokes: list[list[list[float]]], include: bool,
                  limit: int = 600) -> str:
     """The polylines as data, so a caller can put them somewhere else.
@@ -83,43 +185,6 @@ def _stroke_data(strokes: list[list[list[float]]], include: bool,
     return text
 
 
-def _stroke_data(strokes: list[list[list[float]]], include: bool,
-                 limit: int = 600) -> str:
-    """The polylines as data, so a caller can put them somewhere else.
-
-    ``catia_text_strokes`` draws into a sketch and used to answer with counts
-    only, so the 2026-11-11 report had to import ``catia_mcp.fonts`` to get the
-    same numbers - which works for a caller who can read this repository and not
-    for one talking over MCP. The limit keeps a long title from turning a reply
-    into a wall of numbers; what is left over is COUNTED, never dropped silently.
-    """
-    if not include:
-        return ""
-    printed: list[str] = []
-    used = 0
-    left = 0
-    for stroke in strokes:
-        if used + len(stroke) > limit:
-            left += len(stroke)
-            continue
-        printed.append("[" + ", ".join(f"[{float(x):.4f}, {float(y):.4f}]"
-                                       for x, y in stroke) + "]")
-        used += len(stroke)
-    text = (" POINTS (sketch mm, same coordinates the sketch got): "
-            + ", ".join(printed) + ".")
-    if left:
-        text += (f" {left} further point(s) were not printed because this reply "
-                 f"stops at {limit}; call catia_text_strokes on fewer characters or "
-                 "read catia_mcp.fonts.text_to_strokes directly for all of them.")
-    return text
-from catia_mcp.sketch_frames import plane_angle_frame, point_world
-from catia_mcp.results import (
-    ArgumentOutOfRange,
-    ArgumentRejected,
-    PreconditionRejected,
-    operation_result,
-)
-from catia_mcp.topo_search import topology_reference
 
 
 def _vector_text(values: list[float]) -> str:
@@ -962,6 +1027,17 @@ class SketcherTools:
                     "ASCII 32-126 ONLY. A character with no glyph is SKIPPED and "
                     "NAMED in the reply, never replaced by a box, because a box "
                     "would engrave as something you did not ask for. "
+                    "THE BASELINE RUNS ALONG THE SKETCH'S OWN +H AXIS, and that is "
+                    "the whole of the layout rule. On 'xy' H is +X, so text reads "
+                    "left to right. On 'yz' (H = +Y) and 'zx' (H = +Z) it climbs the "
+                    "vertical direction instead and comes out standing up: measured "
+                    "2026-11-12, 'CATIA' at height 6 written on 'zx' covered Z "
+                    "12.5..43.8 and ran straight out of a label area of Z 5..25. "
+                    "There is no 'rotate' here to rescue that - a rotated baseline "
+                    "would tip the GLYPHS too. A sketch on a FRAME plane whose u is "
+                    "the horizontal direction puts the baseline where you want it: "
+                    "catia_create_sketch(plane={'type': 'frame', 'origin': [x, y, z], "
+                    "'u': [1, 0, 0], 'v': [0, 0, 1]}) makes H = X and V = Z. "
                     "Next steps for engraved text: catia_close_sketch, then "
                     "catia_gsd_project onto the face, then catia_surface_engrave."
                 ),
@@ -1014,6 +1090,21 @@ class SketcherTools:
                                 "Where the first baseline starts, as [x, y] in the "
                                 "sketch's own 2D millimetres. The glyphs sit to the "
                                 "RIGHT of it and rise ABOVE it."
+                            ),
+                        },
+                        "center_at": {
+                            "type": "array",
+                            "items": {"type": "number"},
+                            "minItems": 2,
+                            "maxItems": 2,
+                            "description": (
+                                "Shift the whole text so its BOUNDING BOX is centred "
+                                "on this [h, v] point, in the sketch's own mm. Applied "
+                                "after 'origin', which it therefore overrides. Measured "
+                                "need (2026-11-12): fitting 32.6 mm of text into a "
+                                "32 mm pocket took one call to measure and a second "
+                                "sketch to re-draw; the box is now returned on every "
+                                "call, so one pass decides."
                             ),
                         },
                         "line_spacing": {
@@ -1281,6 +1372,11 @@ class SketcherTools:
         # features are hidden where they are created, and the reply names them so
         # catia_set_visibility can bring one back.
         hidden = self._hide_datum(part, features)
+        # THEY OUTLIVE THE SKETCH, and the reply used to leave that out: the
+        # 2026-11-12 report deleted 草图.6 and found the plane and its three
+        # points still in the tree, with nothing said about what delete_feature
+        # does to them. Hidden is not absent, and a frame is a tree element, not
+        # an internal datum - so say so where the caller reads it.
         note = (f"; its datum plane '{plane_name}' and the 3 construction points "
                 "behind it are hidden (show one again with "
                 f"catia_set_visibility(name='{plane_name}', show=true))"
@@ -1289,6 +1385,9 @@ class SketcherTools:
                 "VISIBLE - this build refused the visibility call, so hide them "
                 f"with the CATIA UI (catia_set_visibility(name='{plane_name}') "
                 "may work once the part has been saved and reopened)")
+        note += (". They are tree elements, not an internal datum: deleting this "
+                 f"sketch does NOT take them with it, so '{plane_name}' and its "
+                 f"three points stay until you delete them by name")
         return part.CreateReferenceFromObject(plane_feature), note
 
     @staticmethod
@@ -1941,6 +2040,10 @@ class SketcherTools:
         # made" by index. Recording it here is what makes pad/pocket/shallow
         # features land on the intended profile in a multi-sketch part.
         self.conn.last_sketch = sketch
+        # The sketch is now in edit mode, and CATIA will not delete an open
+        # sketch (0.3.113). Recorded on the CONNECTION because the delete lives
+        # in another tool class.
+        self.conn.open_sketch = str(sketch.Name)
         self._profile_ends = []
         # How many CLOSED curves were drawn (a circle, or a spline closed on
         # itself). They have no free end, so they contribute nothing to the
@@ -2789,6 +2892,10 @@ class SketcherTools:
             # handle cannot poison subsequent calls.
             self._active_sketch = None
             self._active_factory = None
+            # Closed means deletable: CATIA refuses to delete a sketch that is
+            # still in edit mode, and the delete lives in another tool class -
+            # see CATIAConnection.open_sketch.
+            self.conn.open_sketch = None
         self.conn.refresh_display()
         summary = self._profile_summary(name)
         # Read the breaks BEFORE the cache is cleared - and before anything
@@ -3014,6 +3121,18 @@ class SketcherTools:
                     f"but segment {(index + 1) % len(plan) + 1} starts at "
                     f"{_fmt_point(following['start'])}, {gap:.4f} mm apart")
 
+        # What the arcs did to their circles, if anything. Silent when every
+        # endpoint already sat on the circle it was drawn on, which is the
+        # normal case for the angle form.
+        adjusted = [note for segment in plan for note in segment.get("adjust") or []]
+        adjust_text = ""
+        if adjusted:
+            adjust_text = (" " + "; ".join(adjusted[:4])
+                           + (f"; and {len(adjusted) - 4} more" if len(adjusted) > 4 else "")
+                           + ". This is the check catia_close_sketch makes, done on "
+                           "the endpoints that will be DRAWN rather than the ones "
+                           "passed in.")
+
         lines = sum(1 for segment in plan if segment["kind"] == "line")
         arcs = len(plan) - lines
         kinds = ", ".join(part for part in (
@@ -3031,7 +3150,7 @@ class SketcherTools:
         else:
             head += (f" Every one of the {len(plan)} junction(s) meets within "
                      f"{widest:.4f} mm, so it should close.")
-        return head + " NEXT: catia_close_sketch, then catia_pad."
+        return head + adjust_text + " NEXT: catia_close_sketch, then catia_pad."
 
     def _plan_segment(self, number: int, raw: Any) -> dict[str, Any]:
         """Validate one segment and work out both of its endpoints."""
@@ -3084,6 +3203,7 @@ class SketcherTools:
         end_angle = raw.get("end_angle")
         p1 = raw.get("p1")
         p2 = raw.get("p2")
+        adjust: list[str] = []
         if start_angle is not None and end_angle is not None:
             first = _on_circle(center, radius, float(start_angle))
             second = _on_circle(center, radius, float(end_angle))
@@ -3091,6 +3211,57 @@ class SketcherTools:
             first = _pair(p1, f"Segment {number} (arc) needs p1 as [x, y]")
             second = _pair(p2, f"Segment {number} (arc) needs p2 as [x, y]")
             start_angle = end_angle = None
+            # THE POINT GIVEN IS NOT THE POINT DRAWN. An arc is created from
+            # centre + radius + angles, so CATIA starts it at the RADIAL
+            # PROJECTION of p1 onto that circle. A fitted p1 sits a few
+            # hundredths off it, and then the profile this tool calls "closed"
+            # is 30 seams wide in catia_close_sketch (2026-11-12 report: 73
+            # segments, "every junction within 0.0000 mm" here against 0.0043 to
+            # 0.0960 mm there). So rebuild the circle through p1, the old arc's
+            # midpoint and p2: the endpoints then lie on it exactly and the
+            # shape moves by the fit's own error, which the reporter measured at
+            # 0.112 mm.
+            mid_angle, sweep, _ = _sweep_choice(
+                math.atan2(first[1] - center[1], first[0] - center[0]),
+                math.atan2(second[1] - center[1], second[0] - center[0]),
+                direction, bool(raw.get("major", False)))
+            mid = _on_circle(center, radius, math.degrees(mid_angle + sweep / 2.0))
+            already_on = max(
+                abs(_point_gap(first, center) - radius),
+                abs(_point_gap(second, center) - radius))
+            rebuilt = None if already_on <= 1e-9 else _circle_through(first, mid, second)
+            # A circle through three nearly collinear points is meaningless, and
+            # a rebuilt radius far from the one asked for means the data, not the
+            # rounding, is the problem - keep the caller's circle there and say
+            # where the ends will land instead of silently drawing something else.
+            if already_on <= 1e-9:
+                # The ends already lie on the circle: nothing was moved and
+                # there is nothing to report. Saying "rebuilt (R20 -> R20)"
+                # would be noise in every well-formed call.
+                pass
+            elif rebuilt is not None and abs(rebuilt[1] - radius) <= max(0.02, 0.05 * radius):
+                new_center, new_radius = rebuilt
+                adjust = [
+                    f"arc {number}: its circle was rebuilt through its two "
+                    f"endpoints and its midpoint (R{radius:.4f} -> "
+                    f"R{new_radius:.4f}, centre moved "
+                    f"{_point_gap(center, new_center):.4f} mm) because an arc is "
+                    "drawn from centre+radius+angles and the endpoints you gave "
+                    "were not exactly on that circle"]
+                center, radius = new_center, new_radius
+                first = _project_to_circle(first, center, radius)
+                second = _project_to_circle(second, center, radius)
+            else:
+                drawn_first = _project_to_circle(first, center, radius)
+                drawn_second = _project_to_circle(second, center, radius)
+                moved = max(_point_gap(first, drawn_first),
+                            _point_gap(second, drawn_second))
+                adjust = [
+                    f"arc {number}: its circle was NOT rebuilt (the three points "
+                    f"are collinear or the rebuilt radius is off by more than 5 %), "
+                    f"so its ends land where the circle puts them - up to "
+                    f"{moved:.4f} mm from the points given"]
+                first, second = drawn_first, drawn_second
         else:
             raise ArgumentRejected(
                 f"Segment {number} (arc) needs either start_angle and end_angle "
@@ -3105,7 +3276,7 @@ class SketcherTools:
         return {"kind": "arc", "center": center, "radius": radius,
                 "start_angle": start_angle, "end_angle": end_angle,
                 "direction": direction, "major": bool(raw.get("major", False)),
-                "start": first, "end": second}
+                "start": first, "end": second, "adjust": adjust}
 
     def _draw_text(self, args: dict[str, Any]) -> str:
         """Text as strokes, from a font that is in the box rather than in CATIA.
@@ -3170,14 +3341,42 @@ class SketcherTools:
                     "and hand them to catia_sketch_strokes",
                 ],
             )
+
+        # THE BOX THE TEXT ACTUALLY OCCUPIES, always - not only with
+        # include_points. The 2026-11-12 report had to print 36 points and take
+        # min/max itself to find out that 32.6 mm of text did not fit a 32 mm
+        # pocket, then re-draw the whole sketch at a smaller height. "wide" is
+        # the advance, which is not where the ink is.
+        box = _stroke_box(result.strokes)
+        center_at = args.get("center_at")
+        if center_at is not None:
+            if (not isinstance(center_at, (list, tuple))
+                    or len(center_at) != 2):
+                raise ArgumentRejected(
+                    "center_at must be an [h, v] pair in the sketch's own mm; got "
+                    f"{center_at!r}. Nothing was drawn.", code="BAD_ARGUMENT",
+                    stage="validate")
+            want = (float(center_at[0]), float(center_at[1]))
+            shift_h = want[0] - (box[0] + box[1]) / 2.0
+            shift_v = want[1] - (box[2] + box[3]) / 2.0
+            result.strokes = [[[point[0] + shift_h, point[1] + shift_v]
+                               for point in stroke] for stroke in result.strokes]
+            box = (box[0] + shift_h, box[1] + shift_h,
+                   box[2] + shift_v, box[3] + shift_v)
+            origin_x, origin_y = float(origin[0]) + shift_h, float(origin[1]) + shift_v
+        else:
+            origin_x, origin_y = float(origin[0]), float(origin[1])
+
         drawn = self._draw_strokes(result.strokes,
                                    bool(args.get("construction", False)))
-        origin_x, origin_y = float(origin[0]), float(origin[1])
         note = (
             f"Text {raw!r}: {result.glyphs} glyph(s) in {result.lines} line(s), "
             f"{len(result.strokes)} stroke(s), {height:g} mm cap height, "
             f"{result.width_mm:.3f} mm wide, baseline at ({origin_x:g}, "
-            f"{origin_y:g}) in this sketch's own mm."
+            f"{origin_y:g}) in this sketch's own mm. It occupies h "
+            f"{_mm(box[0])}..{_mm(box[1])} and v {_mm(box[2])}..{_mm(box[3])} mm "
+            f"(bbox {_mm(box[1] - box[0])} x {_mm(box[3] - box[2])}), centred on "
+            f"({_mm((box[0] + box[1]) / 2.0)}, {_mm((box[2] + box[3]) / 2.0)})."
         )
         if result.missing:
             note += (
@@ -3356,16 +3555,15 @@ class SketcherTools:
             # meaning "the long way round", which is what ccw means when the two
             # points are 4 degrees apart.
             chosen_ccw = direction != "cw"
-            sweep_rad = ccw if chosen_ccw else (2 * math.pi - ccw)
-            flipped = False
-            if not major and sweep_rad > math.pi + 1e-9:
-                chosen_ccw = not chosen_ccw
-                sweep_rad = 2 * math.pi - sweep_rad
-                flipped = True
-            if chosen_ccw:
-                start_rad, end_rad = a1, a1 + sweep_rad
-            else:
-                start_rad, end_rad = a2, a2 + sweep_rad
+            raw_sweep = ccw if chosen_ccw else (2 * math.pi - ccw)
+            # The rule itself lives in _sweep_choice: _plan_segment needs the
+            # same answer to find an arc's MIDPOINT (its circle is rebuilt
+            # through the two endpoints and that point), and two copies of a
+            # short-way rule is exactly how the angle form and the point form
+            # drifted apart in the first place.
+            start_rad, sweep_rad, chosen_ccw = _sweep_choice(a1, a2, direction, major)
+            end_rad = start_rad + sweep_rad
+            flipped = (not major) and raw_sweep > math.pi + 1e-9
             start_angle = math.degrees(start_rad)
             end_angle = math.degrees(end_rad)
             if flipped:

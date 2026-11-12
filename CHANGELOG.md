@@ -2,6 +2,99 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.113] — 2026-11-13 · the seam had two standards, and a T junction is not a crossing
+
+The 2026-11-12 report drew a 73-segment profile (55 lines + 18 arcs, built from a
+least-squares fit) and got two answers three seconds apart: `catia_sketch_profile`
+said *"every one of the 73 junction(s) meets within 0.0000 mm, so it should
+close"*, and `catia_close_sketch` said *"not closed — 60 loose endpoint(s) in 30
+break(s), smallest gap 0.0043, widest 0.0960"*.
+
+### The junction check now measures the endpoints that get drawn
+
+CATIA creates an arc from **centre + radius + angles**, so the point it draws is
+the *radial projection* of your `p1` onto that circle. `catia_sketch_profile`
+compared the `p1` it was given; `close_sketch` compared what was drawn. A fitted
+arc whose ends sit a few hundredths off its circle therefore read as closed in one
+tool and as 30 seams in the other — in exactly the case the check exists for.
+
+`_plan_segment` now rebuilds each arc's circle through its two endpoints and its
+own midpoint, so the drawn end **is** the given end. Measured on B30 2026-11-13,
+a 4-element stadium with ends 0.05 mm off the circle:
+
+| | before | after |
+|---|---|---|
+| profile junction | "within 0.0000 mm" | "within 0.0000 mm" (now true) |
+| close_sketch | 8 loose endpoints / 4 breaks / 0.0500 mm | `closed: true`, no breaks |
+| pad | — | 5736.1 mm³ vs nominal 5716.8 (+0.34 %) |
+
+The radius grew R20.0000 → R20.1720 to take up the 0.05 mm — 3.4× amplification,
+stated in the reply along with the centre shift. A rebuild that would move the
+radius more than 5 % is **not** made (that is bad data, not rounding) and the
+reply says where the ends will land instead. Ends already on the circle are left
+alone and nothing is said.
+
+### A T junction is a `touch`, not a `crossing`
+
+All four "crossings" in the report sat on one legal shoulder corner, and the `I`
+in `CATIA` reported `line #21 crosses line #22` where its serif bar *ends on* the
+stem. `crossings()` now classifies: interior of both → `crossing` (the hard
+warning, unchanged); endpoint of one → `touch` (nothing is crossed, but the
+outline is branched, so it is not one closed region for a pad); endpoint of both →
+a corner, not reported. Tried on B30: `CATIA` now reports one touch at
+(52.7619, 20.0000) and no self-crossing; a figure-eight still reports one
+`crossing`.
+
+### The rest of that report
+
+- **A sketch still in edit mode cannot be deleted** — and the reply said "this is
+  what a feature that failed its update leaves behind", i.e. it guessed a dead
+  reference. Measured: `DELETE_FAILED` while editing `草图.1`, and *"Deleted sketch
+  '草图.1'"* the moment it was closed. The sketcher now records the open sketch on
+  the connection (`Part.InWorkObject` stays on the body, so COM does not answer
+  it) and the delete answers `SKETCH_IS_OPEN` with the one thing that works —
+  and with "do NOT close or re-open the document", because the old advice cost a
+  caller their work.
+- **`catia_text_strokes` reports the box it occupies on every call**, not only
+  with `include_points`, and takes `center_at: [h, v]` to place it in one pass.
+  The report measured 32.6 mm of text against a 32 mm pocket, found it out by
+  printing 36 points, and re-drew a whole sketch at a smaller height.
+- **`catia_text_strokes` documents the baseline rule**: it runs along the
+  sketch's own **+H**, so on `zx` (H = +Z) text climbs the vertical and comes out
+  standing up — 12.5…43.8 mm of Z for a label area of 5…25. A `frame` plane with
+  `u` horizontal is the fix; a `rotate` would tip the glyphs too, which is why
+  there is none.
+- **`catia_surface_engrave` stops asserting one cause for a shortfall.** On a
+  *plane* the curve cannot leave the surface at all, so the report's 0.81 was its
+  own letter `A` crossbar cutting into the slot its two diagonals had already
+  made. The note now names both causes and says the call cannot separate them.
+- **A message box now marks the result** `DEGRADED(result unverified)` and says
+  what to re-check (`catia_gsd_list_elements` for count and names). What the box
+  said genuinely cannot be read — it is another process's Win32 dialog — and
+  that is now a ceiling entry rather than a missing feature.
+- **`catia_pocket` warns that `direction: "both"` makes TWO features**, which
+  shifts any bookkeeping done by feature count.
+- A `frame` sketch's reply now says the datum plane and its three points **outlive
+  the sketch**; deleting the sketch does not take them.
+
+### Not done, by name
+
+`cleanup`/purge for the ~7 elements one engrave stroke leaves, a batch engrave
+entry, and `catia_fillet(edge_chain=[...])` — the last is now a ceiling entry
+with its measurements (the whole-feature call never builds; one edge at a time
+leaves vertex gaps; whether CATIA has a G0 chain selection is **unknown**, and the
+entry says so instead of claiming an API is absent).
+
+Two entries were removed rather than kept: a duplicated `_stroke_data` that had
+been shadowing itself (dead code since 0.3.106), and the stranded imports below
+it.
+
+Also fixed: `_mm` writes `-0.000` as `0.000`, because the first run of this
+release's own audit compared `centred on (0.000, 0.000)` against
+`centred on (-0.000, 0.000)` and disagreed over a minus sign on zero.
+
+1783 tests, 143 tools, `scripts/b30_v0413_audit.py` 12/12.
+
 ## [0.3.112] — 2026-11-12 · the profile's endpoint form never reached the arc tool
 
 The 2026-11-12 ninth report rebuilt the siphon bottle with 21 elements (3 lines,

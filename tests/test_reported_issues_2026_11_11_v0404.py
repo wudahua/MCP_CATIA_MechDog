@@ -64,12 +64,22 @@ def test_a_floating_curve_is_called_floating_and_not_given_a_depth():
     assert "HALF" not in tail
 
 
-def test_the_usable_band_between_the_two_ends_says_the_depth_varies():
+def test_the_usable_band_between_the_two_ends_names_both_causes_of_a_shortfall():
     """0.69 is what the report measured after shifting the curve 0.6 mm out - a
-    real, visible groove. It must not be called either failure."""
+    real, visible groove. It must not be called either failure.
+
+    THE OLD ASSERTION PROTECTED A HALF-TRUE SENTENCE. It read "does not follow
+    the surface perfectly", i.e. it named one cause and asserted it. The
+    2026-11-12 report measured 0.81 on a PLANE, where the curve cannot leave the
+    surface at all: the shortfall was the letter's own strokes crossing, so the
+    second cut ran partly inside the first one's slot. Both causes are real and
+    this function has nothing that separates them.
+    """
     kind, verdict, tail = _engrave_outcome(0.869, 1.257, 0.4)
     assert kind == "ok"
-    assert "does not follow the surface perfectly" in verdict
+    assert "leaves the surface" in verdict or "leave the surface" in verdict
+    assert "already gone" in verdict
+    assert "cannot tell them apart" in verdict
     assert "HALF of it is inside the material" in tail
 
 
