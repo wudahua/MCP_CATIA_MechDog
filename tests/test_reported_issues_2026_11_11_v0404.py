@@ -128,13 +128,23 @@ def test_the_engraving_ceiling_records_both_ends_and_the_numbers():
     assert "CUTTER'S measured volume" in detail
 
 
-def test_the_projection_ceiling_says_curved_supports_accept_but_keep_little():
+def test_the_projection_ceiling_corrects_parallel_and_curve_supports():
     entry = next((item for item in _CAPABILITY_CEILINGS
                   if "first projection" in item["member"]), None)
     assert entry is not None
     detail = entry["detail"]
     assert "13.6" in detail and "15.1" in detail and "16.0" in detail
-    assert "parallel planes fail" in detail
+    # 2026-11-12, four cells on one reopened document: the face the sketch lies
+    # on, that face extracted as a SURFACE, and a PARALLEL plane all took the
+    # projection at 100 %; only the CURVE support was refused. The sentence this
+    # replaces had both halves backwards - "parallel planes fail" and "a curve
+    # extracted from that face is accepted".
+    assert "PARALLEL to the sketch 100 %" in detail
+    assert "CURVE refused" in detail
+    # The old sentence is now quoted as the thing that did NOT reproduce, so the
+    # phrase itself may appear - what must be gone is the RULE it stated.
+    assert "the rule is 'parallel planes fail" not in detail
+    assert "not 'non-planar is required'" not in detail
 
 
 def test_the_project_failure_no_longer_recommends_translate():

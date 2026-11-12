@@ -2,6 +2,59 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.110] — 2026-11-12 · what refuses a projection is the support's KIND
+
+The 2026-11-11 seventh report (§3) recorded a disagreement and asked for the case
+that would settle it: it had hit `PROJECT_FAILED` three times, concluded the tool
+refuses a planar element on a solid or surface support, and suspected its own
+configuration — "reopened from disk, with `InWorkObject` pointing at a
+`GSD_Set`". The acceptance case existed since 0.3.101, but it covered one
+configuration, so it could not separate the variables.
+
+**Four cells, one document each, all on B30.** Same 40×40 sketch, saved, closed
+and reopened, `InWorkObject` on the geometrical set:
+
+| source → support | landed |
+|---|---|
+| sketch → lofted `Wall` (fresh document) | 84.0 % |
+| the same, after the reopen, `InWorkObject` = body | **84.0 %** |
+| the same, after the reopen, `InWorkObject` = the GSD set | **84.0 %** |
+| sketch → the face it LIES ON (0.0000 mm away) | **100 %** |
+| sketch → that face EXTRACTED as a **surface** | **100 %** |
+| sketch → a plane **PARALLEL** to the sketch | **100 %** |
+| sketch → one of that face's edges EXTRACTED as a **curve** | **refused**, `PROJECT_FAILED` |
+
+So reopening is not a variable and neither is `InWorkObject`. What refuses is the
+support's KIND: a curve has no single normal to project along. Why a curve was
+refused is a likely reason, not a measurement, and the reply says so.
+
+**Two sentences this project had been shipping were wrong, and are now gone.**
+Both came from a single 2026-11-10 run that none of these cells reproduced:
+
+- the `PROJECT_FAILED` text said "parallel makes every point land on the same
+  spot, perpendicular flattens the curve onto a line … both are degenerate", and
+  its first `next_action` said **"PARALLEL is what fails"**. A parallel plane is a
+  plain translation of the element: measured 100 %, twice.
+- it also told callers that reaching a parallel plane needs `catia_gsd_extrude`.
+  It does not.
+- the README's projection matrix had a row "planar sketch → `xy`/`yz`/`zx` or a
+  solid's flat face: refused — parallel or perpendicular is degenerate", and a row
+  saying a curve extracted from a face lands. The first is false, the second
+  depends on the curve: an extracted EDGE was refused. Both rows now carry the
+  measurement and, where two runs disagree, say so instead of picking one.
+
+What survives unchanged, because it was measured over eight repeats: the first
+projection in a document is a fragment and the second is the real curve; a
+translated copy stays a fragment; a curved support accepts but keeps 13–48 %.
+
+**New acceptance script** `scripts/b30_v0410_audit.py`, 8/8, each cell in its own
+document: the fresh control, the reopen with body IO, the reopen with set IO, the
+co-planar face, the extracted curve (refused, but with a measured distance and a
+structured code — never a bare COM error), and the cross-session source
+measurement (100.0000 mm from the sketch's own four curves).
+
+1745 tests, 143 tools.
+
 ## [0.3.109] — 2026-11-12 · the outline says where it crosses itself
 
 The 2026-11-11 eighth report (§3) wrote its own O(n²) segment-intersection test in

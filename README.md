@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.109** · [what changed](CHANGELOG.md) ·
+**0.3.110** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1635,11 +1635,12 @@ Place the result with `catia_get_component_transform`.
 
   | element | support | landed | carries a point-on-curve parameter |
   |---|---|---|---|
-  | planar sketch | `xy` / `yz` / `zx`, or a solid's flat face | refused — parallel or perpendicular is degenerate | — |
+  | planar sketch | `xy` / `yz` / `zx`, or a solid's flat face — **including the very face it lies on (0.0000 mm)** | lands: **100 %**, measured 2026-11-12 (the 2026-11-10 note said "refused", and four cells could not reproduce it) | — |
+  | planar sketch | an **edge** of a face, extracted as a curve | **refused** — `PROJECT_FAILED`, measured 2026-11-12 | — |
   | 80 mm rectangle | plane tilted 45° (`catia_gsd_plane_angle`) | 20.000 mm, then **68.284 mm** = `2·(20+20·cos45)` | yes |
   | 63.947 mm glyph outline | lofted bottle face | **4.000 mm (6.3 %)** before 0.3.102, **32.111 mm (48.2 %)** after | yes |
   | 26.164 mm glyph | padded cylinder, SOLID face `Face.3` | 13.6 % | yes |
-  | 26.164 mm glyph | curve extracted from that same face | 13.6 % — extracting changes nothing | yes |
+  | 26.164 mm glyph | curve extracted from that same face | 13.6 % on 2026-11-11; an extracted **edge** was refused on 2026-11-12 — the two are not the same curve and the disagreement is unexplained | — |
   | 26.164 mm glyph | lofted bottle, sketch on `zx` offset −40 | 16.0 % | yes |
   | 26.164 mm glyph | lofted bottle, sketch on a `frame` plane | 15.1 % | yes |
   | `catia_gsd_line`, its extract, an OPEN spline | curved face | lands | yes |
@@ -1661,15 +1662,20 @@ Place the result with `catia_get_component_transform`.
   worse. Why CATIA answers differently the first time is unknown and is not
   claimed anywhere in the code.
 
-* **A planar element only projects onto a support that crosses it at an angle.**
-  Measured on B30 2026-11-10 with a 40×40 rectangle on an XY plane offset 40 mm:
-  `support="xy"` (parallel, collapses to a point), `"yz"` and `"zx"`
-  (perpendicular, collapses to a line) and the block's own top face all fail; a
-  plane tilted 45° about X succeeds. CATIA answers every one of them with the same
-  `方法 UpdateObject 失败`, which is why `catia_gsd_project` now refuses with
-  `PROJECT_FAILED` and states the rule plus the measured distance. A NON-planar
-  support (an extracted curved face) is fine — the degenerate cases are
-  plane-to-plane.
+* **What a projection needs is a support with one normal — not an angle.**
+  Measured on B30 2026-11-12 on one document, one 40×40 sketch, the file saved,
+  closed and reopened, with `InWorkObject` on the geometrical set: the face the
+  sketch **lies on** (0.0000 mm away) took it at **100 %**, that same face
+  extracted as a **surface** at **100 %**, and a plane **parallel** to the sketch
+  at **100 %**. An **edge** extracted as a curve was refused. So the older rule
+  ("parallel or perpendicular is degenerate", 2026-11-10) did not reproduce in any
+  of those four cells, and `catia_gsd_project` no longer states it: a parallel
+  plane is a plain translation of the element, not a collapse. Reopening the file
+  and pointing `InWorkObject` at a geometrical set changed nothing either — 84.0 %
+  before, 84.0 % after, 84.0 % with the set.
+  `scripts/b30_v0410_audit.py` is the acceptance case that separates those
+  variables, and it exists because a 2026-11-11 report blamed a reopen for three
+  `PROJECT_FAILED`s it never isolated.
 
 * **A measurable taken on a hybrid surface measures the enclosing SOLID.**
   Measured on B30 2026-11-10: `SPAWorkbench.GetMeasurable(<reference to a hybrid

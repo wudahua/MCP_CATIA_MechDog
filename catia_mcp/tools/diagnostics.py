@@ -224,7 +224,7 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
         ),
     },
     {
-        "member": "catia_gsd_project - the first projection in a document",
+        "member": "catia_gsd_project - the first projection in a document, and which supports accept a planar element",
         "status": "AVAILABLE_WITH_LIMIT",
         "detail": (
             "The FIRST projection made in a document answers with a fragment; the "
@@ -243,20 +243,27 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
             "the one shape where both passes agree (17.783 mm), so the second pass "
             "has never measured less than the first in any case tried. WHY CATIA "
             "answers differently the first time is unknown. "
-            "WHICH SUPPORTS ACCEPT A PLANAR ELEMENT AT ALL, because a 2026-11-11 "
-            "report hit PROJECT_FAILED on three configurations and concluded the "
-            "tool refuses it: on B30 2026-11-11 a curved support accepted ALL of "
-            "them - zx offset -40, a frame sketch with u=X v=Z, a padded "
-            "cylinder's side face AND a curve extracted from that face. What a "
-            "curved support cannot do is KEEP MUCH: the same 26.164 mm glyph "
-            "retained 16.0 % from zx, 15.1 % from the frame sketch and 13.6 % on "
-            "the solid face, against one loft. A projection lands only where the "
-            "surface faces the element, so most of a planar outline misses a "
-            "curved face - and a fragment that small engraves as nothing. What "
-            "genuinely fails is a PLANAR element on a PARALLEL PLANAR support "
-            "(xy against xy); a plane skewed 45 degrees accepts it. So the rule "
-            "is 'parallel planes fail, curved supports accept but keep little', "
-            "not 'non-planar is required'."
+            "WHICH SUPPORTS ACCEPT A PLANAR ELEMENT - re-measured 2026-11-12 "
+            "because the earlier answer was wrong in two places. One document, one "
+            "40x40 sketch, the file saved, closed and REOPENED, InWorkObject on the "
+            "geometrical set, four supports: the face the sketch LIES ON (0.0000 mm "
+            "away) 100 %, that same face EXTRACTED as a SURFACE 100 %, a plane "
+            "PARALLEL to the sketch 100 %, and one of that face's edges EXTRACTED as "
+            "a CURVE refused (PROJECT_FAILED). So neither 'parallel planes fail' "
+            "(2026-11-10) nor 'a curve extracted from a face is accepted' "
+            "(2026-11-11) reproduced: the only refusal was the CURVE, and a "
+            "projection runs along one normal, which a curve does not have. "
+            "REOPENING is not a variable either: the same sketch, source and target "
+            "measured 84.0 % in a fresh document, 84.0 % after the reopen with the "
+            "body as InWorkObject, and 84.0 % with the geometrical set as "
+            "InWorkObject - so the 2026-11-11 report's three PROJECT_FAILEDs came "
+            "from something else, and scripts/b30_v0410_audit.py is the case that "
+            "separates those variables. What a CURVED support still cannot do is "
+            "KEEP MUCH: the same 26.164 mm glyph retained 16.0 % from zx, 15.1 % "
+            "from the frame sketch and 13.6 % on the solid face, against one loft. "
+            "A projection lands only where the surface faces the element, so most "
+            "of a planar outline misses a curved face - and a fragment that small "
+            "engraves as nothing."
         ),
     },
     {

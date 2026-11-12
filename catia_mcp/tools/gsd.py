@@ -3978,24 +3978,31 @@ class GSDTools:
             raise PreconditionRejected(
                 f"CATIA created the projection of '{args['element']}' onto "
                 f"'{args['support']}' and then refused it at update. A projection "
-                "runs along the SUPPORT's own normal, so a PLANAR element needs a "
-                "support that crosses its plane AT AN ANGLE: parallel makes every "
-                "point land on the same spot, perpendicular flattens the curve "
-                "onto a line, and both are degenerate - CATIA reports them as "
-                "'方法 UpdateObject 失败' and nothing else. Measured on B30 "
-                "2026-11-10 with a 40x40 rectangle on an XY plane offset 40 mm: "
-                "'xy', 'yz' and 'zx' and the block's own top face ALL failed, and "
-                "a plane tilted 45 degrees about X worked. " + measured +
-                " So 'not parallel' is not enough - the support has to be skewed "
-                "to the element, or the element has to not be flat. Nothing this "
-                "call created was left behind.",
+                "runs along ONE normal of the support, so the support has to be a "
+                "surface or a plane. Measured on B30 2026-11-12, one document, one "
+                "40x40 sketch, four supports: the face the sketch LIES ON (0.0000 mm "
+                "away) took it at 100 %, that same face EXTRACTED as a SURFACE at "
+                "100 %, a plane PARALLEL to the sketch at 100 %, and one of that "
+                "face's edges EXTRACTED as a CURVE was refused - the only refusal "
+                "of the four. So COPLANAR and PARALLEL are not what fails: an "
+                "earlier note (2026-11-10) said they were, and these four cells "
+                "could not reproduce it. If the support is a curve, project onto "
+                "the surface it belongs to, or put the points on that face directly "
+                "with catia_curve_on_surface. " + measured +
+                " Nothing this call created was left behind.",
                 code="PROJECT_FAILED", stage="execute", modified=False,
                 next_actions=[
-                    "PARALLEL is what fails. A PLANAR support has to be skewed to "
-                    "a planar element: a plane tilted 45 degrees about X worked "
-                    "where 'xy', 'yz' and 'zx' all failed (measured 2026-11-10). A "
-                    "CURVED support has no such problem and accepted zx, a frame "
-                    "sketch and a solid face alike (measured 2026-11-11)",
+                    "CHECK THE SUPPORT'S KIND BEFORE ANYTHING ELSE. A surface or a "
+                    "plane is accepted even when it is COPLANAR with the element: "
+                    "measured 2026-11-12, the face the sketch lies on (0.0000 mm "
+                    "away) took it at 100 %, the same face extracted as a surface "
+                    "at 100 %, and a parallel plane at 100 %. An EDGE extracted as a "
+                    "curve was refused in the same run. The likely reason is that a "
+                    "curve has no single normal to project along, but that is NOT measured "
+                    "- what IS measured is that the same geometry extracted "
+                    "as a surface works. So use the surface the curve belongs to, or "
+                    "put the points on that face directly with "
+                    "catia_curve_on_surface.",
                     "A non-planar support works, but READ THE SHARE BEFORE USING "
                     "IT. The same 26.164 mm glyph kept 13.6 % on a padded "
                     "cylinder's side face, 15.1 % from a frame sketch and 16.0 % "
@@ -4013,9 +4020,10 @@ class GSDTools:
                     "with catia_gsd_translate does NOT help - the same report "
                     "measured a translated copy at 3.5 % where the sketch itself "
                     "kept 48.2 % (0.3.102)",
-                    "If the target really is a parallel plane there is no "
-                    "projection to make: extrude the element onto it with "
-                    "catia_gsd_extrude",
+                    "If the target is a PLANE parallel to the element, the "
+                    "projection is a plain translation and it works - measured "
+                    "2026-11-12 at 100 %. Read the share and move on; do not "
+                    "extrude just to reach a parallel plane.",
                 ],
             ) from error
 

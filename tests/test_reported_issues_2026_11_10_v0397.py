@@ -150,12 +150,13 @@ def test_project_warns_when_only_part_of_the_element_landed() -> None:
     assert "MINIMUM" in reply
 
 
-def test_project_failure_names_both_degenerate_cases() -> None:
-    """The first draft blamed only the parallel case; one audit run disproved it.
+def test_project_failure_names_the_support_kind_not_the_angle() -> None:
+    """0.3.97 named parallel and perpendicular; 0.3.110 replaced that.
 
-    The same rectangle failed onto 'yz' and 'zx' as well (measured 2026-11-10 on
-    B30), so a message that said "not parallel" was a half-rule - exactly the
-    class of reply these reports keep paying for.
+    Four cells on B30 2026-11-12 took the projection at 100 % - the face the
+    sketch lies on, that face extracted as a SURFACE, and a plane PARALLEL to the
+    sketch - so "parallel and perpendicular are degenerate" was a cause that did
+    not reproduce. The one refusal was an EDGE extracted as a curve.
     """
     tools = _gsd()
 
@@ -169,14 +170,14 @@ def test_project_failure_names_both_degenerate_cases() -> None:
     error = caught.value
     assert error.code == "PROJECT_FAILED"
     message = str(error)
-    lowered = message.lower()
-    # The measurement, both degenerate cases, and the support that did work.
+    # The measurement, the cells that DID work, and the one that did not.
     assert "40.0000 mm" in message
-    assert "parallel" in lowered and "perpendicular" in lowered
-    assert "45 degrees" in message
-    assert "yz" in message and "zx" in message
+    assert "2026-11-12" in message
+    assert "LIES ON" in message
+    assert "PARALLEL to the sketch" in message
+    assert "CURVE" in message
     assert "Nothing this call created was left behind" in message
-    assert any("PARALLEL is what fails" in action
+    assert any("CHECK THE SUPPORT'S KIND" in action
                for action in error.next_actions)
     # 0.3.104: the advice used to end with "move the element to it with
     # catia_gsd_translate". 0.3.102 measured that a translated copy keeps 3.5 %
