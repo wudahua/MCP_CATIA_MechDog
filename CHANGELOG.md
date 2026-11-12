@@ -44,7 +44,7 @@ descriptions, and a ceiling records the measurement.
 Still open by name: the self-intersection pre-check, CJK glyphs, and the
 polyline-to-spline fitting from the same report.
 
-143 tools, 1724 tests, `scripts/b30_v0408_audit.py` 8/8.
+143 tools, 1725 tests, `scripts/b30_v0408_audit.py` 8/8.
 
 ## [0.3.107] — 2026-11-12 · the all-edges fillet says which edges, because none of them worked
 
