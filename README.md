@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.110** · [what changed](CHANGELOG.md) ·
+**0.3.111** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -230,9 +230,26 @@ R0.25 / 0.5 / 1.0 / 1.5 / 3.0 each took the *same four* 40 mm edges and removed
 2.1460 / 8.5841 / 34.3363 / 77.2567 / 309.0266 mm³ — every one exactly
 `4·40·(R² − πR²/4)`. The eight that refused are not short (the shortest edge is
 20 mm, and `2·R` is 3 mm); edges that share a vertex fight over the same
-material. A retry costs a rebuild and a feature per edge — about 0.59 s each,
-246 edges in 145 s — so `max_edges` (default 200) bounds it, and above that the
-batch runs once and the reply says which number it stopped at.
+material. A retry costs a rebuild and a feature per edge — about 0.6 s for an edge
+that takes and more for one that refuses — so `max_edges` (default 200) bounds it,
+and above that the batch runs once and the reply says which number it stopped at.
+**The batch is not the cheap option**: on the 381-edge part from the 2026-11-11
+report it took 186 s and rounded nothing, which is why the reply now puts the
+short-edge count *before* that paragraph.
+
+What a real outline does to this, measured 2026-11-12 on that same part
+(`SiphonBottle.CATPart`: 2 features, 129 faces, 67 278.8 mm³ — and **381 edges**,
+which is three times the face count):
+
+| request | took | time | left |
+|---|---|---|---|
+| R1.5, default `max_edges` | **0 / 381** | 186 s (batch only) | 2 shapes |
+| R0.25, `max_edges=400` | **101 / 381** | 458 s | 103 shapes, −3.73 mm³ |
+
+At R0.25 every edge is longer than `2·R`, so length is not what stops it — the
+corners are. A 381-edge outline cannot be rounded by picking a radius; it has to
+lose corners first (draw the curved stretches as arcs with `catia_sketch_profile`
+instead of faceting them into 100 points).
 
 
 Two related defaults: `propagation` defaults to `none`, so one picked edge is one

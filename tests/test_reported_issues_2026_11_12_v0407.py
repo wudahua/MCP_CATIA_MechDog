@@ -111,7 +111,7 @@ def test_all_edges_makes_one_attempt_above_the_budget_and_says_so():
     reply = tools._fillet_all_edges(1.5, 0, 200)
 
     assert seen[0]["sequential_retry"] is False
-    assert "more than max_edges=200" in reply
+    assert "more than max_edges=200" in reply.lower()
     assert "NOT retried one at a time" in reply
     # The sentence that explains the failure has to carry numbers, not advice.
     assert "Shortest edge 1.5285 mm" in reply

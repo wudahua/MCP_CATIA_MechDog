@@ -481,8 +481,10 @@ class PartDesignTools:
                                 "each one on its own when the single batch rebuild "
                                 "fails. Above it only the batch is attempted and "
                                 "the reply says so: a retry is a separate rebuild "
-                                "and a separate feature (measured: about 0.59 s per "
-                                "edge - 246 edges take 145 s and leave 44 features)."
+                                "and a separate feature (measured: about 0.6 s per "
+                                "edge that takes and longer for the ones that fail "
+                                "- 381 edges of a real part took 458 s and left "
+                                "101 features)."
                             ),
                         },
                         **_EDGE_ANCHOR_PROPERTIES,
@@ -2948,13 +2950,15 @@ class PartDesignTools:
 
     #: Above this many edges the all-edges path stops after ONE batch attempt.
     #: Measured on B30 2026-11-12, with the batch path's single resolve: the
-    #: one-at-a-time retry costs about 0.59 s per edge - 54 edges took 15 s and
-    #: 246 edges took 145 s (44 of them built). 200 edges is therefore about two
-    #: minutes of work, which a call survives; the real cost above it is the
-    #: FEATURES, one per edge that takes, so a 246-edge outline leaves 44 of them
-    #: in the tree. (An earlier limit of 40 was set from 6.4 s per edge, which
-    #: was measured by re-running catia_list_edges before every edge - that pays
-    #: for 54 SPA length measurements each time and is not what this path does.)
+    #: one-at-a-time retry costs about 0.6 s per edge THAT TAKES and more for the
+    #: ones that refuse - 54 edges took 15 s, 246 took 145 s (44 built), and the
+    #: 381-edge real part took 458 s (101 built). The batch attempt is not the
+    #: cheap option either: on that part it took 186 s and built nothing.
+    #: 200 edges is therefore about two minutes when most of them take, which a
+    #: call survives; the real cost above it is the FEATURES, one per edge that
+    #: takes. (An earlier limit of 40 was set from 6.4 s per edge, which was
+    #: measured by re-running catia_list_edges before every edge - that pays for
+    #: 54 SPA length measurements each time and is not what this path does.)
     _ALL_EDGES_RETRY_LIMIT = 200
 
     def _edge_budget(self, args: dict[str, Any]) -> int:
@@ -3010,6 +3014,9 @@ class PartDesignTools:
                   "length_mm": entry["length"]}
                  for entry in table]
         sequential = total <= limit
+        lengths = sorted(entry["length"] for entry in table
+                         if entry["length"] is not None)
+        too_short = [value for value in lengths if value < 2 * radius]
 
         reply = self._fillet_many(radius, specs, propagation,
                                   sequential_retry=sequential)
@@ -3018,20 +3025,32 @@ class PartDesignTools:
                 "whole-feature fillet call does not build on B30 (measured: "
                 "2-edge cylinder, 12-edge rectangle and two polylines all fail "
                 "at construction, whatever the propagation). ")
+        # The shortest-edge count is ARITHMETIC and used to sit AFTER the
+        # attempt, so callers paid for it before reading it. Measured on the
+        # 2026-11-11 report's own part (381 edges, R1.5): the batch attempt took
+        # 186 s and built nothing, and only then the reply said 166 of the 381
+        # edges were shorter than 2*R. A radius that cannot reach half the part
+        # is knowable before touching CATIA, so it goes first.
+        if lengths and too_short:
+            head += (f"{len(too_short)} of {total} edge(s) "
+                     f"({len(too_short) / total * 100:.1f} %) are shorter than "
+                     f"2*R = {2 * radius:g} mm. Measured on the 381-edge part "
+                     "from the 2026-11-11 report (2026-11-12): R1.5 rounded 0 of "
+                     "381, and even R0.25 - where every edge is longer than "
+                     "2*R - rounded only 101, because neighbouring edges meet at "
+                     "the same corner and compete for the same material. Either "
+                     "the radius comes down or the outline loses corners. "
+                     f"Shortest edge {lengths[0]:.4f} mm, longest "
+                     f"{lengths[-1]:.4f} mm. ")
         if not sequential:
-            lengths = sorted(entry["length"] for entry in table
-                             if entry["length"] is not None)
-            too_short = [value for value in lengths if value < 2 * radius]
             head += (
-                f"This is more than max_edges={limit}, so ONE batch attempt was "
-                "made and the edges were NOT retried one at a time: each retry "
-                "is a separate rebuild and a separate feature (measured: about "
-                "0.59 s per edge, so 246 edges are 145 s and leave 44 features). ")
-            if lengths:
-                head += (f"Shortest edge {lengths[0]:.4f} mm, longest "
-                         f"{lengths[-1]:.4f} mm; {len(too_short)} of "
-                         f"{len(lengths)} are shorter than 2*R = {2 * radius:g} "
-                         "mm, which no fillet of this radius can take. ")
+                f"More than max_edges={limit}, so ONE batch attempt was made and "
+                "the edges were NOT retried one at a time. That attempt is not "
+                "free either: on a 381-edge part it took 186 s and produced 0 "
+                "fillets (measured 2026-11-12), and a retry is a separate "
+                "rebuild plus a separate feature - about 0.6 s per edge that "
+                "takes and longer for the ones that fail, which is how 381 edges "
+                "came to 458 s and 103 features. ")
             head += ("NEXT: choose the edges yourself and send a bounded batch - "
                      "catia_list_edges shows length and bounding faces, and "
                      "catia_fillet(edge_names=[...]) retries each one on its "
@@ -3222,8 +3241,10 @@ class PartDesignTools:
                         "created were removed again, so the body is unchanged. "
                         f"The {len(names)} edges were NOT retried one at a time: "
                         "each retry is a separate rebuild and a separate feature "
-                        "(measured: about 0.59 s per edge), and this call was "
-                        "given more edges than it will spend that on.")
+                        "(measured: about 0.6 s per edge that takes, more for the "
+                        "ones that refuse - 381 edges of a real part took 458 s), "
+                        "and this call was given more edges than it will spend "
+                        "that on.")
                 return head
             fresh_names, fresh_refs = (resolve() if resolve is not None
                                        else (names, refs))
@@ -3486,6 +3507,9 @@ class PartDesignTools:
                   "length_mm": entry["length"]}
                  for entry in table]
         sequential = total <= limit
+        lengths = sorted(entry["length"] for entry in table
+                         if entry["length"] is not None)
+        too_short = [value for value in lengths if value < 2 * length]
 
         reply = self._chamfer_many(length, angle, specs,
                                    sequential_retry=sequential)
@@ -3494,12 +3518,24 @@ class PartDesignTools:
                 "whole-feature chamfer call does not build on B30 (measured: "
                 "feature reference and body reference both fail at construction "
                 "on a 2-edge cylinder and a 12-edge rectangle). ")
+        if lengths and too_short:
+            # 2*L is where two bevels of this size meet at a shared corner, so
+            # the count is a warning about corners, not a proof about any one
+            # edge: the arithmetic is the same as the fillet's, which measured
+            # 101 of 381 at a radius where every edge was long enough.
+            head += (f"{len(too_short)} of {total} edge(s) "
+                     f"({len(too_short) / total * 100:.1f} %) are shorter than "
+                     f"2*L = {2 * length:g} mm, so a bevel this size meets its "
+                     "neighbour at the shared corner - expect those to be "
+                     "refused. Shortest edge "
+                     f"{lengths[0]:.4f} mm, longest {lengths[-1]:.4f} mm. ")
         if not sequential:
             head += (
-                f"This is more than max_edges={limit}, so ONE batch attempt was "
-                "made and the edges were NOT retried one at a time: each retry "
-                "is a separate rebuild and a separate feature (measured for the "
-                "same machinery on fillets: about 0.59 s per edge). ")
+                f"More than max_edges={limit}, so ONE batch attempt was made and "
+                "the edges were NOT retried one at a time. That attempt is not "
+                "free: on a 381-edge part the same batch took 186 s and produced "
+                "0 fillets (measured 2026-11-12), and a retry is a separate "
+                "rebuild plus a separate feature. ")
             head += ("NEXT: choose the edges yourself and send a bounded batch - "
                      "catia_list_edges shows length and bounding faces.")
         return head + reply

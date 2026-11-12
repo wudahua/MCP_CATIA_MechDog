@@ -477,8 +477,20 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
             "lowering the radius does not help and why catia_fillet's reply names "
             "the edges that took and the edges that did not instead of promising "
             "a number. On a 246-edge polyline, 44 edges took and 202 refused. "
-            "Cost of finding that out edge by edge, measured: about 0.59 s per "
-            "edge, 246 edges in 145 s, leaving one feature per edge that took."
+            "THE REAL PART, measured 2026-11-12 on the SiphonBottle.CATPart from "
+            "the 2026-11-11 eighth report (2 features, 129 faces, 67278.8 mm3): it "
+            "has 381 EDGES, not 129 - a face count is not an edge count and this "
+            "one is off by 3x. Shortest edge 0.5770 mm, longest 22.0000 mm, and "
+            "166 of the 381 are shorter than 2*R at R1.5. R1.5 with the default "
+            "max_edges=200 took 186 s for its single batch attempt and rounded "
+            "0 of 381. R0.25 with max_edges=400 - where 2*R = 0.5 mm and EVERY "
+            "edge is long enough - rounded 101 of 381 in 458 s and left 103 "
+            "shapes, removing 3.73 mm3. So on a real outline the short edges and "
+            "the shared vertices both bite, and a 381-edge part cannot be rounded "
+            "by asking for a radius: the outline has to lose corners first. "
+            "Cost: about 0.6 s per edge that takes, and longer for the ones that "
+            "refuse - 381 edges came to 458 s, not the 0.59 s/edge that a run of "
+            "successful edges suggests."
         ),
     },
     {

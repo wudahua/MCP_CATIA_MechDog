@@ -2,6 +2,50 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.111] — 2026-11-12 · the real part: 381 edges, and the count arrived after the cost
+
+The 2026-11-11 eighth report's own model, `SiphonBottle.CATPart`, was run end to
+end on B30 — as a COPY (CATIA refuses a second document with the same identifier,
+so the copy is renamed), with the original's sha256 checked before and after.
+
+**What the model actually is.** The report says "129 faces"; it has **381 edges**,
+three times as many. 2 features, 129 faces, 67 278.8 mm³ all reproduce exactly.
+
+| request | result | time | left behind |
+|---|---|---|---|
+| R1.5, default `max_edges=200` | **0 / 381** | 186 s (batch attempt only) | 2 shapes, volume unchanged |
+| R0.25, `max_edges=400` | **101 / 381** | 458 s | 103 shapes, −3.73 mm³ |
+
+Shortest edge 0.5770 mm, longest 22.0000 mm, and 166 of the 381 are shorter than
+`2·R` at R1.5. At R0.25 every edge is longer than `2·R` and it still only rounded
+101 of 381 — so on a real outline the short edges and the shared corners both
+bite, and **a 381-edge part cannot be rounded by choosing a radius**. The outline
+has to lose corners first, which 0.3.108's `catia_sketch_profile` now allows.
+
+**Two things were wrong with the reply, not with the geometry:**
+
+- `"166 of 381 are shorter than 2·R"` sat AFTER the attempt. It is pure
+  arithmetic over lengths the call already holds, so callers paid 186 s before
+  reading a sentence that could have told them not to start. It now comes first,
+  and it is emitted whether or not the edges get retried one at a time (below
+  `max_edges` the old reply never mentioned short edges at all).
+- the cost estimate said "about 0.59 s per edge", which is the cost of an edge
+  that TAKES. On a part where most refuse, 381 edges came to 458 s — 1.2 s each.
+  The three places that quoted 0.59 s now say 0.6 s for an edge that takes and
+  more for one that refuses, with the 458 s measurement attached. The same for
+  `_chamfer_all_edges`, which now warns about `2·L` corners while saying
+  "expect those to be refused" rather than claiming a bevel cannot fit — a
+  bevel of length `L` does fit on an edge of length `L`; it is the neighbour that
+  needs `2·L`.
+
+**New acceptance script** `scripts/b30_v0411_audit.py`, 9/9: the copy is
+byte-identical, the model numbers reproduce, the short-edge count precedes the
+`max_edges` paragraph (character offsets 297 vs 689), the batch cost is stated,
+the refused batch leaves the body untouched and updatable, the ceilings carry
+R0.25's numbers, and the ORIGINAL file's hash is unchanged at the end.
+
+1751 tests, 143 tools.
+
 ## [0.3.110] — 2026-11-12 · what refuses a projection is the support's KIND
 
 The 2026-11-11 seventh report (§3) recorded a disagreement and asked for the case
