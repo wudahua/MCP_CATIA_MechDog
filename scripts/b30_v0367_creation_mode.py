@@ -14,9 +14,10 @@ still answer .Name while being gone from the tree).
 
 from __future__ import annotations
 
+import os
 import sys
 
-sys.path.insert(0, r"F:\WorkBuddy Space\MCP catia-v5-lite")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from catia_mcp.connection import CATIAConnection
 

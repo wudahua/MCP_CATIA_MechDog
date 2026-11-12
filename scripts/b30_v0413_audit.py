@@ -10,6 +10,7 @@ import json
 import math
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, r"F:\WorkBuddy Space\MCP catia-v5-lite")
 
@@ -18,7 +19,9 @@ from catia_mcp.tools.document import DocumentTools                  # noqa: E402
 from catia_mcp.tools.part_design import PartDesignTools             # noqa: E402
 from catia_mcp.tools.sketcher import SketcherTools                  # noqa: E402
 
-ROOT = r"F:\catia_probe_v0413\audit"
+_PROBE_ROOT = os.environ.get("CATIA_PROBE_ROOT") or os.path.join(
+    tempfile.gettempdir(), "catia_probe_v0413")
+ROOT = os.path.join(_PROBE_ROOT, "audit")
 RESULTS: list[tuple[int, str, bool, str]] = []
 
 

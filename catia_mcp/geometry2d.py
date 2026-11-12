@@ -240,6 +240,16 @@ def crossings(segments: list[dict[str, Any]], tol: float = 1e-3,
     the widest seam measured when this was set (0.0004 mm) and far below any real
     T junction's own error - in a real T the point IS an endpoint, to within the
     arithmetic, so widening it cannot hide one.
+
+    THE PRICE OF THAT WIDTH, said out loud (2026-11-12 acceptance, P3-B): a real
+    crossing that happens to land within ``tol`` of a segment end is downgraded to
+    ``touch``, or dropped altogether when it is that close to an end of BOTH
+    segments. At the default 1e-3 mm the window is 1 micron of geometry, but the
+    caller can widen ``tol`` and must then read this sentence as a warning rather
+    than a footnote: at tol = 1 mm, any crossing within 1 mm of an end is no
+    longer reported as a crossing. The rule that keeps this honest is that ``tol``
+    must stay well under the smallest feature in the profile - it is a noise
+    threshold, not a design tolerance.
     """
     found: list[dict[str, Any]] = []
     for i in range(len(segments)):

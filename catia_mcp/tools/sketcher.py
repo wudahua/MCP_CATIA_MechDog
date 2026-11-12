@@ -56,6 +56,83 @@ def _point_gap(first: Sequence[float], second: Sequence[float]) -> float:
     return math.dist(first, second)
 
 
+def _seam_report(plan: Sequence[dict[str, Any]],
+                 tolerance: float) -> tuple[str, int, float]:
+    """Whether the planned segments form a closed loop, and where they do not.
+
+    Returns ``(text, loose_end_count, widest_gap)``.
+
+    ORDER IS NOT PART OF THE QUESTION. Until 0.3.114 this compared segment *i*'s
+    end with segment *i+1*'s start, so a caller who passed the segments in the
+    order its source data listed them - which is the normal case for a spec table,
+    a STEP dump or a SolidWorks feature row - got "8 of 8 junctions are wider than
+    0.05 mm, widest 33.4548 mm" for a profile that was perfectly connected, and
+    ``catia_close_sketch`` then answered "closed" and the pad came out at the
+    analytic volume (reported 2026-11-13, problem 6: the caller had already
+    checked the volume by hand, 284.8 mm3, and was told 8 of 8 junctions were
+    broken).
+
+    Every end is now matched against every OTHER end. A profile is closed when
+    each end has a partner; what the partner's index is does not matter, which is
+    also how CATIA's own profile analysis treats it.
+
+    The text names, for each loose end, where it is and where the nearest end was
+    - that is the number a caller can act on, and it is what the old message
+    buried under a wrong pairing.
+    """
+    ends: list[tuple[int, str, Sequence[float]]] = []
+    for index, segment in enumerate(plan, start=1):
+        ends.append((index, "ends at", segment["end"]))
+        ends.append((index, "starts at", segment["start"]))
+    if len(ends) < 2:
+        return "", 0, 0.0
+
+    loose: list[tuple[float, int, str, Sequence[float], int, str, Sequence[float]]] = []
+    widest = 0.0
+    for position, (index, word, point) in enumerate(ends):
+        best = (float("inf"), 0, "", None)
+        for other, (other_index, other_word, other_point) in enumerate(ends):
+            if other == position:
+                continue
+            gap = _point_gap(point, other_point)
+            if gap < best[0]:
+                best = (gap, other_index, other_word, other_point)
+        gap = best[0]
+        if gap > tolerance:
+            loose.append((gap, index, word, point, best[1], best[2], best[3]))
+        else:
+            widest = max(widest, gap)
+
+    if not loose:
+        note = ""
+        if len(plan) > 1:
+            disorder = []
+            for index in range(1, len(plan) + 1):
+                following = plan[index % len(plan)]
+                if _point_gap(plan[index - 1]["end"], following["start"]) > tolerance:
+                    disorder.append(index)
+            if disorder:
+                first = disorder[0]
+                note = (f" They do not follow each other in the order given "
+                        f"(segment {first}'s end meets segment "
+                        f"{first % len(plan) + 1}'s start, not the next one in "
+                        f"the list; {len(disorder)} of {len(plan)} adjacent "
+                        "pairs differ) - CATIA builds the loop from the "
+                        "elements, not from the order they were drawn in.")
+        return note, 0, widest
+
+    loose.sort(key=lambda item: item[0], reverse=True)
+    widest = loose[0][0]
+    said = [
+        f"segment {index} {word} {_fmt_point(point)} has nothing within "
+        f"{tolerance:g} mm - its nearest end is segment {near_index}'s "
+        f"{near_word} {_fmt_point(near_point)}, {gap:.4f} mm away"
+        for gap, index, word, point, near_index, near_word, near_point
+        in loose[:4]]
+    more = (f"; and {len(loose) - 4} more end(s)" if len(loose) > 4 else "")
+    return "; ".join(said) + more, len(loose), widest
+
+
 def _sweep_choice(a1: float, a2: float, direction: str,
                   major: bool) -> tuple[float, float, bool]:
     """Which way round an arc runs, from the angles of its two endpoints.
@@ -996,7 +1073,11 @@ class SketcherTools:
                                 "A junction gap in mm above which the profile is "
                                 "reported as NOT CLOSED, with both coordinates. It "
                                 "does not change what is drawn - CATIA closes gaps of "
-                                "a few hundredths at update more often than not."
+                                "a few hundredths at update more often than not. "
+                                "ORDER DOES NOT MATTER: every segment end is matched "
+                                "against every other end, so a profile quoted in its "
+                                "source data's row order is not reported as broken "
+                                "(2026-11-13 report, problem 6)."
                             ),
                         },
                     },
@@ -1069,7 +1150,23 @@ class SketcherTools:
                                 "catia_curve_on_surface) instead of guessing where "
                                 "the glyph is. The 2026-11-11 report had to import "
                                 "catia_mcp.fonts directly to get these; up to 600 "
-                                "points are printed, then a count of the rest."
+                                "points are printed, then a count of the rest. For "
+                                "a script, pass structured=true instead: the same "
+                                "numbers come back as JSON fields."
+                            ),
+                        },
+                        "structured": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Return a JSON object instead of the sentence: "
+                                "{'strokes': [[[h, v], ...]], 'bbox': "
+                                "{'h_min','h_max','v_min','v_max','width','height'}, "
+                                "'center': [h, v], 'baseline': [h, v], "
+                                "'width_mm', 'cap_height', 'glyphs', 'lines', "
+                                "'missing'}. Added because the 2026-11-12 report had "
+                                "to parse 'bbox 20.100 x 4.500' out of the prose to "
+                                "place the text (P2-6). The sentence still has it."
                             ),
                         },
                         "spacing": {
@@ -3103,23 +3200,7 @@ class SketcherTools:
                     major=segment["major"],
                 )
 
-        junctions: list[str] = []
-        widest = 0.0
-        loose = 0
-        for index, segment in enumerate(plan):
-            following = plan[(index + 1) % len(plan)]
-            gap = _point_gap(segment["end"], following["start"])
-            widest = max(widest, gap)
-            if gap > tolerance:
-                loose += 1
-                # The two ends of the break: which segment ends here, and which
-                # one was supposed to start here. Naming the same segment twice
-                # (index % len + 1 on the second one) is how this read on the
-                # first run of the audit.
-                junctions.append(
-                    f"segment {index + 1} ends at {_fmt_point(segment['end'])} "
-                    f"but segment {(index + 1) % len(plan) + 1} starts at "
-                    f"{_fmt_point(following['start'])}, {gap:.4f} mm apart")
+        seam_text, loose, widest = _seam_report(plan, tolerance)
 
         # What the arcs did to their circles, if anything. Silent when every
         # endpoint already sat on the circle it was drawn on, which is the
@@ -3140,16 +3221,18 @@ class SketcherTools:
             f"{arcs} arc(s)" if arcs else "") if part)
         head = f"Profile drawn in one call: {len(plan)} segment(s) - {kinds}."
         if loose:
-            head += (f" WARNING: NOT CLOSED - {loose} of {len(plan)} junction(s) "
-                     f"are wider than {tolerance:g} mm, widest {widest:.4f} mm: "
-                     + "; ".join(junctions)
-                     + ". CATIA closes gaps of a few hundredths of a millimetre "
-                     "at update more often than not, so try the pad before "
-                     "rebuilding anything - catia_close_sketch reports what the "
-                     "sketch actually holds.")
+            head += (f" WARNING: NOT CLOSED - {loose} of {2 * len(plan)} "
+                     f"segment end(s) have no partner within {tolerance:g} mm "
+                     f"(widest {widest:.4f} mm): " + seam_text
+                     + ". The order the segments were passed in does NOT matter "
+                     "- this compares every end against every other end. CATIA "
+                     "closes gaps of a few hundredths of a millimetre at update "
+                     "more often than not, so try the pad before rebuilding "
+                     "anything - catia_close_sketch reports what the sketch "
+                     "actually holds.")
         else:
-            head += (f" Every one of the {len(plan)} junction(s) meets within "
-                     f"{widest:.4f} mm, so it should close.")
+            head += (f" Every segment end meets another one within {widest:.4f} "
+                     "mm, so the elements form a closed loop." + seam_text)
         return head + adjust_text + " NEXT: catia_close_sketch, then catia_pad."
 
     def _plan_segment(self, number: int, raw: Any) -> dict[str, Any]:
@@ -3385,6 +3468,24 @@ class SketcherTools:
                 + " - ASCII 32-126 only, so the text is that much shorter and "
                 "nothing was drawn in their place."
             )
+        if args.get("structured"):
+            return json.dumps({
+                "text": raw,
+                "strokes": result.strokes,
+                "bbox": {"h_min": round(box[0], 4), "h_max": round(box[1], 4),
+                         "v_min": round(box[2], 4), "v_max": round(box[3], 4),
+                         "width": round(box[1] - box[0], 4),
+                         "height": round(box[3] - box[2], 4)},
+                "center": [round((box[0] + box[1]) / 2.0, 4),
+                           round((box[2] + box[3]) / 2.0, 4)],
+                "baseline": [round(origin_x, 4), round(origin_y, 4)],
+                "width_mm": round(result.width_mm, 4),
+                "cap_height": height,
+                "glyphs": result.glyphs,
+                "lines": result.lines,
+                "missing": list(result.missing),
+                "drawn": drawn,
+            }, indent=2)
         return (
             note
             + " Hershey simplex, single-line: one stroke per stem, which is what a "

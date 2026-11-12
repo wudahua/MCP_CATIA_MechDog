@@ -769,6 +769,15 @@ class DocumentTools:
             f"'{product_name}'{rename_note}. In this session the document is called "
             f"'{doc_name}'; a path you save it to decides the FILE name "
             "(catia_save_document(file_path=...))."
+            + f" FOR LATER CALLS use document='{doc_name}': that is the DOCUMENT's "
+            "name, and it is what catia_add_component, catia_list_components and "
+            "catia_get_bounding_box(document=...) resolve"
+            + ("" if doc_name == product_name else
+               f". '{product_name}' is the ROOT PRODUCT's name (its PartNumber, the "
+               "one the tree and the BOM show) - it is not a document name, and "
+               "passing it as document= is the mistake this sentence exists to "
+               "stop")
+            + "."
             + saved
             + self._name_collision_note(doc)
         )

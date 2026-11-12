@@ -77,7 +77,11 @@ def test_a_closed_stadium_reports_every_junction_as_joined():
 
     assert [call[0] for call in tools.calls] == ["line", "arc", "line", "arc"]
     assert "4 segment(s)" in reply and "2 line(s), 2 arc(s)" in reply
-    assert "Every one of the 4 junction(s) meets within 0.0000 mm" in reply
+    # 0.3.114 reworded this from "Every one of the 4 junction(s) meets": the check
+    # no longer compares neighbour pairs by input order, it matches every end
+    # against every other end, so the sentence counts ENDS, not junctions between
+    # neighbours (2026-11-13 report, problem 6).
+    assert "Every segment end meets another one within 0.0000 mm" in reply
     assert "WARNING" not in reply
 
 

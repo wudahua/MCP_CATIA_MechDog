@@ -28,6 +28,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -38,7 +39,9 @@ from catia_mcp.tools.document import DocumentTools       # noqa: E402
 from catia_mcp.tools.part_design import PartDesignTools  # noqa: E402
 
 ORIGINAL = r"F:\WorkBuddy Space\2026-10-20-13-31-14\他人反馈的问题\SiphonBottle.CATPart"
-PROBE_ROOT = r"F:\catia_probe_v0411"
+_PROBE_ROOT = os.environ.get("CATIA_PROBE_ROOT") or os.path.join(
+    tempfile.gettempdir(), "catia_probe_v0411")
+PROBE_ROOT = _PROBE_ROOT
 ROOT = os.path.join(PROBE_ROOT, "audit")
 COPY = os.path.join(ROOT, "SiphonBottle_probe.CATPart")
 EXPECTED_VOLUME = 67278.8

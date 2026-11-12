@@ -9,9 +9,10 @@ they are rather than against a guess.
 Run with -u. Closes only its own OPEN_* documents.
 """
 import math
+import os
 import sys
 
-sys.path.insert(0, r"F:\WorkBuddy Space\MCP catia-v5-lite")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from catia_mcp.connection import CATIAConnection
 from catia_mcp.tools.document import DocumentTools

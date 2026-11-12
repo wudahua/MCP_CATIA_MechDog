@@ -1934,14 +1934,16 @@ class PartDesignTools:
         span = "total %.3f mm, %0.3f each side" % (height, height / 2.0) if symmetric \
             else "%.3f mm" % height
         if took is None:
-            # No volume, no verdict - same rule as pocket and hole.
-            return (
-                f"UNVERIFIED: pad '{pad.Name}' was created: {span} ({direction}). "
-                f"The solid growth could not be measured ({volume_note})"
-                + (f"; CATIA also raised during the update: {update_error}"
-                   if update_error is not None else "")
-                + ", so this is reported on CATIA's return alone."
-            )
+            # No volume, no verdict - same rule as pocket and hole. And when CATIA
+            # also raised, "no volume" plus "update failed" is not an ok:true.
+            return self._unverified(
+                "pad", str(pad.Name), f"{span} ({direction})",
+                volume_note or "the volume came back empty", update_error,
+                ["the profile is the first thing to check: catia_close_sketch "
+                 "reports an open outline or a self-crossing one",
+                 "a pad on a profile that crosses itself builds a broken solid "
+                 "without failing - that is what makes this route look healthy "
+                 "until the next feature"])
         note = ""
         if before is not None and after is not None:
             gain = after - before
@@ -1985,6 +1987,51 @@ class PartDesignTools:
         if volume is None:
             return None, "the measurable returned no volume"
         return volume * 1e9, None  # m3 -> mm3
+
+    def _unverified(self, kind: str, feature_name: str, created: str,
+                    why: str, update_error: Any,
+                    next_actions: list[str]) -> str:
+        """The "no volume, no verdict" sentence - or a refusal when CATIA said so.
+
+        A reply of ``ok: true`` that also contains "UpdateObject failed" is worse
+        than a failure: the 2026-11-13 report's pad answered exactly that, run_plan
+        carried on for ten steps, and the first symptom showed up at
+        ``catia_fillet`` as "the active body has no edges to fillet yet" - a
+        sentence about the wrong feature. The root cause was one step earlier.
+
+        So the two situations are kept apart:
+
+        * CATIA did not raise, only the volume was unreadable -> ``UNVERIFIED``
+          (the feature may well be right; saying "failed" would be a guess).
+        * CATIA raised AND the volume is unreadable -> nothing supports the claim
+          that material exists, so this refuses. The node stays in the tree (it
+          may be the only record of what was asked for), the part is marked as in
+          error for ``catia_list_bodies``, and the caller is told not to build on
+          it.
+        """
+        if update_error is None:
+            return (f"UNVERIFIED: {kind} '{feature_name}' was created: {created}. "
+                    f"It could not be checked against the body volume ({why}), so "
+                    "it is reported on CATIA's return alone - check the geometry "
+                    "before relying on it.")
+        self._note_part_error(str(update_error))
+        raise FeatureRejected(
+            f"CATIA failed to update the part after building this {kind} "
+            f"('{feature_name}', {created}): {update_error}. The node is in the "
+            f"tree but the solid was not rebuilt, and the body volume could not be "
+            f"measured ({why}) - so nothing here shows that material was added or "
+            "removed. Every later feature that depends on this one inherits the "
+            "error, and CATIA keeps answering with the last good volume, so the "
+            "next few calls can look fine. Do not build on this reply.",
+            next_actions=next_actions + [
+                "catia_update_part names every element that fails to update; run "
+                "it now, before the next feature - it points at THIS node",
+                "catia_close_sketch on the profile: an open or self-crossing "
+                "outline is the usual reason a pad or pocket will not rebuild",
+                "catia_delete_feature on the node if the profile is wrong, then "
+                "draw the profile again - a kept node in error makes every later "
+                "update fail as well",
+            ], rolled_back=False, code="UPDATE_FAILED")
 
     def _note_part_error(self, message: str | None) -> None:
         """Remember whether the part is known to be in an update-error state.
@@ -2234,17 +2281,16 @@ class PartDesignTools:
             )
         # No volume, no verdict: say which measurement failed rather than
         # blaming "this installation" for a cut the same session may verify on
-        # the next call.
+        # the next call. A raised update next to an unreadable volume is a
+        # refusal, not an ok:true - see _unverified.
         extent = self._pocket_extent(through_all, depth, symmetric)
-        why = f" ({volume_note})" if volume_note else ""
-        raised = (f" CATIA also raised during the update: {update_error}."
-                  if update_error is not None else "")
-        return (
-            f"UNVERIFIED: pocket '{pocket.Name}' was created: {extent}. The cut "
-            f"could not be checked against the body volume{why}, so it is "
-            f"reported on CATIA's return alone - check the geometry before "
-            f"relying on it.{raised}"
-        )
+        why = volume_note or "the volume came back empty"
+        return self._unverified(
+            "pocket", str(pocket.Name), extent, why, update_error,
+            ["catia_close_sketch on the profile: an open outline or one that "
+             "crosses itself is the usual reason a cut will not rebuild",
+             "a through_all cut whose sketch sits on a datum plane can come back "
+             "empty while the same profile cuts with an explicit depth"])
 
     def _pocket_area_note(self, sketch: Any, depth: float | None,
                           through_all: bool, symmetric: bool,
@@ -3785,12 +3831,14 @@ class PartDesignTools:
                 f"{length_note}{position_note}{axis_note}{type_note}"
                 f"{thread_note}{note}"
             )
-        why = f" ({volume_note})" if volume_note else ""
-        return (
-            f"UNVERIFIED: hole '{hole.Name}' created: D{diameter} mm, {extent}, "
-            f"but the bore was not checked against the body volume{why}."
-            f"{axis_note}{type_note}{thread_note}"
-        )
+        why = volume_note or "the volume came back empty"
+        return self._unverified(
+            "hole", str(hole.Name), f"D{diameter} mm, {extent}",
+            why + axis_note + type_note + thread_note, update_error,
+            ["catia_measure_topology shows the body's faces: a bore that landed "
+             "on the wrong side of the material leaves the face count unchanged",
+             "check the sketch the hole was built on: a bore's direction comes "
+             "from its profile plane, not from the depth alone"])
 
     def _mass_probe(self, part: Any, body: Any
                     ) -> tuple[float | None, list[float] | None, str | None]:

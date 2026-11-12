@@ -30,7 +30,7 @@ import os
 import sys
 import tempfile
 
-sys.path.insert(0, r"F:\WorkBuddy Space\MCP catia-v5-lite")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from catia_mcp.connection import CATIAConnection  # noqa: E402
 from catia_mcp.tools.document import DocumentTools  # noqa: E402

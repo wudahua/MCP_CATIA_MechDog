@@ -5613,18 +5613,30 @@ class GSDTools:
     def _curve_on_surface(self, args: dict[str, Any]) -> str:
         """Snap an outline onto a body's surface, one point at a time, and spline it.
 
-        THE MEASUREMENT THIS RESTS ON (B30, 2026-11-11). ``AddNewPointOnSurface
-        WithReference(face, point, direction, 0)`` moves the point to the NEAREST
-        point of that surface: a point already on it moved 0.0022 mm. What does
-        NOT matter, measured four ways: the direction (+Y / -Y / +Z / +X all moved
-        the same point 26.0052 mm) and which face of the body was named (Face.1,
-        Face.2, Face.3 - same 26.0052). So this tool takes no direction, and the
-        support is only used to choose the BODY.
+        THE MEASUREMENT THIS RESTS ON (B30, 2026-11-11, re-measured 2026-11-13).
+        ``AddNewPointOnSurfaceWithReference(face, point, direction, 0)`` moves the
+        point to the NEAREST point of that surface: a point already on it moved
+        0.0022 mm. What does NOT matter, measured six ways: the direction (+Y / -Y
+        / +Z / +X all moved the same point 26.0052 mm) and which face of the body
+        was named (Face.1, Face.2, Face.3 - same 26.0052).
 
-        Why that is enough: a glyph sits on a plane in front of the body, so its
-        nearest surface is the front skin, which is where the caller wants it.
-        Where it is NOT enough, and the reply says so: a point inside a thin body
-        can be nearer the far wall.
+        The 2026-11-13 cells, because a report contradicted the second half of
+        that: a point 0.6 mm in front of one wall of a 40x20x10 block moved 0.6000
+        mm with NO support and with ``support=`` an END face of the block - the
+        same 0.6000, so naming a different wall did not send it there. On a block
+        with a 0.6 mm recess, an outline drawn on the recess floor moved 0.0000
+        with no support, with the floor named and with a side wall named. So this
+        tool takes no direction, and the support selects the BODY; the reporter's
+        own case (36 points moving 0.6000 with Face.1 and 0.0000 with Face.24 on a
+        56-face lofted body) is NOT reproduced here, and the reply says which
+        support it used so the two can be told apart in the field.
+
+        Why the body is enough: a glyph sits on a plane in front of the body, so
+        its nearest surface is the front skin, which is where the caller wants it.
+        Where it is NOT enough, and the reply says so with the numbers: every
+        point moving the same non-zero distance means the outline landed on a
+        wall that is offset from the plane it was drawn on - a recess, a thin
+        wall, or a body whose front skin is not the plane in front of the glyph.
 
         END TO END, same day: 18 points of a 'C' placed on a plane at y=-60 in
         front of a closed lofted bottle, snapped, threaded into one open spline,
@@ -5708,6 +5720,21 @@ class GSDTools:
             stats += (" - a spread this wide means the plane the outline came from "
                       "is not parallel to the skin, which is normal on a shaped "
                       "face." if high - low > 1.0 else ".")
+            # The 2026-11-12 report's shape: 36 points, every one of them moved
+            # exactly 0.6000 mm, which was the depth of the recess the text was
+            # meant to sit in - so the outline had landed on the outer wall and
+            # the engrave that followed removed nothing (NO_MATERIAL, 10 strokes
+            # lost). The distribution is free: it is already in `moved`. Saying it
+            # costs nothing and is the one fact that separates "it snapped where I
+            # drew it" from "it snapped to another wall".
+            if low > 0.02 and high - low <= max(0.01, 0.05 * mean):
+                stats += (" All of them moved the SAME distance, which is what a "
+                          "wall offset from the drawing plane looks like - before "
+                          "cutting this, check that wall is the one you meant "
+                          "(catia_list_faces names the faces and their areas, "
+                          "catia_measure_distance reads the gap). If it is not, "
+                          "move the plane offset onto that wall instead of relying "
+                          "on the snap.")
         elif measure:
             stats = (" How far the points moved could not be measured, so how far "
                      "the outline was from the surface is unknown.")

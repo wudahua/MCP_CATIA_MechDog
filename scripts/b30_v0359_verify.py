@@ -10,9 +10,10 @@ with and without a region.
 Run with -u; closes only its own V0359_* documents.
 """
 import json
+import os
 import sys
 
-sys.path.insert(0, r"F:\WorkBuddy Space\MCP catia-v5-lite")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from catia_mcp.connection import CATIAConnection
 from catia_mcp.tools.document import DocumentTools

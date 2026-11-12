@@ -2046,10 +2046,14 @@ class MeasurementTools:
                     "components, and when the same part number is ALSO installed "
                     "inside a sub-assembly the reply reports complete: false, lists "
                     "those instances in 'also_nested' and 'skipped', and says the box "
-                    "covers the top-level one only. Those per-component boxes "
-                    "are still vertex sweeps, so ANY part whose extremum lies on a "
-                    "curved face is under-reported there - revolved or not. The true "
-                    "per-part box comes from get_bounding_box(document='<part>"
+                    "covers the top-level one only. With method='vertices' those "
+                    "per-component boxes are vertex sweeps, so ANY part whose "
+                    "extremum lies on a curved face is under-reported there - "
+                    "revolved or not - and every such entry carries "
+                    "lower_bound: true. The default does not have that problem any "
+                    "more (0.3.114: on an assembly 'auto' is the mesh route, one "
+                    "STL per distinct part). The true per-part box comes from "
+                    "get_bounding_box(document='<part>"
                     ".CATPart', method='mesh'), which opens the part by path when it "
                     "exists only as a component. "
                     "document='<assembly>.CATProduct' works too: the world box never "
@@ -3662,9 +3666,20 @@ class MeasurementTools:
             "entries": [], "corners": [], "skipped": [], "warnings": [],
             "parts_detail": {}, "warned": set(), "local_boxes": {},
             "include_curved": include_curved,
-            # method='mesh' is the whole signal - no second flag to keep in sync
-            # with it. 'auto' and 'vertices' keep the old vertices-first route.
-            "force_mesh": method == "mesh",
+            # 0.3.114: on an ASSEMBLY, 'auto' now means mesh too.
+            #
+            # It used to mean "vertices first", and a vertex sweep cannot see an
+            # extremum that sits on a curved face - so the DEFAULT answer was a
+            # systematically small box on any assembly holding a turned or lofted
+            # part. The 2026-11-13 report put the numbers on it: X max 67.954 by
+            # mesh against 62.0003 by vertices on the same assembly, and its own
+            # parts are nearly all curved (a disc, an end arc, a revolution). A
+            # caller who does not ask for a method is asking "how big is this",
+            # and answering that with a lower bound is the wrong default.
+            #
+            # The cost is one STL per DISTINCT part (not per instance), cached per
+            # part file; 'vertices' is still there for the fast route.
+            "force_mesh": method in ("mesh", "auto"),
         }
         self._box_walk(rows, [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
                        [0.0, 0.0, 0.0], 1, "", ctx)
@@ -4062,10 +4077,19 @@ class MeasurementTools:
                 "cheap.")
         payload["include_curved"] = include_curved
         payload["mesh_route"] = (
-            "every part from its mesh (method='mesh'): accurate on curved faces, "
+            "every part from its mesh (method='mesh', and the default on an "
+            "assembly since 0.3.114): the extremes on a curved face are caught, "
             "one mesh per distinct part - not per instance"
-            if method == "mesh" else
-            "vertices first, mesh only for parts that have no vertices at all")
+            if method in ("mesh", "auto") else
+            "vertices first, mesh only for parts that have no vertices at all - "
+            "a LOWER bound on any part whose extremum is on a curved face")
+        if method == "auto":
+            payload["method_note"] = (
+                "method='auto' on an ASSEMBLY is the mesh route: a vertex sweep "
+                "under-reports every curved part (the 2026-11-13 report measured "
+                "62.0003 against 67.954 on one assembly), and a caller who does not "
+                "name a method wants the size, not a lower bound. method='vertices' "
+                "is the fast route and says so on every component entry.")
         if from_mesh:
             # Parts, not instances: `warnings` is per part, and two fields in one
             # reply counting different things made 6-vs-2 look like a defect
@@ -4286,6 +4310,13 @@ class MeasurementTools:
                                for k, mn, mx in zip("xyz", entry_min, entry_max)},
                 "source": cached["source"],
             }
+            if not _from_mesh(cached["source"]):
+                # Per-instance, machine-readable: this instance's extremes came
+                # from a vertex sweep, so its box can be short wherever a face is
+                # curved. The report of 2026-11-13 read a 7 mm shortfall as a
+                # broken rotation matrix because nothing on the entry said which
+                # route it came from (the answer was one level up, in 'bounds').
+                entry["lower_bound"] = True
             if key not in parts_detail:
                 # Per PART, from the part's own local box: the vertex count, the
                 # cell count the construction filter walked, the mesh caveat.

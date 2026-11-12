@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 
 sys.path.insert(0, r"F:\WorkBuddy Space\MCP catia-v5-lite")
 
@@ -32,7 +33,9 @@ from catia_mcp.tools.gsd import GSDTools                 # noqa: E402
 from catia_mcp.tools.part_design import PartDesignTools  # noqa: E402
 from catia_mcp.tools.sketcher import SketcherTools       # noqa: E402
 
-ROOT = r"F:\catia_probe_v0410\audit"
+_PROBE_ROOT = os.environ.get("CATIA_PROBE_ROOT") or os.path.join(
+    tempfile.gettempdir(), "catia_probe_v0410")
+ROOT = os.path.join(_PROBE_ROOT, "audit")
 RADIUS_LO, RADIUS_HI, HEIGHT = 30.0, 24.0, 100.0
 RESULTS: list[tuple[int, str, bool, str]] = []
 

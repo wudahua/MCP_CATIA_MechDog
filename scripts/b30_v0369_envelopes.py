@@ -11,9 +11,10 @@ The unit tests pin the shape offline; this answers three things only CATIA can:
 from __future__ import annotations
 
 import json
+import os
 import sys
 
-sys.path.insert(0, r"F:\WorkBuddy Space\MCP catia-v5-lite")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from catia_mcp.server import CATIAMCPServer
 

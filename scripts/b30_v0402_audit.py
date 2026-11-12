@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -31,7 +32,9 @@ from catia_mcp.tools.gsd import GSDTools  # noqa: E402
 from catia_mcp.tools.part_design import PartDesignTools  # noqa: E402
 from catia_mcp.tools.sketcher import SketcherTools  # noqa: E402
 
-ROOT = r"F:\catia_probe_v0402\audit"
+_PROBE_ROOT = os.environ.get("CATIA_PROBE_ROOT") or os.path.join(
+    tempfile.gettempdir(), "catia_probe_v0402")
+ROOT = os.path.join(_PROBE_ROOT, "audit")
 RESULTS: list[tuple[int, str, bool, str]] = []
 GLYPH = [[-9, 0], [-4, 20], [0, 20], [5, 0], [2.5, 0], [1, 5], [-1, 5],
          [-2.5, 0], [-9, 0]]

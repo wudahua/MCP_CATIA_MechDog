@@ -172,6 +172,57 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
         ),
     },
     {
+        "member": "cutting a tip off a solid along an inclined plane",
+        "status": "AVAILABLE_WITH_LIMIT",
+        "detail": (
+            "catia_split_solid does this, and the 2026-11-12 report that asked for "
+            "a trim-by-plane tool had not tried it: the tool description's "
+            "'split is NOT a local cut' is about a patch that covers only part of the "
+            "cross-section, not about keeping one side of a full cut. MEASURED on "
+            "B30 2026-11-13: a 40x40x40 pad, cut by a plane through three points "
+            "tilted 20 degrees about Y (z = 20 + x*tan20), keep='front' - volume "
+            "20 352.95 mm3 against a hand calculation of 20 353.0. The plane was a "
+            "GSD plane in GSD_Set and needed no extension, because a datum plane is "
+            "already infinite. Two things to know: the reply names the half it kept "
+            "and both volumes, and 'front' is the side the cutter's NORMAL points to "
+            "- for a 3-point plane that is (p2-p1) x (p3-p1), so check the volume "
+            "before building on the shape."
+        ),
+    },
+    {
+        "member": "a B-spline given as control points + knots",
+        "status": "UNSUPPORTED_ON_B30",
+        "detail": (
+            "catia_sketch_spline and catia_gsd_spline INTERPOLATE: the curve passes "
+            "through every point given. A source spec that lists control points and a "
+            "knot vector (2026-11-13 report, [B-SPLINE] with order=4, count=4 and "
+            "knots 0,0,0,0,1,1,1,1) describes a different curve - the polygon is not "
+            "the curve - so feeding those points to the interpolating entry draws "
+            "something else, and the difference is a shape error nothing in the reply "
+            "warns about. The interpolation cost is measured and large: six points of "
+            "an aerofoil-like outline padded +29.3 % in volume against +0.48 % for the "
+            "same points joined with straight lines. There is no control-point entry in "
+            "this package, and HybridShapeSpline has not been measured to expose one "
+            "here; treat 'control points in, same curve out' as unavailable and say so "
+            "rather than passing them as interpolation points."
+        ),
+    },
+    {
+        "member": "sheet metal (wall / flange / bend / unfold / flat pattern)",
+        "status": "UNSUPPORTED_ON_B30",
+        "detail": (
+            "No tool: the server has no Generative Sheetmetal entry point. The "
+            "workbench itself is installed on the 2026-11-13 reporter's machine "
+            "('installed: yes'), so this is a packaging gap, not a CATIA one - the "
+            "geometries exist and cannot be reached. What a caller does instead is "
+            "extrude + cut, and the price is measured: the report's Arm2 came out at "
+            "822.137 mm3 against 792.323 (+3.76 %, the mitre corner's 2x2x20 mm3 of "
+            "extra material) with 15 faces where the source had 21, because a bend is "
+            "a pair of fillets that an extrude cannot have. Do not present an "
+            "extrude+cut part as a sheet-metal equivalent."
+        ),
+    },
+    {
         "member": "AddNewPointOnSurfaceWithReference (putting a point on a surface)",
         "status": "AVAILABLE_WITH_LIMIT",
         "detail": (
@@ -184,11 +235,22 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
             "suggests: (1) the DIRECTION is ignored - +Y, -Y, +Z and +X all moved "
             "the same point 26.0052 mm; (2) WHICH FACE you name is ignored too - "
             "Face.1, Face.2 and Face.3 of one body gave the same 26.0052 mm, so the "
-            "support only selects the BODY; (3) a SOLID BODY reference is refused "
+            "support only selects the BODY (RE-MEASURED 2026-11-13 with a wall "
+            "0.6 mm away, which is the case where it would matter: an outline 0.6 "
+            "mm in front of one wall of a 40x20x10 block moved 0.6000 mm with no "
+            "support and 0.6000 mm with an END face named; on a block with a 0.6 mm "
+            "recess, an outline on the recess floor moved 0.0000 mm with no "
+            "support, with the floor named and with a side wall named); (3) a SOLID "
+            "BODY reference is refused "
             "outright (every point failed 'UpdateObject 失败'), so it has to be a "
             "face or a surface. What follows from (1) and (2) is worth stating "
             "plainly: a point cannot be told which of two nearby walls to land on, "
-            "so it has to be placed nearer the one that is meant. Coordinates "
+            "so it has to be placed nearer the one that is meant. The 2026-11-12 "
+            "report DID see a named face change the landing (0.6000 with Face.1 vs "
+            "0.0000 with Face.24 on a 56-face lofted body), which the cells above do "
+            "not reproduce - so the reply prints which support it used and the "
+            "spread of the movements, and a caller who sees a uniform non-zero move "
+            "should treat the landing wall as unconfirmed. Coordinates "
             "cannot be read back (GetCoordinates fails on a plain point and returns "
             "zeros on a point-on-surface), which is why the tool reports how far "
             "each point MOVED, measured with the SPA workbench, instead of where it "

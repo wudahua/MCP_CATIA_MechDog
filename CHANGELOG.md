@@ -2,6 +2,120 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.114] — 2026-11-13 · a wrong warning is a defect, and "no tool" was a tool
+
+Three reports arrived together (2026-11-12 and 2026-11-13). Two of their P0s were
+not defects in the sense the reporter meant, and one of ours was worse than the
+report said.
+
+### The seam check no longer depends on the order the segments were passed in
+
+`catia_sketch_profile` compared segment *i*'s end with segment *i+1*'s start. The
+2026-11-13 reporter passed the 8 elements of `Arm1-S3` in the order his source data
+listed them — the normal case for a spec table, a STEP dump or a SolidWorks feature
+row — and got *"NOT CLOSED — 8 of 8 junction(s) are wider than 0.05 mm, widest
+33.4548 mm"* for a profile that was never broken: `catia_close_sketch` answered
+`closed`, and the pad came out at 284.8 mm³, the number he had computed by hand.
+
+Every end is now matched against every **other** end. Measured on B30 2026-11-13,
+a 40×20 rectangle given as four segments in the order `right, left, bottom, top`:
+no warning, `close_sketch` closes, pad 8000.0 mm³ — identical to the same four
+segments in order. When a connected loop is passed out of order the reply says so
+(`"they do not follow each other in the order given … CATIA builds the loop from
+the elements, not from the order they were drawn in"`), because the old sentence
+would otherwise still be believed. A real gap is still reported, now as *"segment
+2 ends at (60.0000, -20.0000) has nothing within 0.05 mm — its nearest end is
+segment 3's starts at (60.0600, -20.0000), 0.0600 mm away"*.
+
+### `ok: true` with "UpdateObject failed" in the same reply is gone
+
+The report's problem 4: a pad whose profile crossed itself answered `ok: true`,
+*"UNVERIFIED: … CATIA also raised during the update: (…, '方法 UpdateObject 失败',
+…)"*, 3 such steps went into `run_plan`'s warnings, and the root cause surfaced ten
+steps later as `catia_fillet` — *"the active body has no edges to fillet yet"* —
+a sentence about the wrong feature. Pad, pocket and hole now refuse with
+`UPDATE_FAILED` when CATIA raised **and** the volume could not be read; the node
+stays in the tree (it is the only record of what was asked for), the part is marked
+in error for `catia_list_bodies`, and the next action is `catia_update_part`, which
+names the element that fails. When CATIA did not raise and only the volume is
+unreadable, the reply stays `UNVERIFIED` — "no measurement" is not "failed".
+
+### On an assembly, `method='auto'` is now the mesh route
+
+`auto` meant "vertices first", and a vertex sweep cannot see an extremum that sits
+on a curved face — so the **default** answer was a systematically small box on any
+assembly holding a turned or lofted part. The 2026-11-13 report put numbers on it
+(same assembly, same moment: X max 62.0003 by vertices, 67.954 by mesh) and asked
+for the default to change. It did. Every component entry now also carries
+`lower_bound: true` when its box came from a vertex sweep, so a box that is not an
+envelope says so where the numbers are.
+
+**The report's diagnosis of the 7–11 mm shortfall is not reproduced, and it was
+specific enough to test.** It said a rotated instance's local axis is paired with
+the wrong row/column of the rotation matrix. Measured on B30 2026-11-13 with a box
+whose world box is known by hand (100×20×10, second instance 90° about Z at
+x = 180…200): all nine boxes — unrotated, rotated and whole product × `mesh`,
+`vertices` and `auto` — matched to **0.0000 mm**. Chording, the route's other
+limit, costs 0.19 mm on an R35 disc (0.54 %), not 7 mm. So the mechanism is
+neither, and the report's expected numbers are probably the source's conservative
+`GetBox(0)` rather than a bug in the aggregation; what shipped is the diagnosis
+that would have made a real shortfall visible.
+
+### `catia_split_solid` does cut a tip off along an inclined plane
+
+The other P1 asked for a new "trim by plane" tool because "split is NOT a local
+cut". For cutting a bottle's mouth off, the plane **does** divide the body
+completely and keeping one side **is** the operation. Measured on B30 2026-11-13:
+a 40×40×40 pad, cut by a plane through three points tilted 20° (`z = 20 + x·tan20`),
+`keep='front'` → **20 352.95 mm³** against a hand calculation of 20 353.0. The
+datum plane needed no extension, because it is already infinite. The capability
+was never missing — it was one tool away, and the tool's own warning about
+"NOT a local cut" is about a patch that covers only part of the cross-section.
+
+### `curve_on_surface`: the support is still not what picks the wall — and the reply now says when the landing is suspect
+
+The 2026-11-12 report watched 36 points move 0.6000 mm (exactly its recess depth)
+with `Face.1`, and 0.0000 mm with `support="Face.24"`, and concluded that the
+support decides the landing face — which our docstring denied. Re-measured on B30
+2026-11-13, in the two configurations where it would matter: an outline 0.6 mm in
+front of one wall of a 40×20×10 block moved **0.6000 mm with no support and
+0.6000 mm with an end face named**; on a block with a 0.6 mm recess, an outline
+drawn **on** the recess floor moved **0.0000 mm** with no support, with the floor
+named and with a side wall named. The support still selects the body, so the
+report's effect is *not reproduced* — and the ceilings now say both facts, with
+which cells they came from.
+
+What the reply gained is the observable that was already in hand: when every point
+moved the same non-zero distance (the signature of an outline that landed on a wall
+offset from the drawing plane), it says so and points at `catia_list_faces` /
+`catia_measure_distance` instead of letting the following `surface_engrave` report
+`NO_MATERIAL` with the 10 strokes lost.
+
+### Smaller, and the ones deliberately not done
+
+* `catia_text_strokes(structured=true)` returns `strokes`, `bbox` (`h_min`,
+  `h_max`, `v_min`, `v_max`, `width`, `height`), `center`, `baseline` and the
+  glyph counts as JSON — the reporter had to parse `bbox 20.100 x 4.500` out of
+  prose to place his text.
+* `catia_new_product` now says which name later calls take: `document=` wants the
+  **document** name, and the root product's PartNumber is not one.
+* The 80 probe scripts that hard-coded `F:\WorkBuddy Space\MCP catia-v5-lite` now
+  derive the repo root from their own location, and the 14 `b30_v04NN_audit.py`
+  scratch directories go to `%TEMP%` (`CATIA_PROBE_ROOT` overrides). "12/12" is
+  now reproducible by anyone (2026-11-12 acceptance, P3-A).
+* `crossings()`'s docstring states the price of `tol = 1e-3`: a real crossing
+  within that distance of a segment end is reported as `touch`, or dropped when it
+  is that close to an end of both (P3-B).
+* **NOT DONE**: the control-point + knot B-spline entry, sheet metal, per-stroke
+  engrave cleanup, `catia_fillet(edge_chain=[...])`, and a centroid/normal column
+  on `catia_list_faces`. The last one is not skipped for lack of interest: the
+  obvious call, `GetMeasurable(face).GetCOG`, is measured to answer for the body
+  that encloses the surface rather than the surface itself, so a `centroid` column
+  built on it would be a wrong number in a new place. The B-spline and sheet-metal
+  gaps are now ceilings with the measured cost of not having them (+29.3 % volume
+  for interpolation against control points; +3.76 % and 15 faces instead of 21 for
+  an extrude+cut standing in for a bend).
+
 ## [0.3.113] — 2026-11-12 · the seam had two standards, and a T junction is not a crossing
 
 The 2026-11-12 report drew a 73-segment profile (55 lines + 18 arcs, built from a
