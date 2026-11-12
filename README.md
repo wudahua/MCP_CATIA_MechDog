@@ -922,7 +922,7 @@ seams in the other — and the pad is the one that decides.
 
 `catia_sketch_profile` now rebuilds each arc's circle **through its two endpoints
 and its own midpoint**, so the ends that get drawn are the ends you asked for.
-Measured on B30 2026-11-13 with ends 0.05 mm off the circle: junction `0.0000 mm`,
+Measured on B30 2026-11-12 with ends 0.05 mm off the circle: junction `0.0000 mm`,
 `close_sketch` reports `closed: true` with no breaks, and the pad closes at
 5736.1 mm³ against a nominal 5716.8 (+0.34 %, the radius having grown
 R20.0000 → R20.1720 to take up the error). The reply names every circle it

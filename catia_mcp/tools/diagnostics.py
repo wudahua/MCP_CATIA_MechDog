@@ -515,7 +515,7 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
             "2026-11-12: a 73-segment fitted profile answered 'every one of the 73 "
             "junction(s) meets within 0.0000 mm' and then 'not closed - 60 loose "
             "endpoint(s) in 30 break(s), smallest gap 0.0043, widest 0.0960'. "
-            "Reproduced 2026-11-13 on a 4-element stadium whose arc ends sat "
+            "Reproduced 2026-11-12 on a 4-element stadium whose arc ends sat "
             "0.05 mm off the circle: 0.0000 mm here, '8 loose endpoint(s) in 4 "
             "break(s), 0.0500 mm' there. Now the planner rebuilds each arc's "
             "circle through its two endpoints and its own midpoint, so the ends "

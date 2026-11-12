@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## [0.3.113] — 2026-11-13 · the seam had two standards, and a T junction is not a crossing
+## [0.3.113] — 2026-11-12 · the seam had two standards, and a T junction is not a crossing
 
 The 2026-11-12 report drew a 73-segment profile (55 lines + 18 arcs, built from a
 least-squares fit) and got two answers three seconds apart: `catia_sketch_profile`
@@ -19,7 +19,7 @@ arc whose ends sit a few hundredths off its circle therefore read as closed in o
 tool and as 30 seams in the other — in exactly the case the check exists for.
 
 `_plan_segment` now rebuilds each arc's circle through its two endpoints and its
-own midpoint, so the drawn end **is** the given end. Measured on B30 2026-11-13,
+own midpoint, so the drawn end **is** the given end. Measured on B30 2026-11-12,
 a 4-element stadium with ends 0.05 mm off the circle:
 
 | | before | after |

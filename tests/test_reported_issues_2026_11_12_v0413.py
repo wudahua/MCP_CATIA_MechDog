@@ -10,7 +10,7 @@ profile and got two answers three seconds apart:
 Both were right about their own numbers. An arc is created from centre + radius +
 angles, so the point CATIA draws is the RADIAL PROJECTION of the caller's p1 onto
 that circle; profile compared the p1 it was given, close_sketch compared what was
-drawn. Reproduced on B30 2026-11-13 with a 4-element stadium whose arc ends sat
+drawn. Reproduced on B30 2026-11-12 with a 4-element stadium whose arc ends sat
 0.05 mm off the circle: profile said "within 0.0000 mm", close_sketch said
 "8 loose endpoint(s) in 4 break(s), 0.0500 mm".
 
