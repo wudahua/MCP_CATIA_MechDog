@@ -2,6 +2,50 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.108] — 2026-11-12 · the mixed profile was never missing, it was unwrapped
+
+The 2026-11-11 eighth report put this first (§2.1): "a profile that is straight
+on one side and curved on the other has no workable combination". Both halves of
+its evidence are right — `catia_sketch_spline` interpolates everywhere, so a
+straight run through intermediate points comes out bowed, and
+`catia_sketch_strokes` draws every segment as a chord, so a curve comes out
+faceted. The conclusion is not: drawing each element with the primitive for its
+own kind was never tried, and it is the oldest route there is.
+
+**Measured before any code was written.** A 60×40 stadium as four elements —
+two 60 mm lines and two r=20 half circles, endpoints typed to the same numbers:
+
+| what | answer |
+|---|---|
+| `catia_close_sketch` | "2 arc(s), 2 line(s); bbox (-20, -20)..(80, 20); outline 245.664 mm" |
+| `catia_pad(height=10)` | **36566.37 mm³ = 60·40·10 + π·20²·10**, which is the analytic area exactly |
+| same profile, 0.05 mm gap at one corner | reported not closed, with both coordinates |
+
+**`catia_sketch_profile` does it in one call.** `segments` is a list of `line`
+(`p1`/`p2`) and `arc` (`center`, `radius`, angles or `p1`/`p2`, `direction`
+cw|ccw, `major`), each drawn with the primitive for its kind, then every
+junction measured and reported:
+
+| part | drawn | what follows |
+|---|---|---|
+| stadium, 4 elements | 2 lines, 2 arcs, all 4 junctions within 0.0000 mm | close → pad → 36566.37 mm³ |
+| stadium, 0.06 mm gap | 1 of 4 junctions, both coordinates named | pad reports UNVERIFIED rather than a volume |
+| bad third segment | refused before the first primitive | nothing added: the sketch still held only its absolute axis, and stayed usable |
+
+The last row is the point of planning first: every segment's endpoints are
+arithmetic, so a zero-length line, a radius ≤ 0, equal start and end angles (a
+full circle, not an arc), an unknown type or a direction that is not `cw`/`ccw`
+is refused before COM is touched — a bad third segment cannot leave the first
+two behind.
+
+Both tools the report tried now point at the third route in their own
+descriptions, and a ceiling records the measurement.
+
+Still open by name: the self-intersection pre-check, CJK glyphs, and the
+polyline-to-spline fitting from the same report.
+
+143 tools, 1724 tests, `scripts/b30_v0408_audit.py` 8/8.
+
 ## [0.3.107] — 2026-11-12 · the all-edges fillet says which edges, because none of them worked
 
 The 2026-11-11 eighth report (§2.2) sent `catia_fillet(radius=1.5)` and `(0.5)`

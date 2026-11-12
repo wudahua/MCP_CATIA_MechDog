@@ -7,12 +7,48 @@ All dimensions are in millimeters. CATIA COM API uses millimeters natively.
 from __future__ import annotations
 
 import json
-from typing import Any
+import math
+from typing import Any, Sequence
 
 from catia_mcp.connection import CATIAConnection
 from catia_mcp.fonts import supported as font_charset
 from catia_mcp.fonts import text_to_strokes
-from catia_mcp.results import CodedError
+from catia_mcp.results import ArgumentRejected, ArgumentOutOfRange, CodedError
+
+
+def _pair(value: Any, complaint: str) -> list[float]:
+    """``[x, y]`` from whatever shape the caller sent, or a clear refusal."""
+    if isinstance(value, dict):
+        value = [value.get("x"), value.get("y")]
+    if value is None:
+        raise ArgumentRejected(f"{complaint}; got nothing.",
+                               code="BAD_ARGUMENT", stage="validate")
+    try:
+        numbers = [float(item) for item in value]
+    except (TypeError, ValueError) as exc:
+        raise ArgumentRejected(f"{complaint}; got {value!r}.",
+                               code="BAD_ARGUMENT", stage="validate") from exc
+    if len(numbers) != 2:
+        raise ArgumentRejected(
+            f"{complaint}; got {len(numbers)} number(s).",
+            code="BAD_ARGUMENT", stage="validate")
+    return numbers
+
+
+def _on_circle(center: Sequence[float], radius: float,
+               degrees: float) -> list[float]:
+    """The point at ``degrees`` on the circle, counter-clockwise from +X."""
+    radians = math.radians(degrees)
+    return [center[0] + radius * math.cos(radians),
+            center[1] + radius * math.sin(radians)]
+
+
+def _point_gap(first: Sequence[float], second: Sequence[float]) -> float:
+    return math.dist(first, second)
+
+
+def _fmt_point(point: Sequence[float]) -> str:
+    return f"({point[0]:.4f}, {point[1]:.4f})"
 
 
 def _stroke_data(strokes: list[list[list[float]]], include: bool,
@@ -534,7 +570,15 @@ class SketcherTools:
                     "cancelled: scale the points toward their centroid by "
                     "k = sqrt(target area / measured area) and rebuild once - a "
                     "nine-section blade at k=0.76 landed within 2 % of its 11 382 mm3 "
-                    "target, where the unscaled spline was +70 %."
+                    "target, where the unscaled spline was +70 %. "
+                    "WHAT THIS CANNOT DO, and what to use instead: one spline cannot "
+                    "be straight over one stretch and curved over the next - it "
+                    "interpolates everywhere, so a straight run through intermediate "
+                    "points comes out bowed. A profile like that is drawn element by "
+                    "element with catia_sketch_profile (lines where it is straight, "
+                    "arcs where it is not): measured on B30 2026-11-12, a 60x40 "
+                    "stadium of two lines and two half circles padded to 36566.37 mm3 "
+                    "= the analytic area, with no bowing anywhere."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -767,7 +811,11 @@ class SketcherTools:
                     "exactly as given. Each stroke is a list of [x, y] points in "
                     "the sketch's own 2D coordinates; repeat the first point at the "
                     "end to close one. Handy companions: catia_sketch_rectangle for "
-                    "a box, and catia_close_sketch reports the outline it built."
+                    "a box, and catia_close_sketch reports the outline it built. "
+                    "A profile that is straight in places and CURVED in others is "
+                    "not this tool: every segment here is a chord, so a curve comes "
+                    "out faceted - use catia_sketch_profile, which draws each "
+                    "element with the primitive for its own kind."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -801,6 +849,77 @@ class SketcherTools:
                         },
                     },
                     "required": ["strokes"],
+                },
+            },
+            {
+                "name": "catia_sketch_profile",
+                "description": (
+                    "Draw a MIXED profile in one call: straight runs and arcs, each "
+                    "element drawn with the primitive for its own kind. This answers "
+                    "the 2026-11-11 report's P0 'a profile cannot be straight on one "
+                    "side and curved on the other': both halves of that claim are "
+                    "true (catia_sketch_spline rounds the straight parts, "
+                    "catia_sketch_strokes leaves the curves faceted) and neither is "
+                    "the only route. MEASURED on B30 2026-11-12, a 60x40 stadium as "
+                    "two lines plus two r=20 half circles: catia_close_sketch "
+                    "answered '2 arc(s), 2 line(s), outline 245.664 mm' and the "
+                    "10 mm pad came out at 36566.37 mm3 - exactly 60*40*10 + "
+                    "pi*20^2*10. The reply reports every junction: a profile with a "
+                    "0.05 mm gap is caught here, with both coordinates named, before "
+                    "the pad is attempted. Segments are drawn in the order given and "
+                    "each 'arc' starts at start_angle (or p1) and ends at end_angle "
+                    "(or p2), so give them in the order the outline runs."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "segments": {
+                            "type": "array",
+                            "minItems": 1,
+                            "description": (
+                                "The outline, element by element. Each entry is "
+                                "{\"type\": \"line\", \"p1\": [x, y], \"p2\": [x, y]} "
+                                "or {\"type\": \"arc\", \"center\": [x, y], \"radius\": "
+                                "r, \"start_angle\": a, \"end_angle\": b, "
+                                "\"direction\": \"cw\"|\"ccw\", \"major\": false} - an "
+                                "arc may give p1/p2 instead of the two angles."
+                            ),
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "type": {"type": "string",
+                                             "enum": ["line", "arc"]},
+                                    "p1": {"type": "array",
+                                           "items": {"type": "number"},
+                                           "minItems": 2, "maxItems": 2},
+                                    "p2": {"type": "array",
+                                           "items": {"type": "number"},
+                                           "minItems": 2, "maxItems": 2},
+                                    "center": {"type": "array",
+                                               "items": {"type": "number"},
+                                               "minItems": 2, "maxItems": 2},
+                                    "radius": {"type": "number"},
+                                    "start_angle": {"type": "number"},
+                                    "end_angle": {"type": "number"},
+                                    "direction": {"type": "string",
+                                                  "enum": ["ccw", "cw"]},
+                                    "major": {"type": "boolean"},
+                                },
+                                "required": ["type"],
+                            },
+                        },
+                        "tolerance": {
+                            "type": "number",
+                            "default": 0.05,
+                            "description": (
+                                "A junction gap in mm above which the profile is "
+                                "reported as NOT CLOSED, with both coordinates. It "
+                                "does not change what is drawn - CATIA closes gaps of "
+                                "a few hundredths at update more often than not."
+                            ),
+                        },
+                    },
+                    "required": ["segments"],
                 },
             },
             {
@@ -968,6 +1087,10 @@ class SketcherTools:
             case "catia_sketch_strokes":
                 return self._draw_strokes(arguments["strokes"],
                                           bool(arguments.get("construction", False)))
+            case "catia_sketch_profile":
+                return self._draw_profile(
+                    arguments["segments"],
+                    float(arguments.get("tolerance", 0.05)))
             case "catia_text_strokes":
                 return self._draw_text(arguments)
             case _:
@@ -2751,6 +2874,173 @@ class SketcherTools:
             + ". A stroke that repeats its first point is closed; nothing was "
             "smoothed, so corners stay corners."
         )
+
+    def _draw_profile(self, segments: list[dict], tolerance: float = 0.05) -> str:
+        """Draw a MIXED profile - straight runs and arcs - in one call.
+
+        The gap this fills, from the 2026-11-11 eighth report §2.1: "a profile
+        that is straight on one side and curved on the other has no workable
+        combination", because ``catia_sketch_spline`` rounds the straight parts
+        and ``catia_sketch_strokes`` leaves the curved parts faceted. Both are
+        true, and neither is the only route: drawing each element with the
+        primitive for its own kind works, and the report did not try it.
+
+        MEASURED on B30 2026-11-12, a 60x40 stadium (two 60 mm lines and two
+        r=20 half circles, four elements): ``catia_close_sketch`` answered
+        "2 arc(s), 2 line(s) ... outline 245.664 mm", and the 10 mm pad came out
+        at **36566.37 mm3, which is 60*40*10 + pi*20^2*10 exactly** - one
+        command instead of four plus a close. A 0.05 mm gap at one junction is
+        caught here before the pad, with the two coordinates named.
+
+        Endpoints are taken from the arguments: a line's p1/p2, an arc's point
+        at start_angle/p1 and at end_angle/p2. If the short way round flips an
+        arc's sweep, ``catia_sketch_arc`` says so in its own reply and the
+        junction report here will show the mismatch - read them together.
+        """
+        self._ensure_sketch_open()
+        if not segments:
+            raise ArgumentRejected(
+                'catia_sketch_profile needs at least one segment, e.g. '
+                '{"segments": [{"type": "line", "p1": [0, 0], "p2": [60, 0]}]}. '
+                "Nothing was drawn.",
+                code="BAD_ARGUMENT", stage="validate",
+            )
+        if tolerance <= 0:
+            raise ArgumentOutOfRange(
+                "tolerance is a junction gap in mm and has to be positive; got "
+                f"{tolerance:g}. It decides what counts as 'joined', not what is "
+                "drawn.",
+                code="TOLERANCE_OUT_OF_RANGE", stage="validate")
+
+        # Plan before drawing: a bad third segment must not leave the first two
+        # in the sketch. Every endpoint this needs is arithmetic, so nothing has
+        # to be probed to validate.
+        plan = [self._plan_segment(index, raw)
+                for index, raw in enumerate(segments, start=1)]
+
+        for segment in plan:
+            if segment["kind"] == "line":
+                self._draw_line(*segment["p1"], *segment["p2"])
+            else:
+                self._draw_arc(
+                    segment["center"][0], segment["center"][1],
+                    segment["radius"],
+                    segment.get("start_angle"), segment.get("end_angle"),
+                    p1=segment.get("p1"), p2=segment.get("p2"),
+                    direction=segment["direction"],
+                    major=segment["major"],
+                )
+
+        junctions: list[str] = []
+        widest = 0.0
+        loose = 0
+        for index, segment in enumerate(plan):
+            following = plan[(index + 1) % len(plan)]
+            gap = _point_gap(segment["end"], following["start"])
+            widest = max(widest, gap)
+            if gap > tolerance:
+                loose += 1
+                # The two ends of the break: which segment ends here, and which
+                # one was supposed to start here. Naming the same segment twice
+                # (index % len + 1 on the second one) is how this read on the
+                # first run of the audit.
+                junctions.append(
+                    f"segment {index + 1} ends at {_fmt_point(segment['end'])} "
+                    f"but segment {(index + 1) % len(plan) + 1} starts at "
+                    f"{_fmt_point(following['start'])}, {gap:.4f} mm apart")
+
+        lines = sum(1 for segment in plan if segment["kind"] == "line")
+        arcs = len(plan) - lines
+        kinds = ", ".join(part for part in (
+            f"{lines} line(s)" if lines else "",
+            f"{arcs} arc(s)" if arcs else "") if part)
+        head = f"Profile drawn in one call: {len(plan)} segment(s) - {kinds}."
+        if loose:
+            head += (f" WARNING: NOT CLOSED - {loose} of {len(plan)} junction(s) "
+                     f"are wider than {tolerance:g} mm, widest {widest:.4f} mm: "
+                     + "; ".join(junctions)
+                     + ". CATIA closes gaps of a few hundredths of a millimetre "
+                     "at update more often than not, so try the pad before "
+                     "rebuilding anything - catia_close_sketch reports what the "
+                     "sketch actually holds.")
+        else:
+            head += (f" Every one of the {len(plan)} junction(s) meets within "
+                     f"{widest:.4f} mm, so it should close.")
+        return head + " NEXT: catia_close_sketch, then catia_pad."
+
+    def _plan_segment(self, number: int, raw: Any) -> dict[str, Any]:
+        """Validate one segment and work out both of its endpoints."""
+        if not isinstance(raw, dict):
+            raise ArgumentRejected(
+                f"Segment {number} must be an object with a 'type' of 'line' or "
+                f"'arc'; got {raw!r}. Nothing was drawn.",
+                code="BAD_ARGUMENT", stage="validate")
+        kind = str(raw.get("type") or "").lower()
+        if kind not in ("line", "arc"):
+            raise ArgumentRejected(
+                f"Segment {number} has type {raw.get('type')!r}; this tool draws "
+                "'line' and 'arc' segments. For a polyline use "
+                "catia_sketch_strokes, for a spline catia_sketch_spline. Nothing "
+                "was drawn.",
+                code="BAD_ARGUMENT", stage="validate")
+
+        if kind == "line":
+            p1 = _pair(raw.get("p1"), f"Segment {number} (line) needs p1 as [x, y]")
+            p2 = _pair(raw.get("p2"), f"Segment {number} (line) needs p2 as [x, y]")
+            if _point_gap(p1, p2) < 1e-9:
+                raise ArgumentRejected(
+                    f"Segment {number} is a line from {_fmt_point(p1)} to the "
+                    "same point - zero length. Nothing was drawn.",
+                    code="DEGENERATE_SEGMENT", stage="validate")
+            return {"kind": "line", "p1": p1, "p2": p2,
+                    "start": p1, "end": p2}
+
+        center = _pair(raw.get("center"), f"Segment {number} (arc) needs center as [x, y]")
+        try:
+            radius = float(raw.get("radius"))
+        except (TypeError, ValueError) as exc:
+            raise ArgumentRejected(
+                f"Segment {number} (arc) needs a numeric radius; got "
+                f"{raw.get('radius')!r}. Nothing was drawn.",
+                code="BAD_ARGUMENT", stage="validate") from exc
+        if radius <= 0:
+            raise ArgumentRejected(
+                f"Segment {number} (arc) has radius {radius:g}; it has to be "
+                "positive. Nothing was drawn.",
+                code="BAD_ARGUMENT", stage="validate")
+        direction = str(raw.get("direction") or "ccw").lower()
+        if direction not in ("cw", "ccw"):
+            raise ArgumentRejected(
+                f"Segment {number} (arc) has direction {raw.get('direction')!r}; "
+                "it is 'cw' or 'ccw' (catia_sketch_arc takes the same values). "
+                "Nothing was drawn.",
+                code="BAD_ARGUMENT", stage="validate")
+        start_angle = raw.get("start_angle")
+        end_angle = raw.get("end_angle")
+        p1 = raw.get("p1")
+        p2 = raw.get("p2")
+        if start_angle is not None and end_angle is not None:
+            first = _on_circle(center, radius, float(start_angle))
+            second = _on_circle(center, radius, float(end_angle))
+        elif p1 is not None and p2 is not None:
+            first = _pair(p1, f"Segment {number} (arc) needs p1 as [x, y]")
+            second = _pair(p2, f"Segment {number} (arc) needs p2 as [x, y]")
+            start_angle = end_angle = None
+        else:
+            raise ArgumentRejected(
+                f"Segment {number} (arc) needs either start_angle and end_angle "
+                "or p1 and p2. Nothing was drawn.",
+                code="BAD_ARGUMENT", stage="validate")
+        if _point_gap(first, second) < 1e-9:
+            raise ArgumentRejected(
+                f"Segment {number} (arc) starts and ends at {_fmt_point(first)} - "
+                "that is a full circle, not an arc; use catia_sketch_circle. "
+                "Nothing was drawn.",
+                code="DEGENERATE_SEGMENT", stage="validate")
+        return {"kind": "arc", "center": center, "radius": radius,
+                "start_angle": start_angle, "end_angle": end_angle,
+                "direction": direction, "major": bool(raw.get("major", False)),
+                "start": first, "end": second}
 
     def _draw_text(self, args: dict[str, Any]) -> str:
         """Text as strokes, from a font that is in the box rather than in CATIA.

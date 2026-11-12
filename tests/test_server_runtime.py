@@ -25,8 +25,9 @@ def test_registered_tools_and_schemas_are_unchanged():
     # 0.3.79 colour (colorize_assembly + set_color + get_color) = 130,
     # 0.3.84 gsd_plane_angle = 135; 0.3.94 split_solid = 136; 0.3.95 sketch_strokes = 137;
     # 0.3.98 surface_engrave = 138; 0.3.99 shape_audit = 139; 0.3.103
-    # text_strokes = 140; 0.3.106 curve_on_surface and sketch_ellipse = 142.
-    assert len(server._tool_router) == 142
+    # text_strokes = 140; 0.3.106 curve_on_surface and sketch_ellipse = 142;
+    # 0.3.108 sketch_profile = 143.
+    assert len(server._tool_router) == 143
     assert not any(name.startswith("catia_caa") for name in server._tool_router)
     for schema in server._schemas.values():
         Draft202012Validator.check_schema(schema)

@@ -474,6 +474,29 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
             "edge, 246 edges in 145 s, leaving one feature per edge that took."
         ),
     },
+    {
+        "member": "a sketch profile that is straight in places and curved in others",
+        "status": "AVAILABLE_WITH_LIMIT",
+        "detail": (
+            "This is ONE call - catia_sketch_profile - and the 2026-11-11 eighth "
+            "report listed it as a P0 gap because it had tried the two extremes: "
+            "catia_sketch_spline rounds the straight stretches (it interpolates "
+            "everywhere) and catia_sketch_strokes leaves the curved ones faceted "
+            "(every segment is a chord). Both are true. Drawing each element with "
+            "the primitive for its own kind was never tried, and it works: "
+            "MEASURED on B30 2026-11-12, a 60x40 stadium as two 60 mm lines and two "
+            "r=20 half circles gave catia_close_sketch the answer '2 arc(s), 2 "
+            "line(s), outline 245.664 mm', and the 10 mm pad came out at 36566.37 "
+            "mm3 - exactly 60*40*10 + pi*20^2*10. The limit is the junctions: each "
+            "segment's endpoints come from its own arguments, so they have to "
+            "agree to a hundredth of a millimetre or so. A 0.05 mm gap is caught "
+            "before the pad with both coordinates named; CATIA still builds it "
+            "sometimes, and the pad then reports UNVERIFIED rather than a volume. "
+            "An arc's sweep can also be flipped by the short-way-round rule, in "
+            "which case catia_sketch_arc says so in its own reply and the junction "
+            "report shows the mismatch - read the two together."
+        ),
+    },
 ]
 
 
