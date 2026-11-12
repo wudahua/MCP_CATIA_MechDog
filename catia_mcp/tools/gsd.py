@@ -2218,11 +2218,30 @@ class GSDTools:
                 # 警告, and a modal on this thread stops every later call, so the
                 # boxes are answered while the work runs and the count is reported.
                 with dialogs.watch() as boxes:
-                    reply = self._surface_engrave(arguments)
+                    # A BOX THAT APPEARED BEFORE THE CALL FAILED STILL HAPPENED.
+                    # The count used to be appended only on the success path, so
+                    # a call that answered a 警告 and then threw reported nothing
+                    # about the box - exactly the case where the caller most needs
+                    # to know the operation was interfered with.
+                    try:
+                        reply = self._surface_engrave(arguments)
+                    except Exception as error:                # noqa: BLE001
+                        if boxes.clicks:
+                            error.args = (str(error)
+                                          + _answered_boxes("", boxes.clicks),)
+                        raise
                 return _answered_boxes(reply, boxes.clicks)
             case "catia_curve_on_surface":
                 with dialogs.watch() as boxes:
-                    reply = self._curve_on_surface(arguments)
+                    # Same reason as the engrave case above: a box answered
+                    # before the failure is still a box that was answered.
+                    try:
+                        reply = self._curve_on_surface(arguments)
+                    except Exception as error:                # noqa: BLE001
+                        if boxes.clicks:
+                            error.args = (str(error)
+                                          + _answered_boxes("", boxes.clicks),)
+                        raise
                 return _answered_boxes(reply, boxes.clicks)
             case "catia_gsd_extrude":
                 return self._extrude(arguments)

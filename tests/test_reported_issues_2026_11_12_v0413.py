@@ -321,3 +321,31 @@ def test_the_engrave_note_names_both_causes_of_a_shortfall() -> None:
     assert "cannot tell them apart" in note
     assert "already gone" in note
     assert "does not follow the surface perfectly" not in note
+
+
+# ── §13b a box answered before the call FAILED is still a box ─────────────
+def test_a_box_answered_before_a_failure_reaches_the_error(monkeypatch) -> None:
+    """The count used to be appended only on the success path."""
+    import contextlib
+
+    from catia_mcp import dialogs as dialogs_module
+    from catia_mcp.tools.gsd import GSDTools
+
+    @contextlib.contextmanager
+    def one_box(**_kwargs):
+        answered = dialogs_module.Answered()
+        answered.clicks = 1
+        yield answered
+
+    monkeypatch.setattr("catia_mcp.tools.gsd.dialogs.watch", one_box)
+    tools = GSDTools(connection=None)
+
+    def boom(_args):
+        raise RuntimeError("the boolean refused")
+
+    tools._surface_engrave = boom                        # type: ignore[assignment]
+    with pytest.raises(RuntimeError) as caught:
+        tools.execute("catia_surface_engrave", {"curve": "X", "depth": 0.4})
+    said = str(caught.value)
+    assert "the boolean refused" in said
+    assert "DEGRADED" in said

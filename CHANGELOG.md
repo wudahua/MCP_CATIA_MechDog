@@ -69,9 +69,12 @@ a corner, not reported. Tried on B30: `CATIA` now reports one touch at
   own letter `A` crossbar cutting into the slot its two diagonals had already
   made. The note now names both causes and says the call cannot separate them.
 - **A message box now marks the result** `DEGRADED(result unverified)` and says
-  what to re-check (`catia_gsd_list_elements` for count and names). What the box
-  said genuinely cannot be read — it is another process's Win32 dialog — and
-  that is now a ceiling entry rather than a missing feature.
+  what to re-check (`catia_gsd_list_elements` for count and names). The marker is
+  also attached when the call FAILS after answering a box — it used to be
+  appended only on the success path, which is the case where a caller most needs
+  to know the operation was interfered with. What the box said genuinely cannot
+  be read — it is another process's Win32 dialog — and that is now a ceiling
+  entry rather than a missing feature.
 - **`catia_pocket` warns that `direction: "both"` makes TWO features**, which
   shifts any bookkeeping done by feature count.
 - A `frame` sketch's reply now says the datum plane and its three points **outlive
@@ -93,7 +96,7 @@ Also fixed: `_mm` writes `-0.000` as `0.000`, because the first run of this
 release's own audit compared `centred on (0.000, 0.000)` against
 `centred on (-0.000, 0.000)` and disagreed over a minus sign on zero.
 
-1783 tests, 143 tools, `scripts/b30_v0413_audit.py` 12/12.
+1784 tests, 143 tools, `scripts/b30_v0413_audit.py` 12/12.
 
 ## [0.3.112] — 2026-11-12 · the profile's endpoint form never reached the arc tool
 
