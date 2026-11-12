@@ -434,6 +434,46 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
             "catia_gsd_spline(closed=true) instead."
         ),
     },
+    {
+        "member": "AddNewSolidEdgeFilletWithConstantRadius on a whole FEATURE",
+        "status": "UNSUPPORTED_ON_B30",
+        "detail": (
+            "'Round every edge of this feature' does not exist through this call. "
+            "Passing a Reference to the last feature - which catia_fillet used to "
+            "do when edge_name was omitted, and called 'all edges of the last "
+            "feature' - fails AT CONSTRUCTION on every shape tried on B30 "
+            "2026-11-12: a 2-edge cylinder, a 12-edge rectangle, a 54-edge and a "
+            "246-edge polyline, all answering '方法 "
+            "AddNewSolidEdgeFilletWithConstantRadius 失败'. Four controlled cells "
+            "rule out the arguments: feature reference versus whole-body "
+            "reference, propagation 0 versus 1 - four failures, so neither the "
+            "reference kind nor the propagation is the reason. The failure also "
+            "arrives as a bare COM_ERROR that names no edge, which is what a "
+            "2026-11-11 report hit twice. catia_fillet therefore ENUMERATES the "
+            "body's edges and builds one feature per edge; see the next entry for "
+            "why even that cannot round every edge."
+        ),
+    },
+    {
+        "member": "rounding every edge of one solid at one radius",
+        "status": "AVAILABLE_WITH_LIMIT",
+        "detail": (
+            "Edges that share a vertex cannot all take a round in one pass, and "
+            "the radius is not the variable. Measured on B30 2026-11-12 on an "
+            "80x40x20 box, all 12 edges, five separate documents: R0.25 gave 4 "
+            "edges and removed 2.1460 mm3, R0.5 gave 4 and 8.5841, R1.0 gave 4 and "
+            "34.3363, R1.5 gave 4 and 77.2567, R3.0 gave 4 and 309.0266 - always "
+            "the same four 40 mm edges, and every removed volume is exactly 4 "
+            "edges' worth (4*40*(R^2 - pi*R^2/4)). The eight that refused are not "
+            "short: the shortest edge on the box is 20 mm and 2*R is 3 mm. What "
+            "the refusal is about is the material at a shared vertex, which is why "
+            "lowering the radius does not help and why catia_fillet's reply names "
+            "the edges that took and the edges that did not instead of promising "
+            "a number. On a 246-edge polyline, 44 edges took and 202 refused. "
+            "Cost of finding that out edge by edge, measured: about 0.59 s per "
+            "edge, 246 edges in 145 s, leaving one feature per edge that took."
+        ),
+    },
 ]
 
 

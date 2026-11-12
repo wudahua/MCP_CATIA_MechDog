@@ -20,6 +20,7 @@ something the measurement in front of it does not support.**
 from __future__ import annotations
 
 import inspect
+import re
 import types
 
 import pytest
@@ -277,9 +278,12 @@ def test_capability_ceilings_use_the_stated_vocabulary() -> None:
 
 
 def test_measured_ceilings_carry_a_date_and_the_unmeasured_do_not_claim_one() -> None:
+    # The rule is "a measured ceiling quotes the date it was measured", not
+    # "every ceiling was measured on 2026-11-10" - pinning that one date made
+    # the next measured entry fail for having a later one.
     for entry in _CAPABILITY_CEILINGS:
         if entry["status"] == "UNSUPPORTED_ON_B30":
-            assert "2026-11-10" in entry["detail"], entry["member"]
+            assert re.search(r"20\d\d-\d\d-\d\d", entry["detail"]), entry["member"]
         if entry["status"] == "DECLARED_NOT_MEASURED":
             assert "unknown" in entry["detail"].lower()
 

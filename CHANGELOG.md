@@ -2,6 +2,75 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.107] — 2026-11-12 · the all-edges fillet says which edges, because none of them worked
+
+The 2026-11-11 eighth report (§2.2) sent `catia_fillet(radius=1.5)` and `(0.5)`
+to a 129-face polyline part and got the same bare `COM_ERROR` twice - no edge, no
+length, no next step - while the one-at-a-time machinery that would have named
+them sat unused on the other branch.
+
+**The entry never worked, and it is gone.** Leaving `edge_name` out passed a
+Reference to the last feature into
+`AddNewSolidEdgeFilletWithConstantRadius` and called that "all edges of the last
+feature". Measured on B30 2026-11-12, that call fails AT CONSTRUCTION on every
+shape tried:
+
+| part | edges | whole-feature call |
+|---|---|---|
+| 20 mm cylinder | 2 | 方法 AddNewSolidEdgeFilletWithConstantRadius 失败 |
+| 80×40×20 rectangle | 12 | same |
+| polyline pad | 54 | same |
+| polyline pad | 246 | same |
+
+Four controlled cells rule out the arguments: feature reference versus whole
+body, propagation 0 versus 1 - four failures, so neither the reference kind nor
+the propagation was ever the reason. `catia_chamfer` has the same dead end,
+measured separately because `AddNewChamfer` is a different method (six
+arguments, mode 1 = length+angle): feature ref and body ref both fail on the
+cylinder and on the rectangle, and the volume does not move at all.
+
+**Both tools now enumerate the body's edges** and hand them to the batch path,
+which already rebuilds once, falls back to one at a time, and names every edge
+that took and every edge that did not. Measured end to end, one document per
+cell:
+
+| part | result | volume |
+|---|---|---|
+| cylinder, 2 edges | 2/2 | removed 210.9223 mm³ against 215.77 predicted |
+| rectangle, 12 edges | **4/12** | removed 77.2567 mm³ = exactly four 40 mm edges |
+| chamfer, 2 edges | 2/2 | removed 485.8997 mm³ against 502.65 predicted |
+| polyline, 54 edges | 12/54 in 15 s | 42 refusals named with length and faces |
+| polyline, 246 edges | over budget: one batch, then an honest stop | — |
+
+**4/12 is not a radius problem, which is worth knowing before trying smaller
+radii.** Five documents, same box, all 12 edges: R0.25 / 0.5 / 1.0 / 1.5 / 3.0
+each took the same four 40 mm edges and removed 2.1460 / 8.5841 / 34.3363 /
+77.2567 / 309.0266 mm³ - every one exactly `4*40*(R² - πR²/4)`. The eight that
+refused are not short: the shortest edge on the box is 20 mm and `2*R` is 3 mm.
+Edges that share a vertex fight over the same material, so a box cannot be
+rounded all round in one pass at any radius.
+
+**Reply size and time are bounded.** The retry costs about 0.59 s per edge -
+measured 54 edges in 15 s and 246 edges in 145 s, leaving 44 features - so
+`max_edges` (default 200, and on `catia_chamfer` too) decides whether that is
+paid; above it the batch runs once and the reply says which number it stopped
+at. Long lists are truncated: the first twelve edges that took and the first
+eight that refused are named, the rest counted. A 246-edge part used to produce
+twenty thousand characters of near-identical lines. (An earlier draft of the
+limit was 40, set from 6.4 s per edge - that figure came from re-running
+`catia_list_edges` before every edge, which is not what this path does.)
+
+Also from this round: the all-edges reply prints the shortest edge and how many
+are shorter than `2*R`, and two ceilings record the measurements - the
+whole-feature call as `UNSUPPORTED_ON_B30`, and "rounding every edge at one
+radius" as `AVAILABLE_WITH_LIMIT` with the five radii and their volumes.
+
+Not done, still open by name: the mixed straight/curved profile from §2.1 of the
+same report, the self-intersection pre-check, CJK glyphs, and the polyline
+improvement tools. The envelope test that pinned every `UNSUPPORTED_ON_B30`
+ceiling to one date (2026-11-10) now checks that a date is present, because
+pinning one date made the next measured entry fail for having a later one.
+
 ## [0.3.106] — 2026-11-12 · the outline goes on the face, because the primitive was there
 
 The 2026-11-11 report (seventh in the series) put it exactly: "0.3.105's README

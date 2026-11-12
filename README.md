@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.106** · [what changed](CHANGELOG.md) ·
+**0.3.107** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -202,6 +202,38 @@ fillet legitimately shortens an edge (measured: 17.6112 → 9.8429 mm while the
 bounding faces stayed the same). The listing also filters (`min_length`,
 `max_length`, `faces`) and pages (`offset`, `limit`), and `include_nls: false`
 keeps the reply small.
+
+### Rounding every edge: the feature reference never built
+
+Omitting `edge_name` used to pass a Reference to the last feature into
+`AddNewSolidEdgeFilletWithConstantRadius` and call that "all edges of the last
+feature". Measured on B30, that call fails **at construction** on a 2-edge
+cylinder, a 12-edge rectangle, a 54-edge polyline and a 246-edge polyline — and
+the failure arrives as a bare `COM_ERROR` naming no edge, which is what a
+2026-11-11 report hit twice. Four controlled cells rule out the arguments:
+feature reference versus whole body, propagation 0 versus 1, four failures.
+`AddNewChamfer` behaves the same, measured separately because it is a different
+method.
+
+Both tools now **enumerate the body's edges** and build one feature per edge, so
+the reply can name what took and what did not:
+
+```text
+Every edge of '零件几何体' (12 edge(s)): …
+Fillet R1.5: 4/12 edge(s) done (Edge.1 …, Edge.2 …) [applied Edge.1@R1.5, …].
+Rejected: Edge.3 (L80.0000|Sketch.1;3|Pad.1;2) -> rebuild failed: …
+```
+
+**Four out of twelve is not a radius problem**, and this is the number worth
+knowing before trying smaller radii: on an 80×40×20 box at all 12 edges,
+R0.25 / 0.5 / 1.0 / 1.5 / 3.0 each took the *same four* 40 mm edges and removed
+2.1460 / 8.5841 / 34.3363 / 77.2567 / 309.0266 mm³ — every one exactly
+`4·40·(R² − πR²/4)`. The eight that refused are not short (the shortest edge is
+20 mm, and `2·R` is 3 mm); edges that share a vertex fight over the same
+material. A retry costs a rebuild and a feature per edge — about 0.59 s each,
+246 edges in 145 s — so `max_edges` (default 200) bounds it, and above that the
+batch runs once and the reply says which number it stopped at.
+
 
 Two related defaults: `propagation` defaults to `none`, so one picked edge is one
 fillet instead of its whole tangent chain, and a batch whose rebuild fails is

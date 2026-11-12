@@ -412,12 +412,17 @@ class PartDesignTools:
             {
                 "name": "catia_fillet",
                 "description": (
-                    "Add a fillet (rounded edge) to one or more edges of the current solid. "
-                    "Specify the radius and the edge names or feature to fillet. "
+                    "Add a fillet (rounded edge) to one or more edges of the current "
+                    "solid. Specify the radius and the edge names or feature to fillet. "
                     "Pass 'edge_names' to fillet several edges in one call: each edge "
                     "becomes its own feature, and if the single batch rebuild fails "
                     "they are retried one at a time - the reply reports which ones "
-                    "took and why the others did not. Prefer the 'fingerprint' from "
+                    "took and why the others did not. Omit every edge argument to "
+                    "round ALL edges of the body: the tool enumerates them (CATIA's "
+                    "whole-feature fillet call does not build on B30 - measured on a "
+                    "2-edge cylinder, a 12-edge rectangle and two polylines), builds "
+                    "one feature per edge, and stops retrying above max_edges. "
+                    "Prefer the 'fingerprint' from "
                     "catia_list_edges ('L17.6112|Pad.6;2|Sketch.7;2') over 'Edge.N': "
                     "the index is renumbered by every feature, the fingerprint is "
                     "re-resolved when the call runs. When the source data gives "
@@ -440,7 +445,9 @@ class PartDesignTools:
                             "description": (
                                 "'Edge.N' or a fingerprint from catia_list_edges, or "
                                 "{\"length_mm\": 17.6112, \"faces\": [\"Pad.6;2\"]}. "
-                                "Omit to fillet all edges of the last feature."
+                                "Omit together with edge_names/edge_anchors to round "
+                                "EVERY edge of the body: the tool enumerates them "
+                                "and builds one feature per edge (see max_edges)."
                             ),
                         },
                         "edge_names": {
@@ -464,6 +471,20 @@ class PartDesignTools:
                             "enum": ["tangency", "none"],
                             "default": "none",
                         },
+                        "max_edges": {
+                            "type": "integer",
+                            "default": 200,
+                            "description": (
+                                "Only used when edge_name/edge_names/edge_anchors "
+                                "are all omitted. The tool then rounds EVERY edge "
+                                "of the body and, up to this many edges, retries "
+                                "each one on its own when the single batch rebuild "
+                                "fails. Above it only the batch is attempted and "
+                                "the reply says so: a retry is a separate rebuild "
+                                "and a separate feature (measured: about 0.59 s per "
+                                "edge - 246 edges take 145 s and leave 44 features)."
+                            ),
+                        },
                         **_EDGE_ANCHOR_PROPERTIES,
                     },
                     "required": ["radius"],
@@ -471,7 +492,15 @@ class PartDesignTools:
             },
             {
                 "name": "catia_chamfer",
-                "description": "Add a chamfer (beveled edge) to an edge of the current solid.",
+                "description": (
+                    "Add a chamfer (beveled edge) to one or more edges of the "
+                    "current solid. Omit every edge argument to bevel ALL edges of "
+                    "the body: the tool enumerates them, builds one feature per "
+                    "edge and stops retrying above max_edges, because CATIA's "
+                    "whole-feature chamfer call does not build on B30 (measured: "
+                    "a feature reference and a body reference both fail at "
+                    "construction on a 2-edge cylinder and a 12-edge rectangle)."
+                ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -486,12 +515,28 @@ class PartDesignTools:
                         },
                         "edge_name": {
                             "anyOf": [{"type": "string"}, {"type": "object"}],
-                            "description": "Edge to chamfer: 'Edge.N' or a fingerprint from catia_list_edges. Omit to chamfer all edges of the last feature.",
+                            "description": (
+                                "Edge to chamfer: 'Edge.N' or a fingerprint from "
+                                "catia_list_edges. Omit together with edge_names/"
+                                "edge_anchors to bevel EVERY edge of the body - the "
+                                "tool enumerates them and builds one feature per "
+                                "edge (see max_edges)."
+                            ),
                         },
                         "edge_names": {
                             "type": "array",
                             "items": {"anyOf": [{"type": "string"}, {"type": "object"}]},
                             "description": "Several edges at once, e.g. ['Edge.3','Edge.9'] or a list of fingerprints. Takes precedence over edge_name.",
+                        },
+                        "max_edges": {
+                            "type": "integer",
+                            "default": 200,
+                            "description": (
+                                "Only used when every edge argument is omitted. "
+                                "Up to this many edges each one is retried on its "
+                                "own when the batch rebuild fails; above it only "
+                                "the batch is attempted and the reply says so."
+                            ),
                         },
                         **_EDGE_ANCHOR_PROPERTIES,
                     },
@@ -2894,8 +2939,105 @@ class PartDesignTools:
             return self._fillet_many(args["radius"], list(names),
                                      self._propagation(args))
         target = args.get("edge_name")
+        if target is None:
+            return self._fillet_all_edges(args["radius"],
+                                          self._propagation(args),
+                                          self._edge_budget(args))
         return self._fillet_one(args["radius"], target,
                                 self._propagation(args))
+
+    #: Above this many edges the all-edges path stops after ONE batch attempt.
+    #: Measured on B30 2026-11-12, with the batch path's single resolve: the
+    #: one-at-a-time retry costs about 0.59 s per edge - 54 edges took 15 s and
+    #: 246 edges took 145 s (44 of them built). 200 edges is therefore about two
+    #: minutes of work, which a call survives; the real cost above it is the
+    #: FEATURES, one per edge that takes, so a 246-edge outline leaves 44 of them
+    #: in the tree. (An earlier limit of 40 was set from 6.4 s per edge, which
+    #: was measured by re-running catia_list_edges before every edge - that pays
+    #: for 54 SPA length measurements each time and is not what this path does.)
+    _ALL_EDGES_RETRY_LIMIT = 200
+
+    def _edge_budget(self, args: dict[str, Any]) -> int:
+        raw = args.get("max_edges")
+        if raw is None:
+            return self._ALL_EDGES_RETRY_LIMIT
+        try:
+            value = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise ArgumentRejected(
+                f"max_edges must be a whole number of edges; got {raw!r}.") from exc
+        if value < 1:
+            raise ArgumentOutOfRange(
+                "max_edges must be at least 1. It bounds how many edges the "
+                f"all-edges path retries one at a time; got {value}.",
+                code="MAX_EDGES_OUT_OF_RANGE", stage="validate")
+        return value
+
+    def _fillet_all_edges(self, radius: float, propagation: int,
+                          limit: int) -> str:
+        """Fillet every edge of the body by ENUMERATING them.
+
+        WHAT THE OLD PATH DID, measured on B30 2026-11-12. Leaving ``edge_name``
+        out passed a Reference to the last feature into
+        ``AddNewSolidEdgeFilletWithConstantRadius`` and called that "all edges
+        of the last feature". That call fails AT CONSTRUCTION on every shape
+        tried - a 2-edge cylinder, a 12-edge rectangle, a 54-edge and a 246-edge
+        polyline - with "方法 AddNewSolidEdgeFilletWithConstantRadius 失败".
+        Changing the reference (feature ref / whole body) and the propagation
+        (0 / 1) gave four cells and four failures, so the parameter was never
+        the reason and the entry never worked. Its failure also escaped as a
+        bare COM_ERROR that named no edge, which is what the 2026-11-11
+        report hit twice.
+
+        So: enumerate the body's edges and hand them to the batch path, which
+        already rebuilds once, falls back to one-at-a-time, and names every edge
+        that took and every edge that did not. Above ``limit`` edges only the
+        single batch attempt runs - the measured cost of the rest is in
+        ``_ALL_EDGES_RETRY_LIMIT``.
+        """
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        body = self._prepare_body(part)
+
+        table = self._edge_table(body)
+        if not table:
+            raise PreconditionRejected(
+                "The active body has no edges to fillet yet. Build the solid "
+                "first - a sketch alone has no edges to round.")
+        total = len(table)
+        specs = [{"index": entry["index"],
+                  "faces": list(entry["bounded_by"]),
+                  "length_mm": entry["length"]}
+                 for entry in table]
+        sequential = total <= limit
+
+        reply = self._fillet_many(radius, specs, propagation,
+                                  sequential_retry=sequential)
+        head = (f"Every edge of '{body.Name}' ({total} edge(s)): enumerated "
+                "rather than taken from the feature, because CATIA's "
+                "whole-feature fillet call does not build on B30 (measured: "
+                "2-edge cylinder, 12-edge rectangle and two polylines all fail "
+                "at construction, whatever the propagation). ")
+        if not sequential:
+            lengths = sorted(entry["length"] for entry in table
+                             if entry["length"] is not None)
+            too_short = [value for value in lengths if value < 2 * radius]
+            head += (
+                f"This is more than max_edges={limit}, so ONE batch attempt was "
+                "made and the edges were NOT retried one at a time: each retry "
+                "is a separate rebuild and a separate feature (measured: about "
+                "0.59 s per edge, so 246 edges are 145 s and leave 44 features). ")
+            if lengths:
+                head += (f"Shortest edge {lengths[0]:.4f} mm, longest "
+                         f"{lengths[-1]:.4f} mm; {len(too_short)} of "
+                         f"{len(lengths)} are shorter than 2*R = {2 * radius:g} "
+                         "mm, which no fillet of this radius can take. ")
+            head += ("NEXT: choose the edges yourself and send a bounded batch - "
+                     "catia_list_edges shows length and bounding faces, and "
+                     "catia_fillet(edge_names=[...]) retries each one on its "
+                     "own and names what failed. Raise max_edges only if you "
+                     "accept the time.")
+        return head + reply
 
     @staticmethod
     def _anchor_args(args: dict[str, Any]) -> tuple[list[list[float]], float]:
@@ -2984,7 +3126,8 @@ class PartDesignTools:
         return 1 if args.get("propagation") == "tangency" else 0
 
     def _fillet_many(self, radius: float, specs: list[Any],
-                     propagation: int = 0) -> str:
+                     propagation: int = 0,
+                     sequential_retry: bool = True) -> str:
         """One feature per edge, built as a batch and rebuilt once.
 
         Two measured facts drive the shape of this method.
@@ -3022,7 +3165,8 @@ class PartDesignTools:
         try:
             return self._apply_fillets(
                 radius, names, refs, add, part=part,
-                resolve=lambda: self._resolve_edge_specs(body, specs))
+                resolve=lambda: self._resolve_edge_specs(body, specs),
+                sequential_retry=sequential_retry)
         finally:
             self._clear_selection()
             self.conn.refresh_display()
@@ -3030,7 +3174,8 @@ class PartDesignTools:
     def _apply_fillets(self, radius: float, names: list[str], refs: list[Any],
                        add: Any = None, part: Any = None,
                        label: str = "Fillet R",
-                       resolve: Any = None) -> str:
+                       resolve: Any = None,
+                       sequential_retry: bool = True) -> str:
         """Create one fillet per (name, ref), then rebuild once.
 
         ``add`` is injectable for tests; it may return the new feature (in which
@@ -3038,6 +3183,11 @@ class PartDesignTools:
         edge references from scratch and is what makes the sequential retry
         possible: deleting the batch rebuilds the topology, so the references
         that were resolved for it are dead by the time the retry needs them.
+
+        ``sequential_retry=False`` stops after the single batch attempt and
+        reports why: the retry costs one rebuild per edge (measured about 6 s
+        each), so the all-edges path only pays it when the caller bounded the
+        edge count.
         """
         done, failed, created = [], [], []
         for name, ref in zip(names, refs):
@@ -3066,6 +3216,15 @@ class PartDesignTools:
             # optimisation.
             self._remove_created(created)
             done, failed, created = [], [], []
+            if not sequential_retry:
+                head = (f"{shown}: 0/{len(names)} edge(s) done. The single batch "
+                        f"rebuild failed ({rebuild_error}) and the features it "
+                        "created were removed again, so the body is unchanged. "
+                        f"The {len(names)} edges were NOT retried one at a time: "
+                        "each retry is a separate rebuild and a separate feature "
+                        "(measured: about 0.59 s per edge), and this call was "
+                        "given more edges than it will spend that on.")
+                return head
             fresh_names, fresh_refs = (resolve() if resolve is not None
                                        else (names, refs))
             for name, ref in zip(fresh_names, fresh_refs):
@@ -3091,7 +3250,11 @@ class PartDesignTools:
             head = (f"{shown}: {len(done)}/{len(names)} edge(s) done after a "
                     f"one-at-a-time retry (the batch rebuild failed: {rebuild_error})")
         if done:
-            head += f" ({', '.join(done)})"
+            # A 246-edge outline can take 44 of them: listing every name turned
+            # the reply into twenty thousand characters, so the first twelve are
+            # named and the rest are counted.
+            head += f" ({', '.join(done[:12])}"
+            head += (f" ... and {len(done) - 12} more)" if len(done) > 12 else ")")
             # Which radius each edge got, spelled out: the same edge can be sent
             # again in a later call with a different radius, and the reply used to
             # name the edges without saying what was applied to them (reported
@@ -3100,10 +3263,16 @@ class PartDesignTools:
                 stamp = f"{float(radius):g}"
             except (TypeError, ValueError):
                 stamp = str(radius)
-            short = [str(name).split(" ")[0] for name in done]
+            short = [str(name).split(" ")[0] for name in done[:12]]
             head += " [applied " + ", ".join(f"{n}@R{stamp}" for n in short) + "]"
         if failed:
-            head += ". Rejected: " + "; ".join(f"{n} -> {m}" for n, m in failed)
+            head += ". Rejected: " + "; ".join(
+                f"{n} -> {m}" for n, m in failed[:8])
+            if len(failed) > 8:
+                # The count is the information; 202 near-identical lines are not.
+                head += (f"; and {len(failed) - 8} more edge(s) refused the same "
+                         "way - catia_list_edges lists them all with length and "
+                         "bounding faces")
             head += self._rejection_reason([n for n, _ in failed])
             hint = self._coplanar_hint([n for n, _ in failed])
             if hint:
@@ -3188,19 +3357,23 @@ class PartDesignTools:
 
     def _fillet_one(self, radius: float, edge_name: Any,
                     propagation: int = 0) -> str:
+        if not edge_name:
+            # Reached only if a caller bypasses _fillet. The whole-feature
+            # Reference this branch used to build never worked (see
+            # _fillet_all_edges for the four measured cells), so it is gone
+            # rather than kept as a dead end. Checked before touching CATIA,
+            # so the refusal costs nothing and leaves nothing behind.
+            raise ArgumentRejected(
+                "catia_fillet needs edge_name, edge_names or edge_anchors. To "
+                "round every edge of the body, omit all three and the tool "
+                "enumerates them itself.")
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
         body = self._prepare_body(part)
         sf = part.ShapeFactory
 
-        if edge_name:
-            labels, refs = self._resolve_edge_specs(body, [edge_name])
-            target, scope = refs[0], labels[0]
-        else:
-            # Whole-feature fallback: a Reference to the feature fillets its
-            # edges with tangency propagation.
-            target = part.CreateReferenceFromObject(self._get_last_shape())
-            scope = "all edges of the last feature"
+        labels, refs = self._resolve_edge_specs(body, [edge_name])
+        target, scope = refs[0], labels[0]
 
         fillet = sf.AddNewSolidEdgeFilletWithConstantRadius(
             target,
@@ -3278,10 +3451,61 @@ class PartDesignTools:
         if isinstance(names, str):
             names = [names]
         if len(names) > 1 or (names and not args.get("edge_name")):
-            return self._chamfer_many(args["length"], args.get("angle", 45), list(names))
-        return self._chamfer_one(args["length"], args.get("angle", 45), args.get("edge_name"))
+            return self._chamfer_many(args["length"], args.get("angle", 45),
+                                      list(names))
+        if args.get("edge_name") is None:
+            return self._chamfer_all_edges(
+                args["length"], args.get("angle", 45), self._edge_budget(args))
+        return self._chamfer_one(args["length"], args.get("angle", 45),
+                                 args.get("edge_name"))
 
-    def _chamfer_many(self, length: float, angle: float, specs: list[Any]) -> str:
+    def _chamfer_all_edges(self, length: float, angle: float,
+                           limit: int) -> str:
+        """Chamfer every edge of the body by enumerating them.
+
+        The same dead end as the fillet, measured separately on B30 2026-11-12
+        because AddNewChamfer is a different method with a different signature
+        (six arguments, mode 1 = length+angle): a Reference to the last feature,
+        and a Reference to the whole body, both fail AT CONSTRUCTION with
+        "方法 AddNewChamfer 失败" - on a 2-edge cylinder and on a 12-edge
+        rectangle, while the volume backs it up by not moving at all. So the
+        edges are enumerated and handed to the batch path.
+        """
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        body = self._prepare_body(part)
+
+        table = self._edge_table(body)
+        if not table:
+            raise PreconditionRejected(
+                "The active body has no edges to chamfer yet. Build the solid "
+                "first - a sketch alone has no edges to bevel.")
+        total = len(table)
+        specs = [{"index": entry["index"],
+                  "faces": list(entry["bounded_by"]),
+                  "length_mm": entry["length"]}
+                 for entry in table]
+        sequential = total <= limit
+
+        reply = self._chamfer_many(length, angle, specs,
+                                   sequential_retry=sequential)
+        head = (f"Every edge of '{body.Name}' ({total} edge(s)): enumerated "
+                "rather than taken from the feature, because CATIA's "
+                "whole-feature chamfer call does not build on B30 (measured: "
+                "feature reference and body reference both fail at construction "
+                "on a 2-edge cylinder and a 12-edge rectangle). ")
+        if not sequential:
+            head += (
+                f"This is more than max_edges={limit}, so ONE batch attempt was "
+                "made and the edges were NOT retried one at a time: each retry "
+                "is a separate rebuild and a separate feature (measured for the "
+                "same machinery on fillets: about 0.59 s per edge). ")
+            head += ("NEXT: choose the edges yourself and send a bounded batch - "
+                     "catia_list_edges shows length and bounding faces.")
+        return head + reply
+
+    def _chamfer_many(self, length: float, angle: float, specs: list[Any],
+                      sequential_retry: bool = True) -> str:
         """Same batching rule as ``_fillet_many``: resolve all, build all, rebuild once."""
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
@@ -3303,7 +3527,8 @@ class PartDesignTools:
         try:
             return self._apply_fillets(length, names, refs, add, part=part,
                                        label="Chamfer",
-                                       resolve=lambda: self._resolve_edge_specs(body, specs))
+                                       resolve=lambda: self._resolve_edge_specs(body, specs),
+                                       sequential_retry=sequential_retry)
         finally:
             self._clear_selection()
             self.conn.refresh_display()
@@ -3324,17 +3549,20 @@ class PartDesignTools:
             pass
 
     def _chamfer_one(self, length: float, angle: float, edge_name: Any) -> str:
+        if not edge_name:
+            # Same dead end as the fillet: the whole-feature Reference never
+            # built (see _chamfer_all_edges). Checked before touching CATIA.
+            raise ArgumentRejected(
+                "catia_chamfer needs edge_name, edge_names or edge_anchors. To "
+                "bevel every edge of the body, omit all three and the tool "
+                "enumerates them itself.")
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
         body = self._prepare_body(part)
         sf = part.ShapeFactory
 
-        if edge_name:
-            labels, refs = self._resolve_edge_specs(body, [edge_name])
-            target, scope = refs[0], labels[0]
-        else:
-            target = part.CreateReferenceFromObject(self._get_last_shape())
-            scope = "all edges of the last feature"
+        labels, refs = self._resolve_edge_specs(body, [edge_name])
+        target, scope = refs[0], labels[0]
 
         # AddNewChamfer(iObjectToChamfer, iPropagation, iMode, iOrientation,
         #               iLength1, iLength2OrAngle) - 6 parameters.
