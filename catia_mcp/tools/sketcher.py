@@ -13,6 +13,7 @@ from typing import Any, Sequence
 from catia_mcp.connection import CATIAConnection
 from catia_mcp.fonts import supported as font_charset
 from catia_mcp.fonts import text_to_strokes
+from catia_mcp.geometry2d import crossings, describe, segments_of
 from catia_mcp.results import ArgumentRejected, ArgumentOutOfRange, CodedError
 
 
@@ -2630,6 +2631,38 @@ class SketcherTools:
                 1 for gap in gaps if gap <= self._NEAR_TOL)
         return report
 
+    def _self_crossing_report(self, sketch_name: str | None = None
+                              ) -> tuple[str, list[dict[str, Any]], bool]:
+        """Does the outline cross itself? Answered from the drawing record.
+
+        The 2026-11-11 eighth report wrote a segment-intersection test in
+        Python before daring to feed a 100-point outline to ``catia_pad``,
+        because nothing in the toolchain warned when v2's hook curled into a
+        loop - it surfaced as "the shape looks wrong", then as a feature that
+        would not build. ``_loop_warning`` already catches several OVERLAPPING
+        CLOSED LOOPS by bounding box; this is the general case, computed on the
+        same record, so it also sees a polyline that doubles back through itself.
+
+        The third value is ``checked``. It is False whenever the record is empty
+        - a sketch reopened from disk, or one filled by something else - and the
+        reply must not turn that into "no crossings found": the points CATIA
+        holds cannot be read back on this build, so there is nothing to check.
+        """
+        if sketch_name is None:
+            try:
+                sketch_name = str(self._active_sketch.Name)
+            except Exception:  # noqa: BLE001 - no sketch in hand
+                sketch_name = None
+        drawn = (self._drawn.get(self._sketch_key(sketch_name), [])
+                 if sketch_name else [])
+        if not drawn:
+            return "", [], False
+        segments = segments_of(drawn)
+        if not segments:
+            return "", [], False
+        found = crossings(segments)
+        return describe(found, len(segments)), found, True
+
     def _profile_warning(self) -> str:
         """Name every breakpoint that will make pad/pocket fail.
 
@@ -2748,13 +2781,15 @@ class SketcherTools:
         breaks = self._profile_breaks()
         warning = self._profile_warning()
         loops = self._loop_warning(name)
+        crossing_text, crossing_data, crossing_checked = (
+            self._self_crossing_report(name))
         drawn = self._drawn.get(self._sketch_key(name), [])
         self._profile_ends = []
         self._profile_closed_curves = 0
         message = (
             f"Sketch '{name}' closed. You can now apply Part Design features "
             "(pad, pocket, user pattern on its points, etc.)."
-            + summary + warning + loops
+            + summary + warning + loops + crossing_text
         )
         if not structured:
             return message
@@ -2772,6 +2807,11 @@ class SketcherTools:
                 "breaks": breaks,
                 "loops_warning": loops.strip() or None,
                 "elements_drawn": len(drawn),
+                # Checked from the drawing record, so only this session's
+                # elements are covered - `checked` says which case this is
+                # instead of letting an empty list read as "no crossings".
+                "self_intersection_checked": crossing_checked,
+                "self_intersections": crossing_data,
             },
             modified=bool(drawn),
         )

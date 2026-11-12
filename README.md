@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.108** · [what changed](CHANGELOG.md) ·
+**0.3.109** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1341,6 +1341,17 @@ sketch can be re-created after a rollback (the record said `base`, the resolver
 read `type`), `pocket(direction='normal')` flips like `pad` instead of failing,
 hiding a geometrical set reaches a set inside it, and a part that cannot be
 saved is closed again rather than left pathless.
+
+**0.3.109: the outline's self-crossings, at close time.** `catia_close_sketch`
+now reports where the profile crosses itself, computed from the same drawing
+record it uses for the outline echo and the break list —
+`data.self_intersections`, plus `data.self_intersection_checked` so an empty list
+cannot pass for a clean bill of health. Measured on B30, one document per cell: a
+four-segment figure-eight answered "THE OUTLINE CROSSES ITSELF in 1 place(s):
+'line #1' crosses 'line #3' at (5.0000, 5.0000)" and its pad then reported
+UNVERIFIED rather than a volume; the 0.3.108 stadium answered "does not cross
+itself (4 segment(s) checked)". Elements are numbered in the order they were
+drawn, because that is the only handle a closed sketch gives back.
 
 **0.3.76: the full gap list, as data.** `catia_close_sketch` takes an optional
 `structured=true` and answers `data.breaks[]` — every loose endpoint pair with

@@ -2,6 +2,60 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.109] — 2026-11-12 · the outline says where it crosses itself
+
+The 2026-11-11 eighth report (§3) wrote its own O(n²) segment-intersection test in
+Python before daring to feed a 100-point outline to `catia_pad`, because a hook
+that curled into a loop showed up as "the shape looks wrong" and then as a
+feature that would not build - never as a warning. `_loop_warning` caught several
+OVERLAPPING CLOSED LOOPS by bounding box; nothing caught a chain crossing itself.
+
+**`catia_close_sketch` now reports it**, from the same drawing record it already
+uses for the outline echo and the break list. Measured on B30, one document per
+cell:
+
+| drawn | close_sketch answered |
+|---|---|
+| four-segment figure-eight | `WARNING: THE OUTLINE CROSSES ITSELF in 1 place(s): 'line #1' crosses 'line #3' at (5.0000, 5.0000)` |
+| the 0.3.108 stadium | `does not cross itself (4 segment(s) checked, from the elements this session drew)` |
+
+The pad that followed the figure-eight reported **UNVERIFIED** rather than a
+volume, which is the honest answer: CATIA either refuses a self-crossing profile
+or builds one lobe of it.
+
+The check is a pure function in `catia_mcp/geometry2d.py` - a line and a circular
+arc are the only primitives, everything else is decomposed into them (a rectangle
+into four lines, a spline into its point chain, an ellipse into a 48-gon). Two
+segments that SHARE AN ENDPOINT are not a crossing, that is what a closed outline
+is; a T junction - one segment ending on another's middle - is kept, because that
+is a real defect. Concentric and collinear overlaps are NOT reported: telling them
+apart needs interval arithmetic on both curves, and a wrong line is worse than a
+missing one.
+
+**What it cannot see, said in the reply itself:** a sketch not drawn in this
+session has no record, and the coordinates CATIA holds cannot be read back. So the
+structured reply carries `self_intersection_checked`, and the sentence says
+"from the elements this session drew" - an empty crossing list never means "clean"
+unless that flag is true.
+
+### The two remaining items from that report are not done, and why
+
+- **Polyline-to-spline fitting (§3, P2).** 0.3.108's `catia_sketch_profile` draws
+  the curved stretches as arcs already, which preserves the straight ones by
+  construction. A spline fitted through the same points interpolates everywhere -
+  measured 2026-10-25: a six-point outline padded **+29.3 % in volume** against
+  +0.48 % for the same points joined with lines. Trading a heavy tree for a wrong
+  shape is not a fix.
+- **Selecting edges by geometry (§3, P3).** `catia_list_edges` has had
+  `min_length`, `max_length` and `faces` plus paging since before that report -
+  `min_length` is one of the three the report asked for. And since 0.3.107 the
+  all-edges path names every edge it took, so picking 129 edges one at a time is
+  no longer the only route. What is genuinely missing is `convex_only`, which
+  needs a dihedral angle per edge: 129 edges x 2 face measurements, for a filter
+  the all-edges path has made unnecessary.
+
+143 tools, 1738 tests, `scripts/b30_v0409_audit.py` 7/7.
+
 ## [0.3.108] — 2026-11-12 · the mixed profile was never missing, it was unwrapped
 
 The 2026-11-11 eighth report put this first (§2.1): "a profile that is straight
