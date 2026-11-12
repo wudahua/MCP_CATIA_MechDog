@@ -2,6 +2,66 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.115] — 2026-11-13 · the picture went empty, and the body was never the thing that was hidden
+
+Two more items from the same three reports, both settled by pictures rather than by
+prose.
+
+### Hiding construction elements takes the solid with them — reproduced, and now recoverable
+
+The 2026-11-12 report (P0-2) listed four sequences and two of them ended in an empty
+viewport. Measured on B30 2026-11-13, one frame at a time, on a 2-section solid loft
+whose circles live in `GSD_Set` (`scripts/b30_v0417_visibility_fix.py`):
+
+| frame | call | viewport |
+|---|---|---|
+| 1 | built | solid on screen, **53 978 B** |
+| 2 | `set_visibility(name='GSD_Set', show=false)` | **still on screen**, unchanged |
+| 3 | `set_visibility(name='GSD_Set', show=true)` | same picture |
+| 4 | `set_visibility(kind='construction', show=false)` | **EMPTY — 61 008 B** |
+| 5 | `set_visibility(kind='construction', show=true)` | back, **53 978 B** |
+
+So the report's first suspicion was wrong and its second was right: hiding a
+geometrical SET leaves a body solid alone, while `kind='construction'` takes it off
+screen — a loft's section curves *are* construction elements, and CATIA stops
+displaying a feature whose input is hidden. `clean=true` is innocent: measured on
+the same solid, 58 522 B clean against 58 896 B plain, both with the solid.
+
+The reply now says this, with those numbers, when a kind is hidden. And the second
+half of the report — *"set_visibility(零件几何体, show=true) 这次没能救回来"* — was
+true, for a reason worth fixing: the body node had never been hidden, its FEATURE
+had. **Showing a body now shows the features inside it**, so the recovery the report
+tried first works: measured on the same document, empty frame → `show=true` on
+`零件几何体` → the solid back on screen (`and 1 element(s) inside it`).
+
+### Two mirrored chamfers: six cells, all of them succeeded
+
+The 2026-11-13 report (P0) measured 3 of 3: two symmetric top edges 8 mm apart,
+chamfer at 70°, the first builds and the second always answers `UpdateObject failed`
+— in either order, and as one call with both anchors. Not reproduced on B30
+2026-11-13 (`scripts/b30_v0417_paired_chamfer.py`): a 40×10×30 block, two mirrored
+10 mm top edges, chamfer 2 mm, A-then-B and B-then-A, at 45° **and** at the
+report's 70°, plus both anchors in one call — six cells, 12 000 → 11 980 → 11 960 mm³
+at 45° (each chamfer removing the analytic 20 mm³). So "a pair of chamfers" is not
+the trigger; which part of that geometry is remains UNKNOWN and is written that way
+in the ceilings, with the numbers a re-run has to hit.
+
+### Also in this release
+
+* `crossings()` and the ceilings now carry the visibility facts above, both with the
+  frames they came from, so the next caller who blanks a viewport does not start by
+  deleting their model.
+* the ceiling for "a trim-by-plane tool" keeps its measurement (20 352.95 mm³
+  against a hand calculation of 20 353.0) next to the sentence that says
+  `catia_split_solid` was always able to do it.
+
+NOT DONE, unchanged from 0.3.114: control-point B-splines, sheet metal, per-stroke
+engrave cleanup, `catia_fillet(edge_chain=[...])`, a `close_sketch` "these are
+engraving strokes" downgrade, `solid_loft` section counts, and a bulk close for
+unmodified documents.
+
+1800 tests, 143 tools.
+
 ## [0.3.114] — 2026-11-13 · a wrong warning is a defect, and "no tool" was a tool
 
 Three reports arrived together (2026-11-12 and 2026-11-13). Two of their P0s were

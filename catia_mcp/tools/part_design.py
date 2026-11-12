@@ -6242,6 +6242,24 @@ class PartDesignTools:
                 # and the export warning still counted the set as shown).
                 if where in ("geometrical set", "hybrid body"):
                     children += self._hide_set_contents(target, apply, depth=0)
+                # 0.3.115: showing a BODY also shows the features in it. Measured
+                # on B30 2026-11-13: after a set-hide took a loft off screen,
+                # set_visibility(name='零件几何体', show=true) answered "is now
+                # shown" and changed nothing - the body node had never been hidden,
+                # its FEATURE had. A caller who asks for the body back means the
+                # geometry in it, and the report of 2026-11-12 said so ("实体消失；
+                # set_visibility(零件几何体, show=true) 这次没能救回来").
+                if show and where == "body":
+                    try:
+                        shapes = target.Shapes
+                        for position in range(1, int(shapes.Count) + 1):
+                            try:
+                                apply(shapes.Item(position))
+                                children += 1
+                            except Exception:  # noqa: BLE001 - one feature
+                                continue
+                    except Exception:  # noqa: BLE001 - a body without Shapes
+                        pass
             finally:
                 try:
                     sel.Clear()
@@ -6292,20 +6310,31 @@ class PartDesignTools:
                         "kept inside a geometrical set is not reachable through "
                         "'零件几何体'.")
                 else:
+                    # 0.3.115 re-measured this on a LOFT, because the 2026-11-12
+                    # report said the solid went with the set. It does not:
+                    # measured on B30 2026-11-13 (scripts/b30_v0417_visibility_fix.py),
+                    # a 2-section solid loft whose circles live in GSD_Set stayed
+                    # on screen when the set was hidden, and the picture came back
+                    # identical when it was shown again. What DOES take the solid
+                    # is kind='construction' - those section curves are
+                    # construction elements, and CATIA takes the feature's display
+                    # with its input. That path warns for itself.
                     solid_note = (
                         " Note: a geometrical set is a separate branch from the body, "
-                        "so this does not hide a solid built in the body - "
-                        "measured on B30 2026-11-09: hiding the set took the "
-                        "surface's triangles out of the STL (3778 -> 3244 B) and "
-                        "left the solid's in place. If the view DOES go empty, the "
-                        "geometry you were looking at is an element INSIDE this set; "
-                        "show the set again with this same call and show=true, "
-                        "rather than showing '零件几何体', which holds none of it. "
-                        "When only ONE thing has to come back, call this on that "
-                        "element by name instead - measured 2026-11-09 on a "
-                        "thickened surface inside a hidden set: "
-                        "set_visibility(name='加厚曲面.1', show=true) brought the "
-                        "solid back without touching the rest of the set.")
+                        "so this leaves a solid built in the body alone - "
+                        "re-measured on B30 2026-11-13 on a solid LOFT whose section "
+                        "curves live in this very set: the solid stayed on screen, "
+                        "and showing the set again restored the picture byte for "
+                        "byte. If the view DOES go empty, the geometry you were "
+                        "looking at is an element INSIDE this set; "
+                        "show the set again"
+                        " with this same call and show=true, or name that one "
+                        "element - measured 2026-11-09 on a thickened surface inside "
+                        "a hidden set: set_visibility(name='加厚曲面.1', show=true) "
+                        "brought the solid back without touching the rest of the "
+                        "set. What is NOT safe is kind='construction': a Part "
+                        "Design feature built on construction elements goes off "
+                        "screen with them.")
 
             # An element inside a HIDDEN set stays invisible however it is set:
             # the UI greys the lightbulb and CATIA keeps the parent's visibility.
@@ -6678,15 +6707,30 @@ class PartDesignTools:
         if total["datum_element"]:
             counted.append(f"{total['datum_element']} datum element(s) inside bodies")
         body = " and ".join(counted)
+        # 0.3.115: HIDING THESE CAN TAKE THE SOLID WITH THEM. Measured on B30
+        # 2026-11-13 (scripts/b30_v0417_visibility_fix.py): a 2-section solid loft
+        # whose circles live in GSD_Set stayed on screen when that set was hidden,
+        # and vanished when kind='construction' was hidden - those circles ARE
+        # construction, and CATIA stops displaying a feature whose input is
+        # hidden. The recovery is this same call with show=true (the picture came
+        # back and re-compressed to the byte size it had before). Hiding the SET
+        # does not do this, which is why the sentence is here and not there.
+        vanish = "" if show else (
+            " WARNING: this can take the SOLID off the screen too - measured on "
+            "B30 2026-11-13, a solid loft whose section curves are construction "
+            "elements disappeared with them, and the viewport went empty while "
+            "this call still reported how many elements it hid. Call this again "
+            "with show=true to get the picture back. Untick this kind only for a "
+            "screenshot, and say so in the reply you send to whoever reads it.")
         if len(targets) == 1:
-            return f"{body} now {'shown' if show else 'hidden'}."
+            return (f"{body} now {'shown' if show else 'hidden'}." + vanish)
         return (f"{body} now {'shown' if show else 'hidden'} in {len(touched)} of "
                 f"{len(targets)} part(s) of '{active}': "
                 + ", ".join(touched[:8])
                 + (f", ... ({len(touched) - 8} more)" if len(touched) > 8 else "")
                 + ". Nothing was saved: this is each part document's session "
                 "state - save the parts (catia_save_document) if you need it "
-                "persisted.")
+                "persisted." + vanish)
 
     def _boolean(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()

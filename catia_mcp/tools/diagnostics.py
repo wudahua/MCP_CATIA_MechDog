@@ -172,6 +172,54 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
         ),
     },
     {
+        "member": "hiding construction elements (kind='construction') on a solid",
+        "status": "AVAILABLE_WITH_LIMIT",
+        "detail": (
+            "It can take the SOLID off the screen with them. MEASURED on B30 "
+            "2026-11-13 (scripts/b30_v0417_visibility_fix.py): a 2-section solid "
+            "loft whose section circles live in GSD_Set stayed on screen when that "
+            "SET was hidden - and vanished when kind='construction' was hidden, "
+            "because those circles are construction elements and CATIA stops "
+            "displaying a feature whose input is hidden. The viewport came out "
+            "empty (61 008 bytes against 53 978 with the solid) while the call "
+            "still reported how many elements it had hidden. The way back is the "
+            "same call with show=true: measured, the picture returned and "
+            "re-compressed to the byte size it had before. Two things follow: "
+            "hiding a geometrical SET does not do this (re-measured on the same "
+            "loft), and catia_screenshot(clean=true) alone does not either - it "
+            "hides and restores around the capture (58 522 bytes against 58 896 "
+            "plain, both with the solid). So a blank picture after a clean-up is "
+            "this switch, not a broken model. 0.3.115 also fixed the OTHER way "
+            "back: 'and the body did not bring it back' was true before it, "
+            "because the body node was never the thing that got hidden - its "
+            "feature was. Showing a body now shows the features inside it, "
+            "measured on the same document: empty frame, then "
+            "set_visibility(name='零件几何体', show=true), then the solid back on "
+            "screen ('and 1 element(s) inside it')."
+        ),
+    },
+    {
+        "member": "two mirrored chamfers on one face (report: the second always fails)",
+        "status": "SEEN_ONCE_NOT_REPRODUCED",
+        "detail": (
+            "The 2026-11-13 report measured 3 of 3: on a four-lobe column top, two "
+            "symmetric edges 8 mm apart at 70 degrees, the first chamfer builds and "
+            "the second always answers 'UpdateObject failed' - whichever one is "
+            "built first, and also as one call with both anchors (1 of 2 done). "
+            "NOT REPRODUCED on B30 2026-11-13 (scripts/b30_v0417_paired_chamfer.py): "
+            "a 40x10x30 block with two mirrored 10 mm top edges, chamfer 2 mm, "
+            "A-then-B and B-then-A, at 45 degrees AND at the report's 70 degrees, "
+            "plus both anchors in one call - six cells, all of them succeeded "
+            "(12 000 -> 11 980 -> 11 960 mm3 at 45 deg, each chamfer removing the "
+            "analytic 20 mm3). So 'a pair of chamfers' is not the trigger by "
+            "itself, and guessing a cause here would be worth less than the "
+            "measurement. What is left as UNKNOWN is which part of that geometry "
+            "does it - two bevels whose faces meet across a narrow top, or a "
+            "document that had a chamfer deleted and rebuilt first. Ask for the "
+            "part file rather than trusting a generic 'topology' hint."
+        ),
+    },
+    {
         "member": "cutting a tip off a solid along an inclined plane",
         "status": "AVAILABLE_WITH_LIMIT",
         "detail": (
