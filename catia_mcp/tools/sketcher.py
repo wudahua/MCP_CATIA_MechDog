@@ -466,11 +466,28 @@ class SketcherTools:
                     "of 0.0007 mm is enough to kill the pad - make the shared "
                     "coordinate literally identical."
                     "SCOPE OF THE ECHO: the Profile line counts what THIS session drew in THIS document. After reopening a file it cannot report the sketch's contents (the coordinates are not readable back), so an empty echo is not an empty sketch - and catia_gsd_spline(element=...) refuses the same sketches for the same reason."
+                    "TEXT SKETCHES ARE NOT BROKEN CONTOURS. A sketch filled by catia_text_strokes is branched by design: its strokes have free ends and the gaps between them are the gaps between letters. That case is recognised from the drawing record and answered with a NOTE instead of the 'not closed' warning - and a stroke that crosses itself is a NOTE too, because for engraving two grooves simply meet. Set purpose='engrave' to say so yourself; purpose='profile' forces the profile wording even on lettering, and a mixed sketch (glyphs plus a closed loop) stays a profile unless you say otherwise."
                     "Set structured=true to get the same information as data instead of as a sentence - data.breaks[] holds every loose pair with its gap in mm, and it cannot be truncated (see that argument's description). Default false returns the text, unchanged."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
+                        "purpose": {
+                            "type": "string",
+                            "enum": ["profile", "engrave"],
+                            "description": (
+                                "What the sketch is FOR, which decides how the "
+                                "breaks are reported. 'profile' (and omitting it) "
+                                "means a pad/pocket contour: loose endpoints are "
+                                "warned about. 'engrave' means lettering or any "
+                                "other branched stroke set: the same numbers are "
+                                "reported as a NOTE that expects them. Omit it and "
+                                "a sketch that is NOTHING but catia_text_strokes "
+                                "is treated as 'engrave' on its own, because the "
+                                "drawing record says so - a mixed sketch stays a "
+                                "profile. Reported back as data.purpose."
+                            ),
+                        },
                         "structured": {
                             "type": "boolean",
                             "description": (
@@ -1233,7 +1250,8 @@ class SketcherTools:
                     arguments.get("plane", "xy"), arguments.get("offset")
                 )
             case "catia_close_sketch":
-                return self._close_sketch(bool(arguments.get("structured", False)))
+                return self._close_sketch(bool(arguments.get("structured", False)),
+                                          arguments.get("purpose"))
             case "catia_sketch_line":
                 return self._draw_line(
                     arguments["x1"], arguments["y1"],
@@ -2846,7 +2864,8 @@ class SketcherTools:
                 1 for gap in gaps if gap <= self._NEAR_TOL)
         return report
 
-    def _self_crossing_report(self, sketch_name: str | None = None
+    def _self_crossing_report(self, sketch_name: str | None = None,
+                              engraving: bool = False
                               ) -> tuple[str, list[dict[str, Any]], bool]:
         """Does the outline cross itself? Answered from the drawing record.
 
@@ -2876,7 +2895,7 @@ class SketcherTools:
         if not segments:
             return "", [], False
         found = crossings(segments)
-        return describe(found, len(segments)), found, True
+        return describe(found, len(segments), engraving=engraving), found, True
 
     def _profile_warning(self) -> str:
         """Name every breakpoint that will make pad/pocket fail.
@@ -2955,7 +2974,64 @@ class SketcherTools:
         )
         return text
 
-    def _close_sketch(self, structured: bool = False) -> str | dict[str, Any]:
+    def _text_strokes_in(self, sketch_name: str | None) -> tuple[int, int, int]:
+        """How much of this sketch came from ``catia_text_strokes``.
+
+        Returns ``(elements, strokes, total)``: recorded line segments that came
+        from text, how many separate strokes they make up, and how many
+        non-point elements the sketch holds in all. ``elements == total`` means
+        the sketch is nothing BUT lettering - which is the one case that can be
+        called an engraving sketch without being told.
+
+        Points are excluded from ``total`` on purpose: a construction point adds
+        nothing to the outline, so a sketch of glyphs plus a helper point is
+        still a sketch of glyphs.
+        """
+        drawn = (self._drawn.get(self._sketch_key(sketch_name), [])
+                 if sketch_name else [])
+        body = [item for item in drawn if item.get("kind") != "point"]
+        text = [item for item in body if item.get("source") == "text"]
+        strokes = len({item.get("stroke") for item in text})
+        return len(text), strokes, len(body)
+
+    def _engraving_note(self, breaks: dict[str, Any], strokes: int,
+                        elements: int) -> str:
+        """The same breaks, said in the voice of an engraving instead of a fault.
+
+        This is the whole of the 2026-11-12 P2-5 fix. Its 26-line text sketch was
+        answered with "closed: false, 16 loose endpoints, 8 breaks" and 8 gap
+        widths - every number correct, every one of them read as a defect by the
+        caller, because nothing in the reply knew the lines were glyphs. Here the
+        numbers stay (they are still the only evidence of what is in the sketch)
+        and the conclusion changes: branched strokes are what lettering IS.
+        """
+        loose = breaks.get("endpoints_loose") or 0
+        gaps = len(breaks.get("breaks") or []) + (1 if breaks.get("unpaired") else 0)
+        spread = ""
+        if breaks.get("smallest_gap_mm") is not None:
+            spread = (f"; the {gaps} gap(s) run "
+                      f"{breaks['smallest_gap_mm']:.4f}..{breaks['widest_gap_mm']:.4f} "
+                      "mm and are the space BETWEEN strokes, not a seam to close")
+        return (
+            f" NOTE: this sketch is not a closed profile, and it was not built as "
+            f"one: all {elements} element(s) in it came from catia_text_strokes "
+            f"({strokes} stroke(s)), and a glyph is branched by design. The {loose} "
+            f"loose endpoint(s) are the FREE ENDS of those strokes{spread}. "
+            "Nothing here needs fixing - but nothing here will pad or pocket "
+            "either: those want ONE closed contour and will refuse this sketch. "
+            "The route for lettering is catia_gsd_project of the strokes onto the "
+            "face, then catia_surface_engrave. If you did mean this as a pad "
+            "profile, pass purpose='profile' to be warned about it properly."
+        )
+
+    def _close_sketch(self, structured: bool = False,
+                      purpose: str | None = None) -> str | dict[str, Any]:
+        # Validated before CATIA is touched, so a typo cannot close a sketch the
+        # caller meant to keep open for another element.
+        if purpose is not None and purpose not in ("profile", "engrave"):
+            raise ArgumentRejected(
+                f"purpose must be 'profile' or 'engrave'; got {purpose!r}. "
+                "Nothing was closed.", code="BAD_ARGUMENT", stage="validate")
         if self._active_sketch is None:
             # The cached handle does not survive a server restart while CATIA
             # keeps the sketch open in edition. Re-adopt the document's
@@ -2998,17 +3074,47 @@ class SketcherTools:
         # Read the breaks BEFORE the cache is cleared - and before anything
         # below could raise, so a structured reply still carries them.
         breaks = self._profile_breaks()
-        warning = self._profile_warning()
+        # WHO filled this sketch decides which voice the breaks are reported in.
+        # Explicit wins; with no instruction the record itself answers, but only
+        # for the one case that admits no doubt: a sketch that is NOTHING but
+        # lettering. A mixed sketch stays a profile, because a rectangle plus
+        # some text really might be a pad profile with something gone wrong.
+        text_elements, strokes, elements = self._text_strokes_in(name)
+        engraving = (purpose == "engrave"
+                     or (purpose is None and bool(elements)
+                         and text_elements == elements))
+        warning = "" if engraving else self._profile_warning()
+        engraving_note = (self._engraving_note(breaks, strokes, elements)
+                          if engraving else
+                          (f" ({text_elements} element(s) of this sketch came from "
+                           "catia_text_strokes - a glyph is branched by design, so "
+                           "its free ends are counted among the loose endpoints "
+                           "above. Pass purpose='engrave' to have a text sketch "
+                           "reported as text.)"
+                           if text_elements else ""))
+        # An engraving is not a contour, so a stroke crossing itself is not the
+        # fatal thing the profile wording says it is: two grooves simply meet.
         loops = self._loop_warning(name)
         crossing_text, crossing_data, crossing_checked = (
-            self._self_crossing_report(name))
+            self._self_crossing_report(name, engraving=engraving))
         drawn = self._drawn.get(self._sketch_key(name), [])
         self._profile_ends = []
         self._profile_closed_curves = 0
+        breaks["purpose"] = "engrave" if engraving else "profile"
+        if engraving:
+            # Same fact, different expectation: `closed: false` is still true,
+            # and saying why it is expected to be false is what stops the caller
+            # from trying to fix it.
+            breaks["expected"] = "open"
         message = (
-            f"Sketch '{name}' closed. You can now apply Part Design features "
-            "(pad, pocket, user pattern on its points, etc.)."
-            + summary + warning + loops + crossing_text
+            f"Sketch '{name}' closed."
+            + (" Part Design features will REFUSE this sketch on purpose - it is "
+               "lettering, not a contour, and the next step is catia_gsd_project "
+               "then catia_surface_engrave."
+               if engraving else
+               " You can now apply Part Design features "
+               "(pad, pocket, user pattern on its points, etc.).")
+            + summary + warning + engraving_note + loops + crossing_text
         )
         if not structured:
             return message
@@ -3026,6 +3132,13 @@ class SketcherTools:
                 "breaks": breaks,
                 "loops_warning": loops.strip() or None,
                 "elements_drawn": len(drawn),
+                # Which voice the reply is in, and why. 'engrave' means the
+                # sketch is lettering: `breaks.closed` is still false, and
+                # `breaks.expected` says that is the point.
+                "purpose": "engrave" if engraving else "profile",
+                "expected_open": engraving,
+                "text_strokes": strokes,
+                "text_elements": text_elements,
                 # Checked from the drawing record, so only this session's
                 # elements are covered - `checked` says which case this is
                 # instead of letting an empty list read as "no crossings".
@@ -3049,8 +3162,18 @@ class SketcherTools:
         return f"{kind} created from ({x1}, {y1}) to ({x2}, {y2}) mm"
 
     def _draw_strokes(self, strokes: list[list[list[float]]],
-                      construction: bool = False) -> str:
+                      construction: bool = False,
+                      source: str | None = None) -> str:
         """Draw many polylines as straight segments, in one call.
+
+        ``source`` labels WHO asked for the polylines. It is "text" when
+        ``catia_text_strokes`` calls this, and that label is the whole of
+        0.3.116's answer to the 2026-11-12 report's P2-5: a sketch full of
+        glyphs was being reported with the same "the profile is not closed"
+        wording as a solid outline, because the close-time check sees only
+        "26 lines, 16 loose ends" and cannot tell a letter from a broken
+        contour. The record CAN tell - it knows these lines were drawn as
+        font strokes - so the reply stops guessing and says so.
 
         WHY THIS EXISTS: a glyph outline is 8-20 segments and the one-element
         tools force one call per segment, so a letter was dozens of calls of
@@ -3104,7 +3227,8 @@ class SketcherTools:
 
         factory = self._active_factory
         segments = 0
-        for points in cleaned:
+        for number, points in enumerate(cleaned, start=1):
+            extra = {"source": source, "stroke": number} if source else {}
             for (x1, y1), (x2, y2) in zip(points, points[1:]):
                 line = factory.CreateLine(x1, y1, x2, y2)
                 if construction:
@@ -3119,7 +3243,8 @@ class SketcherTools:
                     # bookkeeping stays exact. A new record kind here would have
                     # been an unhandled branch three functions away.
                     self._note_ends((x1, y1), (x2, y2))
-                    self._note_element("line", x1=x1, y1=y1, x2=x2, y2=y2)
+                    self._note_element("line", x1=x1, y1=y1, x2=x2, y2=y2,
+                                       **extra)
                 segments += 1
 
         xs = [x for points in cleaned for x, _ in points]
@@ -3451,7 +3576,8 @@ class SketcherTools:
             origin_x, origin_y = float(origin[0]), float(origin[1])
 
         drawn = self._draw_strokes(result.strokes,
-                                   bool(args.get("construction", False)))
+                                   bool(args.get("construction", False)),
+                                   source="text")
         note = (
             f"Text {raw!r}: {result.glyphs} glyph(s) in {result.lines} line(s), "
             f"{len(result.strokes)} stroke(s), {height:g} mm cap height, "

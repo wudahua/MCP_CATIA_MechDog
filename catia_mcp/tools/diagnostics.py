@@ -705,6 +705,57 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
             "different claims."
         ),
     },
+    {
+        "member": "how many sections a solid loft actually holds",
+        "status": "AVAILABLE_WITH_LIMIT",
+        "detail": (
+            "Readable, but ONLY while the loft that made them is still in hand. "
+            "Measured on B30 2026-11-13 (scripts/b30_v0418_probe_loft_sections.py): "
+            "HybridShapeLoft.GetSectionFromLoft(i) is 1-BASED, returns "
+            "(reference, orientation, closing point), and RAISES past the last "
+            "section - a 3-section loft answered at 1, 2 and 3 and raised at 0, 4 "
+            "and 5, and reference.DisplayName gave '草图.1', '草图.2', '草图.3'. So "
+            "catia_solid_loft now walks that list after its own update and names "
+            "what CATIA kept, instead of leaving the caller to compare a volume "
+            "with an integral - which is what the 2026-11-12 report had to do with "
+            "45 sections in and 70047.2 mm3 out. AFTERWARDS IT IS GONE: "
+            "Part.FindObject does not exist on this build (raises "
+            "'<unknown>.FindObject'), and a shape read out of body.Shapes.Item(i) "
+            "comes back as a bare base Item with no HybridShape - so a loft "
+            "reopened from disk cannot be asked this question at all."
+        ),
+    },
+    {
+        "member": "closing CATIA's own sample catalogues",
+        "status": "UNSUPPORTED_ON_B30",
+        "detail": (
+            "A .CATfct catalogue accepts Close() and stays open. Measured on B30 "
+            "2026-11-13 with catia_close_document(all_unmodified=true) over a "
+            "47-document session: 15 catalogues from the B30 resource directory "
+            "(CATRacewaySample.CATfct, CATWaveguideSample.CATfct and so on) were "
+            "reported unmodified and on disk, Close() returned without raising, "
+            "and every one of them was still in Documents afterwards - the same "
+            "deferral an assembly-held part gets, without a holder to name. The "
+            "reply lists them as STILL OPEN instead of claiming they closed."
+        ),
+    },
+    {
+        "member": "Document.Saved as a test of 'is this safe to close'",
+        "status": "MEASURED_UNEXPLAINED",
+        "detail": (
+            "Saved is honest about EDITS and wrong about EXISTENCE. Measured on "
+            "B30 2026-11-13: a part answered Saved=False after a feature was added "
+            "and Saved=True straight after catia_save_document, which is what the "
+            "name promises - but a brand-new never-saved part AND a brand-new "
+            "product both answered Saved=True while their FullName was a bare "
+            "'Fresh.CATPart' / 'Prod.CATProduct' with no directory, and CATIA's own "
+            "sample parts do the same ('CATPspPlantShipTypeLibraryManager.CATPart'). "
+            "So Saved alone would have let a batch close work that exists nowhere. "
+            "catia_close_document(all_unmodified=true) therefore also requires an "
+            "absolute FullName that is a real file. Why CATIA reports an empty "
+            "unsaved document as saved is UNKNOWN and not guessed at here."
+        ),
+    },
 ]
 
 

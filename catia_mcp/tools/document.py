@@ -262,11 +262,32 @@ class DocumentTools:
                     "CATIA KEEPS a part that an open assembly references and defers "
                     "the close; that is reported as closed: false with the holders "
                     "named, because it is CATIA's ordinary behaviour rather than a "
-                    "failure."
+                    "failure.\n"
+                    "all_unmodified=true is the batch form: close every open document "
+                    "CATIA reports as unmodified AND that has a real file on disk. "
+                    "Both conditions are needed - measured 2026-11-13, a brand-new "
+                    "part and a brand-new product both answer Saved=true while their "
+                    "FullName is just 'Fresh.CATPart', so 'unmodified' alone would "
+                    "close work that exists nowhere. The active document is left "
+                    "alone (every other tool acts on it), and the reply counts what "
+                    "it closed, what it left and why. Use it to clear the 98 stale "
+                    "documents catia_diagnose reports."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
+                        "all_unmodified": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Close EVERY open document that CATIA reports as "
+                                "unmodified and that exists as a file on disk. The "
+                                "active document is kept, and documents with unsaved "
+                                "changes or no file are named in the reply instead of "
+                                "being closed. Cannot be combined with 'document' or "
+                                "with save=true."
+                            ),
+                        },
                         "save": {
                             "type": "boolean",
                             "description": "Whether to save before closing (default: false)",
@@ -393,7 +414,9 @@ class DocumentTools:
                     arguments["file_path"], bool(arguments.get("overwrite", True)))
             case "catia_close_document":
                 return self._close_document(arguments.get("save", False),
-                                            arguments.get("document"))
+                                            arguments.get("document"),
+                                            bool(arguments.get("all_unmodified",
+                                                              False)))
             case "catia_list_documents":
                 return self._list_documents()
             case "catia_get_active_document_info":
@@ -1541,7 +1564,8 @@ class DocumentTools:
         return matches[0]
 
     def _close_document(self, save: bool = False,
-                        document: str | None = None) -> str:
+                        document: str | None = None,
+                        all_unmodified: bool = False) -> str:
         """Close the active document, or the one named by ``document``.
 
         ``doc.Close()`` returning without an exception is not evidence: CATIA
@@ -1550,6 +1574,20 @@ class DocumentTools:
         locked part again on the next SaveAs and spent a long time on it
         (2026-10-24). The count before/after is the only honest check.
         """
+        if all_unmodified:
+            # Two combinations that cannot mean anything, refused rather than
+            # silently resolved into one of them.
+            if document:
+                raise ArgumentRejected(
+                    "all_unmodified closes every unmodified document, so "
+                    "'document' has nothing to select. Send one or the other.",
+                    code="BAD_ARGUMENT", stage="validate")
+            if save:
+                raise ArgumentRejected(
+                    "save=true and all_unmodified=true contradict each other: an "
+                    "unmodified document has nothing to save. Send one or the "
+                    "other.", code="BAD_ARGUMENT", stage="validate")
+            return self._close_unmodified()
         if document:
             doc = self._locate_document(document)
             # Deliberately NOT activated first: Activate() on a document without
@@ -1619,6 +1657,144 @@ class DocumentTools:
             , code="CLOSE_NOT_CONFIRMED", stage="execute")
         return (f"Document '{named or name}' closed"
                 + (" (saved)" if save else ""))
+
+    def _close_unmodified(self) -> str:
+        """Close every open document CATIA reports as unmodified.
+
+        Why the criteria are three and not one (all measured on B30 2026-11-13,
+        scripts/b30_v0418_probe_loft_saved.py):
+
+        * ``Document.Saved`` is readable and honest about EDITS: False after a
+          feature was added, True right after catia_save_document.
+        * ``Saved`` is NOT honest about EXISTENCE. A brand-new part and a brand-new
+          product both answered Saved=True while their FullName was a bare
+          'Fresh.CATPart' / 'Prod.CATProduct' with no directory - so "unmodified"
+          alone would have closed a document whose content exists nowhere. Hence
+          the second condition: an absolute FullName that is a real file.
+        * The active document is left alone. Every other tool acts on it, so
+          closing it silently moves where the next call lands; the caller can
+          activate something else and ask again.
+
+        A document that an open assembly references is reported as deferred
+        rather than failed - that is CATIA's ordinary behaviour, already handled
+        one document at a time in _close_document.
+        """
+        self.conn.ensure_connected()
+        docs = self.conn.documents
+        try:
+            active = self.conn.active_document
+            active_name = str(active.Name)
+            active_path = str(getattr(active, "FullName", "") or "")
+        except Exception:  # noqa: BLE001 - no active document is a valid state
+            active_name, active_path = "", ""
+
+        entries: list[dict[str, Any]] = []
+        for index in range(1, int(docs.Count) + 1):
+            doc = docs.Item(index)
+            try:
+                name = str(doc.Name)
+            except Exception:  # noqa: BLE001
+                continue
+            try:
+                path = str(getattr(doc, "FullName", "") or "")
+            except Exception:  # noqa: BLE001
+                path = ""
+            try:
+                saved = bool(doc.Saved)
+            except Exception:  # noqa: BLE001 - unreadable is NOT unmodified
+                saved = None
+            entries.append({"doc": doc, "name": name, "path": path,
+                            "saved": saved})
+
+        def on_disk(path: str) -> bool:
+            return bool(path) and os.path.isabs(path) and os.path.exists(path)
+
+        active_skip: list[str] = []
+        modified: list[str] = []
+        no_file: list[str] = []
+        unknown: list[str] = []
+        eligible: list[dict[str, Any]] = []
+        for entry in entries:
+            if entry["name"] == active_name and entry["path"] == active_path:
+                active_skip.append(entry["name"])
+                continue
+            if entry["saved"] is None:
+                unknown.append(entry["name"])
+                continue
+            if not entry["saved"]:
+                modified.append(entry["name"])
+                continue
+            if not on_disk(entry["path"]):
+                # Never saved, or saved somewhere that no longer exists: CATIA
+                # says "unmodified", the disk says otherwise, and closing it
+                # would destroy the only copy.
+                no_file.append(entry["name"])
+                continue
+            eligible.append(entry)
+
+        closed: list[str] = []
+        deferred: list[str] = []
+        failed: list[str] = []
+        for entry in eligible:
+            name = entry["name"]
+            before = self._document_names().count(name)
+            try:
+                entry["doc"].Close()
+            except Exception as error:  # noqa: BLE001 - reported, not raised
+                failed.append(f"{name} ({str(error).splitlines()[0][:60]})")
+                continue
+            after = self._document_names().count(name)
+            if after >= max(1, before):
+                deferred.append(name)
+            else:
+                closed.append(name)
+
+        # Closing documents can move focus on its own; say where it ended up
+        # rather than letting the next tool discover it.
+        try:
+            here = str(self.conn.active_document.Name)
+        except Exception:  # noqa: BLE001
+            here = ""
+
+        def listed(names: list[str], limit: int = 8) -> str:
+            shown = ", ".join(f"'{name}'" for name in names[:limit])
+            if len(names) > limit:
+                shown += f", ... ({len(names) - limit} more)"
+            return shown
+
+        parts = [f"Closed {len(closed)} of {len(entries)} open document(s) that "
+                 "CATIA reported as unmodified and that exist on disk"]
+        if closed:
+            parts[0] += f": {listed(closed)}."
+        else:
+            parts[0] += " - there were none."
+        if modified:
+            parts.append(f" Left open, MODIFIED since the last save ({len(modified)}): "
+                         f"{listed(modified)} - save them (catia_save_document) or "
+                         "close them by name.")
+        if no_file:
+            parts.append(f" Left open, no file on disk ({len(no_file)}): "
+                         f"{listed(no_file)} - CATIA says 'unmodified' for a "
+                         "document that was never saved, so closing it would "
+                         "destroy the only copy.")
+        if active_skip:
+            parts.append(f" Left open, ACTIVE ({len(active_skip)}): "
+                         f"{listed(active_skip)} - every other tool acts on this "
+                         "one. Activate another document and ask again to close "
+                         "it too.")
+        if unknown:
+            parts.append(f" Left open, 'Saved' not readable ({len(unknown)}): "
+                         f"{listed(unknown)} - the state could not be read, which "
+                         "is not the same as unmodified.")
+        if deferred:
+            parts.append(f" STILL OPEN after Close() ({len(deferred)}): "
+                         f"{listed(deferred)} - an open assembly references them, "
+                         "so close the assembly first.")
+        if failed:
+            parts.append(f" Close() raised for {len(failed)}: "
+                         + "; ".join(failed[:6]))
+        parts.append(f"Active document now: {here or 'none'}.")
+        return " ".join(parts)
 
     def _list_documents(self) -> str:
         """Every document in the session, and which assemblies use it.

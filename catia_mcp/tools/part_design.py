@@ -1116,7 +1116,16 @@ class PartDesignTools:
                     "and fails; a closed catia_sketch_spline or catia_gsd_spline is "
                     "one. Reported by a user who found AddNewLoft after this server "
                     "said no solid loft existed (2026-10-25) - that statement was a "
-                    "gap in the probing, not a CATIA limit."
+                    "gap in the probing, not a CATIA limit. "
+                    "THE REPLY NAMES THE SECTIONS CATIA ACTUALLY KEPT, read back with "
+                    "GetSectionFromLoft after the update: 'CATIA's own section list "
+                    "holds 3: 草图.1, 草图.2, 草图.3'. So a section that was dropped "
+                    "is a warning with its name, not something to infer from a "
+                    "volume that happens to look right - the 2026-11-12 report had 45 "
+                    "sections in and could only compare its own integral (69976 mm3) "
+                    "against the reported 70047.2. If the read-back refuses on some "
+                    "build, the reply says the count is the number SENT, not one "
+                    "measured."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -5712,14 +5721,81 @@ class PartDesignTools:
         section_note = (f" Sections: {self._describe_facts(facts)}."
                         if facts_dict else "")
         twist = self._coupling_warning(facts_dict)
+        kept, kept_note = self._loft_sections_used(inner, sections)
+        count = len(kept) if kept else len(sections)
         return (
-            f"Solid loft created through {len(sections)} section(s)"
+            f"Solid loft created through {count} section(s)"
             + (f" ({'; '.join(tangency)})" if tangency else "")
             + f". Feature: '{feature.Name}' in '{body.Name}', a Part Design solid, "
             "not a surface - no thickening step is needed."
             + detail
+            + kept_note
             + section_note
             + twist
+        )
+
+    @staticmethod
+    def _loft_sections_used(inner: Any,
+                            requested: list[str]) -> tuple[list[str], str]:
+        """The sections CATIA ITSELF holds, walked index by index.
+
+        Why this exists: the 2026-11-12 report fed 45 sections into one solid
+        loft and had no way to tell whether any had been dropped - it compared
+        its own numeric integral (69976 mm3) with the volume the tool reported
+        (70047.2, +0.1 %) and called that agreement. A number that agrees is not
+        a section list, and the report asked for ``sections_used``.
+
+        MEASURED on B30 2026-11-13 (scripts/b30_v0418_probe_loft_sections.py):
+        ``HybridShapeLoft.GetSectionFromLoft(i)`` is **1-based**, returns
+        ``(reference, orientation, closing point)``, and RAISES past the last
+        section - 3 sections answered at 1, 2 and 3 and raised at 0, 4 and 5.
+        ``reference.DisplayName`` is the section's own name ('草图.1'), so the
+        list can be compared with what was asked for by name, not by count.
+
+        CAVEAT, because it is the difference between a measurement and a guess:
+        the count is only readable on the ``Loft`` this call created. Doing it
+        later is not possible - ``Part.FindObject`` does not exist on this build
+        and a shape read out of ``body.Shapes`` comes back as a bare base
+        ``Item`` with no ``HybridShape`` (both measured in the same probe). That
+        is why the readback lives inside the build and not in a separate call.
+        """
+        names: list[str] = []
+        try:
+            dynamic = CATIAConnection._dynamic(inner)
+        except Exception:  # noqa: BLE001 - ask the object we have
+            dynamic = inner
+        for index in range(1, len(requested) + 3):
+            try:
+                got = dynamic.GetSectionFromLoft(index)
+            except Exception:  # noqa: BLE001 - past the end, which is the answer
+                break
+            label = ""
+            try:
+                label = str(getattr(got[0], "DisplayName", "") or "")
+            except Exception:  # noqa: BLE001
+                label = ""
+            names.append(label or f"section {index}")
+        if not names:
+            return [], (
+                " How many sections CATIA kept could NOT be read back "
+                "(GetSectionFromLoft refused index 1 on this object), so the "
+                f"count above is the {len(requested)} that were SENT, not a count "
+                "read back from the loft. Check the shape before trusting it."
+            )
+        listed = ", ".join(f"'{name}'" for name in names)
+        if len(names) == len(requested):
+            return names, (
+                f" CATIA's own section list holds {len(names)}: {listed} - read "
+                "back with GetSectionFromLoft, so none was silently dropped."
+            )
+        missing = [name for name in requested if name not in names]
+        return names, (
+            f" WARNING: {len(requested)} section(s) were sent but CATIA holds only "
+            f"{len(names)}: {listed}"
+            + (". Not in the loft: " + ", ".join(f"'{name}'" for name in missing)
+               if missing else "")
+            + ". The volume above is the volume of what it DID build, so do not "
+            "take it as agreement with the sections you meant."
         )
 
     @staticmethod

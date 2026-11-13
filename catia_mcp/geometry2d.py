@@ -286,8 +286,17 @@ def crossings(segments: list[dict[str, Any]], tol: float = 1e-3,
 
 
 def describe(found: list[dict[str, Any]], segment_count: int,
-             limit: int = 20) -> str:
-    """One sentence per case, keeping crossings and T junctions apart."""
+             limit: int = 20, engraving: bool = False) -> str:
+    """One sentence per case, keeping crossings and T junctions apart.
+
+    ``engraving`` changes the VERDICT on a crossing, not the arithmetic. A pad
+    profile that crosses itself has no single inside, so it is a defect. A set
+    of lettering strokes that cross is a groove that meets another groove -
+    which is what an engraved 'X' is. The 2026-11-12 report (P2-5) made this
+    concrete: its text sketch was answered with "THE OUTLINE CROSSES ITSELF ...
+    fix the crossing before the feature", advice that is impossible to follow
+    on lettering and wrong to give.
+    """
     real = [item for item in found if item.get("kind") == "crossing"]
     touches = [item for item in found if item.get("kind") == "touch"]
 
@@ -302,12 +311,20 @@ def describe(found: list[dict[str, Any]], segment_count: int,
             for item in real[:6]
         ]
         more = "" if len(real) <= 6 else f"; and {len(real) - 6} more"
-        parts.append(
-            f" WARNING: THE OUTLINE CROSSES ITSELF in {len(real)} place(s): "
-            + "; ".join(listed) + more
-            + ". A self-crossing profile has no single inside, so pad and pocket "
-            "either refuse it or build something that is not what was drawn - fix "
-            "the crossing before the feature, not after.")
+        if engraving:
+            parts.append(
+                f" NOTE: the strokes cross in {len(real)} place(s): "
+                + "; ".join(listed) + more
+                + ". For ENGRAVING that is not a defect - two grooves meet where "
+                "the strokes do, and the tool follows the curves. It would be "
+                "fatal as a pad profile, where a crossing has no single inside.")
+        else:
+            parts.append(
+                f" WARNING: THE OUTLINE CROSSES ITSELF in {len(real)} place(s): "
+                + "; ".join(listed) + more
+                + ". A self-crossing profile has no single inside, so pad and pocket "
+                "either refuse it or build something that is not what was drawn - fix "
+                "the crossing before the feature, not after.")
     if touches:
         listed = [
             f"'{item['label_a']}' ends on '{item['label_b']}' at "

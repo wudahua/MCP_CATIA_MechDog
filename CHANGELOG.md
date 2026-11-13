@@ -2,6 +2,83 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.116] — 2026-11-13 · a letter is not a broken contour, and a batch close that checks the disk
+
+The three items from the same reports that could be settled without guessing. Each
+one is a case where the reply knew less than the record did.
+
+### `catia_close_sketch`: lettering is now reported as lettering (P2-5)
+
+The 2026-11-12 report's 26-line text sketch closed with `closed: false, 16 loose
+endpoints, 8 breaks, 1 self_intersection(touch)` and eight gap widths. Every number
+was right and every one of them read as a defect, because nothing in the reply knew
+the lines were glyphs.
+
+The drawing record now carries `source='text'` on every stroke `catia_text_strokes`
+draws, so the close-time check can tell a letter from a broken contour:
+
+- **`purpose='engrave'`** says it explicitly. **With no instruction**, a sketch that
+  is *nothing but* text strokes is treated as an engraving on its own, because the
+  record says so. A mixed sketch (glyphs plus a closed loop) stays a profile — that
+  one really might be a pad profile with something else wrong, and the reply says
+  which of its elements came from text.
+- The breaks are still reported, in full, as data — they are the evidence. What
+  changes is the verdict: `data.purpose = 'engrave'`, `data.expected_open = true`,
+  `breaks.expected = 'open'`, and a **NOTE** instead of the warning, naming the free
+  ends as the free ends of strokes and the gaps as the space *between* strokes.
+- A stroke that crosses itself is a NOTE in engraving mode ("two grooves meet where
+  the strokes do") and stays a WARNING for a pad profile ("fix the crossing before
+  the feature"). Same arithmetic, different question — an engraved **X** is two
+  crossing grooves and is exactly what was asked for.
+
+Measured on B30 2026-11-13 (`scripts/b30_v0418_audit.py`, checks 1–3): "CATIA" at
+height 6 → `purpose=engrave, expected_open=true, text_strokes=10, breaks.closed=false,
+breaks.expected=open`, no `WARNING: the profile is not closed`; glyphs plus a circle →
+`purpose=profile, text_elements=3`.
+
+### `catia_solid_loft`: the reply names the sections CATIA kept (P2-7)
+
+The report put 45 sections in, got "through 45 section(s)" and a volume, and had no
+way to tell whether one had been dropped — it compared its own numeric integral
+(69976 mm³) against 70047.2 (+0.1 %) and called that agreement.
+
+B30 2026-11-13 measured the readback: `HybridShapeLoft.GetSectionFromLoft(i)` is
+**1-based**, returns `(reference, orientation, closing point)`, **raises past the
+last section**, and `reference.DisplayName` is the section's own name. A 3-section
+loft answered at 1, 2, 3 and raised at 0, 4, 5.
+
+The reply now walks that list after its own update: *"CATIA's own section list holds
+3: '草图.1', '草图.2', '草图.3' — read back with GetSectionFromLoft, so none was
+silently dropped."* If it ever holds fewer than were sent, that is a **WARNING**
+naming the missing sections. If the readback refuses outright, the reply says the
+count is the number **sent**, not one measured.
+
+The limit is stated in `catia_diagnose`'s ceilings: this works only while the loft
+this call created is in hand. Afterwards it is gone — `Part.FindObject` does not
+exist on this build and a shape from `body.Shapes.Item(i)` is a bare base `Item`
+with no `HybridShape` (both measured in the same probe).
+
+### `catia_close_document`: `all_unmodified=true` (P2-10)
+
+`catia_diagnose` reported 98 open documents and there was no batch way to clear them.
+The parameter exists now, and it needs **three** conditions — each one measured, and
+each one there because the obvious single test was wrong:
+
+1. `Document.Saved` is `True`. CATIA's own answer, and honest about edits: `False`
+   after a feature, `True` right after a save.
+2. The document has an **absolute `FullName` that exists on disk**. `Saved` is not
+   honest about existence: a brand-new part *and* a brand-new product both answer
+   `Saved=True` while their `FullName` is a bare `'Fresh.CATPart'` with no directory.
+   Closing on `Saved` alone would have destroyed work that exists nowhere.
+3. It is **not the active document** — every other tool acts on that one.
+
+Measured on a 47-document session: **1 closed, 26 kept as modified, 4 kept with no
+file, 1 kept as active, 15 catalogues STILL OPEN after `Close()`**. That last group
+is its own finding: CATIA's sample `.CATfct` files accept `Close()`, return without
+raising, and stay open — the same deferral an assembly-held part gets, with no holder
+to name. The reply lists them instead of claiming they closed. Every refusal is named
+with its reason; nothing is skipped silently.
+
 ## [0.3.115] — 2026-11-13 · the picture went empty, and the body was never the thing that was hidden
 
 Two more items from the same three reports, both settled by pictures rather than by
