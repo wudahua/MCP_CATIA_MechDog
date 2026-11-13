@@ -99,8 +99,10 @@ class _Conn:
 def test_engrave_is_registered_with_curve_and_depth() -> None:
     schema = _definition("catia_surface_engrave")["inputSchema"]
     assert schema["required"] == ["curve", "depth"]
+    # 0.3.117 added 'helpers': the four elements each stroke leaves behind can be
+    # hidden (measured safe) but not deleted (measured 4/4 to break the update).
     assert set(schema["properties"]) == {"curve", "depth", "target_body",
-                                         "position", "name"}
+                                         "position", "name", "helpers"}
 
 
 def test_engrave_description_states_the_normal_and_the_glyph_limit() -> None:

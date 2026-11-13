@@ -672,19 +672,27 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
     },
     {
         "member": "the elements one catia_surface_engrave stroke leaves behind",
-        "status": "UNSUPPORTED_ON_B30",
+        "status": "AVAILABLE_WITH_LIMIT",
         "detail": (
-            "There is no cleanup entry: the tool has no cleanup parameter and this "
-            "project has no purge-by-prefix tool. Each stroke leaves about 7 "
-            "elements in the geometrical set - the normal plane, the r=depth "
-            "circle, the sweep, the CloseSurface, the boolean's intermediaries and "
-            "a point - so 10 strokes of 'CATIA' left 84 elements in GSD_Set and "
-            "catia_screenshot(clean=true) hid 125 construction elements for the "
-            "capture (reported 2026-11-12). Removing them means "
-            "catia_delete_feature by name, and catia_gsd_list_elements is where "
-            "the names are. Recorded rather than built because a prefix-based "
-            "purge has to guess which of those elements the caller still needs, "
-            "and a wrong guess deletes geometry something else was built on."
+            "They can be HIDDEN, not DELETED, and the difference was measured. "
+            "Each stroke leaves four helpers in the geometrical set - the "
+            "point-on-curve, the normal plane, the r=depth circle and the swept "
+            "tube - plus the CloseSurface and the boolean; the 2026-11-12 report "
+            "counted ~194 elements after 10 strokes. Measured on B30 2026-11-13 "
+            "(scripts/b30_v0419_probe_engrave_cleanup.py), in FOUR separate "
+            "documents: deleting any ONE of the four (tube, plane, point, circle) "
+            "answers \"Feature 'X' deleted, but the part update failed afterwards\" "
+            "and the part never updates again - the volume only looks right because "
+            "a failed update keeps the last good state. So they are load-bearing, "
+            "and the report's proposed test (\"only the boolean references them, so "
+            "they can go\") is backwards: being referenced by that one feature is "
+            "what keeps them. HIDING them is safe and is now the default "
+            "(helpers='hide'): all four hidden, the same part answered 'Part "
+            "updated successfully' with its volume unchanged (23987.4336290779 mm3 "
+            "either side). There is still no purge, on purpose - a prefix purge "
+            "would delete exactly the elements that cannot go. catia_delete_feature "
+            "on any of the four is what breaks the tree; catia_set_visibility(name="
+            "'<helper>', show=true) is how one comes back into view."
         ),
     },
     {
@@ -703,6 +711,28 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
             "(catia_gsd_list_elements, for the count and names the call should have "
             "added), because 'one box was answered' and 'the call was clean' are "
             "different claims."
+        ),
+    },
+    {
+        "member": "a pad or pocket from a sketch that also holds an open curve",
+        "status": "UNSUPPORTED_ON_B30",
+        "detail": (
+            "It removes nothing, and the open curve does not have to divide "
+            "anything. Measured on B30 2026-11-13, four fresh documents with one "
+            "variable each (scripts/b30_v0419_probe_multiregion.py), a 60x40x10 "
+            "block cut from a sketch on its top face: a circle alone removed 603.2 "
+            "mm3; the SAME circle plus an open spline THROUGH it removed 0 "
+            "(NO_MATERIAL); plus an open spline entirely INSIDE it, 0; plus an open "
+            "LINE through it, 0. So it is not the region topology and not the "
+            "spline - one free endpoint anywhere in the sketch makes the whole "
+            "profile unusable, which is why the 2026-11-13 report's 'closed region "
+            "+ 2 dividing splines' could never cut. catia_pad and catia_pocket now "
+            "refuse such a sketch BEFORE CATIA runs (SKETCH_HAS_OPEN_CURVES), "
+            "naming the free endpoints, so the failure costs neither a rollback nor "
+            "a feature node; allow_open_curves=true bypasses the check. There is no "
+            "'cut only this region' argument, and none is planned: with the open "
+            "curves gone the sketch is ONE closed contour, so a sub-region has to "
+            "be drawn as its own sketch."
         ),
     },
     {

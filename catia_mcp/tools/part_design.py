@@ -17,6 +17,7 @@ from catia_mcp.update_errors import describe, failing_elements
 from catia_mcp.results import CodedError, FeatureRejected, PreconditionRejected
 from catia_mcp.sketch_frames import BASES, frame_of, point_world
 from catia_mcp.results import ArgumentOutOfRange, ArgumentRejected
+from catia_mcp.geometry2d import open_ends, segments_of
 from catia_mcp.topo_search import (
     edge_fingerprint,
     face_keys,
@@ -244,11 +245,28 @@ class PartDesignTools:
                     "on the material boundary is the common case, not an error. Only "
                     "when BOTH orientations add nothing is the pad rolled back, and "
                     "then the reply states that both were measured and whether your "
-                    "sketch is still in the tree."
+                    "sketch is still in the tree. "
+                    "AN OPEN CURVE IN THE SKETCH IS REFUSED BEFORE CATIA IS ASKED: "
+                    "one free endpoint anywhere makes the whole profile unusable - "
+                    "measured on B30 2026-11-13, a circle alone cut 603.2 mm3 and the "
+                    "same circle with one open spline (through it or inside it) or "
+                    "one open line removed 0 mm3 in all three cells. The refusal names "
+                    "the free points; allow_open_curves=true sends it anyway."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
+                        "allow_open_curves": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Skip the open-outline refusal and let CATIA decide. "
+                                "Measured 3/3 to remove nothing, so this is only for "
+                                "the case where the drawing record is wrong about "
+                                "what the sketch holds (a sketch edited by hand "
+                                "after the tools drew it)."
+                            ),
+                        },
                         "height": {
                             "type": "number",
                             "description": "Extrusion height/depth in mm",
@@ -293,10 +311,32 @@ class PartDesignTools:
                     "with catia_boolean; or use a shallow depth that stops inside the "
                     "panel. Reported 2026-11-07, P7, where a through-all slot opened "
                     "the hull side behind it."
+                    "MULTI-REGION SKETCHES ARE REFUSED UP FRONT. A sketch that holds "
+                    "a closed region plus an open curve - the boundary that divides "
+                    "the region into pieces - removes NOTHING: measured on B30 "
+                    "2026-11-13, a circle alone cut 603.2 mm3 and the same circle "
+                    "with one open spline through it, one inside it, or one open "
+                    "line through it all removed 0 mm3 (NO_MATERIAL). The open curve "
+                    "does not have to divide anything. This is checked from the "
+                    "drawing record BEFORE CATIA runs, so the failure costs no "
+                    "rollback and no feature node; the reply names the free points. "
+                    "There is no 'cut only this region' argument - draw each region "
+                    "in its own sketch, or pass allow_open_curves=true to send the "
+                    "sketch to CATIA anyway."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
+                        "allow_open_curves": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Skip the open-outline refusal and let CATIA decide. "
+                                "Measured 3/3 to remove nothing, so this is only for "
+                                "the case where the drawing record is wrong about "
+                                "what the sketch holds."
+                            ),
+                        },
                         "depth": {
                             "type": "number",
                             "description": "Cut depth in mm. Omit when through_all is true.",
@@ -1804,6 +1844,80 @@ class PartDesignTools:
             pass
         return body
 
+    def _sketch_open_ends(self, name: str) -> tuple[list[tuple[float, float]], int]:
+        """Free ends of one sketch, from the drawing record; ``(ends, segments)``.
+
+        ``([], 0)`` means "nothing was recorded" - a sketch reopened from disk,
+        or one filled by something other than this server - which is NOT the same
+        as a closed sketch, so the caller must not read it as a clean bill.
+        """
+        outlines = getattr(self.conn, "sketch_outlines", None) or {}
+        try:
+            document = str(self.conn.active_document.Name)
+        except Exception:  # noqa: BLE001 - no document, no record
+            return [], 0
+        record = outlines.get(f"{document}::{name}")
+        if not record:
+            return [], 0
+        segments = segments_of(record.get("elements") or [])
+        return open_ends(segments), len(segments)
+
+    def _refuse_open_curves(self, sketch: Any, allow: bool) -> None:
+        """Refuse a pad/pocket whose sketch holds an open curve, BEFORE CATIA runs.
+
+        The 2026-11-13 report (P0) lost a whole retry loop to this: its sketch held
+        one closed region plus the two open splines that divide it into three, and
+        the pocket answered NO_MATERIAL - after CATIA had already been asked, and
+        in their case with the sketch gone.
+
+        Measured on B30 2026-11-13, four documents, one variable each
+        (scripts/b30_v0419_probe_multiregion.py): a circle alone on the top face
+        cuts 603.2 mm3, and the SAME circle with an open spline through it, an open
+        spline inside it, or an open line through it removes 0 mm3 in all three.
+        So the cause is the open curve itself, not the division and not the spline
+        - one open curve anywhere makes the whole profile unusable.
+
+        Why refuse instead of letting CATIA answer: the failure costs a rollback and
+        a feature node, and it says "removed no material", which points at the
+        direction. This says which two points are free and what to do.
+
+        ``allow=True`` is the escape hatch, and it exists on purpose: a rule that
+        can only ever say no is worse than CATIA's own answer when the record is
+        wrong about the sketch. See the argument's description.
+        """
+        if allow:
+            return
+        name = str(getattr(sketch, "Name", "") or "")
+        ends, segments = self._sketch_open_ends(name)
+        if not ends:
+            return
+        listed = ", ".join(f"({x:.4f}, {y:.4f})" for x, y in ends[:8])
+        more = "" if len(ends) <= 8 else f", and {len(ends) - 8} more"
+        raise PreconditionRejected(
+            f"'{name}' holds {len(ends)} free endpoint(s) - {listed}{more} - so it "
+            "is not a closed contour, and a pad or pocket on it removes NOTHING. "
+            "Measured on B30 2026-11-13 with one change per document: a circle "
+            "alone cut 603.2 mm3, and the same circle with ONE open spline through "
+            "it, one open spline inside it, or one open line through it removed "
+            "0 mm3 in all three. The open curve is the cause - it does not have to "
+            "divide anything, and it does not have to be a spline. Nothing was "
+            f"built and nothing was rolled back ({segments} segment(s) checked, "
+            "from the coordinates this session gave the sketch tools).",
+            code="SKETCH_HAS_OPEN_CURVES", stage="validate", modified=False,
+            next_actions=[
+                "Put the open curve(s) in their OWN sketch: they are boundaries or "
+                "guides, and pad/pocket never needed them. Draw the closed region "
+                "alone, close it, and cut that",
+                "Or give each closed region its own sketch - the 2026-11-13 "
+                "report's own workaround: three separate pockets gave 1164.92 mm3 "
+                "against a 1142.849 mm3 source (+1.93 %)",
+                "If the open curve is a construction element, draw it with "
+                "construction=true: construction geometry is never part of the "
+                "profile and is not counted here",
+                "Only if you believe this sketch really is closed, pass "
+                "allow_open_curves=true to send it to CATIA anyway",
+            ])
+
     def _pad(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
@@ -1815,6 +1929,10 @@ class PartDesignTools:
         # name in the tree (草图.2 resolving to 草图.3). The failure below has to
         # answer in the caller's vocabulary.
         requested_name = args.get("sketch_name")
+        # Checked before the factory is touched: an open curve makes the pad
+        # remove nothing, and CATIA's own sentence about that points at the
+        # direction instead of at the sketch.
+        self._refuse_open_curves(sketch, bool(args.get("allow_open_curves", False)))
         height = args["height"]
         direction = args.get("direction", "normal")
         symmetric = args.get("symmetric", False) or direction == "both"
@@ -2094,6 +2212,7 @@ class PartDesignTools:
 
         sketch = self._get_last_sketch(args.get("sketch_name"))
         requested_name = args.get("sketch_name")
+        self._refuse_open_curves(sketch, bool(args.get("allow_open_curves", False)))
         through_all = bool(args.get("through_all")) and "depth" not in args
         depth = args.get("depth", 0)
         reverse = args.get("direction") == "reverse"

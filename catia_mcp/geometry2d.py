@@ -342,3 +342,51 @@ def describe(found: list[dict[str, Any]], segment_count: int,
             "strokes and is not fine as a pad profile.")
     return "".join(parts) + (" (Checked from the elements this session drew; "
                              "CATIA cannot hand sketch coordinates back.)")
+
+
+def open_ends(segments: Iterable[dict[str, Any]],
+              tol: float = 1e-6) -> list[tuple[float, float]]:
+    """Endpoints that belong to only ONE segment: the outline is not closed.
+
+    A different question from ``crossings`` and the one pad/pocket actually cares
+    about. Measured on B30 2026-11-13, four fresh documents
+    (scripts/b30_v0419_probe_multiregion.py), a 60x40x10 block cut from a sketch
+    on its top face:
+
+        circle alone                          pocket cut 603.2 mm3
+        circle + an open spline THROUGH it    NO_MATERIAL, 0 mm3
+        circle + an open spline INSIDE it     NO_MATERIAL, 0 mm3
+        circle + an open line THROUGH it      NO_MATERIAL, 0 mm3
+
+    So it is not the division and not the spline: one open curve anywhere in the
+    sketch makes the whole profile unusable, which is why the 2026-11-13 report's
+    "closed region + 2 dividing splines" could never cut.
+
+    A segment that starts and ends at the same point - a circle, a closed spline -
+    is closed BY ITSELF and is skipped: its two ends are one point, and counting
+    that point as free would call every circle an open profile.
+
+    ``tol`` is the same 1e-6 the rest of this module uses for "the same point".
+    The sketch tools record the coordinates they were GIVEN, so a pair of ends
+    that differ by less than a micron is the same junction.
+    """
+    items = list(segments)
+    free: list[tuple[float, float]] = []
+    for index, segment in enumerate(items):
+        first = (float(segment["a"][0]), float(segment["a"][1]))
+        second = (float(segment["b"][0]), float(segment["b"][1]))
+        if math.dist(first, second) <= tol:
+            continue
+        for point in (first, second):
+            met = False
+            for other_index, other in enumerate(items):
+                if other_index == index:
+                    continue
+                if (math.dist(point, (float(other["a"][0]), float(other["a"][1]))) <= tol
+                        or math.dist(point, (float(other["b"][0]),
+                                             float(other["b"][1]))) <= tol):
+                    met = True
+                    break
+            if not met:
+                free.append((round(point[0], 6), round(point[1], 6)))
+    return free

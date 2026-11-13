@@ -1357,11 +1357,42 @@ class GSDTools:
                     "reopened, with the curve still measuring 17.7831 mm and 0.0000 "
                     "mm from the body. A condition of the reopened file is what "
                     "changes, not the curve - the cause is not known (measured "
-                    "2026-11-11), so it is measured here and not explained."
+                    "2026-11-11), so it is measured here and not explained. "
+                    "WHAT IT LEAVES IN THE TREE, and why it cannot be deleted: each "
+                    "stroke adds four helpers - the point-on-curve, the normal "
+                    "plane, the r=depth circle and the swept tube - plus the "
+                    "CloseSurface and the boolean. They are HIDDEN by default "
+                    "(helpers='hide'), because they are clutter and nothing else; "
+                    "measured on B30 2026-11-13, hiding all four leaves the part "
+                    "updating with the volume unchanged ('Part updated successfully', "
+                    "23987.4336 mm3 either way). They CANNOT be deleted: in four "
+                    "separate documents, deleting any ONE of the four left a part "
+                    "whose update fails for good. They are the boolean's history, "
+                    "and 'only the boolean references them' is exactly why - the "
+                    "2026-11-12 report's proposed test was backwards."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
+                        "helpers": {
+                            "type": "string",
+                            "enum": ["hide", "show", "keep"],
+                            "default": "hide",
+                            "description": (
+                                "What to do with the four helper elements each "
+                                "stroke creates (point-on-curve, normal plane, "
+                                "profile circle, swept tube). 'hide' (default) sets "
+                                "them invisible, which is a display state only - "
+                                "measured 2026-11-13, the part still updates and the "
+                                "volume is unchanged. 'show' leaves them visible, "
+                                "and 'keep' does not touch their visibility at all. "
+                                "NONE of the three deletes them: measured 4/4, "
+                                "deleting any one of the four breaks the part's "
+                                "update for good, because they are the boolean's "
+                                "history. A failed engrave still removes everything "
+                                "it made - that is a different path."
+                            ),
+                        },
                         "curve": {
                             "type": "string",
                             "description": (
@@ -5206,8 +5237,9 @@ class GSDTools:
         along the surface normal everywhere, which is the thing a planar pocket
         cannot do (its depth follows an axis).
         """
-        self.conn.ensure_connected()
-        part = self.conn.get_active_part()
+        # Arguments are settled BEFORE CATIA is touched: an argument error must
+        # not depend on a document being open, and 'helpers' has three legal
+        # values, one of which is the default.
         curve = args.get("curve")
         if not curve:
             raise ArgumentRejected(
@@ -5233,7 +5265,14 @@ class GSDTools:
                 f"and must lie strictly between 0 and 1; got {position}. It only "
                 "places the plane that orients the profile.",
                 code="POSITION_OUT_OF_RANGE", stage="validate")
+        helpers = str(args.get("helpers") or "hide")
+        if helpers not in ("hide", "show", "keep"):
+            raise ArgumentRejected(
+                f"helpers must be 'hide', 'show' or 'keep'; got {helpers!r}. "
+                "Nothing was created.", code="BAD_ARGUMENT", stage="validate")
 
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
         target_name = args.get("target_body")
         target = (self._body_by_name(part, str(target_name)) if target_name
                   else self.conn.get_active_part_body())
@@ -5467,7 +5506,73 @@ class GSDTools:
             f"groove over {length_text}. {body_line}.{verdict}{tail} This is a "
             "groove ALONG the curve, not a filled glyph: for a letter, pass its "
             "OUTLINE (catia_sketch_strokes draws one in a call) - not its middle."
+            + self._engrave_helpers(created, helpers)
         )
+
+    def _set_helper_visibility(self, name: str, show: bool) -> None:
+        """One helper's display state, through the tool that already does this.
+
+        Split out so the sentence ``_engrave_helpers`` builds can be tested
+        without CATIA: every branch of that sentence (set, refused, keep) is a
+        claim about what the caller will find in the tree.
+        """
+        from catia_mcp.tools.part_design import PartDesignTools
+
+        PartDesignTools(self.conn).execute(
+            "catia_set_visibility", {"name": name, "show": show})
+
+    def _engrave_helpers(self, created: list[str], mode: str) -> str:
+        """Show or hide what one stroke left behind - and never delete it.
+
+        The 2026-11-12 report (P1-4) counted ~194 elements after 10 strokes and
+        asked for ``cleanup=true`` or a prefix purge, on the reasoning that these
+        elements "are only referenced by that boolean, so deleting them cannot
+        break anything else". Measured on B30 2026-11-13
+        (scripts/b30_v0419_probe_engrave_cleanup.py), that reasoning is exactly
+        backwards: in four separate documents, deleting the swept tube, the normal
+        plane, the point-on-curve or the profile circle each left a part whose
+        update fails for good - ``Feature 'X' deleted, but the part update failed
+        afterwards`` - and the volume only LOOKS right because the failed update
+        keeps the last good state. They are the boolean's history: being referenced
+        by that one feature is what makes them load-bearing.
+
+        Hiding is a different thing, and it was measured before it was shipped:
+        after hiding all four, the same part answered "Part updated successfully"
+        and its volume was unchanged to the last digit (23987.4336290779 mm3 both
+        sides), and the picture still showed the solid.
+
+        So this reports what it did, names the elements, and says why they cannot
+        go - a caller who deletes them anyway gets a broken part and no warning
+        from CATIA.
+        """
+        names = [name for name in created if name]
+        if mode == "keep" or not names:
+            return ""
+        done: list[str] = []
+        refused: list[str] = []
+        for name in names:
+            try:
+                self._set_helper_visibility(name, mode == "show")
+                done.append(name)
+            except Exception as error:  # noqa: BLE001 - reported, not raised
+                refused.append(f"'{name}' ({str(error).splitlines()[0][:60]})")
+        verb = "shown" if mode == "show" else "hidden"
+        text = ""
+        if done:
+            text = (f" The {len(done)} helper element(s) this stroke created are now "
+                    f"{verb} ("
+                    + ", ".join(f"'{name}'" for name in done)
+                    + ") - a display state, not a delete: hiding was measured on "
+                    "B30 2026-11-13 to leave the part updating with the volume "
+                    "unchanged. helpers='show' brings them back.")
+        if refused:
+            text += (" These could not be set: " + "; ".join(refused)
+                     + " - they are still in the tree, whatever their visibility.")
+        text += (" Do NOT delete them: measured on B30 2026-11-13, in four separate "
+                 "documents, deleting any ONE of the four left a part whose update "
+                 "fails for good. They are the boolean's history, so being "
+                 "referenced by that one feature is exactly why they have to stay.")
+        return text
 
     # ── putting an outline ON a curved face ───────────────────────────
     def _stroke_points_3d(self, args: dict[str, Any]

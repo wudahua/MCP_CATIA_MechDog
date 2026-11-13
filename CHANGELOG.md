@@ -2,6 +2,70 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.117] — 2026-11-13 · one open curve is enough, and an engrave's helpers are load-bearing
+
+Two more items from the same reports. Both were settled by changing ONE thing per
+document, and both overturned the explanation given in the report.
+
+### An open curve anywhere in the sketch kills pad and pocket (P0)
+
+The 2026-11-13 report's Arm7 sketch held one closed region plus the two open B-splines
+that divide it into three, and the pocket answered `NO_MATERIAL`. Its explanation was
+the region topology — "CATIA cannot find a usable closed contour when there are open
+curves dividing the area".
+
+Measured on B30 2026-11-13, four fresh documents, one variable each
+(`scripts/b30_v0419_probe_multiregion.py`), a 60×40×10 block cut from a sketch on its
+top face:
+
+| sketch | pocket result |
+|---|---|
+| circle alone | **cut 603.2 mm³** |
+| circle + open spline **through** it | 0 mm³, `NO_MATERIAL` |
+| circle + open spline entirely **inside** it | 0 mm³, `NO_MATERIAL` |
+| circle + open **line** through it | 0 mm³, `NO_MATERIAL` |
+
+So it is neither the division nor the spline: **one free endpoint anywhere makes the
+whole profile unusable**. A dividing curve is not a special case, it is just an open
+curve that happens to cross something.
+
+`catia_pad` and `catia_pocket` now read the drawing record **before CATIA is asked**
+and refuse with `SKETCH_HAS_OPEN_CURVES`, naming the free endpoints and carrying the
+four numbers above. The failure therefore costs no rollback and no feature node — which
+is the report's second complaint ("试一次 → 改参数 → 再试" could not be done), and the
+escape hatch `allow_open_curves=true` exists so a refusal is never final.
+
+There is deliberately **no "cut only this region" argument**: with the open curves
+removed the sketch is one closed contour, so a sub-region has to be its own sketch —
+which is what the report did by hand (three pockets, 1164.92 mm³ against a 1142.849
+source, +1.93 %).
+
+The other half of that report — *"CATIA removed the sketch with the rollback"* — did
+**not** reproduce: in both cells here `草图.2` was still in the tree afterwards, and the
+reply (since 0.3.114) only claims a removal when it measured one.
+
+### An engrave's helpers can be hidden, never deleted (P1-4)
+
+The 2026-11-12 report counted ~194 intermediate elements after 10 strokes and asked for
+`cleanup=true`, on the reasoning that they "are only referenced by that boolean, so
+deleting them cannot break anything else".
+
+That reasoning is exactly backwards, and it was measured: four separate documents,
+deleting the swept tube, the normal plane, the point-on-curve or the profile circle —
+**each one** answered `Feature 'X' deleted, but the part update failed afterwards`, and
+the part never updated again. The volume only *looks* right because a failed update
+keeps the last good state. They are the boolean's history; being referenced by that one
+feature is precisely what makes them load-bearing.
+
+Hiding is a different thing and was measured before it shipped: with all four hidden,
+the same part answered `Part updated successfully` and its volume was unchanged to the
+last digit (23987.4336290779 mm³ either side), with the solid still in the picture.
+
+So `catia_surface_engrave` gained **`helpers='hide'|'show'|'keep'`** (default `hide`).
+The reply names the elements it hid and says why they cannot go, and `catia_diagnose`'s
+ceiling now carries the 4/4 measurement instead of a proposal. No purge tool was built:
+a prefix purge would delete exactly the elements that cannot be deleted.
+
 ## [0.3.116] — 2026-11-13 · a letter is not a broken contour, and a batch close that checks the disk
 
 The three items from the same reports that could be settled without guessing. Each
