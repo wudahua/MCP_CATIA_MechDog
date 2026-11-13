@@ -1505,6 +1505,109 @@ class GSDTools:
                 },
             },
             {
+                "name": "catia_solid_tube",
+                "description": (
+                    "A SOLID round tube along a curve - the one call both 0.3.120 "
+                    "acceptance reports asked for ('six steps to a constant-radius "
+                    "bend', 'Rib/Tube missing, 18 calls and 380 coordinates for a "
+                    "handle dome'). It runs the chain that catia_surface_engrave "
+                    "already used internally and nothing else: datum plane normal "
+                    "to the curve at 'position', circle of radius 'radius' on that "
+                    "plane, explicit sweep of the circle along the curve, then "
+                    "CloseSurface to turn the pipe into a solid. The helpers it "
+                    "needs (a point-on-curve, the normal plane, the profile circle, "
+                    "the swept surface) are created and HIDDEN by default; they "
+                    "cannot be deleted afterwards - measured on B30 2026-11-13, "
+                    "deleting any one of them leaves a part whose update fails for "
+                    "good, because the CloseSurface references them. "
+                    "CONSTANT SECTION ONLY. A radius that varies along the spine is "
+                    "not offered: it needs one section per station, which is what "
+                    "catia_solid_loft does with a chain of closed splines (the "
+                    "route the 2026-11-13 report used for its 17-section handle, "
+                    "and the one to keep using when the section changes). An "
+                    "ELLIPSE section is not offered either - there is no "
+                    "ellipse primitive in this server (a real gap, recorded in "
+                    "capability_ceilings), so a flattened tube has to go through "
+                    "catia_solid_loft as well. "
+                    "WHERE THE SOLID GOES: into a NEW body by default (named after "
+                    "'name'), so nothing merges behind the caller's back - pass "
+                    "'body' to put it into an existing body, where Part Design "
+                    "semantics union it with what is already there, the same way a "
+                    "second catia_solid_loft does. "
+                    "THE NUMBER IS JUDGED, NOT JUST PRINTED: the reply compares the "
+                    "measured volume with pi*r^2*length of the guide and says which "
+                    "way it is off, because a sweep whose profile plane sits at a "
+                    "skew angle, or a guide with a kink, gives a tube that is "
+                    "plausible and wrong."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "curve": {
+                            "type": "string",
+                            "description": (
+                                "The spine: an element name (a catia_gsd_line or an "
+                                "OPEN catia_gsd_spline). It has to carry a "
+                                "point-on-curve parameter, which is the same rule "
+                                "engrave lives by: an open line or open spline does, "
+                                "a circle and a CLOSED spline do not (measured on "
+                                "B30 2026-11-11, one fresh document per case)."
+                            ),
+                        },
+                        "radius": {
+                            "type": "number",
+                            "description": (
+                                "Tube radius in mm. The solid is this radius all "
+                                "round the spine, so a tube of radius r is 2r across."
+                            ),
+                        },
+                        "position": {
+                            "type": "number",
+                            "default": 0.5,
+                            "description": (
+                                "Where along the spine the profile plane is placed, "
+                                "as a fraction of its length. It only has to make "
+                                "the circle square to the spine - the radius is the "
+                                "same everywhere, so any position gives the same "
+                                "tube on a constant-radius bend."
+                            ),
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": (
+                                "Existing body to put the tube into. Omit it and the "
+                                "tube gets a body of its own, so a caller who wanted "
+                                "a separate solid is not surprised by a union."
+                            ),
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": (
+                                "Base name for the tube's elements and body "
+                                "('<name>_N' plane, '<name>_P' profile, '<name>_T' "
+                                "swept surface, '<name>.Body'). Default "
+                                "'Tube_<curve>'."
+                            ),
+                        },
+                        "helpers": {
+                            "type": "string",
+                            "enum": ["hide", "show", "keep"],
+                            "default": "hide",
+                            "description": (
+                                "What to do with the four helper elements. 'hide' "
+                                "(default) sets them invisible, a display state "
+                                "only - measured 2026-11-13, hiding them all leaves "
+                                "the part updating with the volume unchanged. "
+                                "'show' leaves them visible and 'keep' does not "
+                                "touch their visibility. None of the three deletes "
+                                "them: deleting any one breaks the part's update."
+                            ),
+                        },
+                    },
+                    "required": ["curve", "radius"],
+                },
+            },
+            {
                 "name": "catia_measure_deviation",
                 "description": (
                     "Sample a curve ALONG its length and report how far each "
@@ -2407,6 +2510,19 @@ class GSDTools:
                     # to know the operation was interfered with.
                     try:
                         reply = self._surface_engrave(arguments)
+                    except Exception as error:                # noqa: BLE001
+                        if boxes.clicks:
+                            error.args = (str(error)
+                                          + _answered_boxes("", boxes.clicks),)
+                        raise
+                return _answered_boxes(reply, boxes.clicks)
+            case "catia_solid_tube":
+                with dialogs.watch() as boxes:
+                    # Same reason as the engrave case: a sweep plus a CloseSurface
+                    # can raise a modal, and a box answered before a failure is
+                    # still a box that was answered.
+                    try:
+                        reply = self._solid_tube(arguments)
                     except Exception as error:                # noqa: BLE001
                         if boxes.clicks:
                             error.args = (str(error)
@@ -5702,6 +5818,126 @@ class GSDTools:
                 code="ENGRAVE_TUBE_NOT_CLOSED", stage="execute",
                 modified=False) from error
 
+    def _solid_tube(self, args: dict[str, Any]) -> str:
+        """A solid round tube along a curve - the six-step chain, once.
+
+        Both 0.3.120 acceptance reports asked for this by name (one built a
+        constant-radius bend by hand in six calls, the other assembled a handle
+        dome from 17 lofts and 380 hand-fed coordinates). The chain itself is not
+        new: it is the one catia_surface_engrave has used since 0.3.95, with the
+        circle's radius no longer tied to a groove depth and the CloseSurface
+        kept instead of being eaten by a boolean. Nothing here is a new CATIA
+        capability, and the reply says so - it is the same primitives in one
+        call, with the frame work done by the tool.
+
+        Constant section only. A varying radius would need one section per
+        station, which is catia_solid_loft's job; an ellipse section would need
+        an ellipse primitive, which this server does not have (a real gap, in
+        the ceilings).
+        """
+        curve = str(args.get("curve") or "").strip()
+        if not curve:
+            raise ArgumentRejected(
+                "catia_solid_tube needs 'curve': the spine to sweep along, by "
+                "element name. Nothing was created.",
+                code="CURVE_REQUIRED", stage="validate")
+        try:
+            radius = float(args.get("radius"))
+        except (TypeError, ValueError):
+            raise ArgumentRejected(
+                "catia_solid_tube needs 'radius' in mm (the tube's radius, not "
+                f"its diameter). Got {args.get('radius')!r}. Nothing was created.",
+                code="RADIUS_REQUIRED", stage="validate")
+        if radius <= 0:
+            raise ArgumentOutOfRange(
+                f"radius must be positive; got {radius}. A tube of radius 0 is "
+                "a line and creates no solid.",
+                code="RADIUS_OUT_OF_RANGE", stage="validate")
+        position = float(args.get("position", 0.5))
+        if not 0.0 < position < 1.0:
+            raise ArgumentOutOfRange(
+                "position is a FRACTION of the spine's length (0.5 = its middle) "
+                f"and must lie strictly between 0 and 1; got {position}. It only "
+                "places the plane that orients the profile.",
+                code="POSITION_OUT_OF_RANGE", stage="validate")
+        helpers = str(args.get("helpers") or "hide")
+        if helpers not in ("hide", "show", "keep"):
+            raise ArgumentRejected(
+                f"helpers must be 'hide', 'show' or 'keep'; got {helpers!r}. "
+                "Nothing was created.", code="BAD_ARGUMENT", stage="validate")
+
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        curve_ref = self._ref(curve)
+        length = self._curve_length_mm(curve_ref)
+
+        base = str(args.get("name") or f"Tube_{curve}")
+        body_arg = args.get("body")
+        created: list[str] = []
+        tube_name = self._engrave_cutter(curve, base, radius, position, created)
+
+        from catia_mcp.tools.part_design import PartDesignTools
+
+        pd = PartDesignTools(self.conn)
+        if body_arg:
+            target = self._body_by_name(part, str(body_arg))
+            before = pd._body_volume_mm3(part, target)
+            body_note = (f"in the existing body '{target.Name}', where Part Design "
+                         "unions it with what was already there")
+        else:
+            taken = {str(part.Bodies.Item(i).Name)
+                     for i in range(1, int(part.Bodies.Count) + 1)}
+            body_name = f"{base}.Body"
+            suffix = 2
+            while body_name in taken:
+                body_name = f"{base}.Body.{suffix}"
+                suffix += 1
+            pd.execute("catia_new_body", {"name": body_name})
+            target = self._body_by_name(part, body_name)
+            before = 0.0
+            body_note = (f"in a body of its own ('{body_name}'), so nothing was "
+                         "merged into the model")
+
+        # CloseSurface puts its solid in the IN-WORK object, and building the four
+        # GSD helpers above moved that to the geometrical set. Left alone, the
+        # tube's solid would land in the set instead of the body (the same trap
+        # that made AddNewShaftFromRef fail in 0.3.120).
+        part.InWorkObject = target
+        self.conn.active_body = target
+        self._close_tube(curve, tube_name)
+
+        after = pd._body_volume_mm3(part, target)
+        gained = (None if before is None or after is None else after - before)
+        note = self._engrave_helpers(created, helpers, owner="the CloseSurface")
+
+        expected = (math.pi * radius * radius * length) if length else None
+        verdict = ""
+        if gained is not None and expected:
+            ratio = gained / expected
+            verdict = (f" pi*r^2*length along the {length:.3f} mm spine predicts "
+                       f"{expected:.4f} mm3, so the measured volume is {ratio:.3f}x")
+            if ratio < 0.98:
+                verdict += (" - SMALLER than a constant-radius tube, so the sweep "
+                            "did not follow the whole spine (a kink, or a profile "
+                            "plane the guide could not carry round)")
+            elif ratio > 1.02:
+                verdict += (" - LARGER than a constant-radius tube, so the profile "
+                            "was not square to the spine and the sweep opened out")
+            else:
+                verdict += " - a constant-radius tube, which is what was asked for"
+        elif gained is not None:
+            verdict = (" the spine's length could not be read, so there is no "
+                       "pi*r^2*length to judge the volume against")
+
+        return (
+            f"Solid tube '{tube_name}' made {body_note}. Volume "
+            + (f"{gained:.4f} mm3." if gained is not None
+               else "could not be measured.")
+            + verdict + "."
+            + f" Profile radius {radius:g} mm."
+            + note
+        )
+
     def _surface_engrave_many(self, args: dict[str, Any]) -> str:
         """N curves, ONE cutter body, ONE boolean.
 
@@ -5908,7 +6144,8 @@ class GSDTools:
         PartDesignTools(self.conn).execute(
             "catia_set_visibility", {"name": name, "show": show})
 
-    def _engrave_helpers(self, created: list[str], mode: str) -> str:
+    def _engrave_helpers(self, created: list[str], mode: str,
+                         owner: str = "the boolean") -> str:
         """Show or hide what one stroke left behind - and never delete it.
 
         The 2026-11-12 report (P1-4) counted ~194 elements after 10 strokes and
@@ -5946,7 +6183,7 @@ class GSDTools:
         verb = "shown" if mode == "show" else "hidden"
         text = ""
         if done:
-            text = (f" The {len(done)} helper element(s) this stroke created are now "
+            text = (f" The {len(done)} helper element(s) this call created are now "
                     f"{verb} ("
                     + ", ".join(f"'{name}'" for name in done)
                     + ") - a display state, not a delete: hiding was measured on "
@@ -5957,7 +6194,7 @@ class GSDTools:
                      + " - they are still in the tree, whatever their visibility.")
         text += (" Do NOT delete them: measured on B30 2026-11-13, in four separate "
                  "documents, deleting any ONE of the four left a part whose update "
-                 "fails for good. They are the boolean's history, so being "
+                 f"fails for good. They are {owner}'s history, so being "
                  "referenced by that one feature is exactly why they have to stay.")
         return text
 
@@ -6231,11 +6468,36 @@ class GSDTools:
             stats = (" How far the points moved could not be measured, so how far "
                      "the outline was from the surface is unknown.")
 
+        # WHERE IT LANDED, as a box. The 2026-11-13 report proved its own
+        # 36-point outline landed correctly by matching an area (418.265 against
+        # 18x24) and asked for the landing box instead of that inference. The
+        # exact snapped coordinates are not readable through this API, but the
+        # box they were drawn in IS known and so is the furthest any point
+        # travelled - so this is the box grown by that distance: a bound that
+        # contains every snapped point, labelled as a bound.
+        box = ""
+        if polylines:
+            xs = [item[0] for line in polylines for item in line]
+            ys = [item[1] for line in polylines for item in line]
+            zs = [item[2] for line in polylines for item in line]
+            box = (f" Drawn in x {min(xs):.3f}..{max(xs):.3f}, y {min(ys):.3f}.."
+                   f"{max(ys):.3f}, z {min(zs):.3f}..{max(zs):.3f}")
+            if moved:
+                box += (f"; the furthest point travelled {max(moved):.4f} mm, so "
+                        "every snapped point lies inside that box grown by that "
+                        "much - a BOUND, not a reading: the snapped points are not "
+                        "read back here.")
+            else:
+                box += ("; how far the points travelled could not be measured, so "
+                        "this is where they were DRAWN and says nothing about "
+                        "where they landed.")
+            box += "."
+
         named = ", ".join(f"'{name}'" for name in spline_names)
         return (
             f"Snapped {total_points} point(s) from {where} onto {support_note}, "
             f"and built {len(spline_names)} open spline(s): {named}."
-            f"{stats} NEXT: catia_surface_engrave(curve=<one of those names>, "
+            f"{stats}{box} NEXT: catia_surface_engrave(curve=<one of those names>, "
             "depth=...) cuts it. Two facts worth knowing before you rely on it: "
             "each point landed on the NEAREST part of that surface, so a point "
             "inside a thin body can come back on the far wall; and the spline is "

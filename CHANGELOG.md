@@ -2,6 +2,90 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.121] — 2026-11-13 · the view was perspective, and a face knows where it is
+
+Two acceptance reports (11th and 12th round on the same bottle) named the same
+three things, and the biggest one was not what either of them thought.
+
+### `set_view` was never tilted - it was perspective
+
+Both reports said `set_view('front')` comes back "15-20° off, the bottom of the
+bottle visible", and both blamed the sight vector. Measured on B30 2026-11-13:
+right after `PutSightDirection(0,1,0)` and `PutUpDirection(0,0,1)`,
+`GetSightDirection` reads back **(0,1,0)** and `GetUpDirection` **(0,0,1)** - the
+camera *is* on −Y. `Viewpoint3D.ProjectionMode` reads **0** on this install, and
+0 is PERSPECTIVE: a perspective eye point above a 60×40×4 plate shows that plate's
+top face in a front view, with the edges converging. That is the whole "tilt".
+
+Two captures that differed in nothing else (`scripts/b30_v0423_probe_view2.py`):
+mode 0 the plate's top face is visible, mode 1 the plate is a clean elevation.
+`ProjectionMode = 2` is not a third mode - it is silently kept at 1.
+
+So `catia_set_view` now forces **parallel**, offers `projection='perspective'` for
+a presentation shot, accepts `direction=[x,y,z]` + `up=[x,y,z]` for a view none of
+the seven names describe, and **reads the camera back** through
+`GetSightDirection`/`GetUpDirection` (by-ref arrays, so `SystemService.Evaluate`)
+and prints what CATIA holds - a Put that gets ignored now says so instead of
+leaving a plausible picture.
+
+### A face answers its own centre - the 2026-11-10 note was about hybrid references
+
+`list_faces` published area only, for two rounds, because of a rule measured on a
+*hybrid* reference: `GetMeasurable` reads the solid that carries it. A
+**topological face** is different. Measured on a 60×40×40 block: `GetCOG` answers
+the face's own centre - top (30,20,40), bottom (30,20,0) - while the solid's is
+(30,20,20). `GetPlane` answers a plane's origin and two directions on a planar
+face.
+
+Every face now carries `centroid`, and a planar face also `plane_origin` and
+`normal`. The normal keeps **CATIA's own sense**: an earlier version flipped it
+away from the body's centre of gravity, and that was measured wrong the same day -
+on a 40×40×4 plate with a tube standing 20 mm above it the body's centre is above
+the plate's top face, so the flip turned that face's normal inward. The plane is
+exact, the sense is not, and the reply says "read it as a line, not as an arrow".
+
+No bounding box, and this time the absence has three measurements behind it:
+`Measurable` exposes 44 members and none is a box, `Inertias.Add(face)` has none,
+and searching `Vertex`/`Edge` under a face cell returns **0** on every face. Cost:
+~0.3 s per face; `geometry=false` skips it.
+
+### `catia_solid_tube` - the six-step bend, once
+
+Both reports asked for it by name (one built a constant-radius bend in six calls,
+the other assembled a handle dome from 17 lofts and 380 hand-fed coordinates). It
+is the chain `catia_surface_engrave` has used since 0.3.95 with the groove depth
+turned into a radius: normal plane → circle → explicit sweep → CloseSurface. No
+new CATIA capability, one call.
+
+Measured on B30 2026-11-13, one fresh document per case:
+
+| spine | radius | measured | π·r²·L |
+|---|---|---|---|
+| `gsd_line`, 50 mm | 5 | **3 926.9908 mm³** | 3 926.9908 |
+| open spline, 50.851 mm, into a body holding 6 400 mm³ | 3 | +1 437.7749 (body 7 837.7749) | 1 437.7769 |
+| `gsd_circle` | 2 | refused (`ENGRAVE_CURVE_UNPARAMETRISABLE`), nothing created | - |
+
+Volume is *judged* against π·r²·L, into a new body by default so nothing merges
+silently, and `body=` puts it into an existing one where Part Design unions it.
+**Constant section only** - a varying radius needs one section per station, which
+is `catia_solid_loft`; an ellipse section needs an ellipse primitive this server
+does not have. Both gaps are in the ceilings with the route that does work.
+
+### Also
+
+- `catia_solid_loft` now says the two things three reports had to discover:
+  a solid built into a body that already holds material is **UNIONED** with it (the
+  reply's volume is the body's total, not the loft's share), and a section chain
+  that does not close back on itself ends at the **first and last section's
+  plane** - those are the end faces.
+- `catia_curve_on_surface` prints the box the outline was *drawn* in plus the
+  furthest any point travelled, and calls it a **bound**: the snapped coordinates
+  cannot be read back, and the 2026-11-13 report had to prove its landing by
+  matching an area.
+- `catia_screenshot(clean=true)` says the axis triad belongs to the viewer and
+  cannot be switched off (Viewer3D's 58 members hold no such switch).
+- 145 tools (GSD 38). `scripts/b30_v0423_audit.py` 13/13, 1 924 tests.
+
 ## [0.3.120] — 2026-11-14 · Chinese lettering that pads, and a shaft about any line
 
 The last two items on the list. One shipped whole; of the other, one of its three

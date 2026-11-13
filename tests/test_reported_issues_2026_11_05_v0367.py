@@ -157,8 +157,9 @@ def test_the_real_server_still_matches_its_router():
     130 since 0.3.79 added the three colour tools; the point of the assertion is
     that the number comes from ONE source, not that it is any particular value.
     """
-    # 0.3.119: catia_measure_deviation is the 144th.
-    assert _check_tools_match_router() == 144
+    # 0.3.119: catia_measure_deviation is the 144th; 0.3.121 adds
+    # catia_solid_tube for 145.
+    assert _check_tools_match_router() == 145
 
 
 # ── the two hanging suggestions from the 0.3.60 report ─────────────────────

@@ -155,26 +155,72 @@ class ExportTools:
                     "ABSOLUTE AXES, not the model's: 'front' is look-along-minus-Y "
                     "with +Z up whatever the part's own orientation, so a part "
                     "built rotated in the tree (or a component placed with a "
-                    "transform) will not line up with any of them, and no "
-                    "automation call reports the current right/up vectors the way "
-                    "the UI's 'Normal to' does. Build in the axes you want to "
-                    "photograph, or take the screenshot before placing the "
-                    "component (reported 0.3.50 as P3, documented here since "
-                    "0.3.59)."
+                    "transform) will not line up with any of them. "
+                    "PARALLEL PROJECTION BY DEFAULT, and that is the 0.3.121 fix. "
+                    "Two 0.3.120 reports said 'front' was tilted 15-20 degrees with "
+                    "the bottom of the bottle visible; measured on B30 2026-11-13, "
+                    "the sight and up vectors were exactly right (read back after "
+                    "the Put) and the culprit was ProjectionMode, which reads 0 = "
+                    "PERSPECTIVE on this install - a perspective camera framing a "
+                    "60x40x4 plate looks down on it, so the plate shows its top "
+                    "face in a 'front' view. With ProjectionMode=1 the same plate "
+                    "is a clean elevation (two captures differing in nothing else, "
+                    "scripts/b30_v0423_probe_view2.py). So this now forces "
+                    "parallel unless projection='perspective' is passed, and it "
+                    "READS THE CAMERA BACK (GetSightDirection/GetUpDirection through "
+                    "SystemService.Evaluate - the by-ref array does not marshal "
+                    "late-bound) and prints what CATIA actually holds, so an "
+                    "ignored Put says so instead of leaving a plausible picture. "
+                    "For a view none of the seven names describe - looking along a "
+                    "face normal, or down a hole - pass direction=[x,y,z] and "
+                    "optionally up=[x,y,z]."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "view": {
                             "type": "string",
-                            "description": "View orientation",
+                            "description": (
+                                "View orientation. Ignored when 'direction' is "
+                                "given."
+                            ),
                             "enum": [
                                 "front", "back", "top", "bottom",
                                 "left", "right", "isometric",
                             ],
                         },
+                        "direction": {
+                            "type": "array",
+                            "items": {"type": "number"},
+                            "description": (
+                                "Sight direction [x, y, z] in the document's axes - "
+                                "the way the CAMERA LOOKS, so [0, 1, 0] is the same "
+                                "as view='front'. Use it to look along a face normal "
+                                "or a hole axis."
+                            ),
+                        },
+                        "up": {
+                            "type": "array",
+                            "items": {"type": "number"},
+                            "description": (
+                                "Screen up vector [x, y, z]. Optional with "
+                                "'direction' (Z is used unless the sight is within "
+                                "26 degrees of vertical, then Y). It must not be "
+                                "parallel to the sight."
+                            ),
+                        },
+                        "projection": {
+                            "type": "string",
+                            "enum": ["parallel", "perspective"],
+                            "default": "parallel",
+                            "description": (
+                                "'parallel' (default) is an orthographic elevation, "
+                                "which is what 'is this edge vertical' needs. "
+                                "'perspective' restores CATIA's default 0 - offered "
+                                "for a presentation shot, never for a measurement."
+                            ),
+                        },
                     },
-                    "required": ["view"],
                 },
             },
             {
@@ -199,7 +245,12 @@ class ExportTools:
                     bool(arguments.get("clean", False)),
                 )
             case "catia_set_view":
-                return self._set_view(arguments["view"])
+                return self._set_view(
+                    arguments.get("view"),
+                    arguments.get("direction"),
+                    arguments.get("up"),
+                    str(arguments.get("projection") or "parallel"),
+                )
             case "catia_fit_all":
                 return self._fit_all()
             case _:
@@ -440,7 +491,20 @@ class ExportTools:
                          "client area and exposes no capture-resolution setting - "
                          "Window.Width/Height do not change it, measured on B30 "
                          "2026-11-03. Resize the CATIA window to change this.]")
-        return f"Screenshot saved to {file_path} ({size_note}){note}{hidden_note}"
+        return (f"Screenshot saved to {file_path} ({size_note}){note}{hidden_note}"
+                + (self._AXIS_TRIAD_NOTE if clean else ""))
+
+    # The 0.3.120 report photographed a clean part and found "a small white mesh
+    # under the model" - the viewer's own axis system indicator, which it read as
+    # a modelling defect. Said once, where the report image is taken: measured on
+    # B30 2026-11-13, Viewer3D exposes 58 members and the only display switches
+    # among them are lighting (LightSources/LightingMode/LightingIntensity) - no
+    # axis, grid, triad or compass toggle at all.
+    _AXIS_TRIAD_NOTE = (
+        " The small axis triad at the bottom of the window belongs to the VIEWER, "
+        "not to the part, and cannot be switched off from automation: Viewer3D "
+        "exposes 58 members on B30 and the only display switches are lighting "
+        "(measured 2026-11-13). Crop it out of a report image.")
 
     def _clean_view(self) -> tuple[list[Any], str]:
         """Hide construction geometry for one capture; returns what to restore.
@@ -480,7 +544,9 @@ class ExportTools:
         except Exception:  # noqa: BLE001 - the file is already written
             pass
 
-    def _set_view(self, view: str) -> str:
+    def _set_view(self, view: str | None, direction: list[float] | None = None,
+                  up: list[float] | None = None,
+                  projection: str = "parallel") -> str:
         self.conn.ensure_connected()
         viewer = self.conn.active_window.ActiveViewer
         viewpoint = viewer.Viewpoint3D
@@ -508,21 +574,151 @@ class ExportTools:
             "isometric": {"sight": (-1, -1, -1), "up": (-1, -1, 2)},
         }
 
-        if view not in views:
-            raise ArgumentRejected(f"Unknown view: '{view}'")
+        if projection not in ("parallel", "perspective"):
+            raise ArgumentRejected(
+                f"projection must be 'parallel' or 'perspective'; got "
+                f"{projection!r}. Nothing was changed.",
+                code="BAD_ARGUMENT", stage="validate")
 
-        v = views[view]
-        sight = v["sight"]
-        up = v["up"]
+        if direction is not None:
+            sight = self._three(direction, "direction")
+            if up is None:
+                # An up vector that is not parallel to the sight: Z for anything
+                # nearly horizontal, Y for a near-vertical look.
+                up_vec = (0.0, 1.0, 0.0) if abs(sight[2]) > 0.9 else (0.0, 0.0, 1.0)
+                up_note = (f" (up defaulted to {up_vec} because none was given "
+                           "- it only has to be non-parallel to 'direction')")
+            else:
+                up_vec = self._three(up, "up")
+                up_note = ""
+            label = "custom direction"
+            if view:
+                label = f"custom direction (view='{view}' ignored)"
+        else:
+            if not view:
+                raise ArgumentRejected(
+                    "catia_set_view needs 'view' (front, back, top, bottom, left, "
+                    "right, isometric) or 'direction' [x, y, z] plus optional "
+                    "'up'. Nothing was changed.",
+                    code="VIEW_REQUIRED", stage="validate")
+            if view not in views:
+                raise ArgumentRejected(
+                    f"Unknown view: '{view}'",
+                    code="UNKNOWN_VIEW", stage="validate",
+                    data={"known": sorted(views)})
+            v = views[view]
+            sight = tuple(float(c) for c in v["sight"])
+            up_vec = tuple(float(c) for c in v["up"])
+            up_note = ""
+            label = view
 
-        # Set viewpoint sight and up directions
+        cross = (sight[1] * up_vec[2] - sight[2] * up_vec[1],
+                 sight[2] * up_vec[0] - sight[0] * up_vec[2],
+                 sight[0] * up_vec[1] - sight[1] * up_vec[0])
+        if sum(abs(c) for c in cross) < 1e-9:
+            raise ArgumentRejected(
+                f"'up' {list(up_vec)} is parallel to the sight direction "
+                f"{list(sight)}, which leaves the picture's rotation undefined. "
+                "Pick an up vector across the sight. Nothing was changed.",
+                code="UP_PARALLEL_TO_SIGHT", stage="validate")
+
+        # ── the projection, which is what the tilt actually was ────────────
+        # BOTH 0.3.120 acceptance reports said set_view('front') is "15-20 degrees
+        # off with the bottom of the bottle visible", and both blamed the sight
+        # vector. It is not: measured on B30 2026-11-13, GetSightDirection reads
+        # back exactly (0,1,0) and GetUpDirection (0,0,1) right after the Put, so
+        # the camera IS on -Y. What was left is ProjectionMode, which reads 0 on
+        # this install - PERSPECTIVE - and a perspective camera that has to frame
+        # a 60x40x4 plate looks down on it slightly, because the eye point sits
+        # above the plate's plane. Set to 1 (PARALLEL) the same plate is a clean
+        # elevation: measured with two captures that differ in nothing else
+        # (scripts/b30_v0423_probe_view2.py). ProjectionMode=2 is not a third
+        # mode on B30 - it is silently kept at 1.
+        want = 1 if projection == "parallel" else 0
+        try:
+            viewpoint.ProjectionMode = want
+            got_mode = int(viewpoint.ProjectionMode)
+            mode_note = ""
+            if got_mode != want:
+                mode_note = (f" CATIA kept ProjectionMode={got_mode} instead of "
+                             f"{want} - only 0 (perspective) and 1 (parallel) "
+                             "exist on B30.")
+        except Exception as error:  # noqa: BLE001 - reported, the view still sets
+            got_mode = None
+            mode_note = (" The projection mode could not be set ("
+                         + str(error).splitlines()[0][:70] + ").")
+
         viewpoint.PutSightDirection(list(sight))
-        viewpoint.PutUpDirection(list(up))
-
-        # Fit all in view
+        viewpoint.PutUpDirection(list(up_vec))
         viewer.Reframe()
 
-        return f"View set to: {view}"
+        actual = self._view_directions(viewpoint)
+        if actual is None:
+            read_back = (" The direction could not be read back (Viewpoint3D "
+                         "exposes GetSightDirection, and the by-ref array does not "
+                         "marshal late-bound), so this reply does NOT confirm the "
+                         "camera took them.")
+        else:
+            got_sight, got_up = actual
+            if (max(abs(a - b) for a, b in zip(got_sight, sight)) > 1e-6
+                    or max(abs(a - b) for a, b in zip(got_up, up_vec)) > 1e-6):
+                read_back = (f" READ BACK FROM CATIA: sight {got_sight} up "
+                             f"{got_up}, which is NOT what was asked - the Put was "
+                             "ignored on this build, so the picture is not this "
+                             "view.")
+            else:
+                read_back = (f" Read back from CATIA: sight {got_sight}, up "
+                             f"{got_up} - the camera took them.")
+        mode_text = ("parallel projection" if got_mode == 1
+                     else "perspective projection" if got_mode == 0
+                     else "projection unknown")
+        return (f"View set to {label}: {mode_text}, sight {list(sight)}, up "
+                f"{list(up_vec)}.{up_note}{mode_note}{read_back}")
+
+    def _three(self, value: Any, what: str) -> tuple[float, float, float]:
+        """Three finite numbers from a caller, or a refusal that names the fault."""
+        try:
+            numbers = [float(v) for v in value]
+        except (TypeError, ValueError):
+            raise ArgumentRejected(
+                f"'{what}' must be three numbers [x, y, z]; got {value!r}. "
+                "Nothing was changed.", code="BAD_ARGUMENT", stage="validate")
+        if len(numbers) != 3:
+            raise ArgumentRejected(
+                f"'{what}' must have exactly three components; got {len(numbers)}. "
+                "Nothing was changed.", code="BAD_ARGUMENT", stage="validate")
+        if not any(abs(n) > 0 for n in numbers):
+            raise ArgumentRejected(
+                f"'{what}' is [0, 0, 0], which has no direction. Nothing was "
+                "changed.", code="BAD_ARGUMENT", stage="validate")
+        return (numbers[0], numbers[1], numbers[2])
+
+    _VIEW_DIRECTIONS_VBS = (
+        "Public Function catia_mcp_viewdirs(oVP)\n"
+        "    Dim s(2), u(2), a(5)\n"
+        "    oVP.GetSightDirection s\n"
+        "    oVP.GetUpDirection u\n"
+        "    a(0)=s(0) : a(1)=s(1) : a(2)=s(2)\n"
+        "    a(3)=u(0) : a(4)=u(1) : a(5)=u(2)\n"
+        "    catia_mcp_viewdirs = a\n"
+        "End Function\n"
+    )
+
+    def _view_directions(self, viewpoint: Any) -> tuple[list[float], list[float]] | None:
+        """The view's actual sight/up, read through VBS; None if unreadable.
+
+        ``Viewpoint3D.SightDirection`` is not a property on B30: the typelib has
+        ``GetSightDirection`` with a by-ref array, which does not marshal
+        late-bound (measured 2026-11-13), so the same SystemService.Evaluate route
+        the Measurable arrays use is needed.
+        """
+        try:
+            raw = self.conn.app.SystemService.Evaluate(
+                self._VIEW_DIRECTIONS_VBS, 0, "catia_mcp_viewdirs", [viewpoint])
+            values = [round(float(v), 4) for v in raw]
+            return values[:3], values[3:6]
+        except Exception:  # noqa: BLE001 - the reply says so
+            return None
 
     def _fit_all(self) -> str:
         self.conn.ensure_connected()

@@ -81,8 +81,18 @@ def _export():
     ("isometric", (-1, -1, -1), (-1, -1, 2)),
 ])
 def test_view_table_is_the_catia_one(view, sight, up):
+    """0.3.121: the reply grew a projection mode and a camera read-back.
+
+    The old assertion pinned the exact string "View set to: front", which was
+    the whole reply. It now has to say WHICH projection was used (the 0.3.120
+    reports' tilt was ProjectionMode=perspective, not the direction vectors) and
+    whether CATIA took the directions - so the table itself is pinned through
+    the fake viewpoint, and the reply is checked for the two facts it carries.
+    """
     tools, viewer = _export()
-    assert tools.execute("catia_set_view", {"view": view}) == f"View set to: {view}"
+    reply = tools.execute("catia_set_view", {"view": view})
+    assert reply.startswith(f"View set to {view}:")
+    assert "parallel projection" in reply
     assert viewer.Viewpoint3D.sight == sight
     assert viewer.Viewpoint3D.up == up
     assert viewer.reframed == 1

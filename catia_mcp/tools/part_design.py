@@ -1488,7 +1488,26 @@ class PartDesignTools:
                     "List the faces of a body's final solid shape as indexed "
                     "names (Face.N) for catia_measure_distance, shell, draft, "
                     "thickness and face-driven drawing views. Defaults to the "
-                    "main body; pass body_name to enumerate another body."
+                    "main body; pass body_name to enumerate another body. "
+                    "Each face carries its own CENTROID and, when it is planar, "
+                    "its PLANE (origin plus two directions) and NORMAL, so a face "
+                    "can be picked by where it is instead of by guessing area - "
+                    "the 0.3.120 reports' P1-3, twice. Measured on B30 2026-11-13 "
+                    "on a 60x40x40 block: GetCOG on a FACE reference answers the "
+                    "face's own centre (top face (30,20,40), bottom (30,20,0)) and "
+                    "NOT the solid's (30,20,20) - the 'GetMeasurable reads the "
+                    "whole body' note of 2026-11-10 applies to HYBRID references, "
+                    "not to topological cells. There is no per-face BOUNDING BOX "
+                    "and none is invented here: Measurable exposes 44 members on "
+                    "B30 and none of them is a box, Inertia on a face reference "
+                    "has none either, and searching Vertex/Edge under a face cell "
+                    "returns 0 (all measured 2026-11-13). "
+                    "TO FIND WHERE A FEATURE'S GEOMETRY IS, read this listing's "
+                    "'created_by' - every face names the feature that made it - "
+                    "and look at that face's centroid and area. That chain is the "
+                    "answer to 'the pit is in the tree but I cannot ask where it "
+                    "is' without reading sketch coordinates, which this API cannot "
+                    "read at all."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1496,6 +1515,16 @@ class PartDesignTools:
                         "body_name": {
                             "type": "string",
                             "description": "Body to enumerate (default: the part's main body)",
+                        },
+                        "geometry": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": (
+                                "Read each face's centroid (and plane/normal when "
+                                "planar). Two extra measurements per face - pass "
+                                "false for a quick list of a part with hundreds of "
+                                "faces."
+                            ),
                         },
                     },
                 },
@@ -1558,7 +1587,8 @@ class PartDesignTools:
             case "catia_split_solid":
                 return self._split_solid(arguments)
             case "catia_list_faces":
-                return self._list_faces(arguments.get("body_name"))
+                return self._list_faces(arguments.get("body_name"),
+                                        bool(arguments.get("geometry", True)))
             case "catia_list_edges":
                 return self._list_edges(
                     arguments.get("min_length"), arguments.get("max_length"),
@@ -5889,12 +5919,34 @@ class PartDesignTools:
         twist = self._coupling_warning(facts_dict)
         kept, kept_note = self._loft_sections_used(inner, sections)
         count = len(kept) if kept else len(sections)
+        # Two semantics this feature has always had and never said out loud, both
+        # reported as "undocumented" by the 0.3.120 acceptance reports - one of
+        # them for the THIRD time (2026-11-13, twice in one day):
+        #   * a solid loft in a body that already holds material is UNIONED with
+        #     it, no catia_boolean involved, so the volume in this reply is the
+        #     BODY's total and not the loft's own share;
+        #   * a chain of sections that does not close back on itself ends at the
+        #     first and last section's plane - those ARE the end faces. There is
+        #     no open-shell result from this tool.
+        merge = ""
+        if before:
+            merge = (f" THIS FEATURE JOINED '{body.Name}': a Part Design solid built "
+                     f"into a body that already holds {before:.1f} mm3 is UNIONED "
+                     "with it - no catia_boolean, no second body, and the volume "
+                     "above is the body's total, not the loft's own share. Do not "
+                     "add body volumes up.")
+        caps = (" The ends: a section chain that does not close back on itself ends "
+                "at the FIRST and LAST section's plane, and those planes are the "
+                "end faces - the result is always a solid. For an open shell, sweep "
+                "a surface instead (catia_gsd_sweep, or catia_solid_tube for a pipe).")
         return (
             f"Solid loft created through {count} section(s)"
             + (f" ({'; '.join(tangency)})" if tangency else "")
             + f". Feature: '{feature.Name}' in '{body.Name}', a Part Design solid, "
             "not a surface - no thickening step is needed."
             + detail
+            + merge
+            + caps
             + kept_note
             + section_note
             + twist
@@ -7462,7 +7514,8 @@ class PartDesignTools:
         cells = topology_cells(self.conn, body, kind)
         return cells, len(cells)
 
-    def _list_faces(self, body_name: str | None = None) -> str:
+    def _list_faces(self, body_name: str | None = None,
+                    with_geometry: bool = True) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
         body = self._prepare_body(part)
@@ -7500,6 +7553,8 @@ class PartDesignTools:
                     entry["area_unknown"] = True
                 else:
                     entry["area_mm2"] = round(area, 3)
+                if with_geometry:
+                    entry.update(self._face_geometry(spa, cell))
                 faces.append(entry)
         except Exception as e:
             return f"Could not enumerate faces: {e}"
@@ -7514,6 +7569,19 @@ class PartDesignTools:
             "raw_total": raw_total,
             "faces": faces,
         }
+        if with_geometry:
+            payload["geometry"] = (
+                "centroid is the FACE's own centre of gravity (measured on a "
+                "60x40x40 block: top face (30,20,40), bottom (30,20,0) - the solid's "
+                "is (30,20,20), so these are not body values). normal exists on "
+                "PLANAR faces only and its SENSE is CATIA's own - the plane is "
+                "exact, but the sign is not guaranteed to point out of the "
+                "material (5 of a plain block's 6 faces pointed outward, the "
+                "bottom one inward), so read it as a line, not as an arrow. No "
+                "bounding box is reported because a face "
+                "has none: Measurable exposes 44 members and no box, Inertia on a "
+                "face has no box, and searching Vertex/Edge under a face cell "
+                "returns 0 (all measured on B30 2026-11-13).")
         # Publising both numbers is how a shortfall stops being invisible: the
         # report of 2026-10-23 counted 14 faces on a solid and got 10 here, and
         # nothing in the old payload made the difference visible. total_raw is
@@ -7528,6 +7596,96 @@ class PartDesignTools:
                 "both numbers with the part."
             )
         return json.dumps(payload, indent=2)
+
+    # One VBS round trip per face instead of two: a 9-face part cost 3.5 s with
+    # read_measurable_array twice per face, and this halves it. Element 12/13 are
+    # the two success flags, because "GetPlane failed" and "the plane is at the
+    # origin" are different answers and zeros cannot tell them apart.
+    _FACE_GEOMETRY_VBS = (
+        "Public Function catia_mcp_facegeom(oMeasurable)\n"
+        "    Dim c(2), p(8), a(13), i\n"
+        "    On Error Resume Next\n"
+        "    Err.Clear\n"
+        "    oMeasurable.GetCOG c\n"
+        "    a(12) = 0\n"
+        "    If Err.Number = 0 Then a(12) = 1\n"
+        "    For i = 0 To 2\n"
+        "        a(i) = c(i)\n"
+        "    Next\n"
+        "    Err.Clear\n"
+        "    oMeasurable.GetPlane p\n"
+        "    a(13) = 0\n"
+        "    If Err.Number = 0 Then a(13) = 1\n"
+        "    For i = 0 To 8\n"
+        "        a(i + 3) = p(i)\n"
+        "    Next\n"
+        "    catia_mcp_facegeom = a\n"
+        "End Function\n"
+    )
+
+    def _face_geometry(self, spa: Any, cell: Any) -> dict[str, Any]:
+        """One face's centroid, and its plane and normal when it is planar.
+
+        Measured on B30 2026-11-13 on a 60x40x40 block (scripts/
+        b30_v0423_probe_faces.py): ``GetCOG`` on a TOPOLOGICAL FACE reference
+        answers that face's own centre - (30,20,40) for the top, (30,20,0) for the
+        bottom, while the solid's centre is (30,20,20). The 2026-11-10 note that
+        "GetMeasurable reads the body that carries the reference" holds for HYBRID
+        references; a face is measured as a face. That is why list_faces could not
+        publish a centroid then and can now.
+
+        THE NORMAL IS A LINE, NOT AN ARROW. It is the cross product of GetPlane's
+        two directions, unflipped - CATIA's own sign. The first version flipped it
+        to point away from the solid's centre of gravity, and that was measured
+        WRONG the same day: on a 40x40x4 plate with a tube standing 20 mm above it
+        the body's centre is above the plate's top face, so the flip turned the
+        top face's normal inward. Six faces of a plain block came back 6/6 outward
+        with the flip and 5/6 without (only the bottom face pointed inward), and
+        there is no inside/outside test in this API to decide it per face - so the
+        raw sense is published with the caveat instead of a guess dressed as a
+        fact.
+        """
+        out: dict[str, Any] = {}
+        if spa is None:
+            out["geometry_unknown"] = "SPAWorkbench is unavailable"
+            return out
+        try:
+            measurable = spa.GetMeasurable(cell.Reference)
+            raw = self.conn.app.SystemService.Evaluate(
+                self._FACE_GEOMETRY_VBS, 0, "catia_mcp_facegeom", [measurable])
+            # A failed GetPlane leaves its nine slots EMPTY (None), not zero - the
+            # success flag is what separates "no plane" from "plane at the origin",
+            # and float(None) must not cost the centroid that was read fine.
+            values = [0.0 if v is None else float(v) for v in raw]
+        except Exception as error:  # noqa: BLE001 - reported per face
+            out["geometry_unknown"] = str(error).splitlines()[0][:70]
+            return out
+        if len(values) < 14:
+            out["geometry_unknown"] = f"expected 14 values, got {len(values)}"
+            return out
+        centroid: list[float] | None = None
+        if values[12] >= 0.5:
+            centroid = [round(v, 4) for v in values[:3]]
+            out["centroid"] = centroid
+        else:
+            out["centroid_unknown"] = True
+        if values[13] < 0.5:
+            # Not planar. GetPlane raises a CATScript stack on a cylinder, and the
+            # area has already been read - a curved face simply has no normal.
+            return out
+        plane = values[3:12]
+        if not any(abs(v) > 0 for v in plane):
+            return out
+        out["plane_origin"] = [round(v, 4) for v in plane[:3]]
+        d1, d2 = plane[3:6], plane[6:9]
+        normal = [d1[1] * d2[2] - d1[2] * d2[1],
+                  d1[2] * d2[0] - d1[0] * d2[2],
+                  d1[0] * d2[1] - d1[1] * d2[0]]
+        length = math.sqrt(sum(c * c for c in normal))
+        if length < 1e-12:
+            return out
+        out["normal"] = [round(c / length, 4) for c in normal]
+        return out
 
     def _raw_topology_count(self, body: Any, kind: str) -> int | None:
         """Cells CATIA's search returns, construction geometry included."""

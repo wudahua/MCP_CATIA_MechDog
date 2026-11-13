@@ -876,6 +876,67 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
             "unsaved document as saved is UNKNOWN and not guessed at here."
         ),
     },
+    {
+        "member": "a named view that is actually square-on",
+        "status": "AVAILABLE_WITH_LIMIT",
+        "detail": (
+            "The directions were always right; the PROJECTION was not, and that is "
+            "what both 0.3.120 acceptance reports saw as 'front is 15-20 degrees "
+            "off, the bottom of the bottle is visible'. Measured on B30 2026-11-13: "
+            "right after PutSightDirection(0,1,0) and PutUpDirection(0,0,1), "
+            "GetSightDirection reads back (0,1,0) and GetUpDirection (0,0,1) - the "
+            "camera IS on -Y. Viewpoint3D.ProjectionMode reads 0 on this install, "
+            "which is PERSPECTIVE, and a perspective eye point above a 60x40x4 "
+            "plate shows that plate's top face in a front view, with the plate's "
+            "edges converging. Set to 1 (PARALLEL) the same plate is a clean "
+            "elevation - two captures differing in nothing else, "
+            "scripts/b30_v0423_probe_view2.py. ProjectionMode=2 is not a third mode "
+            "on B30: it is silently kept at 1. So catia_set_view forces parallel "
+            "unless projection='perspective' is asked for, and reads the camera "
+            "back through GetSightDirection/GetUpDirection (the by-ref arrays do "
+            "not marshal late-bound, so SystemService.Evaluate is required) so an "
+            "ignored Put is reported instead of photographed. THE REMAINING LIMIT: "
+            "the seven view names are in the DOCUMENT's axes, not the model's, and "
+            "nothing reports the current screen right/up the way the UI's 'Normal "
+            "to' does - use direction=[x,y,z] to look along an arbitrary normal."
+        ),
+    },
+    {
+        "member": "a face's own world bounding box",
+        "status": "UNSUPPORTED_ON_B30",
+        "detail": (
+            "There is none to read, and three routes were tried on B30 2026-11-13 "
+            "(scripts/b30_v0423_probe_faces.py, b30_v0423_probe_face_verts.py) on "
+            "a 60x40x40 block: Measurable exposes 44 members and no bounding box "
+            "(GetBoundingBox raises); SPAWorkbench.Inertias.Add(face) has none "
+            "either; and adding a FACE cell to the selection and searching "
+            "Vertex or Edge under it returns 0 hits on every face - the search "
+            "resolves a body, not a face. WHAT A FACE DOES ANSWER, also measured "
+            "there: GetCOG gives the FACE's own centre (top (30,20,40), bottom "
+            "(30,20,0), while the solid's is (30,20,20)), and GetPlane gives a "
+            "plane's origin and two directions on a planar face, which is a normal "
+            "up to sign. Both are published per face by catia_list_faces, so a "
+            "face can be picked by WHERE it is instead of by guessing area - the "
+            "ask of both 0.3.120 reports. A curved face has a centroid and no "
+            "plane (GetPlane raises), and its extent cannot be bounded by any of "
+            "this; export an STL mesh for that."
+        ),
+    },
+    {
+        "member": "a solid tube whose section changes along the spine",
+        "status": "UNSUPPORTED_ON_B30",
+        "detail": (
+            "catia_solid_tube sweeps ONE circle, so the radius is constant. A "
+            "varying section needs one section per station, which is what "
+            "catia_solid_loft does with a chain of closed splines - the route the "
+            "2026-11-13 handle-dome report used with 17 sections, and it works. An "
+            "ELLIPSE profile would be the cheaper way to a flattened tube, and it "
+            "does not exist: this server has no ellipse primitive at all, and the "
+            "reporter's own workaround - 20 sampled points as a closed spline - is "
+            "the one to keep using. Neither gap is a CATIA limit; both are surface "
+            "not yet written here, and the loft route covers both today."
+        ),
+    },
 ]
 
 
