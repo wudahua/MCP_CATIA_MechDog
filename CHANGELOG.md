@@ -2,6 +2,64 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.118] — 2026-11-14 · a word in one boolean, and the sentence that called a working cut grazing
+
+The last item of the 2026-11-12 report (P1-4): ten strokes of one word cost ten
+booleans, ten cutter bodies and ~19 elements each. `catia_surface_engrave` now takes
+`curves=[...]`.
+
+### Which route works was measured, not guessed
+
+Three cells on B30 2026-11-13, one fresh document each
+(`scripts/b30_v0420_probe_batch_engrave.py`), three 50 mm traces 0.4 mm deep on a
+60×40×10 block:
+
+| route | result |
+|---|---|
+| `catia_gsd_join` on the three tubes | **REFUSED** — `方法 UpdateObject 失败`, feature removed from the tree |
+| three CloseSurfaces in **one** tool body | 75.3982 mm³ body → one boolean removed **37.699 mm³** |
+| three separate engraves (control) | removed **37.698 mm³** |
+
+Joining disjoint tubes is not a route at all; a shared tool body is. It is the same
+cut to a hundredth, from one boolean instead of three — measured 24000.0 → 23962.3
+mm³ either way, and `scripts/b30_v0420_audit.py` 5/5.
+
+What it actually saves, stated because the report's own numbers suggest more: a
+cutter **body** and a boolean **feature** per curve, plus the update each of those
+costs. It does **not** save the helpers — every curve still needs its own
+point-on-curve, normal plane, circle and tube, because the sweep needs them.
+
+Two design consequences worth knowing:
+
+- Every name is resolved **before** anything is built, so a typo in the tenth name
+  costs nothing instead of nine tubes and a cleanup.
+- One boolean can only be judged on its **total**, so the reply says "THE NUMBER
+  ABOVE IS A TOTAL" instead of dividing by the count and calling that per-curve.
+  `curve=` remains the way to have one curve judged by itself. A side effect of
+  measuring the body instead of the length: overlapping strokes count once, so the
+  prediction stays exact where ten separate calls would each claim their own half.
+
+### The defect this release caught in its own reply
+
+The first end-to-end run said: *"The body touches the material and still removes
+nothing: the curves GRAZE it instead of running through it"* — on a call that had
+just removed 37.699 mm³. The gap measures 0.0000 mm **by definition** when a curve
+lies on the surface, so the gap alone is not a verdict. The grazing sentence now
+belongs to the failure path only, and both branches are pinned by tests and by
+check 3 of the audit. This is the same class of error as 0.3.113's two seam
+standards: one measurement, two conclusions.
+
+### Also
+
+- `_engrave_common` / `_engrave_cutter` / `_close_tube` now hold the parts both
+  engrave paths share, so the POINT_ON_CURVE matrix and the "OPEN guides are
+  normally FINE" correction exist once. A second copy of a correction is a second
+  chance to keep the wrong one.
+- A missing `depth` was escaping as `KeyError` (`float(args["depth"])` on a missing
+  key is not caught by `except TypeError, ValueError`); it is now a coded refusal.
+- Ceilings: new entry for joining tubes, with the `UpdateObject 失败` and the
+  75.3982/37.699/37.698 numbers.
+
 ## [0.3.117] — 2026-11-13 · one open curve is enough, and an engrave's helpers are load-bearing
 
 Two more items from the same reports. Both were settled by changing ONE thing per

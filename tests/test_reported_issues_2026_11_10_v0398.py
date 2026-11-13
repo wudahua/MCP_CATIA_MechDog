@@ -98,10 +98,14 @@ class _Conn:
 
 def test_engrave_is_registered_with_curve_and_depth() -> None:
     schema = _definition("catia_surface_engrave")["inputSchema"]
-    assert schema["required"] == ["curve", "depth"]
+    # 0.3.118 added 'curves', so 'curve' and 'curves' are now alternatives and
+    # only 'depth' is unconditionally required. The tool refuses a call that
+    # carries neither, before CATIA is touched (CURVE_REQUIRED).
+    assert schema["required"] == ["depth"]
+    assert {"curve", "curves"} <= set(schema["properties"])
     # 0.3.117 added 'helpers': the four elements each stroke leaves behind can be
     # hidden (measured safe) but not deleted (measured 4/4 to break the update).
-    assert set(schema["properties"]) == {"curve", "depth", "target_body",
+    assert set(schema["properties"]) == {"curve", "curves", "depth", "target_body",
                                          "position", "name", "helpers"}
 
 
@@ -116,15 +120,24 @@ def test_engrave_description_states_the_normal_and_the_glyph_limit() -> None:
 
 
 def test_engrave_names_its_five_steps_in_the_right_order() -> None:
-    source = inspect.getsource(GSDTools._surface_engrave)
-    # Skip the docstring: it names the steps too, in prose.
-    body = source.split('"""', 2)[2]
-    order = [body.index('{"curve": curve, "position": position'),
-             body.index('"support_plane": plane_name'),
-             body.index('"guide": curve'),
-             body.index("_close_surface"),
-             body.index('"catia_boolean"')]
+    # 0.3.118 moved the plane -> circle -> sweep chain into _engrave_cutter, so
+    # the batch path builds the same four elements. The dependency order is still
+    # the thing that matters, so it is pinned where each step now lives: point,
+    # plane, circle, tube inside the cutter, then CloseSurface and one boolean.
+    cutter = inspect.getsource(GSDTools._engrave_cutter)
+    order = [cutter.index('{"curve": curve, "position": position'),
+             cutter.index('"support_plane": plane_name'),
+             cutter.index('"guide": curve')]
     assert order == sorted(order)
+    # 0.3.118 also wrapped CloseSurface in _close_tube, so its measured message
+    # ("OPEN guides are normally FINE") has one copy instead of two.
+    closing = inspect.getsource(GSDTools._close_tube)
+    assert closing.index("_close_surface") < closing.index("ENGRAVE_TUBE_NOT_CLOSED")
+    for method in (GSDTools._surface_engrave, GSDTools._surface_engrave_many):
+        body = inspect.getsource(method).split('"""', 2)[2]
+        steps = [body.index("_engrave_cutter"), body.index("_close_tube"),
+                 body.index('"catia_boolean"')]
+        assert steps == sorted(steps), method.__name__
 
 
 def test_engrave_cleans_up_on_failure() -> None:

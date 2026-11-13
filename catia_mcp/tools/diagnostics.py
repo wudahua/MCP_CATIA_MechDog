@@ -696,6 +696,27 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
         ),
     },
     {
+        "member": "joining several swept tubes into ONE cutter for a batch engrave",
+        "status": "UNSUPPORTED_ON_B30",
+        "detail": (
+            "catia_gsd_join will not fuse disjoint tubes, so 'one shell for the "
+            "whole word' is not a route. Measured on B30 2026-11-13 "
+            "(scripts/b30_v0420_probe_batch_engrave.py), one fresh document per "
+            "cell, three 50 mm traces 0.4 mm deep on a 60x40x10 block: joining the "
+            "three tubes raised 'CATIA rejected the feature (update failed) and it "
+            "was removed from the tree' with 方法 UpdateObject 失败 - the tubes do "
+            "not touch, and Join needs them to. THE ROUTE THAT WORKS IS A SHARED "
+            "TOOL BODY: three CloseSurfaces inside ONE body measured 75.3982 mm3, "
+            "and one boolean removed 37.699 mm3 - the same cut three separate "
+            "engraves made (37.698 mm3), from one boolean instead of three. That is "
+            "what catia_surface_engrave(curves=[...]) does, measured end to end in "
+            "scripts/b30_v0420_audit.py 5/5: 24000.0 -> 23962.3 mm3, tree ends with "
+            "ONE 移除.1 and no leftover cutter body. What it does NOT save is the "
+            "four helpers per curve - the sweep still needs them."
+        ),
+    },
+
+    {
         "member": "the text of a CATIA message box",
         "status": "NOT_IN_TYPELIB",
         "detail": (

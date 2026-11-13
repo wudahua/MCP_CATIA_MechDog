@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "MCP_CATIA_MechDog"
-version = "0.3.117"
+version = "0.3.118"
 description = "CATIA V5 MCP server (lite fork): build solids from a written spec and verify them, via COM Automation"
 readme = "README.md"
 license = "MIT"

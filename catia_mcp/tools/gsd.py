@@ -1369,11 +1369,37 @@ class GSDTools:
                     "separate documents, deleting any ONE of the four left a part "
                     "whose update fails for good. They are the boolean's history, "
                     "and 'only the boolean references them' is exactly why - the "
-                    "2026-11-12 report's proposed test was backwards."
+                    "2026-11-12 report's proposed test was backwards. "
+                    "BATCH: pass 'curves' instead of 'curve' to engrave several "
+                    "already-built elements with ONE boolean. Measured on B30 "
+                    "2026-11-13, three routes, one document each: joining three "
+                    "disjoint tubes with catia_gsd_join is REFUSED ('UpdateObject "
+                    "failed', feature removed from the tree), three CloseSurfaces "
+                    "in ONE tool body then one boolean removed 37.699 mm3, and "
+                    "three separate engraves removed 37.698 - the same cut from one "
+                    "boolean instead of three. What that saves is a cutter body, a "
+                    "boolean feature and an update per curve; it does NOT save the "
+                    "helpers, because every curve still needs its own point, "
+                    "plane, circle and tube. One boolean can only be judged on the "
+                    "TOTAL, so the reply says so instead of dividing by the count; "
+                    "use curve= when a single curve has to be judged by itself."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
+                        "curves": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Several curves to engrave in ONE call: each gets "
+                                "its own tube, every tube goes into one cutter "
+                                "body, and one boolean removes them together. All "
+                                "the names are resolved before anything is built, "
+                                "so a typo costs nothing. Same acceptance rules as "
+                                "'curve', and one 'depth' for all of them - a "
+                                "per-curve depth would need a per-curve boolean."
+                            ),
+                        },
                         "helpers": {
                             "type": "string",
                             "enum": ["hide", "show", "keep"],
@@ -1437,7 +1463,7 @@ class GSDTools:
                             ),
                         },
                     },
-                    "required": ["curve", "depth"],
+                    "required": ["depth"],
                 },
             },
             {
@@ -5237,39 +5263,25 @@ class GSDTools:
         along the surface normal everywhere, which is the thing a planar pocket
         cannot do (its depth follows an axis).
         """
+
+        # ── batch: many curves, one cutter body, one boolean ────────────────
+        # An explicit but EMPTY list is a different mistake from passing no
+        # curve at all, and it gets its own refusal (CURVES_REQUIRED) instead of
+        # falling through to "needs 'curve'".
+        if args.get("curves") is not None:
+            return self._surface_engrave_many(args)
         # Arguments are settled BEFORE CATIA is touched: an argument error must
         # not depend on a document being open, and 'helpers' has three legal
         # values, one of which is the default.
         curve = args.get("curve")
         if not curve:
             raise ArgumentRejected(
-                "catia_surface_engrave needs 'curve': the element that lies ON the "
-                "surface - normally the one catia_gsd_project produced. Nothing was "
-                "created.", code="CURVE_REQUIRED", stage="validate")
+                "catia_surface_engrave needs 'curve' (or 'curves' for several): "
+                "the element that lies ON the surface - normally the one "
+                "catia_gsd_project produced. Nothing was created.",
+                code="CURVE_REQUIRED", stage="validate")
         curve = str(curve)
-        try:
-            depth = float(args["depth"])
-        except (TypeError, ValueError):
-            raise ArgumentRejected(
-                "catia_surface_engrave needs 'depth': the groove depth in mm, "
-                "which is also the sweep radius. Got "
-                f"{args.get('depth')!r}.")
-        if depth <= 0:
-            raise ArgumentOutOfRange(
-                f"depth must be positive; got {depth}. A groove of depth 0 would "
-                "remove nothing.", code="DEPTH_OUT_OF_RANGE", stage="validate")
-        position = float(args.get("position", 0.5))
-        if not 0.0 < position < 1.0:
-            raise ArgumentOutOfRange(
-                "position is a FRACTION of the curve's length (0.5 = its middle) "
-                f"and must lie strictly between 0 and 1; got {position}. It only "
-                "places the plane that orients the profile.",
-                code="POSITION_OUT_OF_RANGE", stage="validate")
-        helpers = str(args.get("helpers") or "hide")
-        if helpers not in ("hide", "show", "keep"):
-            raise ArgumentRejected(
-                f"helpers must be 'hide', 'show' or 'keep'; got {helpers!r}. "
-                "Nothing was created.", code="BAD_ARGUMENT", stage="validate")
+        depth, position, helpers = self._engrave_common(args)
 
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
@@ -5297,100 +5309,16 @@ class GSDTools:
         # this is the only chance to keep it: the caller needs it to undo a groove
         # that turned out to be a cavity (2026-11-11, §2.5).
         boolean_reply: str | None = None
-        # THE POINT COMES BEFORE THE PLANE IN THIS LIST, and the list is deleted
-        # in reverse. The plane holds the point as an input, so removing the point
-        # first makes CATIA raise a modal 警告 ('已移除授权输入 "参考点"') - which is
-        # exactly what the 2026-11-10 bottle report photographed. Reverse order is
-        # dependency order: tube, profile, plane, point.
         tube_facts = ""
-        plane_name = f"{base}_N"
-        profile_name = f"{base}_P"
-        tube_name = f"{base}_T"
         try:
-            try:
-                plane_reply = self._plane_normal_to_curve(
-                    {"curve": curve, "position": position, "name": plane_name})
-            except CodedError as error:
-                # WHICH CURVES CAN CARRY A POINT-ON-CURVE PARAMETER, measured on
-                # B30 2026-11-11 one fresh document per case (a failed update is
-                # document-wide, so eleven cases in one part measured the first
-                # failure eleven times). WORK: gsd_line, extract of a gsd_line,
-                # an OPEN gsd_spline, and a SKETCH outline projected onto a face.
-                # REFUSE: gsd_circle, its extract, a CLOSED gsd_spline, and the
-                # projection of any of those - including a closed spline's, so
-                # "it came from catia_gsd_project" is NOT the test. The 0.3.100
-                # message said the projection was what mattered; the 2026-11-11
-                # report followed that advice and got refused, so it is written
-                # as the matrix now.
-                if getattr(error, "code", "") != "POINT_ON_CURVE_FAILED":
-                    raise
-                modified = bool(getattr(error, "modified", False))
-                stranded = re.search(r"already added \('([^']+)'\)", str(error))
-                raise PreconditionRejected(
-                    f"'{curve}' cannot carry a point-on-curve parameter, which this "
-                    "route needs: the profile plane is built normal to the curve at "
-                    "that point. Which curves do, measured on B30 2026-11-11 one "
-                    "fresh document per case: a catia_gsd_line yes, the extract of "
-                    "one yes, an OPEN 3D spline yes, and a SKETCH outline projected "
-                    "onto the face yes. A catia_gsd_circle no, its extract no, a "
-                    "CLOSED spline no, and the projection of any of those onto a "
-                    "face no - including a closed spline's projection, so 'it came "
-                    "from catia_gsd_project' is not what decides. What the working "
-                    "ones share is an OPEN curve, or a sketch outline projected "
-                    "onto the surface."
-                    + (f" The point this call added ('{stranded.group(1)}') could "
-                       "not be removed - delete it with catia_delete_feature "
-                       "before updating the part." if modified and stranded else
-                       "" if not modified else
-                       " A point this call added may still be in the tree - check "
-                       "before the next update."),
-                    code="ENGRAVE_CURVE_UNPARAMETRISABLE", stage="execute",
-                    modified=modified,
-                    next_actions=[
-                        "Draw the outline in a SKETCH and project THAT onto the "
-                        "face: a projected sketch outline carries the parameter "
-                        "(measured 2026-11-11) and is the route this tool is built "
-                        "for",
-                        "Or engrave along a catia_gsd_line / an OPEN catia_gsd_spline: "
-                        "both carry it. A CLOSED curve does not - that includes "
-                        "catia_gsd_circle and catia_gsd_spline(closed=true), and "
-                        "their projections",
-                    ]) from error
-            # The point the plane tool made is named after the curve and the
-            # position, and it is the only thing the profile can be centred on
-            # that is guaranteed to lie ON the curve.
-            origin = re.search(r"origin '([^']+)'", plane_reply or "")
-            centre = origin.group(1) if origin else f"{curve}_at{position:g}"
-            created.append(centre)
-            created.append(plane_name)
-            self._circle({"center": centre, "support_plane": plane_name,
-                          "radius": depth, "name": profile_name})
-            created.append(profile_name)
-            self._sweep({"profile": profile_name, "guide": curve,
-                         "name": tube_name})
-            created.append(tube_name)
+            tube_name = self._engrave_cutter(curve, base, depth, position, created)
 
             from catia_mcp.tools.part_design import PartDesignTools
 
             pd = PartDesignTools(self.conn)
             pd.execute("catia_new_body", {"name": body_name})
             body_created = True
-            try:
-                self._close_surface({"surface": tube_name})
-            except Exception as error:  # noqa: BLE001 - this is the usual break
-                raise PreconditionRejected(
-                    f"The sweep along '{curve}' produced a surface that CloseSurface "
-                    f"will not close ({str(error).splitlines()[0][:120]}). OPEN "
-                    "guides are normally FINE - CloseSurface closes the two ends of "
-                    "the pipe by itself, measured on B30 2026-11-11 with a 50 mm "
-                    "segment (19.5829 mm3 removed) and a 65.682 mm open spline "
-                    "(25.6436 mm3) - so this is about the surface the sweep "
-                    "actually made, not about the curve being open. An earlier "
-                    "version of this message blamed open guides and was wrong. "
-                    "Check that the sweep produced a real pipe (its area, or its "
-                    "distance to the body) before retrying.",
-                    code="ENGRAVE_TUBE_NOT_CLOSED", stage="execute",
-                    modified=False) from error
+            self._close_tube(curve, tube_name)
 
             # MEASURE THE CUTTER BEFORE THE BOOLEAN EATS IT. catia_boolean
             # consumes the tool body, so once it reports NO_MATERIAL the tube is
@@ -5506,6 +5434,340 @@ class GSDTools:
             f"groove over {length_text}. {body_line}.{verdict}{tail} This is a "
             "groove ALONG the curve, not a filled glyph: for a letter, pass its "
             "OUTLINE (catia_sketch_strokes draws one in a call) - not its middle."
+            + self._engrave_helpers(created, helpers)
+        )
+
+    def _engrave_common(self, args: dict[str, Any]) -> tuple[float, float, str]:
+        """depth, position and helpers - the arguments both engrave paths share.
+
+        One copy for the single-curve call and the batch one, so a depth of 0 is
+        refused with the same code whichever way the caller arrived. ``depth`` is
+        read with .get on purpose: a missing key used to escape as a KeyError,
+        which is neither a CodedError nor anything a caller can act on.
+        """
+        try:
+            depth = float(args.get("depth"))
+        except (TypeError, ValueError):
+            raise ArgumentRejected(
+                "catia_surface_engrave needs 'depth': the groove depth in mm, "
+                "which is also the sweep radius. Got "
+                f"{args.get('depth')!r}")
+        if depth <= 0:
+            raise ArgumentOutOfRange(
+                f"depth must be positive; got {depth}. A groove of depth 0 would "
+                "remove nothing.", code="DEPTH_OUT_OF_RANGE", stage="validate")
+        position = float(args.get("position", 0.5))
+        if not 0.0 < position < 1.0:
+            raise ArgumentOutOfRange(
+                "position is a FRACTION of the curve's length (0.5 = its middle) "
+                f"and must lie strictly between 0 and 1; got {position}. It only "
+                "places the plane that orients the profile.",
+                code="POSITION_OUT_OF_RANGE", stage="validate")
+        helpers = str(args.get("helpers") or "hide")
+        if helpers not in ("hide", "show", "keep"):
+            raise ArgumentRejected(
+                f"helpers must be 'hide', 'show' or 'keep'; got {helpers!r}. "
+                "Nothing was created.", code="BAD_ARGUMENT", stage="validate")
+        return depth, position, helpers
+
+    def _engrave_cutter(self, curve: str, prefix: str, depth: float,
+                        position: float, created: list[str]) -> str:
+        """plane -> point-on-curve -> circle -> tube, for ONE curve.
+
+        Returns the tube's name and appends every element it made to ``created``
+        in DEPENDENCY order (point, plane, profile, tube), because
+        ``_engrave_cleanup`` deletes that list backwards: taking the point out
+        before the plane that references it raises CATIA's modal 警告
+        ('已移除授权输入 "参考点"'), which is what the 2026-11-10 bottle
+        report photographed.
+
+        One function for both engrave paths on purpose: the POINT_ON_CURVE matrix
+        below is a claim about which curves work, and a second copy of it is a
+        second thing to forget to update.
+        """
+        plane_name = f"{prefix}_N"
+        profile_name = f"{prefix}_P"
+        tube_name = f"{prefix}_T"
+        try:
+            plane_reply = self._plane_normal_to_curve(
+                {"curve": curve, "position": position, "name": plane_name})
+        except CodedError as error:
+            # WHICH CURVES CAN CARRY A POINT-ON-CURVE PARAMETER, measured on
+            # B30 2026-11-11 one fresh document per case (a failed update is
+            # document-wide, so eleven cases in one part measured the first
+            # failure eleven times). WORK: gsd_line, extract of a gsd_line,
+            # an OPEN gsd_spline, and a SKETCH outline projected onto a face.
+            # REFUSE: gsd_circle, its extract, a CLOSED gsd_spline, and the
+            # projection of any of those - including a closed spline's, so
+            # "it came from catia_gsd_project" is NOT the test. The 0.3.100
+            # message said the projection was what mattered; the 2026-11-11
+            # report followed that advice and got refused, so it is written
+            # as the matrix now.
+            if getattr(error, "code", "") != "POINT_ON_CURVE_FAILED":
+                raise
+            modified = bool(getattr(error, "modified", False))
+            stranded = re.search(r"already added \('([^']+)'\)", str(error))
+            raise PreconditionRejected(
+                f"'{curve}' cannot carry a point-on-curve parameter, which this "
+                "route needs: the profile plane is built normal to the curve at "
+                "that point. Which curves do, measured on B30 2026-11-11 one "
+                "fresh document per case: a catia_gsd_line yes, the extract of "
+                "one yes, an OPEN 3D spline yes, and a SKETCH outline projected "
+                "onto the face yes. A catia_gsd_circle no, its extract no, a "
+                "CLOSED spline no, and the projection of any of those onto a "
+                "face no - including a closed spline's projection, so 'it came "
+                "from catia_gsd_project' is not what decides. What the working "
+                "ones share is an OPEN curve, or a sketch outline projected "
+                "onto the surface."
+                + (f" The point this call added ('{stranded.group(1)}') could "
+                   "not be removed - delete it with catia_delete_feature "
+                   "before updating the part." if modified and stranded else
+                   "" if not modified else
+                   " A point this call added may still be in the tree - check "
+                   "before the next update."),
+                code="ENGRAVE_CURVE_UNPARAMETRISABLE", stage="execute",
+                modified=modified,
+                next_actions=[
+                    "Draw the outline in a SKETCH and project THAT onto the "
+                    "face: a projected sketch outline carries the parameter "
+                    "(measured 2026-11-11) and is the route this tool is built "
+                    "for",
+                    "Or engrave along a catia_gsd_line / an OPEN catia_gsd_spline: "
+                    "both carry it. A CLOSED curve does not - that includes "
+                    "catia_gsd_circle and catia_gsd_spline(closed=true), and "
+                    "their projections",
+                ]) from error
+        # The point the plane tool made is named after the curve and the
+        # position, and it is the only thing the profile can be centred on
+        # that is guaranteed to lie ON the curve.
+        origin = re.search(r"origin '([^']+)'", plane_reply or "")
+        centre = origin.group(1) if origin else f"{curve}_at{position:g}"
+        created.append(centre)
+        created.append(plane_name)
+        self._circle({"center": centre, "support_plane": plane_name,
+                      "radius": depth, "name": profile_name})
+        created.append(profile_name)
+        self._sweep({"profile": profile_name, "guide": curve,
+                     "name": tube_name})
+        created.append(tube_name)
+        return tube_name
+
+    def _close_tube(self, curve: str, tube_name: str) -> None:
+        """Turn one swept tube into a solid, or say why it would not close.
+
+        Shared by both engrave paths for the same reason ``_engrave_cutter`` is:
+        the sentence below is a measured claim (open guides are FINE - an earlier
+        version of it blamed them and was wrong), and two copies of a correction
+        are two chances to keep the wrong one.
+        """
+        try:
+            self._close_surface({"surface": tube_name})
+        except Exception as error:  # noqa: BLE001 - this is the usual break
+            raise PreconditionRejected(
+                f"The sweep along '{curve}' produced a surface that CloseSurface "
+                f"will not close ({str(error).splitlines()[0][:120]}). OPEN "
+                "guides are normally FINE - CloseSurface closes the two ends of "
+                "the pipe by itself, measured on B30 2026-11-11 with a 50 mm "
+                "segment (19.5829 mm3 removed) and a 65.682 mm open spline "
+                "(25.6436 mm3) - so this is about the surface the sweep "
+                "actually made, not about the curve being open. An earlier "
+                "version of this message blamed open guides and was wrong. "
+                "Check that the sweep produced a real pipe (its area, or its "
+                "distance to the body) before retrying.",
+                code="ENGRAVE_TUBE_NOT_CLOSED", stage="execute",
+                modified=False) from error
+
+    def _surface_engrave_many(self, args: dict[str, Any]) -> str:
+        """N curves, ONE cutter body, ONE boolean.
+
+        The 2026-11-12 report's ten-stroke word cost ten booleans and about
+        nineteen elements per stroke, and asked for a batch route. Which route
+        works was measured on B30 2026-11-13
+        (scripts/b30_v0420_probe_batch_engrave.py), one fresh document per cell,
+        three 50 mm traces 0.4 mm deep on a 60x40x10 block:
+
+            catia_gsd_join on the three tubes     REFUSED - 'UpdateObject
+                                                  failed', and CATIA removed the
+                                                  feature from the tree
+            three CloseSurfaces in ONE body        75.3982 mm3 cutter body, one
+                                                  boolean removed 37.699 mm3
+            three separate engraves (control)      removed 37.698 mm3
+
+        So joining disjoint tubes is not the route; ONE tool body holding every
+        tube is. The cut is the same to a hundredth, from one boolean instead of
+        three - 24000.0 -> 23962.3 mm3 either way.
+
+        What it saves is the cutter BODY and the BOOLEAN feature per curve, with
+        the update each of those costs. It does NOT save the helpers: every curve
+        still leaves its point, plane, circle and tube, because the sweep needs
+        them. Overlapping strokes cost nothing extra here either - the body
+        volume counts an overlap once, so the prediction stays exact where ten
+        separate calls would each claim their own half.
+
+        The price of one boolean is that only a TOTAL can be measured, so a
+        single curve that cut shallower than its share cannot be pointed at from
+        here. The reply says so instead of dividing the total by the count and
+        calling that per-curve.
+        """
+        curves = args.get("curves")
+        if not isinstance(curves, (list, tuple)) or not curves:
+            raise ArgumentRejected(
+                "'curves' must be a non-empty list of element names. Nothing was "
+                "created.", code="CURVES_REQUIRED", stage="validate")
+        curves = [str(item) for item in curves]
+        repeated = sorted({name for name in curves if curves.count(name) > 1})
+        if repeated:
+            raise ArgumentRejected(
+                "'curves' names the same element more than once: "
+                + ", ".join(repeated)
+                + ". Two identical tubes would sweep the same groove twice and "
+                "the second would remove nothing. Nothing was created.",
+                code="CURVES_REPEATED", stage="validate")
+        depth, position, helpers = self._engrave_common(args)
+
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        target_name = args.get("target_body")
+        target = (self._body_by_name(part, str(target_name)) if target_name
+                  else self.conn.get_active_part_body())
+
+        # EVERY CURVE IS RESOLVED BEFORE ANYTHING IS BUILT. A typo in the tenth
+        # name would otherwise cost nine tubes and a cleanup sentence, when what
+        # the caller needs to read is "no such element".
+        lengths: list[float | None] = []
+        for curve in curves:
+            lengths.append(self._curve_length_mm(self._ref(curve)))
+
+        base = str(args.get("name") or "Engrave")
+        taken = {str(part.Bodies.Item(i).Name)
+                 for i in range(1, int(part.Bodies.Count) + 1)}
+        body_name = base
+        suffix = 2
+        while body_name in taken:
+            body_name = f"{base}.{suffix}"
+            suffix += 1
+
+        created: list[str] = []
+        body_created = False
+        boolean_reply: str | None = None
+        tube_facts = ""
+        grazing = ""
+        cutter_volume: float | None = None
+        try:
+            from catia_mcp.tools.part_design import PartDesignTools
+
+            pd = PartDesignTools(self.conn)
+            # Tubes first, body second: a sweep that fails then leaves no empty
+            # cutter body behind for the cleanup to explain away.
+            tubes: list[str] = []
+            for index, curve in enumerate(curves, start=1):
+                tubes.append(self._engrave_cutter(
+                    curve, f"{base}{index}", depth, position, created))
+
+            pd.execute("catia_new_body", {"name": body_name})
+            body_created = True
+            for curve, tube_name in zip(curves, tubes):
+                self._close_tube(curve, tube_name)
+
+            try:
+                tube_body = self._body_by_name(part, body_name)
+                cutter_volume = pd._body_volume_mm3(part, tube_body)
+                cutter_gap = self._cutter_gap(
+                    part.CreateReferenceFromObject(tube_body),
+                    part.CreateReferenceFromObject(target))
+            except Exception:  # noqa: BLE001 - diagnostics, not the operation
+                cutter_volume, cutter_gap = None, None
+            swept = (sum(lengths) if all(length is not None for length in lengths)
+                     else None)
+            cutters = ("1 tube" if len(tubes) == 1 else f"{len(tubes)} tubes")
+            tube_facts = (
+                " The cutter was measured before it was consumed:"
+                + (f" one body holding {cutters}, "
+                   f"{cutter_volume:.4f} mm3 in all" if cutter_volume is not None
+                   else f" one body holding {cutters} whose volume "
+                        "could not be read")
+                + (f", swept over {swept:.3f} mm of curve" if swept else "")
+                + (f", its body {cutter_gap:.4f} mm from '{target.Name}' at the "
+                   "closest point" if cutter_gap is not None else
+                   ", and its distance to '" + str(target.Name) + "' could not be "
+                   "measured")
+                + ".")
+            # "TOUCHING AT 0.0000 AND REMOVING NOTHING" IS A CONCLUSION, not a
+            # measurement: a curve lying ON the surface measures 0.0000 by
+            # definition and cuts perfectly (measured on B30 2026-11-14: three
+            # traces on the top face, gap 0.0000, removed 37.699 mm3). So the
+            # sentence belongs to the FAILURE handler, which is where the
+            # touching body really did remove nothing.
+            grazing = (". The body touched the material and removed nothing: the "
+                       "curves GRAZE it instead of running through it."
+                       if cutter_gap is not None and cutter_gap < 0.05 else "")
+
+            pd.execute("catia_set_active_body", {"name": str(target.Name)})
+            before = pd._body_volume_mm3(part, target)
+            boolean_reply = pd.execute(
+                "catia_boolean", {"operation": "remove",
+                                  "tool_body": body_name,
+                                  "target_body": str(target.Name)})
+            after = pd._body_volume_mm3(part, target)
+        except Exception as error:
+            note = self._engrave_cleanup(created, body_name, body_created)
+            if getattr(error, "code", None):
+                error.args = (str(error) + tube_facts + grazing + note,)
+                raise
+            raise PreconditionRejected(
+                f"Engraving along {len(curves)} curves failed: "
+                f"{str(error).splitlines()[0][:160]}.{tube_facts}{grazing}{note}",
+                code="ENGRAVE_FAILED", stage="execute", modified=False,
+                next_actions=[
+                    "Check that every curve really lies ON the target body - one "
+                    "that floats above it removes nothing, and one that misses it "
+                    "cannot be swept into a cutter at all",
+                    "Run the batch as single curves (curve=) to find the one that "
+                    "misbehaves: one boolean over several reports only a total",
+                ],
+            ) from error
+
+        removed = (before - after) if (before is not None and after is not None) else None
+        if cutter_volume is not None and cutter_volume > 0:
+            expected = cutter_volume / 2.0
+        elif all(lengths):
+            expected = sum(lengths) * math.pi * depth * depth / 2.0
+        else:
+            expected = None
+
+        boolean_feature = None
+        found = re.search(r"\(feature '([^']+)'\)", str(boolean_reply or ""))
+        if found:
+            boolean_feature = found.group(1)
+        undo = (f" The feature this call created is '{boolean_feature}': "
+                f"catia_delete_feature('{boolean_feature}') takes it all back out."
+                if boolean_feature else
+                " catia_list_features shows the feature this call created.")
+
+        body_line = (f"Removed {removed:.3f} mm3" if removed is not None
+                     else "Removed an amount that could not be measured")
+        if removed is not None and expected:
+            body_line += (f" against the {expected:.3f} mm3 the tubes lying half "
+                          "in the material predict")
+
+        kind, verdict, tail = _engrave_outcome(removed, expected, depth)
+        if kind in ("buried", "floating"):
+            verdict += undo
+        names = ", ".join(f"'{curve}'" for curve in curves)
+        grooves = ("1 groove" if len(curves) == 1 else f"{len(curves)} grooves")
+        each = "it" if len(curves) == 1 else "each"
+        return (
+            f"Engraved {grooves} along {names} into "
+            f"'{target.Name}' with ONE boolean, a {depth:g} mm deep groove along "
+            f"{each}.{tube_facts} {body_line}.{verdict}{tail}"
+            " One boolean for several curves cuts the same material as one call "
+            "per curve - measured on B30 2026-11-13, 24000.0 -> 23962.3 mm3 "
+            "either way. What it saves is a cutter body and a boolean feature per "
+            "curve, not the helpers: every curve still needs its own point, "
+            "plane, circle and tube."
+            " THE NUMBER ABOVE IS A TOTAL. One boolean cannot say which curve cut "
+            "less than its share, so engrave a curve on its own (curve=) when it "
+            "has to be judged by itself."
             + self._engrave_helpers(created, helpers)
         )
 
