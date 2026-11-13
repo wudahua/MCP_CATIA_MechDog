@@ -294,6 +294,44 @@ def _engrave_outcome(removed: float | None, expected: float | None,
         "planar pocket cannot do."))
 
 
+def _deviation_verdict(rows: list[tuple[float, float | None]],
+                       tolerance: float | None) -> tuple[tuple[float, float] | None, str]:
+    """(worst sample, verdict) for a sampled deviation profile.
+
+    Pure, because every sentence here is a claim about numbers - which sample is
+    the worst, whether a tolerance was met, and whether a tolerance was given at
+    all. The last one is the easiest to get wrong: "within tolerance" on a call
+    that passed no tolerance is a verdict the caller never asked for.
+    """
+    readable = [(ratio, distance) for ratio, distance in rows
+                if distance is not None]
+    if not readable:
+        return None, (" No sample could be measured, so this call says nothing "
+                      "about how far the curve is from the target.")
+    worst_ratio, worst = max(readable, key=lambda row: row[1])
+    if tolerance is None:
+        return (worst_ratio, worst), (
+            " No tolerance was given, so this is reported and not judged: the "
+            f"number to read is the MAXIMUM, {worst:.4f} mm at "
+            f"t={worst_ratio:.3f}.")
+    over = [(ratio, distance) for ratio, distance in readable
+            if distance > tolerance]
+    if not over:
+        return (worst_ratio, worst), (
+            f" Within the {tolerance:g} mm you allowed: the worst of the "
+            f"{len(readable)} readable sample(s) is {worst:.4f} mm at "
+            f"t={worst_ratio:.3f}.")
+    listed = ", ".join(f"t={ratio:.3f} at {distance:.4f} mm"
+                       for ratio, distance in over[:5])
+    return (worst_ratio, worst), (
+        f" WARNING: {len(over)} of {len(readable)} sample(s) exceed the "
+        f"{tolerance:g} mm you allowed, worst {worst:.4f} mm at "
+        f"t={worst_ratio:.3f} ({listed}"
+        + (f", and {len(over) - 5} more" if len(over) > 5 else "") + ").")
+
+
+
+
 class GSDTools:
     """Tools for Generative Shape Design (wireframe & surface) in CATIA V5."""
 
@@ -1467,6 +1505,91 @@ class GSDTools:
                 },
             },
             {
+                "name": "catia_measure_deviation",
+                "description": (
+                    "Sample a curve ALONG its length and report how far each "
+                    "sample is from a body or a face - the MAXIMUM deviation, "
+                    "which catia_measure_distance cannot give. That tool returns a "
+                    "MINIMUM, and a minimum is 0 for any curve that touches the "
+                    "target once: measured on B30 2026-11-14, a 50 mm line running "
+                    "from a face up to 3 mm above it measures 0.0000 mm. Sampling "
+                    "the same line returned 0.0000 / 0.7500 / 1.5000 / 2.2500 / "
+                    "3.0000 mm at t = 0, 0.25, 0.5, 0.75, 1 - the exact values, "
+                    "which is why this is a measurement and not an estimate. "
+                    "HOW IT WORKS: one point per sample "
+                    "(AddNewPointOnCurveFromPercent, updated) and GetMinimumDistance "
+                    "from that point to the target; the points are deleted again "
+                    "unless keep_points=true. Deleting them was measured safe on "
+                    "B30 2026-11-14 - they are referenced by nothing, so they went "
+                    "and the part kept updating with its volume unchanged. "
+                    "'t' IS THE CURVE'S OWN PARAMETER, the same fraction "
+                    "catia_gsd_plane_normal_to_curve takes; on a straight line it "
+                    "equals the fraction of the length (0.25 of a 50 mm ramp is "
+                    "12.5 mm along). LIMITS, STATED BECAUSE THE NUMBER LOOKS MORE "
+                    "CERTAIN THAN IT IS: the samples are a GRID, so a curve can "
+                    "leave the target and come back between two of them - raise "
+                    "'samples' where clearance matters; and 0.0000 mm means ON or "
+                    "INSIDE the body, because the distance is to a solid. Which "
+                    "curves can carry a point-on-curve is the same rule engrave "
+                    "uses: open lines, open splines and projected outlines can, a "
+                    "circle or a closed spline cannot."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "curve": {
+                            "type": "string",
+                            "description": (
+                                "The curve to sample - typically the projection "
+                                "catia_gsd_project made, or a curve you computed "
+                                "and want to know the clearance of."
+                            ),
+                        },
+                        "surface": {
+                            "type": "string",
+                            "description": (
+                                "What to measure against: an element name (a face "
+                                "'Face.3', a set, a surface) or omitted for the "
+                                "active body. Naming a FACE is the stricter "
+                                "question - a curve 2 mm inside the body reads "
+                                "0.0000 mm against the body and 2.0000 mm against "
+                                "the face it was meant to lie on."
+                            ),
+                        },
+                        "samples": {
+                            "type": "integer",
+                            "default": 9,
+                            "description": (
+                                "How many points to place along the curve, both "
+                                "ends included (2-51). Each one is a real element "
+                                "CATIA builds and updates, so this is the cost of "
+                                "the call as well as its resolution."
+                            ),
+                        },
+                        "tolerance": {
+                            "type": "number",
+                            "description": (
+                                "Optional allowed deviation in mm. Given, the "
+                                "reply says whether every sample is within it and "
+                                "names the ones that are not; omitted, it reports "
+                                "the maximum and judges nothing."
+                            ),
+                        },
+                        "keep_points": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Leave the sample points in the tree (named "
+                                "'<curve>_t00' ...) instead of deleting them. They "
+                                "are useful to look at, and they are also N extra "
+                                "elements per call."
+                            ),
+                        },
+                    },
+                    "required": ["curve"],
+                },
+            },
+            {
                 "name": "catia_curve_on_surface",
                 "description": (
                     "PUT A PLANAR OUTLINE ON A CURVED FACE, point by point, and say "
@@ -2267,6 +2390,8 @@ class GSDTools:
                 return self._multi_section_surface(arguments)
             case "catia_gsd_sweep":
                 return self._sweep(arguments)
+            case "catia_measure_deviation":
+                return self._measure_deviation(arguments)
             case "catia_surface_engrave":
                 # This is the most dialog-prone call in the package: it creates a
                 # body, sweeps, closes a surface, runs a boolean that CONSUMES the
@@ -6436,18 +6561,24 @@ class GSDTools:
             # cutter that was already lying on the surface by construction - the
             # projected curve touches the surface, and the minimum is 0 whether
             # or not the whole contour follows it. A minimum cannot answer the
-            # question. The maximum deviation along the contour would, and there
-            # is no way to sample a curve on this build (AddNewPointOnCurveFromPercent
-            # does not update - measured 2026-11-09), so this message now says
-            # what the number can and cannot mean instead of implying it decides.
+            # question. The maximum deviation along the contour can, and it IS
+            # measurable. This comment used to claim "there is no way to sample a
+            # curve on this build (AddNewPointOnCurveFromPercent does not update -
+            # measured 2026-11-09)", and that claim was WRONG: the primitive
+            # updates, this very file depends on it in _plane_normal_to_curve, and
+            # 0.3.119 added catia_measure_deviation to sample a curve at N points.
+            # Measured on B30 2026-11-14: a 50 mm ramp 0 -> 3 mm off a face
+            # sampled 0.0000 / 0.7500 / 1.5000 / 2.2500 / 3.0000 mm.
             raise PreconditionRejected(
                 f"CATIA rejected the split of '{args['element']}' by "
                 f"'{args['cutter']}' at update, and the attempt was removed from "
                 f"the tree again. The closest approach between the two measures "
                 f"{measured} AFTER the refusal - and that is a MINIMUM, so it is 0 "
                 "for a curve that merely touches the element in one place. It does "
-                "NOT prove the contour follows the element, and this build offers "
-                "no way to sample along a curve to find out. What the measurements "
+                "NOT prove the contour follows the element. Run "
+                "catia_measure_deviation on the cutter BEFORE the split: it "
+                "samples the curve and reports the MAXIMUM deviation, which is "
+                "what decides this - a minimum never can. What the measurements "
                 "do separate: "
                 "a closed curve lying on a PLANE patch splits cleanly (1486.903 "
                 "mm2 kept, 2026-11-09); the same circle 3 mm above that patch "
@@ -6866,6 +6997,187 @@ class GSDTools:
                 "full period (valley-ridge-valley) and divide by the number of "
                 "periods instead. Compare the boundary edges themselves with "
                 "catia_measure_distance if this is still unclear.")
+
+    def _measure_deviation(self, args: dict[str, Any]) -> str:
+        """How far a curve runs from a body or a face, sampled ALONG it.
+
+        THE GAP THIS FILLS, and the false statement that had been keeping it
+        open. catia_measure_distance returns GetMinimumDistance, and a minimum is
+        0 for any curve that touches the target once - measured on B30 2026-11-14,
+        a 50 mm line rising from a face to 3 mm above it read 0.0000 mm. A message
+        in _split said "there is no way to sample a curve on this build
+        (AddNewPointOnCurveFromPercent does not update - measured 2026-11-09)",
+        and that claim is wrong: the primitive updates, and the same file already
+        depends on it (``_plane_normal_to_curve`` puts a plane's origin on it).
+        Measured here, one fresh point per sample on the same ramp:
+
+            t=0     0.000000 mm      t=0.5   1.500000 mm
+            t=0.25  0.750000 mm      t=0.75  2.250000 mm
+            t=1     3.000000 mm
+
+        which is 3*t to six decimals, i.e. the sample really is at that fraction
+        of the curve. A second cell sampled a spline through z = 10, 10.8, 10.2,
+        11.4 and got the profile 0.0000 / 0.5985 / 0.8290 / 0.7422 / 0.4747 /
+        0.2354 / 0.2339 / 0.6064 / 1.4000 mm with its maximum 1.4000 mm at t=1, on
+        the control point that is 1.4 mm up.
+
+        What was measured about the COST of sampling: one point per sample, each
+        appended, named, updated and measured; the points are deleted again
+        afterwards, which was measured safe - 4/4 deleted and ``part.Update()``
+        still fine with the volume unchanged, because nothing references them.
+        One point CANNOT be re-used: ``HybridShapePointOnCurve.Ratio`` exists but
+        answers "Property ... can not be set" (measured 2026-11-14), so N samples
+        need N points.
+        """
+        curve = args.get("curve")
+        if not curve:
+            raise ArgumentRejected(
+                "catia_measure_deviation needs 'curve': the element to sample "
+                "along. Nothing was created.", code="CURVE_REQUIRED",
+                stage="validate")
+        curve = str(curve)
+        try:
+            samples = int(args.get("samples", 9))
+        except (TypeError, ValueError):
+            raise ArgumentRejected(
+                "samples must be a whole number of points; got "
+                f"{args.get('samples')!r}. Nothing was created.",
+                code="BAD_ARGUMENT", stage="validate")
+        if not 2 <= samples <= 51:
+            raise ArgumentOutOfRange(
+                f"samples must be between 2 and 51; got {samples}. Two is the "
+                "smallest grid that has both ends, and every sample is a point "
+                "CATIA has to build and update, so the ceiling is a cost, not a "
+                "style choice.", code="SAMPLES_OUT_OF_RANGE", stage="validate")
+        tolerance = args.get("tolerance")
+        if tolerance is not None:
+            try:
+                tolerance = float(tolerance)
+            except (TypeError, ValueError):
+                raise ArgumentRejected(
+                    "tolerance must be a distance in mm; got "
+                    f"{args.get('tolerance')!r}. Omit it to have the deviation "
+                    "reported instead of judged.", code="BAD_ARGUMENT",
+                    stage="validate")
+            if tolerance < 0:
+                raise ArgumentOutOfRange(
+                    f"tolerance must be zero or positive; got {tolerance}. A "
+                    "negative allowance would fail every sample.",
+                    code="TOLERANCE_OUT_OF_RANGE", stage="validate")
+        keep_points = bool(args.get("keep_points", False))
+
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        spa = self.conn.active_document.GetWorkbench("SPAWorkbench")
+        target_name = args.get("surface")
+        if target_name:
+            target_ref = self._ref(str(target_name))
+            target_label = str(target_name)
+        else:
+            target_ref = part.CreateReferenceFromObject(part.MainBody)
+            target_label = str(part.MainBody.Name)
+        curve_ref = self._ref(curve)
+        try:
+            length: float | None = float(spa.GetMeasurable(curve_ref).Length)
+        except Exception:  # noqa: BLE001 - decoration, not the measurement
+            length = None
+
+        factory = self._factory()
+        geoset = self._get_geoset()
+        rows: list[tuple[float, float | None]] = []
+        made: list[tuple[str, Any]] = []
+        notes: list[str] = []
+        try:
+            for step in range(samples):
+                ratio = step / (samples - 1)
+                name = ""
+                try:
+                    point = factory.AddNewPointOnCurveFromPercent(
+                        curve_ref, ratio, 0)
+                    geoset.AppendHybridShape(point)
+                    name, _verified = self._free_name(part, f"{curve}_t{step:02d}")
+                    try:
+                        point.Name = name
+                    except Exception:  # noqa: BLE001 - the name is decoration
+                        name = ""
+                    made.append((name, point))
+                    part.UpdateObject(point)
+                    distance = float(
+                        spa.GetMeasurable(part.CreateReferenceFromObject(point))
+                        .GetMinimumDistance(target_ref))
+                except Exception as error:  # noqa: BLE001 - one bad sample
+                    notes.append(f"t={ratio:.3f} ({str(error).splitlines()[0][:70]})")
+                    rows.append((ratio, None))
+                    continue
+                rows.append((ratio, distance))
+        finally:
+            # The points go whether or not the sampling succeeded: they are the
+            # tool's own scaffolding, and 0.3.117's lesson was about elements a
+            # FEATURE references. These reference nothing.
+            gone, still = 0, []
+            if not keep_points:
+                for name, point in made:
+                    self._drop_element(point)
+                    if not name:
+                        continue
+                    if self._name_gone(part, name):
+                        gone += 1
+                    else:
+                        still.append(name)
+        worst, verdict = _deviation_verdict(rows, tolerance)
+        try:
+            whole = float(spa.GetMeasurable(curve_ref).GetMinimumDistance(
+                target_ref))
+            minimum_note = (
+                " The WHOLE curve's own GetMinimumDistance to the same target is "
+                f"{whole:.4f} mm - that is a MINIMUM, so it is 0 for any curve "
+                "that touches once, however far the rest of it runs. That number "
+                "is what catia_measure_distance reports, and it is why this tool "
+                "samples instead.")
+        except Exception:  # noqa: BLE001 - the profile is already the answer
+            minimum_note = ""
+
+        table = "\n".join(
+            f"  t={ratio:.3f}  "
+            + (f"{distance:.4f} mm" if distance is not None
+               else "could not be read")
+            for ratio, distance in rows)
+        header = (
+            f"Deviation of '{curve}' from '{target_label}', sampled at {samples} "
+            "point(s) along it"
+            + (f" (its measured length is {length:.3f} mm)" if length else "")
+            + ":\n" + table)
+
+        cleanup = ""
+        if keep_points:
+            kept = [name for name, _ in made if name]
+            cleanup = (f" The {len(kept)} sample point(s) were KEPT"
+                       + (f" ({', '.join(kept[:8])}"
+                          + (f", ... ({len(kept) - 8} more)"
+                             if len(kept) > 8 else "") + ")" if kept else "")
+                       + " because keep_points=true.")
+        else:
+            cleanup = (f" The {gone} sample point(s) this call created were "
+                       "removed again - measured on B30 2026-11-14: they are "
+                       "referenced by nothing, so they go and the part keeps "
+                       "updating.")
+            if still:
+                cleanup += (" THESE COULD NOT BE REMOVED and are still in the "
+                            "tree: " + ", ".join(f"'{name}'" for name in still)
+                            + " - they reference nothing either, so they are "
+                            "clutter rather than a breakage.")
+        if notes:
+            cleanup += " Some samples failed: " + "; ".join(notes[:6]) + "."
+
+        zero_note = (" 0.0000 mm means ON or INSIDE the target: the distance is "
+                     "to a solid body, so a sample buried in the material also "
+                     "reads 0." if not target_name else "")
+        return (
+            header + "\n" + verdict
+            + f" The grid is {samples} samples, not a proof: a curve can leave "
+            "the target and come back between two of them, so raise 'samples' "
+            "where clearance matters." + zero_note + minimum_note + cleanup
+        )
 
     def _plane_normal_to_curve(self, args: dict[str, Any]) -> str:
         """A datum plane normal to a curve, with its origin ON that curve.

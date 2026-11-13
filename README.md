@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.118** · [what changed](CHANGELOG.md) ·
+**0.3.119** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -12,7 +12,7 @@ defects that make that loop lie to you. Most of the work since 0.3.0 came from
 people rebuilding real assemblies with it: the changelog is a list of things that
 produced a plausible number, a wrong number, or no explanation at all.
 
-**143 tools** (upstream 98 + 45 added, and nothing dropped any more: knowledge
+**144 tools** (upstream 98 + 46 added, and nothing dropped any more: knowledge
 came back in 0.3.63 and drafting in 0.3.64, each after its tools were measured on
 B30 rather than trusted). Nothing in the COM layer was rewritten — the value of upstream is
 the field-verified knowledge in its comments, so this fork is strictly add /
@@ -71,10 +71,9 @@ two - `catia_delete_body`, `catia_solid_loft`; 0.3.19: one - `catia_copy_compone
 `catia_gsd_rotate`, `catia_gsd_translate`; 0.3.82: three - `catia_sketch_copy`,
 `catia_gsd_circ_pattern`, `catia_gsd_plane_normal_to_curve`; 0.3.84: one -
 `catia_gsd_plane_angle`).
-98 + 45 added = 143: the 31 below, `catia_apply_design_table` under Knowledgeware,
+98 + 46 added = 144: the 31 below, `catia_apply_design_table` under Knowledgeware,
 `catia_drawing_set_sheet` and `catia_drawing_add_frame` under Drafting (0.3.65),
-the three colour tools in their own table below (0.3.79), and
-`catia_replace_component` (0.3.80), and `catia_split_solid` (0.3.94). 0.3.85 added arguments instead of tools:
+the three colour tools in their own table below (0.3.79), `catia_replace_component` (0.3.80), `catia_split_solid` (0.3.94), and `catia_measure_deviation` (0.3.119). 0.3.85 added arguments instead of tools:
 `catia_gsd_boundary(edge=N, propagation=…)` takes one loop of a border (a
 selector `AddNewBoundaryOfSurface` does not have), `catia_gsd_fill` accepts
 `Edge.N`, and `catia_gsd_circ_pattern(cap_center=true, cap_curve=…)` closes the
@@ -1319,7 +1318,7 @@ while a reply that only reports success cannot.
 | Document | 12 | new/open/save/close/list + `catia_save_as_copy`; `catia_save_document` retries around dialogs |
 | Sketcher | 18 | lines, rectangles, circles, constraints; reopen a closed sketch and delete one element; `catia_sketch_copy` replays a profile onto another plane; `catia_sketch_strokes` draws a whole letter outline in one call, and `catia_text_strokes` supplies those outlines from a built-in single-line font (it can hand the points back, and always reports the box the text occupies; its baseline runs along the sketch's own +H); `catia_sketch_ellipse` draws a slanted ellipse in one curve; `catia_sketch_profile` draws a MIXED outline - straight runs and arcs, each with its own primitive - in one call, and checks the junctions on the endpoints that will be DRAWN (it rebuilds each arc's circle through them) |
 | Part Design | 26 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, solid loft, bodies (create / list / delete)… |
-| Generative Shape Design | 36 | wireframe and surfaces, extract, `boundary`, `heal`, `fillet_surface`, `spine`, `rotate`, `translate`, `circ_pattern` (rotate+join), `plane_normal_to_curve`, `plane_angle`, revolve + close surface, and `catia_surface_engrave` (a constant-depth groove along a curve on a curved face); a GSD element or set is removed with `catia_delete_feature` |
+| Generative Shape Design | 37 | wireframe and surfaces, extract, `boundary`, `heal`, `fillet_surface`, `spine`, `rotate`, `translate`, `circ_pattern` (rotate+join), `plane_normal_to_curve`, `plane_angle`, revolve + close surface, and `catia_surface_engrave` (a constant-depth groove along a curve on a curved face, with `curves=[...]` for a whole word in one boolean); `catia_measure_deviation` samples a curve along its length and reports how far each sample sits from a body or a face; a GSD element or set is removed with `catia_delete_feature` |
 | Assembly | **14** | upstream 9 + get/set component transform, rename, list constraints, copy component, replace component |
 | Appearance | **3** | `catia_colorize_assembly`, `catia_set_color`, `catia_get_color` - per-instance colour in an assembly, per-node in a part |
 | Measurement | 8 | inertia, distance, bounding box\*, parameters, `catia_check_surface`, `catia_shape_audit` |

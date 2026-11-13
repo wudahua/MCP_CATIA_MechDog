@@ -2,6 +2,71 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.119] — 2026-11-14 · sampling a curve, and the sentence that said it was impossible
+
+`catia_measure_deviation` exists now. It was believed impossible here, and the
+reason was a wrong measurement recorded as a fact.
+
+### The false claim
+
+A comment inside `catia_gsd_split` said: *"there is no way to sample a curve on
+this build (`AddNewPointOnCurveFromPercent` does not update — measured
+2026-11-09)"*, and the failure message repeated it to callers: *"this build offers
+no way to sample along a curve to find out."* That sentence is printed whenever a
+split is refused, i.e. exactly when a caller most needs to know that the maximum
+deviation **can** be measured.
+
+It was wrong, and the code contradicted it: `_plane_normal_to_curve` has been
+calling `AddNewPointOnCurveFromPercent` + `Part.UpdateObject` since 0.3.x, and the
+whole engrave depends on the resulting plane origin.
+
+Measured on B30 2026-11-14 (`scripts/b30_v0421_probe_deviation.py`), a 50 mm line
+rising from a face to 3 mm above it, one fresh point per sample:
+
+| t | 0 | 0.25 | 0.5 | 0.75 | 1 |
+|---|---|---|---|---|---|
+| measured | 0.000000 | 0.750000 | 1.500000 | 2.250000 | 3.000000 |
+| expected (3t) | 0.000000 | 0.750000 | 1.500000 | 2.250000 | 3.000000 |
+
+Six decimals, five samples, and a second cell on a spline through z = 10, 10.8,
+10.2, 11.4 returned 0.0000 / 0.5985 / 0.8290 / 0.7422 / 0.4747 / 0.2354 / 0.2339 /
+0.6064 / 1.4000 mm — maximum 1.4000 at t=1, on the control point that is 1.4 mm up.
+
+### What the tool does
+
+`catia_measure_deviation(curve, surface?, samples=9, tolerance?, keep_points?)`:
+one point per sample, updated, `GetMinimumDistance` from that point to the target,
+and a table plus the maximum. Against the body by default, or against a face when
+you name one (a curve 2 mm inside the body reads 0.0000 against the body and
+2.0000 against the face it was meant to lie on).
+
+Four things it says because the number looks more certain than it is:
+
+- **A minimum cannot answer this.** The reply prints the curve's own
+  `GetMinimumDistance` beside the profile: `0.0000 mm`, because its first point
+  touches. That is the number `catia_measure_distance` gives.
+- **The grid is not a proof** — a curve can leave the target and come back between
+  two samples.
+- **`0.0000 mm` means ON or INSIDE** when the target is a solid body.
+- **A tolerance is not assumed**: omit it and the reply explicitly says it is
+  reporting, not judging.
+
+### What it cost, measured
+
+One point per sample — a re-used point is impossible (`HybridShapePointOnCurve.Ratio`
+exists but answers *"Property … can not be set"*), so N samples are N points. They
+are deleted again afterwards, which was measured before shipping: referenced by
+nothing, 4/4 removed, `part.Update()` still fine, volume unchanged. The audit ends
+with the same 3 elements it started with.
+
+`scripts/b30_v0421_audit.py` 6/6.
+
+### Also
+
+- `catia_gsd_split`'s refusal now points at the new tool instead of denying it.
+- Ceilings: new `AVAILABLE` entry for sampling, with the ratio→2-point rule and the
+  measured numbers.
+
 ## [0.3.118] — 2026-11-14 · a word in one boolean, and the sentence that called a working cut grazing
 
 The last item of the 2026-11-12 report (P1-4): ten strokes of one word cost ten

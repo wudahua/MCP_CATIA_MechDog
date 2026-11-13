@@ -122,7 +122,12 @@ def test_the_failed_update_reports_the_distance_and_refuses_to_guess():
     # answer "does the whole contour follow the element".
     assert "MINIMUM" in text
     assert "NOT prove the contour" in text
-    assert "no way to sample along a curve" in text
+    # 0.3.119: this used to assert "no way to sample along a curve", and that
+    # sentence was FALSE - AddNewPointOnCurveFromPercent does update (the engrave
+    # depends on it), and catia_measure_deviation samples a curve at N points.
+    # The message now points at that tool instead of denying it exists.
+    assert "no way to sample along a curve" not in text
+    assert "catia_measure_deviation" in text
     # The cases the measurements DO separate, named.
     assert "join or an array" in text
     assert "measured-unsupported combination" in text

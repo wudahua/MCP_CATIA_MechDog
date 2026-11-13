@@ -671,6 +671,33 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
         ),
     },
     {
+        "member": "sampling a curve along its length",
+        # AVAILABLE_WITH_LIMIT, not AVAILABLE: the vocabulary of this list has no
+        # plain "works" status, and the three limits are real - a point per
+        # sample, a point cannot be re-used, and only open curves take one.
+        "status": "AVAILABLE_WITH_LIMIT",
+        "detail": (
+            "It works, and until 0.3.119 a message in catia_gsd_split said it did "
+            "not. Measured on B30 2026-11-14 (scripts/b30_v0421_probe_deviation.py): "
+            "HybridShapeFactory.AddNewPointOnCurveFromPercent(curve, ratio, 0) "
+            "creates a point at that fraction, part.UpdateObject(point) updates it, "
+            "and GetMeasurable(point_ref).GetMinimumDistance(target) reads its "
+            "distance. On a 50 mm line rising from a face to 3 mm above it the five "
+            "samples read 0.000000 / 0.750000 / 1.500000 / 2.250000 / 3.000000 mm - "
+            "exactly 3*t, so the sample really sits at that fraction. A point CANNOT "
+            "be re-used: HybridShapePointOnCurve.Ratio exists but answers "
+            "\"Property ... can not be set\", so N samples need N points. The points "
+            "can be deleted again - they are referenced by nothing, 4/4 went and "
+            "part.Update() stayed fine with the volume unchanged. catia_measure_"
+            "deviation is built on all of this; the same rule as engrave decides "
+            "which curves accept a point: open line / open spline / projected "
+            "outline yes, circle or closed spline no. THE REASON THIS MATTERS: a "
+            "minimum distance is 0 for any curve that touches once, so "
+            "catia_measure_distance can never answer 'does the contour follow the "
+            "surface' - the maximum, sampled, can."
+        ),
+    },
+    {
         "member": "the elements one catia_surface_engrave stroke leaves behind",
         "status": "AVAILABLE_WITH_LIMIT",
         "detail": (
