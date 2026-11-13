@@ -357,12 +357,22 @@ class PartDesignTools:
                             "type": "string",
                             "description": (
                                 "Cut direction: 'normal' (default), 'reverse', "
-                                "or 'both' (same as symmetric=true). 'both' makes "
-                                "TWO FEATURES, not one: a two-sided cut is built "
-                                "as two one-sided ones, so the tree gains e.g. "
-                                "'凹槽.1' and '凹槽.2' and any bookkeeping by feature "
-                                "count is off by one. catia_list_features shows both "
-                                "names, and the reply says 'two one-sided cuts'."
+                                "or 'both' (same as symmetric=true). 'DEPTH IS THE "
+                                "TOTAL, on 'both' AS WELL': depth=14 removes 7 mm on "
+                                "each side of the sketch plane, not 14. Reported "
+                                "2026-11-13 after depth=14 cut y = -7..+7 on a 26 mm "
+                                "wall and depth=28 was needed to go through - the "
+                                "old text only said this for symmetric=true. "
+                                "HOW MANY FEATURES: one, when the sketch plane sits "
+                                "on a face (measured on B30 2026-11-13: a pocket on "
+                                "a 40x40x10 block answered '5.000 mm total, 2.500 "
+                                "each side' and added ONE '凹槽.1'). TWO when the "
+                                "plane sits INSIDE the material - a mid-plane sketch "
+                                "is built as two one-sided cuts, so the tree gains "
+                                "'凹槽.1' and '凹槽.2' and the reply says 'two "
+                                "one-sided cuts' (measured the same day, offset=5 on "
+                                "a 10 mm block). Bookkeeping by feature count is off "
+                                "by one in that case; catia_list_features shows both."
                             ),
                             "enum": ["normal", "reverse", "both"],
                             "default": "normal",
@@ -3560,6 +3570,9 @@ class PartDesignTools:
             hint = self._coplanar_hint([n for n, _ in failed])
             if hint:
                 head += hint
+            segmented = self._segmented_outline_hint([n for n, _ in failed])
+            if segmented:
+                head += segmented
         return head
 
     @staticmethod
@@ -3637,6 +3650,66 @@ class PartDesignTools:
             "reported 2026-10-25, a six-sided tip took R3.81 on one side and R1.27 "
             "on the next, then refused the third edge for exactly this reason."
         )
+
+    _FINGERPRINT_FACE = re.compile(r"([A-Za-z_\u4e00-\u9fff][\w\u4e00-\u9fff]*)\.(\d+);")
+
+    @classmethod
+    def _segmented_outline_hint(cls, labels: list[str]) -> str:
+        """Name the SEGMENTED OUTLINE when that is why a fillet was refused.
+
+        The 2026-11-13 report (P1-1) paid for this the hard way: a hole cut from a
+        12-segment sketch_profile gave a rim of 12 edges, `catia_fillet` refused
+        12/12 ("bounded by three or more faces"), and the only advice on offer was
+        "draw the radius in the sketch, or cut the transition with catia_gsd_*".
+        The reporter then spent a 15-section / 1440-coordinate flare body trying to
+        fake a roundover. Redrawing the SAME hole as one closed
+        `catia_sketch_spline` left ONE rim edge, and R1.8 filleted 1/1 - the
+        measurements are the reporter's, on B30 2026-11-13.
+
+        So when several rejected edges name the SAME sketch or feature, say it: the
+        profile was drawn as segments, each segment is its own edge, and the seam
+        between two of them has three faces and nothing to round. The fix is at the
+        PROFILE, not at the fillet - which is the one thing the old message left
+        out.
+
+        Deliberately a hint, not a verdict: this reads fingerprints, and a part can
+        legitimately have three faces on an edge for other reasons (an earlier
+        fillet meeting it is the other measured one).
+        """
+        if len(labels) < 3:
+            return ""
+        counts: dict[str, int] = {}
+        for label in labels:
+            named = {f"{m.group(1)}.{m.group(2)}"
+                     for m in cls._FINGERPRINT_FACE.finditer(label or "")}
+            for name in named:
+                counts[name] = counts.get(name, 0) + 1
+        if not counts:
+            return ""
+        owner, hits = max(counts.items(), key=lambda item: item[1])
+        # ALL of the rejected edges, not most of them: a fillet that took four and
+        # refused four is a different situation (measured on B30 2026-11-13 during
+        # 0.3.123's own audit - a mixed batch produced this hint about the PAD's
+        # outline, where "redraw it as one spline" is not the fix). The reporter's
+        # case was 12/12.
+        if hits < 3 or hits != len(labels):
+            return ""
+        return (
+            f" {hits} of these {len(labels)} edge(s) all come from the same profile "
+            f"'{owner}'. That is what a SEGMENTED outline leaves behind: every "
+            "segment of the sketch becomes its own edge, and the seam between two "
+            "of them is bounded by three or more faces, so there is no dihedral "
+            "angle to round. THE FIX IS AT THE PROFILE, NOT AT THE FILLET - "
+            "measured by the reporter on B30 2026-11-13 on their own part: a hole "
+            "cut from a 12-segment outline refused 12/12, and the SAME hole redrawn "
+            "as ONE closed catia_sketch_spline then filleted 1/1 at R1.8. Two calls: "
+            "(1) redraw the loop as one curve - catia_sketch_spline(closed=true) "
+            "through the same points (catia_sketch_get_geometry lists what the old "
+            "sketch holds, and the drawing record has the points if this session "
+            "drew them); (2) cut again with catia_pocket and fillet the single rim "
+            "edge that results. Keep the radius under half the profile's smallest "
+            "radius of curvature, or the fillet will refuse for the next reason "
+            "instead.")
 
     def _fillet_one(self, radius: float, edge_name: Any,
                     propagation: int = 0) -> str:
@@ -5138,11 +5211,28 @@ class PartDesignTools:
             deleted, kept = self._delete_owned(gsd_names) if gsd_names else ([], [])
             done: list[str] = list(deleted)
             failed: list[str] = [f"'{name}' (could not be deleted)" for name in kept]
+            removed_features: list[str] = []
             for name in others:
                 try:
-                    done.append(self._delete_one(args, name))
+                    # NO UPDATE PER NAME. The 2026-11-13 report (P0-1) deleted a PAIR
+                    # of one-sided pockets in one batch and got, after the first of
+                    # the two, "Feature '凹槽.1' deleted, but the part update failed
+                    # afterwards ... 8 elements fail on their own ... delete those
+                    # too". The model was fine: 凹槽.2 was still there and referenced
+                    # the feature that had just gone, so the update between the two
+                    # deletes could not succeed - and the reply read a one-step
+                    # in-between state as a verdict on the model, then told the
+                    # caller to delete six healthy downstream features with it.
+                    # Deleting the whole list and updating ONCE removes the state
+                    # that produced that sentence.
+                    done.append(self._delete_one(args, name, defer_update=True))
+                    removed_features.append(name)
                 except Exception as error:  # noqa: BLE001 - reported per name
                     failed.append(f"'{name}' ({str(error).splitlines()[0][:120]})")
+            # Kept OUT of `done`: that list is counted as elements removed, and a
+            # sentence about the update is not one.
+            update_note = (self._final_update_note(removed_features)
+                           if removed_features else "")
             # `deleted` counts OBJECTS, so a name that two elements carried
             # contributes two entries: saying "1 of 1" after removing two of them
             # would be the same kind of half-truth this batch exists to avoid.
@@ -5153,10 +5243,19 @@ class PartDesignTools:
                     f"'{name}' x{len(found[name])}" for name in duplicates) + ".")
             if failed:
                 summary += f" Failed ({len(failed)}): " + "; ".join(failed) + "."
-            return summary + " " + " ".join(done)
+            return summary + " " + " ".join(done) + update_note
         return self._delete_one(args, None)
 
-    def _delete_one(self, args: dict[str, Any], forced: str | None) -> str:
+    def _delete_one(self, args: dict[str, Any], forced: str | None,
+                    defer_update: bool = False) -> str:
+        """Delete one named element. ``defer_update`` leaves Part.Update to a caller.
+
+        The batch form deletes a whole list and updates ONCE at the end: an update
+        between two halves of a pair (two one-sided pockets, a feature and the
+        fillet on it) cannot succeed, and reading that in-between failure as a
+        verdict on the model is what produced the destructive advice of 0.3.122
+        (reported 2026-11-13, P0-1).
+        """
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
         target = forced or args.get("feature_name")
@@ -5321,6 +5420,10 @@ class PartDesignTools:
                 sel.Clear()
             except Exception:
                 pass
+        if defer_update:
+            # The caller updates once, for the whole list. Saying anything about
+            # the part's state here would be a verdict on a half-applied batch.
+            return self._deleted_message(kind, target, before, args)
         try:
             part.Update()
         except Exception as e:
@@ -5334,22 +5437,39 @@ class PartDesignTools:
             lost = [n for n in before
                     if n not in self._sketch_names() and n != target]
             return (
-                f"Feature '{target}' deleted, but the part update failed "
-                f"afterwards ({e}). "
-                + (describe(culprits) + " - every later update stops there; delete "
-                   + ("it" if len(culprits) == 1 else "those")
-                   + " too (catia_delete_feature). "
+                f"Feature '{target}' deleted, and the part update after it failed "
+                f"({e}). This is a TERMINAL state: the delete happened, this call is "
+                "finished. "
+                + (describe(culprits) + " IN THIS STATE - which is what a feature "
+                   "looks like when what it referenced is the thing that just went, "
+                   "not proof that it is broken. "
                    if culprits else
-                   "No single element fails on its own, so the damage is a relation "
-                   "between features; every body feature and geometrical-set element "
-                   "still updates alone. ")
+                   "No single element fails on its own, so this is a relation "
+                   "between features rather than one broken node. ")
+                # The imperative that used to be here ("delete those too") erased
+                # six healthy downstream features for a 2026-11-13 reporter. Say
+                # what each route costs instead of which button to press.
+                + "Two ways out, and only one is reversible: rebuild the feature "
+                "that was removed (or edit the downstream feature that lost its "
+                "support), or delete the named elements - DESTRUCTIVE, and it "
+                "removes model features. "
                 + "The part is IN ERROR until this is cleared - catia_update_part "
-                "says whether it is, and catia_list_bodies now marks its numbers "
+                "says whether it is, and catia_list_bodies marks its numbers "
                 "stale instead of reporting them as current."
                 + (f" Sketches removed with it: {', '.join(lost)}." if lost else "")
             )
         self._note_part_error(None)
         self.conn.refresh_display()
+        return self._deleted_message(kind, target, before, args)
+
+    def _deleted_message(self, kind: str, target: str, before: list[str],
+                         args: dict[str, Any]) -> str:
+        """What one successful delete did, shared by both call shapes.
+
+        Split out so a batch (which must not describe the part's state until its
+        single final update) and a single delete report the same facts the same
+        way: which sketch went with it, and which construction elements it left.
+        """
         # A sketch deleted on purpose is not a casualty of the delete.
         lost = [n for n in before
                 if n not in self._sketch_names() and n != target]
@@ -5387,6 +5507,60 @@ class PartDesignTools:
             except Exception:  # noqa: BLE001 - bookkeeping only
                 pass
         return message
+
+    def _final_update_note(self, removed: list[str]) -> str:
+        """Update the part ONCE after a batch, and judge only the FINAL state.
+
+        The 2026-11-13 report (P0-1) is why this exists and why the wording is
+        what it is. A batch of two paired one-sided pockets, updated after each
+        name, answered:
+
+            Feature '凹槽.1' deleted, but the part update failed afterwards ...
+            8 elements fail on their own: '凹槽.2', '凹槽.3', '移除.1', ...
+            - every later update stops there; delete those too
+
+        and the model was healthy the whole time: 凹槽.2 still referenced the
+        feature that had just gone, so the update BETWEEN the two deletes could
+        not succeed. A caller who took that instruction deleted six healthy
+        downstream features - an unrecoverable loss that was only survived
+        because the reporter had copied the file first.
+
+        So: one update, and if it fails, the reply says this is the terminal
+        state, names what fails IN THAT STATE, and puts the destructive route
+        last with the loss spelled out. It never says "delete those too".
+        """
+        part = self.conn.get_active_part()
+        names = ", ".join(f"'{name}'" for name in removed[:6])
+        if len(removed) > 6:
+            names += f" and {len(removed) - 6} more"
+        try:
+            part.Update()
+        except Exception as error:
+            self.conn.refresh_display()
+            self._note_part_error(str(error))
+            culprits = failing_elements(part)
+            return (
+                f" THE FINAL UPDATE FAILED ({str(error).splitlines()[0][:140]}). This "
+                f"is a TERMINAL state, not an in-between step: {len(removed)} "
+                f"element(s) were removed ({names}) and this call is finished. "
+                + (describe(culprits) + " IN THIS STATE - which is what a feature "
+                   "looks like when the element it referenced is the one that just "
+                   "went, not proof that it is broken. "
+                   if culprits else
+                   "No single element fails on its own, so this is a relation "
+                   "between features rather than one broken node. ")
+                + "Two ways out, and only one of them is reversible: (1) put back "
+                "what was removed - rebuild that feature, or edit the downstream "
+                "feature that lost its support; (2) delete the named elements with "
+                "catia_delete_feature, which is DESTRUCTIVE and removes model "
+                "features, and is what erased six healthy features for the "
+                "2026-11-13 reporter who followed an earlier version of this "
+                "sentence. catia_update_part says whether the part is still in "
+                "error; catia_list_bodies marks its numbers stale while it is.")
+        self._note_part_error(None)
+        self.conn.refresh_display()
+        return (f" ONE update at the end: the part updates, {len(removed)} "
+                f"element(s) removed ({names}).")
 
     def _delete_owned(self, names: list[str]) -> tuple[list[str], list[str]]:
         """Delete the construction elements a feature created, in ONE selection.
@@ -7771,6 +7945,20 @@ class PartDesignTools:
                      "point_on_edge_unknown instead.")
         return note
 
+    @staticmethod
+    def _bounded_by_flags(faces: list[str]) -> dict[str, Any]:
+        """Mark an edge whose fingerprint names fewer than two bounding faces.
+
+        A solid edge is bounded by two faces, so one is an incomplete record
+        rather than a strange part - and that missing face is the whole question
+        behind "is this edge bounded by three or more faces", which is what a
+        fillet refusal turns on. Reported 2026-11-13 (P2-2): a hole rim came back
+        as 'Sketch.5;1' alone, and nothing said the list was short.
+        """
+        if len(faces) < 2:
+            return {"bounded_by_incomplete": True}
+        return {}
+
     def _list_edges(self, min_length: float | None = None,
                     max_length: float | None = None,
                     faces: list[str] | None = None,
@@ -7834,6 +8022,13 @@ class PartDesignTools:
                 item["length_unknown"] = True
             else:
                 item["length_mm"] = round(entry["length"], 4)
+            # A REAL EDGE HAS TWO BOUNDING FACES. When the fingerprint names
+            # one, the list is incomplete rather than the part being odd - and
+            # that missing face is exactly what tells a caller whether the edge
+            # carries three or more faces, which is why a fillet refuses it.
+            # Reported 2026-11-13 (P2-2) on a hole rim that came back as
+            # "Sketch.5;1" alone. Saying it beats letting the field look complete.
+            item.update(self._bounded_by_flags(entry["bounded_by"]))
             if include_nls and entry.get("nls"):
                 item["nls"] = entry["nls"]
                 item["created_by"] = nls_features(entry["nls"])

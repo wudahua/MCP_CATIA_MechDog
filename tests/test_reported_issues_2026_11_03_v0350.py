@@ -295,18 +295,26 @@ def _part_design():
 
 def test_batch_delete_aggregates_and_reports_each_failure():
     tools = _part_design()
+    deferred = []
 
-    def one(args, forced):
+    def one(args, forced, defer_update=False):
+        deferred.append(defer_update)
         if forced == "bad":
             raise RuntimeError("No feature named 'bad'")
         return f"Deleted element '{forced}'."
 
     tools._delete_one = one
+    tools._final_update_note = lambda removed: f"ONE update at the end: {removed}."
     reply = tools.execute("catia_delete_feature", {"names": ["a", "bad", "c"]})
     # 0.3.52 counts what was removed, not what was asked for: a name that two
     # elements carried removes two of them, and "2 of 3" would hide that.
     assert "Deleted 2 element(s) for 3 name(s) given." in reply
     assert "bad" in reply and "No feature named" in reply
+    # 0.3.123: every name is deleted WITHOUT an update, and the part is updated
+    # once at the end. An update between two halves of a pair cannot succeed, and
+    # the 2026-11-13 report was told to delete six healthy features because of it.
+    assert deferred == [True, True, True]
+    assert "ONE update at the end" in reply
 
 
 def test_batch_delete_refuses_to_guess_between_forms():

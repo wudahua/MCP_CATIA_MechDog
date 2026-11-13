@@ -7,6 +7,7 @@ Also includes screenshot capture.
 from __future__ import annotations
 
 import json
+import math
 import os
 from typing import Any
 
@@ -660,20 +661,81 @@ class ExportTools:
                          "camera took them.")
         else:
             got_sight, got_up = actual
-            if (max(abs(a - b) for a, b in zip(got_sight, sight)) > 1e-6
-                    or max(abs(a - b) for a, b in zip(got_up, up_vec)) > 1e-6):
-                read_back = (f" READ BACK FROM CATIA: sight {got_sight} up "
-                             f"{got_up}, which is NOT what was asked - the Put was "
-                             "ignored on this build, so the picture is not this "
-                             "view.")
+            # COMPARE ANGLES, NOT COMPONENTS. 0.3.121 compared the read-back with
+            # the REQUESTED numbers component by component at 1e-6, and CATIA
+            # normalises what it stores - so every non-unit direction and every
+            # named diagonal view was reported as "the Put was ignored". The
+            # 0.3.122 report (P0-2) measured it both ways: isometric's
+            # (-1,-1,-1)/(-1,-1,2) reads back as (-0.5774,-0.5774,-0.5774) and
+            # (-0.4082,-0.4082,0.8165), which IS the same view (1/sqrt3, 2/sqrt6),
+            # and sending those normalised values in made the same call "pass" -
+            # same camera, different wording. A direction has no length, so the
+            # test has to be an angle: sight within 0.5 deg, up within 1 deg after
+            # the same Gram-Schmidt CATIA applies.
+            sight_angle = self._angle_between(sight, got_sight)
+            up_angle = self._angle_between(self._orthonormal_up(sight, up_vec),
+                                           got_up)
+            taken = (sight_angle is not None and up_angle is not None
+                     and sight_angle <= 0.5 and up_angle <= 1.0)
+            shown_sight = [round(c, 4) for c in self._unit(sight)]
+            shown_up = [round(c, 4) for c in self._unit(got_up)]
+            if taken:
+                read_back = (
+                    f" Read back from CATIA: sight {got_sight}, up {got_up} - the "
+                    f"camera took them (sight is {sight_angle:.2f} deg and up "
+                    f"{up_angle:.2f} deg from what was asked; CATIA stores both as "
+                    "unit vectors and squares the up vector to the sight, so those "
+                    f"numbers differ from the request by exactly that: {shown_sight} "
+                    f"and {shown_up} is the same view).")
             else:
-                read_back = (f" Read back from CATIA: sight {got_sight}, up "
-                             f"{got_up} - the camera took them.")
+                read_back = (
+                    f" READ BACK FROM CATIA: sight {got_sight}, up {got_up}, which "
+                    "is NOT the direction asked for - sight differs by "
+                    + (f"{sight_angle:.2f} deg" if sight_angle is not None
+                       else "an unmeasurable amount")
+                    + (f" and up by {up_angle:.2f} deg" if up_angle is not None
+                       else "")
+                    + ". The requested direction is "
+                    f"{shown_sight} (up, squared to it: "
+                    f"{[round(c, 4) for c in self._orthonormal_up(sight, up_vec)]}), "
+                    "so this is not a normalisation difference - the picture is not "
+                    "this view.")
         mode_text = ("parallel projection" if got_mode == 1
                      else "perspective projection" if got_mode == 0
                      else "projection unknown")
         return (f"View set to {label}: {mode_text}, sight {list(sight)}, up "
                 f"{list(up_vec)}.{up_note}{mode_note}{read_back}")
+
+    @staticmethod
+    def _unit(vector: Any) -> list[float]:
+        values = [float(v) for v in vector]
+        length = math.sqrt(sum(v * v for v in values))
+        if length < 1e-12:
+            return [0.0, 0.0, 0.0]
+        return [v / length for v in values]
+
+    @classmethod
+    def _orthonormal_up(cls, sight: Any, up: Any) -> list[float]:
+        """``up`` with its component along ``sight`` removed, then normalised.
+
+        This is what CATIA does to a view's up vector before storing it - the
+        0.3.122 report sent up=[0,0,1] with sight=[0.45,1,-0.18] and read back
+        [0.0665,0.1477,0.9868], which is exactly that projection.
+        """
+        s_unit = cls._unit(sight)
+        u = [float(v) for v in up]
+        dot = sum(a * b for a, b in zip(u, s_unit))
+        remainder = [v - dot * c for v, c in zip(u, s_unit)]
+        return cls._unit(remainder)
+
+    @classmethod
+    def _angle_between(cls, one: Any, other: Any) -> float | None:
+        """Angle in degrees between two directions, or None if either is zero."""
+        a, b = cls._unit(one), cls._unit(other)
+        if not any(abs(v) > 0 for v in a) or not any(abs(v) > 0 for v in b):
+            return None
+        dot = max(-1.0, min(1.0, sum(x * y for x, y in zip(a, b))))
+        return math.degrees(math.acos(dot))
 
     def _three(self, value: Any, what: str) -> tuple[float, float, float]:
         """Three finite numbers from a caller, or a refusal that names the fault."""

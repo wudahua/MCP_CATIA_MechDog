@@ -135,7 +135,9 @@ def test_a_put_that_catia_ignores_is_reported_not_photographed():
     viewpoint = _Viewpoint()
     tools, _ = _export(viewpoint, _SystemService([0, 0, -1, 0, 1, 0]))
     reply = tools.execute("catia_set_view", {"view": "front"})
-    assert "NOT what was asked" in reply
+    # 0.3.123 reworded this: a normalisation difference and an ignored Put have to
+    # be told apart, so the sentence says which one it is and by how many degrees.
+    assert "NOT the direction asked for" in reply
     assert "sight [0.0, 0.0, -1.0]" in reply
 
 

@@ -308,10 +308,20 @@ def test_text_strokes_documents_the_baseline_axis_and_returns_a_box() -> None:
 
 
 def test_pocket_warns_that_both_makes_two_features() -> None:
+    """0.3.123: the claim became conditional, because it was measured both ways.
+
+    A pocket with direction='both' on a 40x40x10 block added ONE feature
+    ("5.000 mm total, 2.500 each side"), while the same call from a sketch plane
+    INSIDE the material (offset=5) added TWO ("凹槽.1 + 凹槽.2, two one-sided
+    cuts"). The old text stated the two-feature case as if it were unconditional,
+    and also left 'depth' ambiguous for 'both' - the 2026-11-13 report cut 14 mm
+    expecting 14 per side and got 7.
+    """
     schema = next(tool for tool in PartDesignTools(connection=None).get_tool_definitions()
                   if tool["name"] == "catia_pocket")
     said = schema["inputSchema"]["properties"]["direction"]["description"]
-    assert "TWO FEATURES" in said
+    assert "TOTAL, on 'both' AS WELL" in said
+    assert "TWO when the" in said and "one, when the sketch plane sits" in said
 
 
 def test_the_engrave_note_names_both_causes_of_a_shortfall() -> None:

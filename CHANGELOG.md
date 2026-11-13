@@ -2,6 +2,87 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.123] — 2026-11-14 · two sentences that would have cost the model
+
+The 2026-11-13 acceptance report (13th round) opened with two P0s, and both were
+the reply asserting more than it had measured.
+
+### A batch delete updated the part after every name
+
+`catia_delete_feature(names=[...])` deleted one name, called `Part.Update()`, then
+the next. When two features depend on each other - the reporter's two one-sided
+pockets from a mid-plane cut - that update CANNOT succeed, and the reply read the
+in-between state as a verdict on the model:
+
+> Feature '凹槽.1' deleted, but the part update failed afterwards ... 8 elements fail
+> on their own: '凹槽.2', '凹槽.3', '移除.1', ... - delete those too
+
+The model was healthy the whole time. A caller who followed that instruction would
+have deleted six downstream features; the reporter only survived it because they
+had copied the file first. Measured on B30 2026-11-14
+(`scripts/b30_v0424_audit.py`), the same pair deleted in one batch: "ONE update at
+the end: the part updates, 2 element(s) removed ('凹槽.1', '凹槽.2')", volume back to
+16 000.0 mm³, `catia_update_part` clean.
+
+So the batch now deletes the whole list and updates **once**, and the failure text
+is a TERMINAL state with the destructive route last and its cost spelled out:
+
+> Two ways out, and only one of them is reversible: (1) put back what was removed ...
+> (2) delete the named elements with catia_delete_feature, which is DESTRUCTIVE ...
+> and is what erased six healthy features for the 2026-11-13 reporter who followed
+> an earlier version of this sentence.
+
+The words "delete those too" no longer exist anywhere in the codebase.
+
+### The view read-back compared numbers, not directions
+
+0.3.121's read-back was a good idea with a wrong test: it compared CATIA's
+answer with the REQUESTED vector component by component at 1e-6, and CATIA stores
+unit vectors. So `isometric` (-1,-1,-1) read back (-0.5774,-0.5774,-0.5774) and the
+reply announced "the Put was ignored" - for a camera that had taken it, on a
+picture that was correct. The report proved it by sending the normalised values
+back in: same camera, same view, "the camera took them".
+
+Every diagonal named view and every non-unit `direction=` was misreported. Now the
+test is an ANGLE - sight within 0.5°, up within 1° after the same Gram-Schmidt
+CATIA applies - and the reply says what each number is:
+
+> Read back from CATIA: sight [-0.5774, -0.5774, -0.5774], up [-0.4082, -0.4082,
+> 0.8165] - the camera took them (sight is 0.00 deg and up 0.00 deg from what was
+> asked; CATIA stores both as unit vectors and squares the up vector to the sight,
+> so those numbers differ from the request by exactly that ...)
+
+A camera that really looks elsewhere still says so, with the angle and "so this is
+not a normalisation difference".
+
+### A fillet refusal now names the profile, not just the edges
+
+The report's P1-1 was the real lesson of the round: a hole cut from a 12-segment
+outline refused 12/12 ("bounded by three or more faces"), and the advice on offer
+was "draw the radius in the sketch, or cut the transition with `catia_gsd_*`". The
+reporter then built a 15-section, 1 440-coordinate flare body to fake a roundover -
+until the same hole redrawn as ONE closed `catia_sketch_spline` filleted **1/1 at
+R1.8**. When every rejected edge shares one profile, the reply now says so, quotes
+that before/after, and gives the two calls that do it. Gated on ALL of the rejected
+edges sharing that profile: a mixed batch (6 accepted, 6 refused, measured here)
+must not get advice about a profile that half worked.
+
+### Also
+
+- `catia_pocket(direction='both')`: the description claimed "TWO FEATURES"
+  unconditionally and left `depth` ambiguous. Measured both ways on B30 2026-11-14:
+  a sketch on a FACE gives one feature ("5.000 mm total, 2.500 each side"), a sketch
+  INSIDE the material gives two. `depth` is the TOTAL on 'both' too - the reporter
+  cut 14 mm expecting 14 per side and got 7.
+- `catia_list_edges` marks `bounded_by_incomplete: true` when an edge's fingerprint
+  names fewer than two bounding faces (a real edge has two) - the missing one is
+  exactly what a fillet refusal turns on.
+- Ceilings: two new entries, both attributed to the reporter's measurements - a
+  periodic 2D sketch spline (the seam line), and fillet radii that differ between a
+  hole's two rims (CATIA can fuse them into one edge).
+
+1 954 tests, 146 tools. `scripts/b30_v0424_audit.py` 6/6.
+
 ## [0.3.122] — 2026-11-13 · a whole section chain in one call
 
 The last open item of the 0.3.120 reports (P2-3): a 17-section handle dome cost 17

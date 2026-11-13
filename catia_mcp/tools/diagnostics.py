@@ -902,6 +902,41 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
         ),
     },
     {
+        "member": "a periodic 2D sketch spline",
+        "status": "UNSUPPORTED_ON_B30",
+        "detail": (
+            "catia_sketch_spline(closed=true) closes a loop by REPEATING the first "
+            "point, so the seam has a tangent discontinuity - reported 2026-11-13 by "
+            "a user who saw it as a faint transverse line on a hole wall (with a "
+            "'both' pocket there is also the join of the two one-sided cuts at the "
+            "sketch plane). The sketch-side spline type exposes IsPeriodic as "
+            "READ-ONLY and has no SetClosing (reporter-measured), while the GSD side "
+            "does get a true periodic curve from HybridShapeSpline.SetClosing(1) - "
+            "but a GSD curve cannot be used as the profile of a Part Design pocket. "
+            "So: for a smooth closed profile cut with a pocket, use a GSD closed "
+            "spline and a surface route (extrude/sweep + split), or accept the seam; "
+            "for a closed profile that must be a SKETCH, accept the seam too. Not "
+            "worked around here, and not claimed to be."
+        ),
+    },
+    {
+        "member": "fillet radii that differ between the two rims of one hole",
+        "status": "UNSUPPORTED_ON_B30",
+        "detail": (
+            "A through-hole leaves two rims, but when the hole is cut 'both' ways "
+            "CATIA can report ONE edge for both of them: the reporter measured "
+            "Edge.64 at 116.1574 mm on a hole whose outline is 58.0787 mm - exactly "
+            "twice - with one of the two rims' coordinates answering for both. Then "
+            "one fillet rounds both rims and there is no way to give the front and "
+            "back different radii (the reference picture needed 2:1). Measured by "
+            "the reporter on B30 2026-11-13. The listing now marks an edge whose "
+            "fingerprint names fewer than two bounding faces "
+            "(bounded_by_incomplete), which is the visible symptom; splitting a "
+            "fused edge per rim has no tool here and was not measured in this "
+            "project, so catia_fillet still rounds both or neither."
+        ),
+    },
+    {
         "member": "a face's own world bounding box",
         "status": "UNSUPPORTED_ON_B30",
         "detail": (
