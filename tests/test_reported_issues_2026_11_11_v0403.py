@@ -162,20 +162,36 @@ def test_the_reply_repeats_the_measured_engraving_catch():
     assert "catia_diagnose" in reply
 
 
+# 0.3.120: CJK is no longer the case that cannot be drawn - it comes from a
+# system font's outlines. What CANNOT be drawn is a character no font maps, and
+# U+0378 is unassigned in Unicode, so no font has it.
+_UNASSIGNED = "\u0378"
+
+
+def _needs_font() -> None:
+    from catia_mcp.fonts import find_outline_font
+
+    if find_outline_font() is None:
+        pytest.skip("no outline font on this machine - the CJK path cannot run")
+
+
 def test_a_string_with_no_drawable_character_is_refused_by_name():
+    _needs_font()
     tools, factory = _tools()
     with pytest.raises(PreconditionRejected) as caught:
-        tools.execute("catia_text_strokes", {"text": "瓶子", "height": 10.0})
+        tools.execute("catia_text_strokes",
+                      {"text": _UNASSIGNED, "height": 10.0})
     assert caught.value.code == "TEXT_NO_GLYPHS"
-    assert "瓶" in str(caught.value)
+    assert "nothing was drawn" in str(caught.value).lower()
     assert factory.lines == [], "nothing may be drawn when nothing can be"
 
 
 def test_a_partly_unknown_string_draws_what_it_can_and_names_the_rest():
+    _needs_font()
     tools, factory = _tools()
     reply = tools.execute("catia_text_strokes",
-                          {"text": "A瓶B", "height": 10.0})
-    assert "SKIPPED" in reply and "瓶" in reply
+                          {"text": "A中" + _UNASSIGNED, "height": 10.0})
+    assert "SKIPPED" in reply
     assert factory.lines, "the known characters must still be drawn"
 
 

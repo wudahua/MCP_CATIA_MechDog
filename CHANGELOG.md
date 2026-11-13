@@ -2,6 +2,83 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.120] — 2026-11-14 · Chinese lettering that pads, and a shaft about any line
+
+The last two items on the list. One shipped whole; of the other, one of its three
+parts shipped and two were measured shut.
+
+### CJK text: a real font's outlines, read with no new dependency
+
+Hershey simplex is ASCII 32-126 and there is no public-domain **single-line** CJK
+face with useful coverage, so a Chinese word meant handing over point sets by hand
+- which is exactly what the 2026-11-11 report did. What every machine already has is
+an *outline* font, so `catia_mcp/font_outline.py` now reads one directly: table
+directory, `.ttc` collections, `cmap` formats 4 and 12, simple and composite glyphs,
+quadratic curves flattened to a chord error. No `fontTools`, because this package
+has three dependencies on purpose and a customer's B30 has to be able to install it.
+
+`catia_text_strokes` sends **any** string with one character outside ASCII to that
+face, in one piece (mixing faces inside one line would give two cap heights), and
+says which face it used. `outline=true` forces it for ASCII - worth it when the
+letters are to be padded, since Hershey's single lines enclose no area at all.
+
+Measured on B30 2026-11-14 (`scripts/b30_v0422_audit.py`): `中文` at height 8 is 5
+closed contours over 321 segments, `catia_close_sketch` reports the sketch as a
+profile, and a 2 mm pad over it measures **107.47 mm³**. ASCII is untouched and
+still comes from Hershey.
+
+The honesty this needs: an outline gives each stem **two walls**, so a 0.4 mm
+groove down the middle of one cuts both - engrave the contour, or pad the letters.
+And `height` stays the cap height, so an ideograph comes out about 1.25× taller;
+the reply prints the box it really occupies. `close_sketch` now tells the two faces
+apart, because "lettering, therefore Part Design will refuse it" is right for
+Hershey's open strokes and backwards for closed contours.
+
+### Shaft / groove about an arbitrary axis
+
+`axis` used to be `horizontal`/`vertical` only, backed by a note saying a reference
+to a line is refused at update. That note was about a construction line **inside the
+sketch**; an element in the tree was never tried. Measured on B30 2026-11-14, one
+fresh document per cell, profile = rectangle u 5..15 / v 0..30 on `zx` (area 300):
+
+| axis | volume | = 2π·R·A |
+|---|---|---|
+| sketch H | 28 274.33 mm³ | R = 15 |
+| sketch V | 18 849.56 mm³ | R = 10 |
+| `gsd_line` along Z through origin | 28 274.33 mm³ | H *is* Z on this plane |
+| `gsd_line` along X through origin | 18 849.56 mm³ | V *is* X here |
+| `gsd_line` along Z at x = 60 | **84 823.00 mm³** | R = 45 |
+
+The last row is the one that proves the reference is honoured rather than ignored:
+no sketch axis can produce 45 mm of centroid radius. `axis` now takes any element
+name (`catia_gsd_line`, `Edge.3`, the axis of an earlier feature), the reply names
+what it used, and the enum - which would have rejected the name before CATIA saw it
+- is gone.
+
+### The two that are shut, with the evidence
+
+Written into `catia_diagnose`'s ceilings rather than left as "not done":
+
+- **Control-point B-spline.** `HybridShapeFactory` has one spline constructor out of
+  160 members (`AddNewSpline`) and no control-point variant. `SetSplineType(0/1)`
+  looked like the switch - the same four points give 79.1304 mm and 80.2511 mm - but
+  both curves sit **0.0000 mm** from the second point, i.e. both interpolate. Type 1
+  changes the parametrisation, not the interpolation. The 2D sketch spline has no
+  such member at all (`Item.SetSplineType`).
+- **Sheet metal.** `Part` *does* expose `SheetMetalFactory`, which corrects "no
+  sheet metal in the API" - but of its 23 members, 22 are the COM base and the one
+  real method is `CreateSheetMetalParameters()`, whose result adds only
+  `GetThickness`. No wall, flange, bend or unfold. Parameters can be read; nothing
+  can be built with them.
+
+### Also
+
+- `catia_mcp/font_outline.py` (new, ~430 lines, no dependency) with the reader's
+  own tests against simhei.ttf (cmap 4), msyh.ttc (cmap 12, collection) and
+  Deng.ttf.
+- `TextStrokes` carries `outline` and `source`, so `close_sketch` and the replies
+  can say which face wrote a sketch.
+
 ## [0.3.119] — 2026-11-14 · sampling a curve, and the sentence that said it was impossible
 
 `catia_measure_deviation` exists now. It was believed impossible here, and the

@@ -181,6 +181,15 @@ class TextStrokes:
     missing: list[str] = field(default_factory=list)
     #: Advances that came from nothing but a space.
     spaces: int = 0
+    #: True when these came from a real font's OUTLINES rather than Hershey's
+    #: single lines. The difference matters downstream: an outline is a CLOSED
+    #: contour, so it can be padded or pocketed but cannot be engraved by a
+    #: point-on-curve sweep (a closed curve carries no such parameter - measured
+    #: 2026-11-11).
+    outline: bool = False
+    #: Which face produced them, for the reply: '' for Hershey, else "family
+    #: (path)".
+    source: str = ""
 
 
 def has_glyph(char: str) -> bool:
@@ -260,6 +269,153 @@ def text_to_strokes(
             pen_x += (right - left) * scale + spacing
             widest = max(widest, pen_x - origin_x - spacing)
 
+    result.width_mm = max(0.0, widest)
+    result.height_mm = float(height_mm)
+    return result
+
+
+# ── the outline face, for everything Hershey does not have ────────────────
+#
+# Hershey simplex covers ASCII 32-126 and nothing else. There is no public-domain
+# SINGLE-LINE CJK face with useful coverage, so a Chinese word used to mean
+# handing over point sets by hand - which is what the 2026-11-11 report did. What
+# every machine already has is an OUTLINE font, and an outline is real geometry:
+# it pads, it pockets, and its contour can be engraved. It is NOT what the ASCII
+# path uses, because a groove a fraction of a millimetre deep cannot resolve the
+# two walls of one stem - so the reply says which face was used and what that
+# costs, rather than letting the caller assume.
+
+#: Where a CJK face usually lives, in the order this prefers. A SANS face first:
+#: the single-line look a caller wants is closest to it, and a song/serif face
+#: has thick horizontals and thin verticals, which reads worse after engraving.
+OUTLINE_FONT_CANDIDATES = (
+    "C:/Windows/Fonts/msyh.ttc",          # Microsoft YaHei
+    "C:/Windows/Fonts/msyh.ttf",
+    "C:/Windows/Fonts/simhei.ttf",        # SimHei
+    "C:/Windows/Fonts/Deng.ttf",          # DengXian
+    "C:/Windows/Fonts/simsun.ttc",        # SimSun, last on Windows: serif
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+)
+
+#: Chord error, in MILLIMETRES of the finished drawing, for flattening a glyph's
+#: quadratic curves. 0.05 mm is a tenth of the 0.5 mm a drawing cares about and
+#: keeps a CJK glyph near a hundred segments; tighter doubles the count for a
+#: difference no 0.4 mm groove can show.
+OUTLINE_FLATTEN_MM = 0.05
+
+_FONT_CACHE: dict[tuple[str, int], object] = {}
+
+
+def find_outline_font(preferred: str | None = None) -> tuple[str, int] | None:
+    """``(path, face)`` of a usable outline font, or None if this machine has none.
+
+    ``preferred`` is taken as given (the caller may know better than this list);
+    its existence is checked, because a path that does not exist has to be
+    reported rather than silently replaced by a system font.
+    """
+    import os
+
+    if preferred:
+        return (preferred, 0) if os.path.exists(preferred) else None
+    for candidate in OUTLINE_FONT_CANDIDATES:
+        if os.path.exists(candidate):
+            return candidate, 0
+    return None
+
+
+def outline_font(preferred: str | None = None):
+    """A parsed ``TrueTypeFont``, cached per path - parsing 20 MB is not free."""
+    from catia_mcp.font_outline import TrueTypeFont
+
+    found = find_outline_font(preferred)
+    if found is None:
+        # One sentence, no line breaks: every path is one clause, and a message
+        # that wraps has to be re-read to be believed.
+        searched = ", ".join(OUTLINE_FONT_CANDIDATES)
+        raise ArgumentRejected(
+            "No outline font found on this machine, so text outside ASCII cannot "
+            "be drawn. Looked for these, in this order: " + searched + ". "
+            "Pass font_path to name one: a TrueType .ttf/.ttc with CJK coverage "
+            "(a CFF/OpenType .otf is refused - its outlines are PostScript, not "
+            "quadratic). Nothing was drawn.",
+            code="NO_OUTLINE_FONT", stage="validate")
+    path, face = found
+    key = (path, face)
+    if key not in _FONT_CACHE:
+        try:
+            _FONT_CACHE[key] = TrueTypeFont(path, face)
+        except Exception as error:  # noqa: BLE001 - the reader's own message is the answer
+            raise ArgumentRejected(
+                f"Cannot read the font '{path}': {error}. Nothing was drawn.",
+                code="BAD_OUTLINE_FONT", stage="validate") from error
+    return _FONT_CACHE[key]
+
+
+def text_to_outlines(
+    text: str,
+    height_mm: float = 10.0,
+    font_path: str | None = None,
+    spacing_mm: float | None = None,
+    origin: tuple[float, float] = (0.0, 0.0),
+    line_spacing_mm: float | None = None,
+    flatten_mm: float = OUTLINE_FLATTEN_MM,
+) -> TextStrokes:
+    """Text as CLOSED CONTOURS in millimetres, y up, baseline at ``origin``.
+
+    ``height_mm`` is the CAP HEIGHT, exactly as in :func:`text_to_strokes`, so a
+    caller who switches faces does not have to relearn the argument. An ideograph
+    is taller than a Latin capital - it fills about 0.88 of the em box against a
+    cap height of about 0.70 - so 中文 drawn at height 10 measures roughly 12.4 mm
+    tall. That is not a bug to hide: the reply prints the box the text actually
+    occupies, and the caller who wants 10 mm characters passes height 8.
+    """
+    if height_mm <= 0:
+        raise ArgumentRejected(
+            f"height_mm must be positive; got {height_mm:g}.",
+            code="BAD_ARGUMENT", stage="validate")
+    font = outline_font(font_path)
+    scale = float(height_mm) / float(font.cap_height or font.units_per_em)
+    spacing = (DEFAULT_SPACING_RATIO * float(height_mm)
+               if spacing_mm is None else float(spacing_mm))
+    line_step = (DEFAULT_LINE_RATIO * float(height_mm)
+                 if line_spacing_mm is None else float(line_spacing_mm))
+    origin_x, origin_y = float(origin[0]), float(origin[1])
+    flatten_units = max(1.0, float(flatten_mm) / scale) if scale > 0 else 1.0
+
+    result = TextStrokes(outline=True,
+                         source=f"{font.family or 'unnamed'} ({font.path})")
+    lines = str(text).split("\n")
+    result.lines = len(lines)
+    widest = 0.0
+    for line_index, line in enumerate(lines):
+        pen_x = origin_x
+        base_y = origin_y - line_index * line_step
+        for char in line:
+            glyph = font.glyph(ord(char), flatten=flatten_units) if char.strip() else None
+            if char == " ":
+                result.spaces += 1
+                pen_x += font.advance(font._glyph_index(0x20)) * scale + spacing
+                continue
+            if glyph is None or not glyph.contours:
+                if char not in result.missing:
+                    result.missing.append(char)
+                continue
+            for contour in glyph.contours:
+                moved = [[pen_x + x * scale, base_y + y * scale] for x, y in contour]
+                keep = [moved[0]]
+                for point in moved[1:]:
+                    if (abs(point[0] - keep[-1][0]) > 1e-9
+                            or abs(point[1] - keep[-1][1]) > 1e-9):
+                        keep.append(point)
+                if len(keep) >= 3:
+                    result.strokes.append(keep)
+            result.glyphs += 1
+            pen_x += glyph.advance * scale + spacing
+            widest = max(widest, pen_x - origin_x - spacing)
     result.width_mm = max(0.0, widest)
     result.height_mm = float(height_mm)
     return result

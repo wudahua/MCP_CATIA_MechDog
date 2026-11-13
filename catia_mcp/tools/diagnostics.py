@@ -671,6 +671,48 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
         ),
     },
     {
+        "member": "a B-spline through CONTROL POINTS rather than through the points given",
+        "status": "UNSUPPORTED_ON_B30",
+        "detail": (
+            "HybridShapeFactory exposes ONE spline constructor out of its 160 "
+            "members - AddNewSpline() - and no control-point variant (type info "
+            "read on B30 2026-11-14). The spline object itself has 56 members "
+            "including SetSplineType, GetSplineType, GetNbControlPoint and "
+            "RemoveControlPoint, so a control-point mode looked likely; it is not "
+            "one. Measured with the same four points (0,0,0) (10,25,0) (30,25,0) "
+            "(40,0,0): type 0 gives a 79.1304 mm curve 0.0000 mm from the second "
+            "point, type 1 gives 80.2511 mm and is STILL 0.0000 mm from it - a "
+            "curve that passes through the point is interpolating, so type 1 "
+            "changes the parametrisation, not the interpolation. What to do "
+            "instead: accept interpolation and expect the shape to differ (a "
+            "2026-11-12 report measured +29.3 % volume against the control-point "
+            "curve it wanted), or pass the control points to catia_gsd_spline and "
+            "get a curve through them. The 2D SKETCH spline has no such switch at "
+            "all: Sketch.GeometricElements.Item(1).SetSplineType(0) answers just "
+            "'Item.SetSplineType'."
+        ),
+    },
+    {
+        "member": "building sheet-metal geometry (walls, flanges, bends, unfold)",
+        "status": "UNSUPPORTED_ON_B30",
+        "detail": (
+            "The Part object DOES expose SheetMetalFactory - measured on B30 "
+            "2026-11-14, two of its 54 members are SheetMetalFactory and "
+            "SheetMetalParameters - so 'no sheet metal in the API' would be wrong. "
+            "What it can do is one thing: of the factory's 23 members, 22 are the "
+            "COM base (QueryInterface ... Parent, Name, GetItem) and the only real "
+            "one is CreateSheetMetalParameters(). That call succeeds and returns an "
+            "object whose only member beyond the same base set is GetThickness - no "
+            "wall, no flange, no bend, no unfold, no AddNew* of any kind. So the "
+            "parameters can be read and nothing can be built from them, and no "
+            "workbench route helps: the factory is there without the Sheet Metal "
+            "Design workbench being loaded. A 2026-11-13 report replaced a "
+            "sheet-metal part with a solid of 15 faces against 21 and +3.76 % "
+            "volume; that solid is the measured substitute, and it is what "
+            "catia_solid_loft / catia_pad / catia_thickness build."
+        ),
+    },
+    {
         "member": "sampling a curve along its length",
         # AVAILABLE_WITH_LIMIT, not AVAILABLE: the vocabulary of this list has no
         # plain "works" status, and the three limits are real - a point per

@@ -406,14 +406,19 @@ class PartDesignTools:
                         },
                         "axis": {
                             "type": "string",
-                            "enum": ["horizontal", "vertical"],
                             "description": (
-                                "Axis to revolve about. 'horizontal' (default) revolves "
-                                "about the sketch's H axis (u axis, v=0) and suits a "
-                                "profile drawn above it with x = axial, y = radius. "
-                                "'vertical' uses the V axis (v axis, u=0). Only the "
-                                "sketch's own axes work: CATIA rejects a reference to a "
-                                "construction line here (verified)."
+                                "Axis to revolve about. 'horizontal' (default) is the "
+                                "sketch's H axis (u axis, v=0) and suits a profile "
+                                "drawn above it with x = axial, y = radius; "
+                                "'vertical' is the V axis. ANY OTHER VALUE IS AN "
+                                "ELEMENT NAME - a catia_gsd_line, 'Edge.3', the axis "
+                                "of an earlier feature - and that works: measured on "
+                                "B30 2026-11-14, the same profile revolved about "
+                                "three lines gave 28274.33 / 18849.56 / 84823.00 mm3, "
+                                "each matching 2*pi*R*area for that line's own "
+                                "distance. A construction line INSIDE the sketch is "
+                                "still refused by CATIA at update - draw the axis "
+                                "outside the sketch (a gsd_line) and name it here."
                             ),
                             "default": "horizontal",
                         },
@@ -441,10 +446,12 @@ class PartDesignTools:
                         },
                         "axis": {
                             "type": "string",
-                            "enum": ["horizontal", "vertical"],
                             "description": (
-                                "Axis to revolve about: 'horizontal' (default) or "
-                                "'vertical' - the sketch's own H or V axis."
+                                "Axis to revolve about: 'horizontal' (default), "
+                                "'vertical', or the NAME OF AN ELEMENT - a "
+                                "catia_gsd_line or an edge - which is measured to "
+                                "work (see catia_shaft). A construction line inside "
+                                "the sketch is refused by CATIA at update."
                             ),
                             "default": "horizontal",
                         },
@@ -2501,17 +2508,55 @@ class PartDesignTools:
     def _revolve_axis_reference(self, part: Any, sketch: Any, mode: str) -> Any:
         """Resolve the revolution axis to the Reference CATIA wants.
 
-        Only the sketch's own absolute axes work. A reference to a construction
-        line inside the sketch is accepted by the property setter and then
-        rejected at update time with E_FAIL, so it is not offered as an option.
+        'horizontal' / 'vertical' are the sketch's own absolute axes. ANYTHING
+        ELSE IS AN ELEMENT NAME - a gsd_line, an edge, the axis of an earlier
+        feature - and that works, measured on B30 2026-11-14. The earlier text
+        here said only the sketch's own axes work, quoting a construction line
+        INSIDE the sketch being refused at update. That measurement was about a
+        sketch child; an element in the tree is a different thing, and it was
+        never tried until a report asked for a shaft about an arbitrary axis.
+
+        The measurement, one fresh document per cell, profile = rectangle
+        u 5..15 / v 0..30 on 'zx' (area 300, centroid 15 from H and 10 from V):
+
+            sketch horizontal                  28274.33 mm3   (2*pi*15*300)
+            sketch vertical                    18849.56 mm3   (2*pi*10*300)
+            gsd_line along Z through origin    28274.33 mm3   (H IS Z here)
+            gsd_line along X through origin    18849.56 mm3   (V IS X here)
+            gsd_line along Z at x = 60         84823.00 mm3   (2*pi*45*300)
+
+        The last one is the cell that proves the line is honoured rather than
+        ignored: no sketch axis can produce 45 mm of centroid radius.
         """
-        mode = (mode or "horizontal").lower()
+        text = str(mode or "horizontal").strip()
+        lowered = text.lower()
         axis = self._sketch_absolute_axis(sketch)
-        if mode == "horizontal":
+        if lowered == "horizontal":
             return axis.HorizontalReference
-        if mode == "vertical":
+        if lowered == "vertical":
             return axis.VerticalReference
-        raise ArgumentRejected(f"Unknown axis '{mode}'. Use 'horizontal' or 'vertical'.")
+        # An element name. Resolved through the GSD resolver because that is the
+        # one that reaches into geometrical sets and understands 'Face.N' /
+        # 'Edge.N'; PartDesign has no equivalent and duplicating it here would be
+        # a second copy of the topology rules.
+        from catia_mcp.tools.gsd import GSDTools
+
+        try:
+            return GSDTools(self.conn)._ref(text)
+        except Exception as error:  # noqa: BLE001 - reworded as an axis problem
+            raise ArgumentRejected(
+                f"axis must be 'horizontal', 'vertical', or the name of an "
+                f"element to revolve about; '{text}' is not one this part can "
+                f"find ({str(error).splitlines()[0][:100]}). Nothing was "
+                "created.", code="BAD_AXIS", stage="validate") from error
+
+    @staticmethod
+    def _axis_label(axis_mode: str, sketch: Any) -> str:
+        """What the reply calls the axis - and it must match what was used."""
+        text = str(axis_mode or "horizontal").strip()
+        if text.lower() in ("horizontal", "vertical"):
+            return f"the {text.lower()} axis of '{sketch.Name}'"
+        return f"'{text}' (an element of the tree, not a sketch axis)"
 
     def _build_revolution(self, part: Any, sketch: Any, angle: float, axis_mode: str,
                           from_ref: str, label: str) -> Any:
@@ -2547,8 +2592,9 @@ class PartDesignTools:
         if before is not None and after is not None:
             detail = f" Volume {before:.1f} -> {after:.1f} mm3 (added {after - before:.1f})."
         return (
-            f"Shaft created: {angle}° about the {axis_mode} axis of '{sketch.Name}'."
-            f"{detail} Feature: '{shaft.Name}'"
+            f"Shaft created: {angle}deg about "
+            f"{self._axis_label(axis_mode, sketch)}.{detail} "
+            f"Feature: '{shaft.Name}'"
         )
 
     def _groove(self, args: dict[str, Any]) -> str:
@@ -2570,8 +2616,9 @@ class PartDesignTools:
             if abs(removed) < 1e-6:
                 detail += " WARNING: nothing was removed - check the profile side of the axis."
         return (
-            f"Groove created: {angle}° about the {axis_mode} axis of '{sketch.Name}'."
-            f"{detail} Feature: '{groove.Name}'"
+            f"Groove created: {angle}deg about "
+            f"{self._axis_label(axis_mode, sketch)}.{detail} "
+            f"Feature: '{groove.Name}'"
         )
 
     def _remove_feature(self, part: Any, feature: Any,

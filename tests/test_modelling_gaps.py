@@ -88,9 +88,15 @@ def test_sketch_line_can_be_construction():
 
 @pytest.mark.parametrize("tool", ["catia_shaft", "catia_groove"])
 def test_revolution_tools_take_an_axis(tool):
+    # 0.3.120 removed the two-value enum: the axis may also name an ELEMENT, and
+    # that was measured to work (three gsd_lines gave 28274.33 / 18849.56 /
+    # 84823.00 mm3, each 2*pi*R*area for that line's own distance). An enum would
+    # reject the name before CATIA ever saw it.
     props = schema(CATIAMCPServer(), tool)["properties"]
-    assert props["axis"]["enum"] == ["horizontal", "vertical"]
+    assert props["axis"]["type"] == "string"
+    assert "enum" not in props["axis"]
     assert props["axis"]["default"] == "horizontal"
+    assert "NAME" in props["axis"]["description"]
 
 
 @pytest.mark.parametrize("tool", ["catia_pocket", "catia_hole"])

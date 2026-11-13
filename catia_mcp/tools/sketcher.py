@@ -11,8 +11,9 @@ import math
 from typing import Any, Sequence
 
 from catia_mcp.connection import CATIAConnection
+from catia_mcp.fonts import has_glyph
 from catia_mcp.fonts import supported as font_charset
-from catia_mcp.fonts import text_to_strokes
+from catia_mcp.fonts import text_to_outlines, text_to_strokes
 from catia_mcp.geometry2d import crossings, describe, segments_of
 from catia_mcp.results import (
     ArgumentOutOfRange,
@@ -1122,9 +1123,23 @@ class SketcherTools:
                     "glyph, never a spline - a spline through the same points rounds "
                     "the corners, which is how an earlier hand-built 'A' became an "
                     "omega. "
-                    "ASCII 32-126 ONLY. A character with no glyph is SKIPPED and "
-                    "NAMED in the reply, never replaced by a box, because a box "
-                    "would engrave as something you did not ask for. "
+                    "ASCII 32-126 FROM THAT FACE. A character with no glyph is "
+                    "SKIPPED and NAMED in the reply, never replaced by a box, "
+                    "because a box would engrave as something you did not ask "
+                    "for. "
+                    "ANY OTHER SCRIPT COMES FROM A REAL FONT'S OUTLINES, read by "
+                    "this server with no extra dependency. A string with one "
+                    "character outside ASCII is drawn from a system font in one "
+                    "piece (Windows: Microsoft YaHei, SimHei, DengXian; macOS: "
+                    "PingFang; Linux: Noto CJK, WenQuanYi) or from 'font_path'. "
+                    "Those are CLOSED CONTOURS, not single lines, and the reply "
+                    "says so: a stem now has two walls, so a 0.4 mm groove down "
+                    "the middle of one cuts both - engrave the CONTOUR, or pad / "
+                    "pocket the letters as a profile (which Hershey's single lines "
+                    "cannot do at all, having no area). 'outline' forces that face "
+                    "for ASCII too. 'height' stays the cap height, so an ideograph "
+                    "comes out about 1.25x taller; the reply prints the box it "
+                    "really occupies. "
                     "THE BASELINE RUNS ALONG THE SKETCH'S OWN +H AXIS, and that is "
                     "the whole of the layout rule. On 'xy' H is +X, so text reads "
                     "left to right. On 'yz' (H = +Y) and 'zx' (H = +Z) it climbs the "
@@ -1155,7 +1170,32 @@ class SketcherTools:
                             "description": (
                                 "Cap height in millimetres - the height of an H. "
                                 "Not the width, and not the point size of any font "
-                                "you might be thinking of."
+                                "you might be thinking of. The same meaning is "
+                                "used for outlines, so an ideograph comes out "
+                                "about 1.25x taller than this; the reply prints "
+                                "the box the text actually occupies."
+                            ),
+                        },
+                        "font_path": {
+                            "type": "string",
+                            "description": (
+                                "A TrueType .ttf/.ttc to take OUTLINES from - "
+                                "needed for any script Hershey simplex does not "
+                                "cover (CJK, accented letters) and optional to "
+                                "force outlines for ASCII. Omitted, a system CJK "
+                                "face is found (Microsoft YaHei, SimHei, DengXian, "
+                                "PingFang, Noto CJK, WenQuanYi); a CFF .otf is "
+                                "refused, because its outlines are PostScript."
+                            ),
+                        },
+                        "outline": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Use the outline font even for ASCII. Worth it "
+                                "when the letters are to be PAD or POCKET as "
+                                "regions: Hershey's single lines enclose no area, "
+                                "so they cannot be padded at all."
                             ),
                         },
                         "include_points": {
@@ -2974,11 +3014,12 @@ class SketcherTools:
         )
         return text
 
-    def _text_strokes_in(self, sketch_name: str | None) -> tuple[int, int, int]:
+    def _text_strokes_in(self, sketch_name: str | None
+                          ) -> tuple[int, int, int, bool]:
         """How much of this sketch came from ``catia_text_strokes``.
 
-        Returns ``(elements, strokes, total)``: recorded line segments that came
-        from text, how many separate strokes they make up, and how many
+        Returns ``(elements, strokes, total, outline)``: recorded line segments
+        that came from text, how many separate strokes they make up, how many
         non-point elements the sketch holds in all. ``elements == total`` means
         the sketch is nothing BUT lettering - which is the one case that can be
         called an engraving sketch without being told.
@@ -2990,9 +3031,17 @@ class SketcherTools:
         drawn = (self._drawn.get(self._sketch_key(sketch_name), [])
                  if sketch_name else [])
         body = [item for item in drawn if item.get("kind") != "point"]
-        text = [item for item in body if item.get("source") == "text"]
+        text = [item for item in body
+                if item.get("source") in ("text", "text-outline")]
         strokes = len({item.get("stroke") for item in text})
-        return len(text), strokes, len(body)
+        # WHICH FACE WROTE IT decides whether the lettering is an open stroke
+        # (Hershey, "text") or a closed contour (a real font's outline,
+        # "text-outline"). The distinction is not cosmetic: a closed contour is
+        # pad-able and cannot be engraved by a point-on-curve sweep, so calling
+        # it "lettering, therefore a profile is wrong" would be the wrong advice.
+        outline = bool(text) and all(item.get("source") == "text-outline"
+                                     for item in text)
+        return len(text), strokes, len(body), outline
 
     def _engraving_note(self, breaks: dict[str, Any], strokes: int,
                         elements: int) -> str:
@@ -3079,11 +3128,22 @@ class SketcherTools:
         # for the one case that admits no doubt: a sketch that is NOTHING but
         # lettering. A mixed sketch stays a profile, because a rectangle plus
         # some text really might be a pad profile with something gone wrong.
-        text_elements, strokes, elements = self._text_strokes_in(name)
+        text_elements, strokes, elements, outline_text = (
+            self._text_strokes_in(name))
         engraving = (purpose == "engrave"
                      or (purpose is None and bool(elements)
-                         and text_elements == elements))
+                         and text_elements == elements and not outline_text))
         warning = "" if engraving else self._profile_warning()
+        # Lettering from a REAL font is a set of closed contours, so it is a
+        # profile - the opposite conclusion from Hershey's single lines, and the
+        # only reason the two cases are told apart at all.
+        outline_note = (
+            " These were drawn from a real font's OUTLINES, so they are CLOSED "
+            "contours: pad or pocket them as a profile, "
+            "or engrave the contour line itself. The single-line engrave route "
+            "(catia_surface_engrave) refuses a closed curve - a point-on-curve "
+            "parameter does not exist on one (measured 2026-11-11)."
+            if outline_text else "")
         engraving_note = (self._engraving_note(breaks, strokes, elements)
                           if engraving else
                           (f" ({text_elements} element(s) of this sketch came from "
@@ -3114,7 +3174,8 @@ class SketcherTools:
                if engraving else
                " You can now apply Part Design features "
                "(pad, pocket, user pattern on its points, etc.).")
-            + summary + warning + engraving_note + loops + crossing_text
+            + summary + warning + engraving_note + outline_note + loops
+            + crossing_text
         )
         if not structured:
             return message
@@ -3526,16 +3587,56 @@ class SketcherTools:
             )
         spacing = args.get("spacing")
         line_spacing = args.get("line_spacing")
-        result = text_to_strokes(
-            raw,
-            height_mm=height,
-            spacing_mm=None if spacing is None else float(spacing),
-            origin=(float(origin[0]), float(origin[1])),
-            line_spacing_mm=None if line_spacing is None else float(line_spacing),
-        )
+        # WHICH FACE WRITES IT. Hershey simplex is the face this tool was built
+        # for: single-line, one stroke per stem, which is what a sub-millimetre
+        # groove can resolve. It covers ASCII 32-126 and nothing else. A string
+        # carrying ANY character outside that goes to a real font IN ONE PIECE -
+        # mixing the two inside one string would give two cap heights and two
+        # looks in one line, which is worse than either face alone.
+        font_path = args.get("font_path")
+        forced_outline = bool(args.get("outline"))
+        wants_font = (forced_outline or bool(font_path)
+                      or any(char != "\n" and not has_glyph(char)
+                             for char in raw))
+        if wants_font:
+            result = text_to_outlines(
+                raw,
+                height_mm=height,
+                font_path=None if font_path is None else str(font_path),
+                spacing_mm=None if spacing is None else float(spacing),
+                origin=(float(origin[0]), float(origin[1])),
+                line_spacing_mm=(None if line_spacing is None
+                                 else float(line_spacing)),
+            )
+            source_kind = "text-outline"
+        else:
+            result = text_to_strokes(
+                raw,
+                height_mm=height,
+                spacing_mm=None if spacing is None else float(spacing),
+                origin=(float(origin[0]), float(origin[1])),
+                line_spacing_mm=(None if line_spacing is None
+                                 else float(line_spacing)),
+            )
+            source_kind = "text"
         if not result.strokes:
             named = (", ".join(repr(char) for char in result.missing)
                      if result.missing else "every character")
+            if wants_font:
+                raise PreconditionRejected(
+                    f"Not one character of {raw!r} has an outline in "
+                    f"{result.source or 'the font'} ({named}). Nothing was "
+                    "drawn - a placeholder box would engrave as something you "
+                    "did not ask for.",
+                    code="TEXT_NO_GLYPHS", stage="execute", modified=False,
+                    next_actions=[
+                        "Name a font that covers this script: "
+                        "catia_text_strokes(font_path='C:/Windows/Fonts/"
+                        "simhei.ttf')",
+                        "Or build the outlines yourself and hand them to "
+                        "catia_sketch_strokes",
+                    ],
+                )
             raise PreconditionRejected(
                 f"Not one character of {raw!r} has a glyph in this font "
                 f"({named}). The face is Hershey simplex: ASCII 32-126 only, no "
@@ -3545,8 +3646,10 @@ class SketcherTools:
                 code="TEXT_NO_GLYPHS", stage="execute", modified=False,
                 next_actions=[
                     "Write the text in ASCII letters, digits and punctuation",
-                    "If it must be another script, build the outlines yourself "
-                    "and hand them to catia_sketch_strokes",
+                    "For any other script pass font_path (or nothing - a system "
+                    "CJK font is found automatically) and the letters come from "
+                    "that font's OUTLINES: closed contours instead of single "
+                    "lines",
                 ],
             )
 
@@ -3577,7 +3680,7 @@ class SketcherTools:
 
         drawn = self._draw_strokes(result.strokes,
                                    bool(args.get("construction", False)),
-                                   source="text")
+                                   source=source_kind)
         note = (
             f"Text {raw!r}: {result.glyphs} glyph(s) in {result.lines} line(s), "
             f"{len(result.strokes)} stroke(s), {height:g} mm cap height, "
@@ -3612,6 +3715,25 @@ class SketcherTools:
                 "missing": list(result.missing),
                 "drawn": drawn,
             }, indent=2)
+        if wants_font:
+            closed = sum(1 for stroke in result.strokes
+                         if stroke[0] == stroke[-1])
+            return (
+                note
+                + f" FROM AN OUTLINE FONT ({result.source}), {closed} closed "
+                "contour(s) - NOT single lines. Two consequences, both measured "
+                "or argued from the geometry: each stem has two walls, so a "
+                f"{0.4:g} mm groove down the middle of one would cut both - "
+                "engrave the CONTOUR line, or pad/pocket the letters as a "
+                "profile; and an ideograph is taller than the Latin cap height "
+                "'height' means (about 1.25x, because it fills the em box), so "
+                "the box above is what decides whether it fits. "
+                + drawn
+                + " catia_close_sketch reports this sketch as a PROFILE, not as "
+                "lettering, because closed contours are what it holds."
+                + _stroke_data(result.strokes,
+                               bool(args.get("include_points", False)))
+            )
         return (
             note
             + " Hershey simplex, single-line: one stroke per stem, which is what a "
