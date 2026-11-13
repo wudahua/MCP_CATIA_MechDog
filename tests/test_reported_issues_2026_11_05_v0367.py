@@ -158,8 +158,8 @@ def test_the_real_server_still_matches_its_router():
     that the number comes from ONE source, not that it is any particular value.
     """
     # 0.3.119: catia_measure_deviation is the 144th; 0.3.121 adds
-    # catia_solid_tube for 145.
-    assert _check_tools_match_router() == 145
+    # catia_solid_tube and 0.3.122 catia_gsd_splines, for 146.
+    assert _check_tools_match_router() == 146
 
 
 # ── the two hanging suggestions from the 0.3.60 report ─────────────────────

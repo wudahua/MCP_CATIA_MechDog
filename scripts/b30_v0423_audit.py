@@ -14,6 +14,11 @@ _view2.py, _faces.py, _face_verts.py, _solid_tube.py).
     7  catia_solid_tube on a 50 mm line with r=5 gives pi*25*50 = 3926.9908 mm3
     8  a tube put into a body that already holds 6400 mm3 adds to it (union)
     9  a closed spine is refused and leaves nothing behind
+   10  two lofts in one body say UNION and CAPS
+   11  three rings built by ONE catia_gsd_splines call, then a loft through them
+   12  a bad entry is refused at validation: nothing is built, not even entry 1
+   13  a curve CATIA refuses mid-chain leaves the earlier one, named
+   14  a repeated closing point on a closed ring is dropped AND counted
 
     .venv/Scripts/python.exe scripts/b30_v0423_audit.py
 """
@@ -225,6 +230,82 @@ def main() -> int:
           "UNIONED" in reply and "no catia_boolean" in reply, "auto-union")
     check(10, "the reply says the first and last section planes are the end faces",
           "FIRST and LAST section's plane" in reply, "end caps")
+
+    # ── 11: three rings, one call ────────────────────────────────────────
+    say("")
+    say("── 11: catia_gsd_splines - three rings, one call, then a loft ──")
+    part = fresh(conn, documents, "BatchSplines")
+
+    def ring(z, radius, count=18):
+        return [[round(radius * math.cos(2 * math.pi * i / count), 4),
+                 round(radius * math.sin(2 * math.pi * i / count), 4), z]
+                for i in range(count)]
+
+    reply = gsd.execute("catia_gsd_splines", {"entries": [
+        {"name": "S01", "points": ring(0, 10), "closed": True},
+        {"name": "S02", "points": ring(30, 14), "closed": True},
+        {"name": "S03", "points": ring(60, 6), "closed": True}]})
+    say("  " + " ".join(str(reply).split())[:240])
+    present = [name for name in ("S01", "S02", "S03")
+               if part.FindObjectByName(name) is not None]
+    check(11, "one call built three rings and they are in the tree",
+          len(present) == 3 and "Built 3 spline(s)" in reply, ", ".join(present))
+    loft = part_design.execute("catia_solid_loft",
+                               {"sections": ["S01", "S02", "S03"], "name": "Cone"})
+    volume = part_design._body_volume_mm3(part, part.MainBody)
+    check(11, "a solid loft through them measures 27945.3 mm3",
+          volume is not None and abs(volume - 27945.3) < 2.0,
+          f"{volume:.1f} mm3" if volume is not None else "unreadable")
+
+    # ── 12: a bad entry, refused before anything is built ────────────────
+    say("")
+    say("── 12: entry 2 has one point ──")
+    part = fresh(conn, documents, "BatchBad")
+    refused = ""
+    try:
+        gsd.execute("catia_gsd_splines", {"entries": [
+            {"name": "T01", "points": ring(0, 10), "closed": True},
+            {"name": "T02", "points": [[0, 0, 10]], "closed": True}]})
+    except Exception as error:  # noqa: BLE001
+        refused = str(getattr(error, "code", "")) + " " + " ".join(str(error).split())
+    say("  " + refused[:200])
+    check(12, "the bad entry stops the whole list before CATIA is touched",
+          "BAD_ENTRY" in refused
+          and part.FindObjectByName("T01") is None
+          and "Nothing was created" in refused, "T01 absent")
+
+    # ── 13: CATIA refuses one curve mid-chain ────────────────────────────
+    say("")
+    say("── 13: entry 2 repeats a point, so CATIA refuses THAT curve ──")
+    part = fresh(conn, documents, "BatchMid")
+    refused = ""
+    data = {}
+    try:
+        gsd.execute("catia_gsd_splines", {"entries": [
+            {"name": "U01", "points": ring(0, 10), "closed": True},
+            {"name": "U02", "points": [[0, 0, 0], [0, 0, 0], [10, 0, 0],
+                                       [10, 10, 0]], "closed": False}]})
+    except Exception as error:  # noqa: BLE001
+        refused = str(getattr(error, "code", "")) + " " + " ".join(str(error).split())
+        data = dict(getattr(error, "data", {}) or {})
+    say("  " + refused[:240])
+    check(13, "the earlier curve stays, is named, and nothing is rolled back",
+          "SPLINES_PARTIAL" in refused and data.get("created") == ["U01"]
+          and part.FindObjectByName("U01") is not None
+          and "NOTHING WAS ROLLED BACK" in refused, str(data.get("created")))
+
+    # ── 14: a repeated closing point is dropped and counted ──────────────
+    say("")
+    say("── 14: a closed ring whose last point repeats the first ──")
+    part = fresh(conn, documents, "BatchRepeat")
+    ring19 = ring(0, 10) + [ring(0, 10)[0]]
+    reply = gsd.execute("catia_gsd_splines",
+                        {"entries": [{"name": "R01", "points": ring19,
+                                      "closed": True}]})
+    say("  " + " ".join(str(reply).split())[:240])
+    check(14, "19 points go in, 18 go on the curve, and the reply says so",
+          "'R01' (18 point(s), closed)" in reply
+          and "1 closing point(s)" in reply, "18 on the curve")
 
     say("")
     failed = [row for row in RESULTS if not row[2]]

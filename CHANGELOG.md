@@ -2,6 +2,43 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.122] — 2026-11-13 · a whole section chain in one call
+
+The last open item of the 0.3.120 reports (P2-3): a 17-section handle dome cost 17
+`catia_gsd_spline` calls and 380 hand-fed coordinates, a 13-section bend the same,
+with the 429 rate limit waiting in between.
+
+`catia_gsd_splines(entries=[{name?, points?|element?, closed?, create_points?}, …])`
+loops over the existing call - every entry goes through `_spline` itself, so a
+section it accepts is a section that call accepts. Its arguments are the single
+call's arguments, and an entry with an unknown key is refused rather than ignored,
+so a typo in `closed` cannot silently produce an open section.
+
+What it refuses to average away, measured on B30 2026-11-13
+(`scripts/b30_v0423_probe_splines.py`, `b30_v0423_audit.py` 18/18):
+
+| case | result |
+|---|---|
+| three 18-point rings, one call | built, all three found by name; a solid loft through them **27 945.3 mm³** |
+| entry 2 has one point | `BAD_ENTRY` at validation - **nothing** built, not even entry 1 |
+| two entries named `X1` | `NAME_REPEATED` at validation - nothing built |
+| entry 2 repeats a point | CATIA refuses **that** curve at update; entry 1 stays, is named in the reply |
+| closed ring, 19 points with the last repeating the first | 18 on the curve, and the reply says one was dropped |
+
+The last two are the ones worth having. A mid-chain refusal is reported as an error
+carrying the curves that DO exist (checked by name in the tree after the update) and
+the entry that failed - **nothing is rolled back**, because deleting a coordinate
+spline leaves its points behind (measured on B30 2026-11-03: six points stayed after
+the spline went), so a rollback would trade a named partial chain for unnamed
+clutter. And the dropped closing point is counted out loud, because a 21-point ring
+silently built from 20 only shows up later, in a volume.
+
+The bulge warning of the single call applies to every entry: these curves
+interpolate, so a chain built this way is an approximation of the polygon it came
+from (+20 % / +79 % measured on a 20 × 12 rectangle's corners).
+
+146 tools (GSD 39), 1 940 tests, `scripts/b30_v0423_audit.py` 18/18.
+
 ## [0.3.121] — 2026-11-13 · the view was perspective, and a face knows where it is
 
 Two acceptance reports (11th and 12th round on the same bottle) named the same

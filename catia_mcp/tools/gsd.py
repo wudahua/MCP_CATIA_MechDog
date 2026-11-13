@@ -685,6 +685,71 @@ class GSDTools:
                 },
             },
             {
+                "name": "catia_gsd_splines",
+                "description": (
+                    "Several 3D splines in ONE call - the section chain of a loft, or "
+                    "any set of curves that is produced by the same loop. Asked for by "
+                    "the 0.3.120 acceptance report (P2-3): a 17-section handle dome "
+                    "cost 17 calls and 380 hand-fed coordinates, and a 13-section "
+                    "bend the same, with the 429 rate limit waiting in between. "
+                    "Everything each spline gets is the same as catia_gsd_spline - "
+                    "points as [x, y, z] or element names, closed, create_points, "
+                    "name - so the two calls do not drift apart: this one loops over "
+                    "that one. "
+                    "WHAT IT DOES NOT HIDE: a closed ring that repeats its first "
+                    "point has that repeat dropped (a closed spline already joins "
+                    "back to its start, and keeping the repeat makes CATIA refuse the "
+                    "whole curve), and the reply counts how many entries that "
+                    "happened to, so a 21-point ring that becomes 20 is stated and "
+                    "not discovered later in a volume. "
+                    "PARTIAL FAILURE IS NOT A SUCCESS: if entry 12 of 17 is refused, "
+                    "the reply is an error carrying the 11 that DO exist (checked by "
+                    "name in the tree after the update) and the entry that failed - "
+                    "nothing is rolled back, because deleting a coordinate spline "
+                    "leaves its points behind (measured on B30 2026-11-03: six "
+                    "points stayed after the spline went), so a rollback would leave "
+                    "more clutter than it removes. Build the rest, or delete the "
+                    "named ones with catia_delete_feature. "
+                    "THE BULGE WARNING OF catia_gsd_spline APPLIES TO EVERY ENTRY: "
+                    "the curve interpolates and bulges between points (+20 % / +79 % "
+                    "measured on a 20 x 12 rectangle's corners), so a chain of "
+                    "sections made this way is an approximation of the polygon it "
+                    "came from."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "entries": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "points": {
+                                        "type": "array",
+                                        "items": POINT_OR_NAME,
+                                        "minItems": 2,
+                                    },
+                                    "element": {"type": "string"},
+                                    "closed": {"type": "boolean"},
+                                    "create_points": {"type": "boolean"},
+                                    "name": {"type": "string"},
+                                },
+                                "additionalProperties": False,
+                            },
+                            "description": (
+                                "One object per spline: {name?, points?|element?, "
+                                "closed?, create_points?}. Same meaning as the "
+                                "arguments of catia_gsd_spline; unknown keys are "
+                                "refused rather than ignored, so a typo in 'closed' "
+                                "cannot silently produce an open section."
+                            ),
+                        },
+                    },
+                    "required": ["entries"],
+                },
+            },
+            {
                 "name": "catia_gsd_circle",
                 "description": (
                     "Create a full 3D circle from a center point, a support plane, and a "
@@ -2473,6 +2538,8 @@ class GSDTools:
                 return self._plane_angle(arguments)
             case "catia_gsd_spline":
                 return self._spline(arguments)
+            case "catia_gsd_splines":
+                return self._splines(arguments)
             case "catia_gsd_circle":
                 return self._circle(arguments)
             case "catia_gsd_project":
@@ -3559,6 +3626,188 @@ class GSDTools:
             return [float(value) for value in spec]
         except (TypeError, ValueError):
             return None
+
+    #: The keys one entry of catia_gsd_splines may carry - exactly the arguments
+    #: catia_gsd_spline takes, so the batch cannot grow a private vocabulary.
+    _SPLINE_ENTRY_KEYS = ("name", "points", "element", "closed", "create_points")
+
+    def _splines(self, args: dict[str, Any]) -> str:
+        """N independent splines, one per entry - the loop, with the checks.
+
+        Asked for by the 0.3.120 acceptance report (P2-3): its 17-section handle
+        dome was 17 calls and 380 hand-fed coordinates. This is not a new CATIA
+        capability and does not pretend to be one: every entry goes through
+        ``_spline`` itself, so a section this call accepts is a section that call
+        accepts.
+
+        Two things are deliberately NOT batched into silence:
+
+        * a closed ring whose last point repeats the first loses that repeat (a
+          closed spline already joins back), and the count is reported - a
+          21-point ring silently built from 20 points is the kind of difference
+          that only shows up in a volume;
+        * a mid-chain refusal does not roll back. Deleting a coordinate spline
+          leaves its points behind (measured on B30 2026-11-03: six points stayed
+          after the spline went), so a rollback trades a named partial chain for
+          unnamed clutter. The error carries what exists and what failed instead.
+        """
+        entries = args.get("entries")
+        if not isinstance(entries, (list, tuple)) or not entries:
+            raise ArgumentRejected(
+                "'entries' must be a non-empty list, one object per spline: "
+                "{name?, points?|element?, closed?, create_points?}. Nothing was "
+                "created.", code="ENTRIES_REQUIRED", stage="validate")
+
+        # EVERY ENTRY IS CHECKED BEFORE ANY CURVE IS BUILT. A typo in entry 12
+        # would otherwise cost eleven splines and a partial-failure report, when
+        # what the caller needs to read is which entry is wrong.
+        cleaned: list[dict[str, Any]] = []
+        names: set[str] = set()
+        for index, entry in enumerate(entries, start=1):
+            where = f"entry {index}"
+            if not isinstance(entry, dict):
+                raise ArgumentRejected(
+                    f"{where} must be an object like "
+                    '{"name": "S01", "points": [[0,0,0], ...], "closed": true}; '
+                    f"got {entry!r}. Nothing was created.",
+                    code="BAD_ENTRY", stage="validate")
+            unknown = sorted(set(entry) - set(self._SPLINE_ENTRY_KEYS))
+            if unknown:
+                raise ArgumentRejected(
+                    f"{where} carries key(s) {', '.join(unknown)} that "
+                    "catia_gsd_splines does not take. Allowed: "
+                    + ", ".join(self._SPLINE_ENTRY_KEYS)
+                    + ". Nothing was created.",
+                    code="BAD_ENTRY", stage="validate")
+            points = entry.get("points")
+            element = entry.get("element")
+            if bool(points) == bool(element):
+                raise ArgumentRejected(
+                    f"{where} needs exactly one of 'points' or 'element'; got "
+                    + ("neither" if not points and not element else "both")
+                    + ". Nothing was created.",
+                    code="BAD_ENTRY", stage="validate")
+            closed = bool(entry.get("closed", False))
+            name = entry.get("name")
+            if name is not None:
+                name = str(name)
+                if name in names:
+                    raise ArgumentRejected(
+                        f"{where} reuses the name '{name}' - two elements with one "
+                        "name make every later call by name ambiguous, and the "
+                        "build would silently rename the second. Nothing was "
+                        "created.", code="NAME_REPEATED", stage="validate")
+                names.add(name)
+            effective = list(points or [])
+            dropped = 0
+            if points and closed:
+                effective, _note = self._drop_closing_point(list(points))
+                dropped = len(points) - len(effective)
+            if points and len(effective) < 2:
+                raise ArgumentRejected(
+                    f"{where} has {len(effective)} usable point(s) left; a spline "
+                    "needs at least two. Nothing was created.",
+                    code="BAD_ENTRY", stage="validate")
+            cleaned.append({
+                "index": index, "name": name, "element": element,
+                "points": effective, "closed": closed,
+                "create_points": bool(entry.get("create_points", False)),
+                "dropped": dropped, "sent": len(points or []),
+            })
+
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        made: list[dict[str, Any]] = []
+        failed: tuple[dict[str, Any], Exception] | None = None
+        for item in cleaned:
+            call: dict[str, Any] = {"closed": item["closed"],
+                                    "create_points": item["create_points"]}
+            if item["element"]:
+                call["element"] = item["element"]
+            else:
+                call["points"] = item["points"]
+            if item["name"]:
+                call["name"] = item["name"]
+            try:
+                self._spline(call)
+            except Exception as error:  # noqa: BLE001 - reported with the partial
+                failed = (item, error)
+                break
+            made.append(item)
+
+        def exists(name: str | None) -> bool | None:
+            if not name:
+                return None
+            try:
+                return part.FindObjectByName(name) is not None
+            except Exception:  # noqa: BLE001 - unreadable is not "gone"
+                return None
+
+        for item in made:
+            item["in_tree"] = exists(item["name"])
+
+        def describe(item: dict[str, Any]) -> str:
+            shape = "closed" if item["closed"] else "open"
+            if item["points"]:
+                body = f"{len(item['points'])} point(s), {shape}"
+            else:
+                body = f"from '{item['element']}', {shape}"
+            label = f"'{item['name']}'" if item["name"] else f"entry {item['index']}"
+            return f"{label} ({body})"
+
+        listing = ", ".join(describe(item) for item in made)
+        verified = [item for item in made if item.get("in_tree")]
+        missing = [item for item in made if item.get("in_tree") is False]
+        checks = (
+            f" All {len(verified)} are in the tree by name after the update."
+            if made and len(verified) == len(made) else
+            f" {len(verified)} of {len(made)} could be found in the tree by name"
+            + (f"; MISSING: {', '.join(describe(item) for item in missing)}"
+               if missing else
+               "; the rest have no name to look up, so their presence was not "
+               "verified"))
+        dropped = sum(item["dropped"] for item in made)
+        drop_note = (
+            f" {dropped} closing point(s) that repeated their first point were "
+            "dropped - a closed spline already joins back to its start, and the "
+            "repeat makes CATIA refuse the whole curve." if dropped else "")
+        points_note = ""
+        if any(item["points"] for item in made) and not any(
+                item["create_points"] for item in made):
+            points_note = (" Coordinates did not become tree elements: each spline "
+                           "references its points and the part saves them, but the "
+                           "set lists one element per curve (create_points=true "
+                           "changes that per entry).")
+
+        if failed is not None:
+            item, error = failed
+            code = getattr(error, "code", "") or "SPLINE_FAILED"
+            raise CodedError(
+                f"Built {len(made)} of {len(cleaned)} spline(s): {listing or 'none'}"
+                f".{checks} Entry {item['index']}"
+                + (f" ('{item['name']}')" if item["name"] else "")
+                + f" was refused: {str(error).splitlines()[0][:220]} "
+                "NOTHING WAS ROLLED BACK, on purpose: deleting a coordinate spline "
+                "leaves its points behind (measured on B30 2026-11-03, six points "
+                "after the spline went), so the curves that exist are kept and "
+                "named. Fix that entry and call again for it, or remove the built "
+                "ones with catia_delete_feature.",
+                code="SPLINES_PARTIAL", stage="execute", modified=bool(made),
+                data={"created": [item["name"] or item["index"] for item in made],
+                      "failed_entry": item["index"],
+                      "failed_name": item["name"],
+                      "failed_code": code},
+                next_actions=[
+                    "Fix the named entry and pass it alone (one entry is a legal "
+                    "list), then continue with the rest",
+                    "Or delete the built curves by name with catia_delete_feature "
+                    "before rebuilding the chain from scratch",
+                ]) from error
+
+        return (
+            f"Built {len(made)} spline(s) in one call: {listing}.{checks}"
+            f"{drop_note}{points_note} NEXT: catia_solid_loft(sections=[...]) takes "
+            "them as the section chain.")
 
     def _drop_closing_point(self, points: list[Any]) -> tuple[list[Any], str]:
         """Remove a trailing repeat of the first point from a CLOSED spline.
