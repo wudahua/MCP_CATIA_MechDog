@@ -15,7 +15,7 @@ Eleven checks, one fresh document per case.
    8  after deleting that relation the same set_parameter succeeds
    9  a solid loft renamed by the caller still reports type "loft"
   10  a Fix constraint is refused as NOT_A_DIMENSION, with nothing changed
-  11  the router holds 148 tools
+  11  the router holds 149 tools
 
     .venv/Scripts/python.exe scripts/b30_v0427_audit.py
 """
@@ -254,7 +254,7 @@ def main() -> int:
     from catia_mcp.server import CATIAMCPServer
 
     count = len(CATIAMCPServer()._tool_router)
-    check(11, "the router holds 148 tools", count == 148, str(count))
+    check(11, "the router holds 149 tools", count == 149, str(count))
 
     say("")
     failed = [row for row in RESULTS if not row[2]]

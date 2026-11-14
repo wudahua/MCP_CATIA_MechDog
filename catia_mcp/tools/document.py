@@ -130,6 +130,25 @@ class DocumentTools:
                                 "schema did not have it."
                             ),
                         },
+                        "ascii_fallback": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "ONE STEP instead of two, for a non-ASCII FILE NAME: "
+                                "convert the name to ASCII, create the part there, "
+                                "and put the original wording in the part number - "
+                                "the combination the refusal otherwise tells you to "
+                                "assemble by hand (2026-11-14 report, P1-5). "
+                                "The conversion keeps the ASCII letters and digits "
+                                "already in the name and drops the rest "
+                                "('苹果AirPods一二代.CATPart' -> 'AirPods.CATPart'); "
+                                "it is DETERMINISTIC, so repeating the call lands on "
+                                "the same file instead of a second one beside it. "
+                                "A non-ASCII FOLDER needs nothing here - it saves "
+                                "normally (measured on B30 in nine attempts). "
+                                "The reply always states the real path it used."
+                            ),
+                        },
                     },
                 },
             },
@@ -217,6 +236,20 @@ class DocumentTools:
                                 "Replace an existing file at file_path. Without "
                                 "it, an existing file is reported instead of "
                                 "overwritten."
+                            ),
+                        },
+                        "ascii_fallback": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Convert a non-ASCII FILE NAME to ASCII and save "
+                                "there, in one call (2026-11-14 report, P1-5). "
+                                "It does NOT touch the part number - this document "
+                                "already has one, and overwriting text the caller "
+                                "may have set on purpose is not a repair; the reply "
+                                "names the catia_set_part_number call to make if "
+                                "you want the wording in the tree. Deterministic: "
+                                "the same request produces the same file name."
                             ),
                         },
                     },
@@ -400,7 +433,8 @@ class DocumentTools:
             case "catia_new_part":
                 return self._new_part(arguments.get("name"),
                                       arguments.get("file_path"),
-                                      bool(arguments.get("overwrite", False)))
+                                      bool(arguments.get("overwrite", False)),
+                                      bool(arguments.get("ascii_fallback", False)))
             case "catia_new_product":
                 return self._new_product(arguments.get("name"),
                                          arguments.get("file_path"))
@@ -408,7 +442,8 @@ class DocumentTools:
                 return self._open_document(arguments["file_path"])
             case "catia_save_document":
                 return self._save_document(arguments.get("file_path"),
-                                           bool(arguments.get("overwrite", False)))
+                                           bool(arguments.get("overwrite", False)),
+                                           bool(arguments.get("ascii_fallback", False)))
             case "catia_save_as_copy":
                 return self._save_as_copy(
                     arguments["file_path"], bool(arguments.get("overwrite", True)))
@@ -502,9 +537,31 @@ class DocumentTools:
 
     def _new_part(self, name: str | None = None,
                   file_path: str | None = None,
-                  overwrite: bool = False) -> str:
+                  overwrite: bool = False,
+                  ascii_fallback: bool = False) -> str:
         self.conn.ensure_connected()
         docs = self.conn.documents
+        # THE ONE-STEP WORKAROUND the 2026-11-14 report asked for (P1-5): the
+        # refusal used to name the combination and leave the caller to build it.
+        # Only a non-ASCII NAME reaches this - a Chinese FOLDER saves normally
+        # (measured on B30 in nine attempts), so there is nothing to convert there.
+        fallback_note = ""
+        if file_path and ascii_fallback and not os.path.basename(
+                str(file_path)).isascii():
+            original = os.path.basename(str(file_path))
+            converted, title = self._ascii_name_for(str(file_path))
+            file_path = converted
+            if not name:
+                # The Chinese wording goes where CATIA stores text properly. The
+                # caller can still override it with 'name'.
+                name = title
+            fallback_note = (
+                f" [ascii_fallback: '{original}' cannot be a CATIA file name on "
+                f"this build, so the file is '{os.path.basename(converted)}'"
+                + (f" and the wording was kept as the part number" if name == title
+                   else "")
+                + ". Repeating this call produces the same name - the conversion is "
+                  "not randomised.]")
         # Refuse BEFORE adding a document, because the failure is unrecoverable
         # once it has been added: `docs.Add` always makes a NEW document, and the
         # SaveAs onto a path another open document holds then fails (correctly -
@@ -675,7 +732,8 @@ class DocumentTools:
                     + ".")
         return (f"Created new Part document: '{part_name}'"
                 + (f" [{part_number}]" if part_number else "")
-                + f".{note}{saved}{hint}" + self._name_collision_note(doc))
+                + f".{note}{saved}{hint}{fallback_note}"
+                + self._name_collision_note(doc))
 
     def _new_product(self, name: str | None = None,
                      file_path: str | None = None) -> str:
@@ -806,8 +864,13 @@ class DocumentTools:
         )
 
     def _open_document(self, file_path: str) -> str:
-        self.conn.ensure_connected()
-        docs = self.conn.documents
+        # THE NAME IS CHECKED BEFORE THE CONNECTION, not after. Until 0.3.127 this
+        # method connected first, so asking to open a Chinese-named file on a
+        # machine with no CATIA running started CATIA and only then answered
+        # PATH_NOT_ASCII - an argument error that cost thirty seconds and a
+        # process. Found by the 0.3.127 test, which had no conn at all and got
+        # AttributeError instead of the refusal.
+        #
         # Refuse a non-ASCII FILE NAME before CATIA sees it. Measured on B30
         # 2026-11-07 (scripts/b30_v0374_zh_copy.py): Documents.Open on
         # '...\副本.CATPart' raises DISP_E_EXCEPTION - and pops a modal "突发事件
@@ -818,17 +881,20 @@ class DocumentTools:
         # afterwards" advice was wrong.
         name = os.path.basename(str(file_path))
         if name and not name.isascii():
+            # Shortened in 0.3.127 for the same reason as the SaveAs refusal: the
+            # probe dates and the screenshot evidence belong in the comment above,
+            # not in a reply read on every failure (2026-11-14, P1-5).
             raise PathNotSupported(
                 f"CATIA cannot open a document whose FILE NAME is non-ASCII: "
-                f"'{name}'. Measured on B30 2026-11-07 - the same file with an "
-                "ASCII name in the same folder opens normally, and the non-ASCII "
-                "name is refused by Documents.Open with a modal error dialog on "
-                "top. Nothing was opened. Keep .CATPart/.CATProduct file names "
-                "ASCII (the FOLDER may be Chinese) and put the Chinese wording "
-                "in the part number - that is what the tree and the BOM show. If "
-                "a build ever accepts such a name, this check is the thing to "
-                "remove - report it rather than working around it."
+                f"'{name}'. Nothing was opened. The same file with an ASCII name "
+                "opens normally, so the name is the limit and the Chinese FOLDER "
+                "is not. Keep .CATPart/.CATProduct names ASCII and put the wording "
+                "in the part number. Retrying is worse than useless: the refusal "
+                "leaves a modal error dialog on the automation thread, which the "
+                "next tool call then finds in front of it."
             )
+        self.conn.ensure_connected()
+        docs = self.conn.documents
         # Opening a file CATIA already holds raises "the document is already open,
         # reopen?" - a modal on the automation thread, and its Yes answer RELOADS
         # the document, discarding unsaved edits. Answering it is not our call, so
@@ -956,6 +1022,48 @@ class DocumentTools:
         """
         return str(path).isascii()
 
+    #: The only punctuation kept when a non-ASCII name becomes an ASCII one.
+    _ASCII_NAME_SAFE = "-_"
+
+    @classmethod
+    def _ascii_name_for(cls, file_path: str) -> tuple[str, str]:
+        """``(path with an ASCII file name, the wording to keep as the title)``.
+
+        The 2026-11-14 report's P1-5 asked for a one-step workaround, because the
+        refusal already names the combination - ASCII file name, Chinese wording in
+        the part number - and then leaves the caller to assemble it. This is that
+        step.
+
+        IT IS DELIBERATELY DUMBER THAN IT COULD BE. It keeps the ASCII letters and
+        digits already in the name, drops everything else, and falls back to
+        "Part". No transliteration, no date stamp, no sequence number: a name this
+        call invents twice has to be the same name twice, or a retry writes a
+        second file beside the first and the caller ends up with two halves of one
+        part. (A date stamp was the obvious alternative and it fails exactly that
+        test.)
+
+            '苹果AirPods一二代.CATPart' -> 'AirPods.CATPart', title '苹果AirPods一二代'
+            '零件.CATPart'             -> 'Part.CATPart',    title '零件'
+            '2号件.CATPart'            -> 'Part_2.CATPart',  title '2号件'
+
+        Only ever called for a basename that is NOT ASCII: an ASCII name that
+        happens to contain dots or spaces would be rewritten by this, and there is
+        nothing to fix there.
+        """
+        folder, base = os.path.split(str(file_path))
+        stem, ext = os.path.splitext(base)
+        kept = "".join(character for character in stem
+                       if character.isascii()
+                       and (character.isalnum() or character in cls._ASCII_NAME_SAFE))
+        kept = kept.strip(cls._ASCII_NAME_SAFE)
+        if not kept:
+            kept = "Part"
+        elif not kept[0].isalpha():
+            # A file name starting with a digit is legal on Windows but is a poor
+            # thing to hand CATIA, and "Part_2号件" reads better than "2".
+            kept = "Part_" + kept
+        return os.path.join(folder, kept + (ext or ".CATPart")), stem
+
     @staticmethod
     def _same_file(first: Any, second: Any) -> bool:
         """"These two documents hold the same FILE" - not "share a name".
@@ -1007,6 +1115,15 @@ class DocumentTools:
         data = dict(getattr(error, "data", None) or {})
         data.setdefault("save_route", list(trace))
         report = self._staging_report()
+        if isinstance(error, PathNotSupported):
+            # 0.3.127: a NAME problem is not a ROUTE problem. The staging file
+            # could not carry a non-ASCII name either, so appending "which step of
+            # the staging route refused" adds ~250 characters that answer a
+            # question nobody asked - and the 2026-11-14 report's P1-5 counted
+            # exactly that kind of tail when it measured a 1000+ character reply.
+            # The route is still in data.save_route for anyone who wants it.
+            error.data = data
+            return
         if report["tried"] and "staging_route" not in data:
             data["staging_route"] = report
             message = str(error)
@@ -1181,8 +1298,48 @@ class DocumentTools:
                 pass
 
     def _save_document(self, file_path: str | None = None,
-                       overwrite: bool = False) -> str:
+                       overwrite: bool = False,
+                       ascii_fallback: bool = False) -> str:
         doc = self.conn.active_document
+        # The save-side half of P1-5's one-step workaround. It converts the FILE
+        # NAME and nothing else: this document already has a part number, and
+        # overwriting text the caller may have set on purpose in order to "help"
+        # is not a repair. catia_new_part's fallback does set it, because a new
+        # part has no other identity to lose.
+        fallback_note = ""
+        if file_path and ascii_fallback and not os.path.basename(
+                str(file_path)).isascii():
+            original = os.path.basename(str(file_path))
+            converted, title = self._ascii_name_for(str(file_path))
+            # TWO DIFFERENT CHINESE NAMES CAN CONVERT TO ONE ASCII NAME, because
+            # the conversion keeps only what was already ASCII: '苹果AirPods一二代'
+            # and '苹果AirPods一二代_另存' both land on 'AirPods'. Saving the second
+            # onto the first one's path is not a second file - it is a SAVE of the
+            # document that already holds that path, which silently discards the
+            # "save a copy" the caller asked for. Measured on B30 2026-11-14 while
+            # writing this audit: the reply was "Document 'AirPods.CATPart' saved"
+            # and no new file existed. Refused instead, naming what differs.
+            try:
+                current = str(doc.FullName or "")
+            except Exception:  # noqa: BLE001 - a pathless document has no conflict
+                current = ""
+            if current and os.path.normcase(os.path.abspath(converted)) == \
+                    os.path.normcase(os.path.abspath(current)):
+                raise ArgumentRejected(
+                    f"'{original}' converts to '{os.path.basename(converted)}', "
+                    "which is THIS document's own path - so this call would "
+                    "re-save the existing file rather than write a second one. "
+                    "Nothing was saved. Pass an ASCII file_path that differs: the "
+                    "conversion keeps only the ASCII characters of the name, so "
+                    "two Chinese names can land on one ASCII name.",
+                    code="ASCII_NAME_COLLIDES", stage="validate")
+            file_path = converted
+            fallback_note = (
+                f" [ascii_fallback: '{original}' cannot be a CATIA file name on "
+                f"this build, so the file is '{os.path.basename(converted)}' - the "
+                f"part number was NOT changed; set it with "
+                f"catia_set_part_number('{title}') if that is the wording you want "
+                "the tree and the BOM to show.]")
         # Whether THIS call reached the ASCII staging route. The caller's failure
         # message says "a staging file was already tried" - a sentence that is
         # only true when it is, and that was being printed unconditionally
@@ -1394,13 +1551,13 @@ class DocumentTools:
                     f"Document saved as: {target} (moved here from an ASCII staging "
                     "file: the first SaveAs to this path was refused - "
                     f"{str(first_error).splitlines()[0][:90]} - and the move, from "
-                    "a document that already had a path, was not)")
+                    f"a document that already had a path, was not){fallback_note}")
             # Always say whether the path was free. A caller in a finished-parts
             # directory should never have to check the folder afterwards to know
             # whether it just replaced something (reported 2026-10-25).
             note = (f" (replaced the existing file: {existing})" if existing
                     else " (new file - nothing was overwritten)")
-            return f"Document saved as: {target}{note}"
+            return f"Document saved as: {target}{note}{fallback_note}"
         if not self._document_has_path(doc):
             # doc.Save() on a never-saved document raises E_FAIL and retrying it
             # is pure delay: there is no path to write to, and SaveAs is refused

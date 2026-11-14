@@ -1065,12 +1065,79 @@ class DiagnosticsTools:
                     "properties": {},
                 },
             },
+            {
+                "name": "catia_server_info",
+                "description": (
+                    "The cheap answer to 'what am I talking to': server name, "
+                    "version, the number of tools registered, and the CATIA release "
+                    "+ open-document count if a session is connected. "
+                    "NO PROBES, which is the whole point: catia_diagnose builds a "
+                    "Part Design factory, a GSD factory and a measurement to find "
+                    "out what the install supports, and costs a few seconds of COM "
+                    "for an answer that changes once per session. The 2026-11-14 "
+                    "report asked for exactly this (P2-1) after using diagnose for "
+                    "it. "
+                    "IT NEVER CONNECTS: with no session open it answers "
+                    "connected=false instead of starting one, because a version "
+                    "lookup has no business opening a CAD application. "
+                    "Nothing in the model is read, so nothing can be changed."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
         ]
 
-    def execute(self, tool_name: str, arguments: dict[str, Any]) -> str:
+    def _server_info_tool(self) -> dict[str, Any]:
+        """Server identity plus, when there is one, the CATIA session behind it.
+
+        Deliberately not `_diagnose`: that one probes factories and type libraries
+        to answer "what can this INSTALL do". This answers "what am I talking to",
+        which needs nothing but a caption and a count - and the 2026-11-14 report
+        (P2-1) pointed out that reaching for the expensive tool for the cheap
+        question is the wrong shape.
+        """
+        info = dict(self._server_info())
+        catia: dict[str, Any] = {"connected": False}
+        try:
+            connected = bool(self.conn.is_connected)
+        except Exception:  # noqa: BLE001 - a connection object that cannot say
+            connected = False
+        if connected:
+            catia["connected"] = True
+            try:
+                catia["release"] = self.conn._get_version()
+            except Exception:  # noqa: BLE001 - the caption is a courtesy
+                catia["release"] = "unknown"
+            try:
+                catia["documents"] = int(self.conn.documents.Count)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                catia["active_document"] = str(self.conn.active_document.Name)
+            except Exception:  # noqa: BLE001 - no window, or none open
+                pass
+        info["catia"] = catia
+        release = catia.get("release") if catia["connected"] else "not connected"
+        return {
+            "ok": True,
+            "code": "SERVER_INFO",
+            "tool": "catia_server_info",
+            "message": (
+                f"{info['name']} {info['version']} · "
+                f"{info['tool_count']} tool(s) · CATIA {release}"
+                + (f" · {catia['documents']} document(s)"
+                   if catia.get("documents") is not None else "")),
+            "data": info,
+        }
+
+    def execute(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         match tool_name:
             case "catia_diagnose":
                 return self._diagnose()
+            case "catia_server_info":
+                return self._server_info_tool()
             case _:
                 raise ArgumentRejected(f"Unknown diagnostics tool: {tool_name}")
 

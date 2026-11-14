@@ -413,7 +413,27 @@ class ExportTools:
             else:
                 size_info = f" ({size_bytes} bytes)"
 
-        return f"Exported to {file_path}{size_info} (format: {fmt_key.upper()})"
+        # WHY THIS ACCEPTS A NON-ASCII FILE NAME AND catia_save_document DOES NOT
+        # (the 2026-11-14 report's P1-5 called the difference an inconsistency
+        # and asked for one policy). They are two different CATIA APIs, not two
+        # opinions: ExportData writes a translation through the file system, while
+        # SaveAs goes through the DOCUMENT layer, which is ANSI on this build in
+        # both directions - measured on B30 2026-11-07, Documents.Open refuses a
+        # Chinese .CATPart name and leaves a modal dialog, so an ASCII save
+        # renamed afterwards is an unopenable file. The report's own export
+        # (160 847 bytes, Chinese name intact) reproduced here. Nothing to unify:
+        # refusing here would break a call that works, and allowing it there would
+        # produce files CATIA cannot reopen.
+        non_ascii = ""
+        if not os.path.basename(str(file_path)).isascii():
+            non_ascii = (" The file name is not ASCII and that is fine HERE - this "
+                         "goes through ExportData, not the document layer, so the "
+                         ".CATPart naming limit does not apply to it (exported files "
+                         "are opened by other software). Do not read it as a licence "
+                         "for catia_save_document: that one is refused, because this "
+                         "build cannot reopen a non-ASCII .CATPart name.")
+        return (f"Exported to {file_path}{size_info} (format: {fmt_key.upper()})"
+                + non_ascii)
 
     @staticmethod
     def _image_size(path: str) -> str | None:

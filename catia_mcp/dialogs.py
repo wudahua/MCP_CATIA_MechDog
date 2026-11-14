@@ -218,21 +218,19 @@ def save_as(doc, path: str, tries: int = 6, wait: float = 0.6) -> str:
     # (reported 2026-10-31).
     name = os.path.basename(target)
     if not name.isascii():
+        # The message was ~700 characters until 0.3.127, carrying the probe dates,
+        # the Save As screenshot evidence and the staging explanation. That is the
+        # right material for PathNotSupported's docstring, where it still is, and
+        # the wrong material for a reply an agent has to read on every failure
+        # (reported 2026-11-14, P1-5: "message 约 1000+ 字符, 对 Agent 上下文是显著
+        # 负担"). What stays is what a caller has to ACT on.
         raise PathNotSupported(
-            "CATIA cannot SaveAs a non-ASCII file name on this build - use an "
-            "ASCII name.\n"
-            f"  path: {target}\n"
-            "  measured on V5-6R2020 B30: the same folder saved "
-            "'ascii_probe.CATPart' and failed '中文探针.CATPart' with "
-            "DISP_E_EXCEPTION, while a non-ASCII FOLDER ('中文目录\\probe.CATPart') "
-            "saved normally - the limit is the file name, not the path.\n"
-            "  Renaming an ASCII save to a Chinese name is NOT a way out: this "
-            "build cannot OPEN such a name either (Documents.Open refuses it and "
-            "leaves a modal error dialog, measured 2026-11-07). Use an ASCII file "
-            "name and put the Chinese wording in the part number.\n"
-            "  CATIA's own 'Save As' dialog rejects the same name with "
-            "'上述文件名无效' / 'the above file name is invalid' (screenshot "
-            "evidence, 2026-11-07), which is the same limit seen through the UI."
+            f"CATIA cannot SaveAs a non-ASCII file name on this build: '{name}'. "
+            "Use an ASCII name and put the wording in the part number - "
+            "catia_new_part(file_path=..., ascii_fallback=true) does both in one "
+            "call. A non-ASCII FOLDER is fine (measured on B30), and renaming an "
+            "ASCII save afterwards is NOT a way out: this build cannot OPEN such a "
+            "name either."
         )
     parent = os.path.dirname(target)
     try:

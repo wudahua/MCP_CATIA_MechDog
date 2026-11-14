@@ -2,6 +2,66 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.127] — 2026-11-14 · a name that could be worked around, and an identity that costs nothing
+
+The 2026-11-14 report's last two items. Both were small, and both had a detail
+that only shows up when the fix is measured.
+
+### P1-5: the non-ASCII file name, in one step
+
+The refusal was right - this build cannot `SaveAs` or `Open` a non-ASCII file
+NAME, measured on B30 in nine attempts, and renaming an ASCII save afterwards
+produces a file it cannot reopen either - but it left the caller to assemble the
+workaround it recommended. Three things are fixed:
+
+  * **`ascii_fallback`** on `catia_new_part` and `catia_save_document`. It
+    converts the name, does the work, and reports the real path. On a part that
+    is being CREATED it also puts the original wording in the part number; on a
+    SAVE it does not, because that document already has one and overwriting text
+    the caller may have set on purpose is not a repair. Measured on B30:
+    `苹果AirPods一二代.CATPart` -> `AirPods.CATPart` with
+    `part_number = 苹果AirPods一二代`, in one call.
+  * **The conversion is deterministic** - it keeps the ASCII letters and digits
+    already in the name and drops the rest. A date stamp or a sequence number was
+    the obvious alternative and it fails the one test that matters: the second
+    attempt would write a second file beside the first. Which also means two
+    Chinese names can land on one ASCII name, so a conversion that collides with
+    the document's OWN path is refused with `ASCII_NAME_COLLIDES` instead of
+    quietly re-saving the file the caller meant to copy (found while writing the
+    audit - the first version answered "Document 'AirPods.CATPart' saved" and no
+    second file existed).
+  * **The message is 358 characters, down from ~1000.** The probe dates, the
+    Save As screenshot evidence and the staging explanation are still in
+    `PathNotSupported`'s docstring and in the code comments; a reply read on every
+    failure needs the action. `_annotate_save_error` also stopped appending the
+    staging-route sentence to a NAME error - a staging file cannot carry a
+    non-ASCII name either, so it described a route that could not have helped.
+
+**The "inconsistency" with `catia_export` is not one.** Export goes through
+`ExportData`, which writes a translation through the file system; `SaveAs` goes
+through the document layer, which is ANSI on this build. The report's own export
+(160 847 bytes, Chinese name intact) reproduces here at 2 035 bytes for an empty
+part. Refusing it would break a call that works; allowing it in `SaveAs` would
+produce files CATIA cannot reopen. `catia_export` now says so in its reply.
+
+Also fixed while measuring: `catia_open_document` connected to CATIA *before*
+refusing a non-ASCII name, so an argument error started the application and then
+answered. The name is now checked first.
+
+### P2-1: `catia_server_info`
+
+Name, version, registered tool count, and - when a session exists - the CATIA
+release and open-document count. No factory probes, no type libraries: that is
+`catia_diagnose`'s job and it costs seconds for an answer that changes once per
+session. Measured: `MCP_CATIA_MechDog 0.3.127 · 149 tool(s) · CATIA CATIA V5 · 4
+document(s)`.
+
+**It never connects.** With no session it answers `connected=false` rather than
+starting a CAD application to look up a version, and a connection object that
+throws is reported rather than raised.
+
+2035 tests. 149 tools. `scripts/b30_v0429_audit.py` 14/14.
+
 ## [0.3.126] — 2026-11-14 · three things the report had measured and the code had not
 
 The 2026-11-14 report's P0-4, P1-1 and P1-3 were each described as

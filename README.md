@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.126** · [what changed](CHANGELOG.md) ·
+**0.3.127** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -12,7 +12,7 @@ defects that make that loop lie to you. Most of the work since 0.3.0 came from
 people rebuilding real assemblies with it: the changelog is a list of things that
 produced a plausible number, a wrong number, or no explanation at all.
 
-**148 tools** (upstream 98 + 50 added, and nothing dropped any more: knowledge
+**149 tools** (upstream 98 + 51 added, and nothing dropped any more: knowledge
 came back in 0.3.63 and drafting in 0.3.64, each after its tools were measured on
 B30 rather than trusted). Nothing in the COM layer was rewritten — the value of upstream is
 the field-verified knowledge in its comments, so this fork is strictly add /
@@ -71,11 +71,11 @@ two - `catia_delete_body`, `catia_solid_loft`; 0.3.19: one - `catia_copy_compone
 `catia_gsd_rotate`, `catia_gsd_translate`; 0.3.82: three - `catia_sketch_copy`,
 `catia_gsd_circ_pattern`, `catia_gsd_plane_normal_to_curve`; 0.3.84: one -
 `catia_gsd_plane_angle`).
-98 + 50 added = 148: the 31 below, `catia_apply_design_table` under Knowledgeware,
+98 + 50 added = 148, plus `catia_server_info` (0.3.127) = 149: the 31 below, `catia_apply_design_table` under Knowledgeware,
 `catia_drawing_set_sheet` and `catia_drawing_add_frame` under Drafting (0.3.65),
 the three colour tools in their own table below (0.3.79), `catia_replace_component` (0.3.80), `catia_split_solid` (0.3.94), `catia_measure_deviation` (0.3.119), `catia_solid_tube` (0.3.121), `catia_gsd_splines` (0.3.122), and
 `catia_solid_sweep_variable` (0.3.124, elliptic sections since 0.3.126), and
-`catia_set_constraint_value` (0.3.125). 0.3.85 added arguments instead of tools:
+`catia_set_constraint_value` (0.3.125), and `catia_server_info` (0.3.127). 0.3.85 added arguments instead of tools:
 `catia_gsd_boundary(edge=N, propagation=…)` takes one loop of a border (a
 selector `AddNewBoundaryOfSurface` does not have), `catia_gsd_fill` accepts
 `Edge.N`, and `catia_gsd_circ_pattern(cap_center=true, cap_curve=…)` closes the
@@ -1328,7 +1328,7 @@ while a reply that only reports success cannot.
 | Knowledge | 6 | parameters, formulas, relations, design tables - upstream's five, measured and corrected, plus `catia_apply_design_table` |
 | Drawing | 13 | upstream's drafting module, measured, plus `catia_drawing_set_sheet` and `catia_drawing_add_frame`: new drawing, generative view (plane / face / body), projection, section, detail, text, table, generated and manual dimensions, paper size, border and title block |
 | Planner | **2** | `run_plan`, `measure_topology` |
-| Diagnostics | 1 | `catia_diagnose` |
+| Diagnostics | 2 | `catia_diagnose` (full probe: factories, type libraries, ceilings), `catia_server_info` (0.3.127 - name, version, tool count, CATIA release; no probes, never connects) |
 
 #### Knowledgeware (6 tools, 0.3.63)
 
