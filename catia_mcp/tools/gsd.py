@@ -338,6 +338,44 @@ class GSDTools:
 
     DEFAULT_GEOSET = "GSD_Set"
 
+    #: Tools of this class that carry a semantic check catia_run_plan can pre-run
+    #: (see planner's _semantic_problems). A station table is the one part of a
+    #: variable sweep that cannot be inspected afterwards, so a bad one must be
+    #: refused BEFORE the plan builds twenty helpers - not at the station it
+    #: happens to reach.
+    PRE_CHECKS = {"catia_solid_sweep_variable": "_precheck_sweep"}
+
+    def _precheck_sweep(self, args: dict[str, Any]) -> None:
+        """Refuse a station table the sweep itself would refuse.
+
+        Calls the same pure function the tool calls, so the reading of
+        ``[r, ...]`` / ``[[t, r], ...]`` / ``[[t, rx, ry], ...]`` cannot diverge
+        between the dry run and the build. A missing or non-list ``sections`` is
+        left to the schema, which already names it.
+        """
+        sections = args.get("sections")
+        if not isinstance(sections, (list, tuple)):
+            return
+        self._sweep_stations(sections)
+        axis = args.get("major_axis")
+        if axis is None:
+            return
+        if not isinstance(axis, (list, tuple)) or len(axis) != 3:
+            raise ArgumentRejected(
+                "'major_axis' must be [x, y, z] - a direction in mm, not a "
+                "point. Nothing was created.", code="BAD_MAJOR_AXIS",
+                stage="validate")
+        try:
+            values = [float(value) for value in axis]
+        except (TypeError, ValueError) as error:
+            raise ArgumentRejected(
+                f"'major_axis' is not numeric: {axis!r}. Nothing was created.",
+                code="BAD_MAJOR_AXIS", stage="validate") from error
+        if math.sqrt(sum(value * value for value in values)) < 1e-9:
+            raise ArgumentRejected(
+                "'major_axis' is the zero vector, which has no direction. "
+                "Nothing was created.", code="BAD_MAJOR_AXIS", stage="validate")
+
     # Below this a fill is not a face, it is the degenerate result of boundaries
     # that do not close a region (measured 2026-11-09: an open 25.0000 mm line
     # came back as a face with no area at all, while a real closed loop measured
@@ -1723,20 +1761,33 @@ class GSDTools:
                     "SECTIONS: either [[t, radius], ...] where t is a FRACTION of "
                     "the spine's length in 0..1 (strictly increasing, same "
                     "convention as catia_gsd_plane_normal_to_curve), or a bare "
-                    "[r0, r1, ...] spread evenly from t=0 to t=1. The first and "
-                    "last station's planes are the end faces; the result is always "
-                    "a solid. "
+                    "[r0, r1, ...] spread evenly from t=0 to t=1, or "
+                    "[[t, rx, ry], ...] for ELLIPTIC stations (rx and ry are "
+                    "SEMI-axes, not full widths - an earbud stem is 5.4 x 4.8 mm "
+                    "across, which is rx=2.7 ry=2.4). The three forms mix only "
+                    "where they carry t: [[0, 8], [0.5, 5, 3]] is a circle that "
+                    "becomes an ellipse, which is the transition this was built "
+                    "for. A station with rx == ry is built as a GSD circle, which "
+                    "is exact and one element; only a real ellipse costs anything. "
+                    "The first and last station's planes are the end faces; the "
+                    "result is always a solid. "
+                    "AN ELLIPTIC STATION IS A CLOSED SPLINE THROUGH 64 POINTS ON "
+                    "THE ELLIPSE, not an ellipse primitive: GSD has no "
+                    "AddNewEllipse (measured on B30 2026-11-14 - the factory "
+                    "answers no to that name, yes to AddNewConic and AddNewSpline, "
+                    "and a conic is an OPEN curve so a loft through it does not "
+                    "close). Points that lie on a curve make the spline that curve: "
+                    "a 10 x 6 ellipse came back 51.0540 mm against the exact "
+                    "51.0543, and a 10x6 -> 5x3 loft held 1099.56 mm3 against the "
+                    "analytic 1099.56. rx runs along the FIRST station's plane "
+                    "axis, and every later station's axes are carried onto its own "
+                    "plane so the loft does not twist; pass 'major_axis' to choose "
+                    "that first direction. "
                     "THE SPINE HAS TO CARRY A POINT-ON-CURVE PARAMETER: an open "
                     "catia_gsd_line or an OPEN catia_gsd_spline does, a circle and "
                     "a CLOSED spline do not (the matrix measured on B30 2026-11-11 "
                     "and written into the engrave code). A closed spine is refused "
                     "before anything is built. "
-                    "ELLIPSE SECTIONS ARE NOT OFFERED HERE: every station is a "
-                    "circle. For a flattened or non-circular section, draw the "
-                    "profiles with catia_sketch_ellipse (there IS an ellipse "
-                    "primitive - Factory2D.CreateClosedEllipse) or "
-                    "catia_sketch_profile and feed them to catia_solid_loft "
-                    "directly. "
                     "THE HELPERS CANNOT BE DELETED, only hidden: the points, planes "
                     "and circles are the loft's history, and removing one leaves a "
                     "part whose update fails for good (measured 2026-11-13 on the "
@@ -1761,11 +1812,28 @@ class GSDTools:
                             "description": (
                                 "[[t, radius], ...] with t in 0..1 as a fraction of "
                                 "the spine's length, strictly increasing - or a bare "
-                                "[r0, r1, ...] spread evenly from start to end. At "
-                                "least two stations. Radii are in mm and must be "
-                                "positive."
+                                "[r0, r1, ...] spread evenly from start to end - or "
+                                "[[t, rx, ry], ...] for elliptic stations, where rx "
+                                "and ry are SEMI-axes in mm (a 5.4 x 4.8 mm section "
+                                "is rx=2.7 ry=2.4). At least two stations. All "
+                                "sizes must be positive."
                             ),
                             "items": {},
+                        },
+                        "major_axis": {
+                            "type": "array",
+                            "items": {"type": "number"},
+                            "minItems": 3,
+                            "maxItems": 3,
+                            "description": (
+                                "Optional [x, y, z] direction: where the FIRST "
+                                "station's rx points. It is projected onto that "
+                                "station's plane, so it only has to be roughly "
+                                "across the spine. Omit it and CATIA's own first "
+                                "axis is used - stable on a straight spine, but "
+                                "CATIA's choice, not yours. Only matters when a "
+                                "station is elliptic."
+                            ),
                         },
                         "name": {
                             "type": "string",
@@ -6417,18 +6485,37 @@ class GSDTools:
     #: real transition and stops a typo from turning into a ten-minute build.
     _SWEEP_MAX_STATIONS = 200
 
+    #: Points per elliptic station. 64 puts them 5.6 degrees apart, and a closed
+    #: spline through points that sit ON the curve is that curve: measured on B30
+    #: 2026-11-14, a 10 x 6 ellipse came back 51.0540 mm long against the exact
+    #: 51.0543, and a two-section loft through two such splines held 1099.56 mm3
+    #: against the analytic 1099.56 -0.000 %. This is the ONE shape where an
+    #: interpolating spline is the right primitive. The caution in
+    #: catia_gsd_spline's description is about POLYGONS, where the corners are a
+    #: specification and the interpolation bulges across them (a 20 x 12 closed
+    #: spline measured 24.04 x 21.46); an ellipse has nothing to bulge across.
+    _ELLIPSE_POINTS = 64
+
     @classmethod
-    def _sweep_stations(cls, raw: Any) -> list[tuple[float, float]]:
-        """``[(t, radius), ...]`` from ``[[t, r], ...]`` or a bare ``[r0, r1, ...]``.
+    def _sweep_stations(cls, raw: Any) -> list[tuple[float, float, float]]:
+        """``[(t, rx, ry), ...]`` from ``[r, ...]``, ``[[t, r], ...]`` or
+        ``[[t, rx, ry], ...]``.
 
         Kept pure so the accept/refuse line can be tested without CATIA: a station
         table is the one part of a variable sweep that cannot be inspected
         afterwards, and getting it wrong produces a solid that looks plausible.
+
+        A CIRCLE IS AN ELLIPSE with equal semi-axes, so there is one shape here and
+        not two. That is not tidiness: two shapes would mean two volume formulas
+        and two sets of message numbers, and 0.3.124 already had to correct a
+        volume comparison once. ``rx == ry`` still BUILDS a circle (a GSD circle
+        is exact and one element), it is only the TABLE that is unified.
         """
         if not isinstance(raw, (list, tuple)):
             raise ArgumentRejected(
                 "'sections' must be a list: [[t, radius], ...] with t a fraction of "
-                "the spine's length in 0..1, or [r0, r1, ...] spread evenly. "
+                "the spine's length in 0..1, [[t, rx, ry], ...] for elliptic "
+                "stations, or [r0, r1, ...] spread evenly. "
                 "Nothing was created.", code="BAD_SECTIONS", stage="validate")
         if len(raw) < 2:
             raise ArgumentRejected(
@@ -6441,10 +6528,11 @@ class GSDTools:
                 f"{cls._SWEEP_MAX_STATIONS}. Nothing was created.",
                 code="TOO_MANY_STATIONS", stage="validate")
 
-        uniform = all(isinstance(item, (int, float)) and not isinstance(item, bool)
-                      for item in raw)
-        partial = any(isinstance(item, (int, float)) and not isinstance(item, bool)
-                      for item in raw)
+        def is_number(value: Any) -> bool:
+            return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+        uniform = all(is_number(item) for item in raw)
+        partial = any(is_number(item) for item in raw)
         if not uniform and partial:
             raise ArgumentRejected(
                 "'sections' mixes bare radii with [t, radius] pairs. Use one form: "
@@ -6452,19 +6540,24 @@ class GSDTools:
                 "- a mixed list has no single reading. Nothing was created.",
                 code="BAD_SECTIONS", stage="validate")
 
-        stations: list[tuple[float, float]] = []
+        stations: list[tuple[float, float, float]] = []
         for index, item in enumerate(raw):
             if uniform:
-                t, radius = index / (len(raw) - 1), item
+                t, rx, ry = index / (len(raw) - 1), item, item
             else:
-                if not isinstance(item, (list, tuple)) or len(item) != 2:
+                if not isinstance(item, (list, tuple)) or len(item) not in (2, 3):
                     raise ArgumentRejected(
                         f"sections[{index}] is {item!r}; a station is "
-                        "[t, radius] or a bare radius. Nothing was created.",
+                        "[t, radius], [t, rx, ry] or a bare radius. Nothing was "
+                        "created.",
                         code="BAD_SECTIONS", stage="validate")
-                t, radius = item
+                if len(item) == 2:
+                    t, rx = item
+                    ry = rx
+                else:
+                    t, rx, ry = item
             try:
-                t, radius = float(t), float(radius)
+                t, rx, ry = float(t), float(rx), float(ry)
             except (TypeError, ValueError) as error:
                 raise ArgumentRejected(
                     f"sections[{index}] is not numeric: {item!r}. Nothing was "
@@ -6474,23 +6567,202 @@ class GSDTools:
                     f"sections[{index}] has t={t:g}; t is a FRACTION of the spine's "
                     "length, so it runs from 0 (start) to 1 (end). Nothing was "
                     "created.", code="T_OUT_OF_RANGE", stage="validate")
-            if radius <= 0:
-                raise ArgumentOutOfRange(
-                    f"sections[{index}] has radius {radius:g}; a station needs a "
-                    "positive radius - zero would collapse the solid to a point. "
-                    "Nothing was created.", code="RADIUS_OUT_OF_RANGE",
-                    stage="validate")
+            for label, value in (("rx", rx), ("ry", ry)):
+                if value <= 0:
+                    raise ArgumentOutOfRange(
+                        f"sections[{index}] has {label} {value:g}; a station needs "
+                        "a positive semi-axis - zero would collapse the solid to a "
+                        f"line. {'rx and ry are SEMI-axes, not full widths' if rx != ry else ''}"
+                        " Nothing was created.".lstrip(),
+                        code="RADIUS_OUT_OF_RANGE", stage="validate")
             if stations and t <= stations[-1][0]:
                 raise ArgumentRejected(
                     f"sections[{index}] has t={t:g} after t={stations[-1][0]:g}; "
                     "stations must run strictly forward along the spine, or the "
                     "loft doubles back on itself. Nothing was created.",
                     code="T_NOT_INCREASING", stage="validate")
-            stations.append((t, radius))
+            stations.append((t, rx, ry))
         return stations
 
+    @classmethod
+    def _swept_volume(cls, stations: list[tuple[float, float, float]],
+                      length: float) -> float:
+        """Volume of the loft, as pi*h/6*(f0 + 4*fmid + f1) per segment, f = rx*ry.
+
+        Simpson is EXACT here and not an approximation: rx and ry are linear along
+        a segment, so their product is a quadratic, which Simpson integrates with
+        no error. With rx == ry this collapses algebraically to the truncated-cone
+        sum pi*h/3*(r0^2 + r0*r1 + r1^2) that 0.3.124 compared against - measured
+        identity on B30 2026-11-14 for the documented case (r 8 -> 16 over 40 mm:
+        18765.7 from both, CATIA 18765.8). So the circle case is not a branch
+        here; it is the same formula with one fewer term.
+        """
+        total = 0.0
+        for (t0, x0, y0), (t1, x1, y1) in zip(stations, stations[1:]):
+            height = (t1 - t0) * length
+            f0, f1 = x0 * y0, x1 * y1
+            fmid = ((x0 + x1) / 2.0) * ((y0 + y1) / 2.0)
+            total += math.pi * height / 6.0 * (f0 + 4.0 * fmid + f1)
+        return total
+
+    @classmethod
+    def _carry_frame(cls, previous: list[float],
+                     normal: list[float]) -> list[float] | None:
+        """Rotate ``previous`` onto the plane with ``normal`` the short way.
+
+        Stations do not share a plane on a curved spine, and the axes a station
+        uses have to follow the spine or the loft twists between two sections that
+        look right on their own. Measured on B30 2026-11-14: a datum plane normal
+        to a TILTED straight line reports the same two unit axes at every station
+        (u = (0.8086, -0.1427, -0.5708), dot products with the tangent 0.0000), so
+        on a straight spine this is an identity operation - it only starts doing
+        work where the spine bends.
+
+        Returns None when the two directions are parallel within 1e-9, which is a
+        90-degree bend: there the caller has to pick a new axis, because "the
+        smallest rotation" has no unique answer.
+        """
+        dot = sum(a * b for a, b in zip(previous, normal))
+        carried = [a - dot * b for a, b in zip(previous, normal)]
+        size = math.sqrt(sum(value * value for value in carried))
+        if size < 1e-9:
+            return None
+        return [value / size for value in carried]
+
+    @classmethod
+    def _ellipse_ring(cls, centre: list[float], u: list[float], v: list[float],
+                      rx: float, ry: float,
+                      count: int | None = None) -> list[list[float]]:
+        """``count`` points on the ellipse ``centre + rx cos u + ry sin v``.
+
+        The points sit ON the curve, which is what makes the spline through them an
+        ellipse rather than an approximation of one.
+        """
+        n = cls._ELLIPSE_POINTS if count is None else count
+        ring: list[list[float]] = []
+        for index in range(n):
+            angle = 2.0 * math.pi * index / n
+            a, b = rx * math.cos(angle), ry * math.sin(angle)
+            ring.append([centre[0] + a * u[0] + b * v[0],
+                         centre[1] + a * u[1] + b * v[1],
+                         centre[2] + a * u[2] + b * v[2]])
+        return ring
+
+    def _station_frame(self, spa: Any, part: Any, point: Any, plane: Any,
+                       carry: list[float] | None,
+                       requested_axis: list[float] | None, index: int, t: float
+                       ) -> tuple[list[float], list[float], list[float]]:
+        """``(centre, u, v)`` for an elliptic station - measured, never assumed.
+
+        Two reads CATIA has to supply, and neither is a property:
+
+          centre   GetMeasurable(point-on-curve).GetPoint()        -> 3 values
+          u, v     GetMeasurable(normal plane).GetPlane()          -> 9 values
+                   (origin[0:3], first axis[3:6], second axis[6:9])
+
+        Measured on B30 2026-11-14 against a spine tilted 0,0,0 -> 30,10,40:
+        GetPoint answered exactly (t=0.5 gave (15, 5, 20)); GetPlane answered the
+        station's origin plus two ORTHONORMAL axes (|u| = |v| = 1, u.v = u.T =
+        v.T = 0.0000) and the SAME two axes at all four stations of that straight
+        line. Both work ONLY through SystemService.Evaluate: calling them directly
+        raises 方法 GetPoint 失败 / 方法 GetPlane 失败, which is what the first
+        version of this probe did.
+
+        ``carry`` is the previous station's u. On a curved spine the stations do
+        not share a plane, and re-using a fixed axis would rotate the section
+        between them - so the previous axis is projected onto the new plane. None
+        means "first station": CATIA's own axis is used unless the caller named
+        one with ``major_axis``.
+        """
+        from catia_mcp.tools.measurement import read_measurable_array
+
+        if spa is None:
+            raise PreconditionRejected(
+                f"station {index} (t={t:g}) is an ELLIPSE, so its two semi-axes "
+                "have to be placed on the plane normal to the spine - and this "
+                "document's SPAWorkbench could not be opened, which is the only "
+                "way to read where that plane is. No station was built. Use "
+                "circular sections (rx == ry) here, or build the sections with "
+                "catia_sketch_ellipse and loft them with catia_solid_loft.",
+                code="STATION_FRAME_UNAVAILABLE", stage="execute", modified=False)
+
+        try:
+            centre = read_measurable_array(
+                self.conn.app, spa.GetMeasurable(
+                    part.CreateReferenceFromObject(point)), "GetPoint", 3)
+        except Exception as error:  # noqa: BLE001 - say which read failed
+            raise PreconditionRejected(
+                f"the centre of station {index} (t={t:g}) could not be read "
+                f"({str(error).splitlines()[0][:100]}), so an elliptic section "
+                "there would be placed on a guess. No station was built. The "
+                "point itself exists in the tree; this is about reading it back.",
+                code="STATION_CENTRE_UNREADABLE", stage="execute",
+                modified=False) from error
+
+        try:
+            measured = read_measurable_array(
+                self.conn.app, spa.GetMeasurable(
+                    part.CreateReferenceFromObject(plane)), "GetPlane", 9)
+        except Exception as error:  # noqa: BLE001 - say which read failed
+            raise PreconditionRejected(
+                f"the plane normal to the spine at station {index} (t={t:g}) "
+                f"could not be measured ({str(error).splitlines()[0][:100]}), so "
+                "there is no frame for the semi-axes. No station was built. Pass "
+                "circular sections (rx == ry) if this spine is the problem.",
+                code="STATION_PLANE_UNMEASURABLE", stage="execute",
+                modified=False) from error
+
+        u_raw = measured[3:6]
+        v_raw = measured[6:9]
+        normal = [u_raw[1] * v_raw[2] - u_raw[2] * v_raw[1],
+                  u_raw[2] * v_raw[0] - u_raw[0] * v_raw[2],
+                  u_raw[0] * v_raw[1] - u_raw[1] * v_raw[0]]
+        size = math.sqrt(sum(value * value for value in normal))
+        if size < 1e-9:
+            raise PreconditionRejected(
+                f"the plane at station {index} (t={t:g}) came back with a "
+                "degenerate frame - its two axes are parallel, so there is no "
+                "normal to place an ellipse on. No station was built.",
+                code="STATION_PLANE_DEGENERATE", stage="execute", modified=False)
+        normal = [value / size for value in normal]
+
+        if carry is None:
+            if requested_axis is None:
+                axis = [value / math.sqrt(sum(v * v for v in u_raw))
+                        for value in u_raw]
+            else:
+                dot = sum(a * b for a, b in zip(requested_axis, normal))
+                projected = [a - dot * b for a, b in zip(requested_axis, normal)]
+                length = math.sqrt(sum(value * value for value in projected))
+                if length < 1e-9:
+                    raise ArgumentRejected(
+                        "'major_axis' is PARALLEL to the spine at the first "
+                        "station, so it cannot point along a semi-axis in that "
+                        "station's plane. Pass a direction across the spine. "
+                        "Nothing was created.",
+                        code="MAJOR_AXIS_ALONG_SPINE", stage="validate")
+                axis = [value / length for value in projected]
+        else:
+            carried = self._carry_frame(carry, normal)
+            if carried is None:
+                raise PreconditionRejected(
+                    f"station {index} (t={t:g}) is turned about 90 degrees from "
+                    "station 1, so the section's own axes have no continuous "
+                    "carry-over and the loft would twist there. No station was "
+                    "built. Split the sweep into two calls at the bend, or use "
+                    "circular sections (rx == ry), which have no orientation.",
+                    code="STATION_FRAME_BROKEN", stage="execute", modified=False)
+            axis = carried
+
+        second = [normal[1] * axis[2] - normal[2] * axis[1],
+                  normal[2] * axis[0] - normal[0] * axis[2],
+                  normal[0] * axis[1] - normal[1] * axis[0]]
+        size = math.sqrt(sum(value * value for value in second))
+        second = [value / size for value in second]
+        return centre, axis, second
+
     def _solid_sweep_variable(self, args: dict[str, Any]) -> str:
-        """N circular stations along a spine, one loft through them.
+        """N stations along a spine, one loft through them.
 
         Not a new CATIA capability - it is the chain the 2026-11-13 report did by
         hand (17 sections, 380 coordinates, then 15 sections and 1 440 more for a
@@ -6498,6 +6770,14 @@ class GSDTools:
         compared with the ruled-cone sum, because that sum is what a loft through
         circles IS when it works, and a number that misses it is a station that
         did not take.
+
+        A station may be an ELLIPSE since 0.3.126 (the 2026-11-14 report's P0-4:
+        an earbud stem is 5.4 x 4.8 mm, and every station used to be a circle).
+        GSD has no ellipse primitive, so an elliptic station is a CLOSED SPLINE
+        through 64 points that lie on the ellipse - and points that lie on a curve
+        make the spline that curve, measured at -0.001 % of the exact perimeter.
+        A conic would have been the other candidate and cannot be used: a conic is
+        an open curve, so a loft through it does not close into a solid.
         """
         self.conn.ensure_connected()
         spine = args.get("spine")
@@ -6539,16 +6819,41 @@ class GSDTools:
         geoset = self._get_geoset()
         spine_ref = self._ref(spine)
         length = None
+        spa = None
         try:
             spa = self.conn.active_document.GetWorkbench("SPAWorkbench")
             length = float(spa.GetMeasurable(spine_ref).Length)
         except Exception:  # noqa: BLE001 - the build still works without it
             length = None
 
+        # The axis the FIRST elliptic station's rx runs along, projected onto that
+        # station's plane. Absent, CATIA's own first axis is used - which is stable
+        # on a straight spine but is CATIA's choice, not the caller's.
+        requested_axis = args.get("major_axis")
+        if requested_axis is not None:
+            if (not isinstance(requested_axis, (list, tuple))
+                    or len(requested_axis) != 3):
+                raise ArgumentRejected(
+                    "'major_axis' must be [x, y, z] - a direction in mm, not a "
+                    "point. It is projected onto the first station's plane to "
+                    "become that station's rx. Nothing was created.",
+                    code="BAD_MAJOR_AXIS", stage="validate")
+            try:
+                requested_axis = [float(value) for value in requested_axis]
+            except (TypeError, ValueError) as error:
+                raise ArgumentRejected(
+                    f"'major_axis' is not numeric: {requested_axis!r}. Nothing was "
+                    "created.", code="BAD_MAJOR_AXIS", stage="validate") from error
+            if math.sqrt(sum(value * value for value in requested_axis)) < 1e-9:
+                raise ArgumentRejected(
+                    "'major_axis' is the zero vector, which has no direction. "
+                    "Nothing was created.", code="BAD_MAJOR_AXIS", stage="validate")
+
         helpers: list[str] = []
         section_names: list[str] = []
         rows: list[str] = []
-        for index, (t, radius) in enumerate(stations, start=1):
+        carry: list[float] | None = None
+        for index, (t, rx, ry) in enumerate(stations, start=1):
             tag = f"{base}_{index:02d}"
             try:
                 point = factory.AddNewPointOnCurveFromPercent(spine_ref, t, 0)
@@ -6620,35 +6925,59 @@ class GSDTools:
                     modified=bool(helpers) or not gone) from error
             helpers.append(plane_name)
 
-            circle = factory.AddNewCircleCtrRad(
-                part.CreateReferenceFromObject(point),
-                part.CreateReferenceFromObject(plane), False, radius)
-            circle.SetLimitation(1)
-            circle_name, _ = self._free_name(part, f"{tag}_S")
-            circle.Name = circle_name
-            geoset.AppendHybridShape(circle)
+            if rx == ry:
+                # THE EXACT PATH, UNCHANGED: a GSD circle is one element and
+                # exactly a circle, so equal semi-axes still build one.
+                profile = factory.AddNewCircleCtrRad(
+                    part.CreateReferenceFromObject(point),
+                    part.CreateReferenceFromObject(plane), False, rx)
+                profile.SetLimitation(1)
+                kind, shape_word = "circle", f"circle of radius {rx:g}"
+            else:
+                # AN ELLIPSE IS A CLOSED SPLINE THROUGH POINTS THAT LIE ON IT.
+                # GSD has no ellipse primitive: measured on B30 2026-11-14, the
+                # factory answers "no" to AddNewEllipse while AddNewConic and
+                # AddNewSpline answer yes - and a conic is an OPEN curve, so it
+                # cannot be a loft section that closes into a solid.
+                centre, u_axis, v_axis = self._station_frame(
+                    spa, part, point, plane, carry, requested_axis, index, t)
+                carry = u_axis
+                ring = self._ellipse_ring(centre, u_axis, v_axis, rx, ry)
+                profile = factory.AddNewSpline()
+                for ref in self._point_refs(ring, False):
+                    profile.AddPoint(ref)
+                profile.SetClosing(1)
+                kind = "ellipse"
+                shape_word = (f"ellipse rx={rx:g} ry={ry:g} through "
+                              f"{len(ring)} points on it")
+
+            profile_name, _ = self._free_name(part, f"{tag}_S")
+            profile_name = str(profile_name)
+            profile.Name = profile_name
+            geoset.AppendHybridShape(profile)
             try:
-                part.UpdateObject(circle)
+                part.UpdateObject(profile)
             except Exception as error:  # noqa: BLE001 - reported, not a stack trace
-                self._drop_element(circle)
-                gone = self._name_gone(part, circle_name)
+                self._drop_element(profile)
+                gone = self._name_gone(part, profile_name)
                 raise PreconditionRejected(
-                    f"the circle of radius {radius:g} at station {index} could not "
-                    f"be built ({str(error).splitlines()[0][:100]}). The plane it "
-                    "sits on and the point it is centred on are both valid, so the "
-                    "radius or the spine's local geometry is the suspect. "
-                    + (f"That circle ('{circle_name}') was removed again; "
+                    f"the {shape_word} at station {index} could not be built "
+                    f"({str(error).splitlines()[0][:100]}). The plane it sits on "
+                    "and the point it is centred on are both valid, so the size or "
+                    "the spine's local geometry is the suspect. "
+                    + (f"That {kind} ('{profile_name}') was removed again; "
                        if gone else
-                       f"THAT CIRCLE ('{circle_name}') MAY STILL BE IN THE TREE - "
-                       "delete it with catia_delete_feature if it is. ")
+                       f"THAT {kind.upper()} ('{profile_name}') MAY STILL BE IN "
+                       "THE TREE - delete it with catia_delete_feature if it is. ")
                     + f"{len(helpers)} helper element(s) from this call remain.",
                     code="STATION_PROFILE_FAILED", stage="execute",
                     modified=bool(helpers) or not gone) from error
-            helpers.append(circle_name)
-            section_names.append(circle_name)
+            helpers.append(profile_name)
+            section_names.append(profile_name)
             rows.append(f"t={t:g} "
                         + (f"({t * length:.3f} mm) " if length else "")
-                        + f"r={radius:g}")
+                        + (f"r={rx:g}" if kind == "circle"
+                           else f"rx={rx:g} ry={ry:g}"))
 
         # THE LOFT GOES INTO THE BODY CHOSEN ABOVE. _prepare_body reads
         # connection.active_body, so it has to be told, not just InWorkObject.
@@ -6675,10 +7004,18 @@ class GSDTools:
         gained = None if volume is None else volume - before_volume
         expected = None
         if length is not None:
-            expected = 0.0
-            for (t0, r0), (t1, r1) in zip(stations, stations[1:]):
-                height = (t1 - t0) * length
-                expected += math.pi * height / 3.0 * (r0 * r0 + r0 * r1 + r1 * r1)
+            expected = self._swept_volume(stations, length)
+        # A SWEEP WITH ELLIPTIC STATIONS IS NOT JUDGED THE SAME WAY, and the
+        # difference is not decoration: each station there is a spline through
+        # 64 points ON the ellipse, and the closed spline interpolates them. The
+        # measured agreement is -0.000 % (a 10 x 6 -> 5 x 3 loft: 1099.56 mm3
+        # against the analytic 1099.56), so the tolerance stays at 2 %, but the
+        # SENTENCE has to say what was compared, or "agreement means the loft IS
+        # the chain of truncated cones" would describe a shape that is not round.
+        elliptic = any(abs(rx - ry) > 1e-12 for _t, rx, ry in stations)
+        shape_words = ("chain of truncated elliptic cones the stations describe"
+                       if elliptic else
+                       "chain of truncated cones the stations describe")
 
         verdict = ""
         if gained is None:
@@ -6691,7 +7028,13 @@ class GSDTools:
                            f"'{getattr(body, 'Name', '?')}' (now {volume:.1f}); the "
                            f"ruled sum of these stations is {expected:.1f} mm3, "
                            f"{off:+.2f} % off. Agreement here means the loft IS the "
-                           "chain of truncated cones the stations describe.")
+                           f"{shape_words}."
+                           + (f" Each station is a closed spline through "
+                              f"{self._ELLIPSE_POINTS} points on the ellipse, "
+                              "measured on B30 2026-11-14 at -0.001 % of the exact "
+                              "perimeter, so the section IS an ellipse and not an "
+                              "approximation of one that happens to match."
+                              if elliptic else ""))
             else:
                 # THE SUM ONLY MEANS SOMETHING ON A STRAIGHT SPINE. It is the sum
                 # of truncated cones, which is what a loft between PARALLEL
@@ -6718,9 +7061,13 @@ class GSDTools:
 
         helper_note = self._engrave_helpers(
             helpers, str(args.get("helpers") or "hide"), owner="the loft")
+        elliptic_count = sum(1 for _t, rx, ry in stations if abs(rx - ry) > 1e-12)
         return (
             f"Swept {len(stations)} stations along '{spine}'"
             + (f" ({length:.3f} mm)" if length else "")
+            + (f", {elliptic_count} of them elliptic (rx along the first station's "
+               f"axis, closed spline through {self._ELLIPSE_POINTS} points on the "
+               "ellipse)" if elliptic_count else "")
             + ": " + ", ".join(rows) + ". "
             + " ".join(str(loft_reply).split())[:260]
             + " " + verdict + f" Body '{getattr(body, 'Name', '?')}'."

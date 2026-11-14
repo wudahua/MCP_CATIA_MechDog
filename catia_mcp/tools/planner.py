@@ -179,7 +179,45 @@ class PlannerTools:
                         "dry_run": {
                             "type": "boolean",
                             "default": False,
-                            "description": "Validate the plan without executing it",
+                            "description": (
+                                "Validate the plan without executing it. SINCE "
+                                "0.3.126 this runs the tools' own semantic checks "
+                                "as well as the argument schemas: a step that "
+                                "would die on 'major (5.2) is shorter than minor "
+                                "(5.8)' is now refused here, before anything is "
+                                "built. Before that, dry_run answered PLAN_VALID "
+                                "for a plan that then failed at step 10 of 21 after "
+                                "nine steps had put geometry in the model (reported "
+                                "2026-11-14, P1-1). The rules are declared by the "
+                                "tools themselves (PRE_CHECKS), so this cannot "
+                                "disagree with what a tool enforces; a tool without "
+                                "one is checked against its schema only. "
+                                "data.semantic_checks says how many steps were "
+                                "checked that way, so an empty answer is not read "
+                                "as 'every tool was checked'."
+                            ),
+                        },
+                        "rollback": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "If a step fails, DELETE WHAT THE PLAN ALREADY "
+                                "BUILT, newest first, and report which names went "
+                                "and which could not. Off by default: a plan that "
+                                "failed may still be worth keeping so the next call "
+                                "can continue instead of rebuilding - that is what "
+                                "the 2026-11-14 report did, and it took 12 manual "
+                                "steps to avoid colliding with its own leftovers. "
+                                "WHAT IT DOES NOT DO: it does not undo a step's "
+                                "partial work inside one feature, and it cannot "
+                                "delete what CATIA keeps by dependency - those are "
+                                "reported in data.rollback.left, never silently "
+                                "left out. The yes/no is read back from the tree, "
+                                "so 'deleted' in the reply means the name is gone "
+                                "now, not that a call returned without an error. "
+                                "created_features is reported whether or not this "
+                                "is set."
+                            ),
                         },
                     },
                     "required": ["steps"],
@@ -348,12 +386,188 @@ class PlannerTools:
             })
         return problems
 
+    def _semantic_problems(self, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Every step whose arguments are well-typed but cannot work.
+
+        The 2026-11-14 report (P1-1) is the case: a 21-step plan was rejected at
+        step 10 because ``catia_sketch_ellipse`` got major=5.2, minor=5.8, and
+        ``dry_run: true`` had already answered PLAN_VALID for the same plan. Schema
+        validation cannot see it - both numbers are numbers - and nine steps had
+        already built geometry by the time the tool's own check fired.
+
+        THE RULES LIVE WITH THE TOOLS, not here. A table in this file would drift
+        the first time a tool's argument meaning changed and nothing would fail;
+        ``_sweep_stations`` can be called by the planner exactly as the tool calls
+        it, because it is already a pure function that raises the tool's own
+        CodedError. A tool that declares no PRE_CHECKS is simply not checked - this
+        is an addition to schema validation, not a replacement for it.
+        """
+        problems: list[dict[str, Any]] = []
+        if self._router is None:
+            # Not bound to a router yet, so there is nothing to ask. Returning
+            # here rather than raising keeps the planner usable for the pure
+            # helpers (assertions, expect validation) without a server.
+            return problems
+        for index, step in enumerate(steps, start=1):
+            tool = step.get("tool")
+            handler = self._router.get(tool) if tool else None
+            checks = getattr(type(handler), "PRE_CHECKS", None) if handler else None
+            check = (checks or {}).get(tool)
+            if check is None:
+                continue
+            args = step.get("args") or {}
+            code = "SEMANTIC_ARGS"
+            try:
+                message = getattr(handler, check)(args)
+            except Exception as error:  # noqa: BLE001 - the tool's own refusal
+                # The tool raised its real CodedError, so the code it would have
+                # answered at run time is the code the caller sees here. Without
+                # this the dry run would report a different code than the run,
+                # which is the one thing a dry run must not do.
+                message = str(error)
+                code = getattr(error, "code", None) or code
+                if not message:
+                    continue
+            if not message:
+                continue
+            problems.append({
+                "step": index,
+                "tool": tool,
+                "code": code,
+                "message": f"step {index} ({tool}): {message}",
+            })
+        return problems
+
     #: `expect` keys whose value has to be a NUMBER. A string here used to
     #: reach `float()` inside `_check`, i.e. AFTER the model had been built, and
     #: surfaced as an assertion failure about a measurement that was fine.
     _EXPECT_NUMBERS = ("volume_mm3", "area_mm2", "volume_tolerance_pct",
                        "area_tolerance_pct", "cog_tolerance_mm", "mass_kg",
                        "density_kg_m3")
+
+    # ── what a plan built, and how to take it back ───────────────────────────
+
+    def _snapshot_names(self) -> dict[str, int] | None:
+        """Every element name in the active part, with the order it was walked in.
+
+        A plan's report says which STEP failed, and never what the steps before it
+        left behind. The 2026-11-14 report hit that at step 10 of 21: three
+        sketches and three datum planes stayed in the model, nothing named them,
+        and the recovery was a manual 12-step continuation that had to dodge what
+        was already there.
+
+        Names rather than objects, because the whole point is to compare two
+        moments and a COM handle cannot be compared reliably across calls. A name
+        CATIA duplicated would collapse into one key - which is exactly why the
+        delete this feeds into documents its own duplicate-name refusal.
+        """
+        try:
+            part = self.conn.get_active_part()
+        except Exception:  # noqa: BLE001 - no part, no snapshot
+            return None
+        names: dict[str, int] = {}
+
+        def note(label: Any) -> None:
+            text = str(label or "")
+            if text and text not in names:
+                names[text] = len(names)
+
+        def walk(holder: Any, depth: int = 0) -> None:
+            if depth > 4:
+                return
+            for collection in ("HybridShapes", "HybridSketches"):
+                try:
+                    items = getattr(holder, collection)
+                    count = int(items.Count)
+                except Exception:  # noqa: BLE001 - not this collection
+                    continue
+                for position in range(1, count + 1):
+                    try:
+                        note(items.Item(position).Name)
+                    except Exception:  # noqa: BLE001 - one element
+                        pass
+            try:
+                nested = holder.HybridBodies
+                count = int(nested.Count)
+            except Exception:  # noqa: BLE001 - no nested sets
+                return
+            for position in range(1, count + 1):
+                try:
+                    child = nested.Item(position)
+                    note(child.Name)
+                except Exception:  # noqa: BLE001 - one nested set
+                    continue
+                walk(child, depth + 1)
+
+        try:
+            for index in range(1, int(part.Bodies.Count) + 1):
+                body = part.Bodies.Item(index)
+                for collection in ("Shapes", "Sketches", "HybridShapes"):
+                    try:
+                        items = getattr(body, collection)
+                        count = int(items.Count)
+                    except Exception:  # noqa: BLE001 - not this collection
+                        continue
+                    for position in range(1, count + 1):
+                        try:
+                            note(items.Item(position).Name)
+                        except Exception:  # noqa: BLE001 - one element
+                            pass
+            for index in range(1, int(part.HybridBodies.Count) + 1):
+                try:
+                    holder = part.HybridBodies.Item(index)
+                    note(holder.Name)
+                except Exception:  # noqa: BLE001 - one set
+                    continue
+                walk(holder)
+        except Exception:  # noqa: BLE001 - a half-readable part still helps
+            pass
+        return names
+
+    def _created_since(self, before: dict[str, int]) -> list[str]:
+        """Names that were not in the part before the plan ran, in tree order."""
+        after = self._snapshot_names()
+        if after is None:
+            return []
+        return [name for name in after if name not in before]
+
+    def _rollback(self, names: list[str]) -> dict[str, Any]:
+        """Delete what a failed plan created, newest first, and say what happened.
+
+        NEWEST FIRST is the only order that works without asking the model what
+        depends on what: a plan builds sections and then the solid, and the solid
+        cannot be deleted before them.
+
+        THE VERDICT IS READ BACK FROM THE TREE, not from the reply. A delete can
+        answer "deleted" for a name CATIA resolved to a different element - this
+        same tool documents that two elements can share one name - so the only
+        statement worth making is which names are gone now. That is also why the
+        result carries ``verified``: a tree that cannot be read back leaves the
+        outcome UNKNOWN rather than successful.
+        """
+        ordered = list(reversed(names))
+        report: dict[str, Any] = {"requested": len(ordered), "names": ordered,
+                                  "deleted": [], "left": [], "verified": False,
+                                  "error": None}
+        if not ordered:
+            report["verified"] = True
+            return report
+        handler = self._router.get("catia_delete_feature")
+        if handler is None:
+            report["error"] = "catia_delete_feature is not bound to this planner"
+            return report
+        try:
+            report["reply"] = self._trim(str(handler.execute(
+                "catia_delete_feature", {"names": ordered})))
+        except Exception as error:  # noqa: BLE001 - the tree check decides below
+            report["error"] = f"{type(error).__name__}: {error}"
+        after = self._snapshot_names()
+        if after is None:
+            return report
+        report["deleted"] = [name for name in ordered if name not in after]
+        report["left"] = [name for name in ordered if name in after]
+        report["verified"] = True
+        return report
 
     def _validate_expect(self, expect: Any) -> list[str]:
         """Everything wrong with `expect`, before a single step runs.
@@ -430,9 +644,11 @@ class PlannerTools:
 
         problems = self._validate_steps(steps)
         arg_problems = self._validate_args(steps)
+        semantic_problems = self._semantic_problems(steps)
         expect_problems = self._validate_expect(arguments.get("expect"))
-        if problems or arg_problems or expect_problems:
+        if problems or arg_problems or semantic_problems or expect_problems:
             messages = (problems + [p["message"] for p in arg_problems]
+                        + [p["message"] for p in semantic_problems]
                         + expect_problems)
             # "BAD_ARGS" is the honest code when the only thing wrong is a step's
             # arguments: the plan itself is fine, and the caller has to fix a
@@ -440,7 +656,7 @@ class PlannerTools:
             # from the step half - they are fixed in different places.
             if problems:
                 code = "INVALID_PLAN"
-            elif arg_problems:
+            elif arg_problems or semantic_problems:
                 code = "BAD_ARGS"
             else:
                 code = "INVALID_EXPECT"
@@ -453,6 +669,11 @@ class PlannerTools:
                 "problems": messages,
                 "expect_problems": expect_problems,
             }
+            if semantic_problems:
+                # Each entry keeps the code the TOOL would have answered, so a
+                # caller branching on BAD_ARGUMENT / T_NOT_INCREASING still works
+                # - this refusal is a pre-run of the same check, not a new one.
+                data["semantic_problems"] = semantic_problems
             if self._unknown_argument_problems and (
                     self._unknown_argument_problems == len(problems)):
                 data["problem_code"] = "UNKNOWN_ARGUMENT"
@@ -466,7 +687,7 @@ class PlannerTools:
                 code=code,
                 message="Plan rejected before touching the model: "
                         + "; ".join(messages[:3]),
-                details=arg_problems or None,
+                details=(arg_problems or semantic_problems) or None,
                 data=data,
                 next_actions=[
                     "Fix the named argument and re-submit: this plan was rejected "
@@ -481,16 +702,31 @@ class PlannerTools:
                 "ok": True,
                 "code": "PLAN_VALID",
                 "tool": "catia_run_plan",
-                "message": f"Plan of {len(steps)} steps is valid; nothing executed",
+                "message": (f"Plan of {len(steps)} steps is valid; nothing executed. "
+                            "This includes the tools' own semantic checks, not just "
+                            "the argument schemas - the 0.3.126 addition, because a "
+                            "2026-11-14 plan passed dry_run and then died at step 10 "
+                            "on 'major (5.2) is shorter than minor (5.8)'."),
                 "data": {
                     "steps": [
                         {"index": i, "tool": s["tool"], "id": s.get("id")}
                         for i, s in enumerate(steps, start=1)
-                    ]
+                    ],
+                    "semantic_checks": sum(
+                        1 for s in steps
+                        if s.get("tool") in getattr(
+                            type(self._router.get(s.get("tool"))), "PRE_CHECKS", {})),
                 },
             }
 
         stop_on_error = arguments.get("stop_on_error", True)
+        rollback_wanted = bool(arguments.get("rollback"))
+        # A SNAPSHOT BEFORE THE FIRST STEP. What a plan BUILT can only be answered
+        # by comparing two moments, and this is the first one. Taken even when
+        # rollback is not asked for, because "the model now holds six elements it
+        # did not hold before" is worth saying to every caller of a failed plan -
+        # the 2026-11-14 report had to find that out by looking at the tree.
+        before_tree = self._snapshot_names()
         report: list[dict[str, Any]] = []
         failed_at: int | None = None
 
@@ -552,6 +788,16 @@ class PlannerTools:
                     break
 
         measure = arguments.get("measure", True) or bool(arguments.get("expect"))
+        # WHAT THE FAILED PLAN LEFT BEHIND, and the chance to take it back.
+        # Both are answered from the tree, not from the step reports: a step that
+        # answered ok:true can still be the one that created the element, and a
+        # step that failed may have created half of its output before giving up.
+        created: list[str] = []
+        rollback_report: dict[str, Any] | None = None
+        if failed_at is not None and before_tree is not None:
+            created = self._created_since(before_tree)
+            if created and rollback_wanted:
+                rollback_report = self._rollback(created)
         measurements: dict[str, Any] = {}
         assertions: list[dict[str, Any]] = []
         assertions_skipped_because = None
@@ -595,6 +841,38 @@ class PlannerTools:
         if failed_at is not None:
             code = "STEP_FAILED"
             message = self._failure_summary(report, stop_on_error, len(steps))
+            # What the plan had already built, in the sentence a caller reads
+            # first - the 2026-11-14 report's plan left six elements in the model
+            # and said only "1 of 21 planned steps failed".
+            if created:
+                names = ", ".join(created[:4]) + (
+                    f", ... ({len(created) - 4} more)" if len(created) > 4 else "")
+                if rollback_report is not None:
+                    if not rollback_report.get("verified"):
+                        message += (f" {len(created)} element(s) had already been "
+                                    f"built ({names}) and rollback=true was asked "
+                                    "for, but the tree could not be read back - "
+                                    "whether they are still there is UNKNOWN.")
+                    elif rollback_report.get("left"):
+                        message += (f" {len(created)} element(s) had already been "
+                                    f"built ({names}) and rollback=true was asked "
+                                    f"for: {len(rollback_report['deleted'])} were "
+                                    "deleted, "
+                                    f"{len(rollback_report['left'])} could NOT be "
+                                    f"({', '.join(rollback_report['left'][:4])}) "
+                                    "- they are still in the model.")
+                    else:
+                        message += (f" The {len(created)} element(s) this plan had "
+                                    f"already built ({names}) were deleted again "
+                                    "(rollback=true).")
+                else:
+                    message += (f" {len(created)} element(s) this plan had already "
+                                f"built are STILL IN THE MODEL ({names}) - pass "
+                                "rollback=true to have a failed plan take its own "
+                                "work back, or delete them with "
+                                "catia_delete_feature(names=[...]).")
+            elif before_tree is not None:
+                message += " Nothing had been created in the document when it failed."
             if assertions_skipped_because:
                 message += f" (assertions not evaluated: {len(report)} step(s) ran, " \
                            f"{sum(1 for e in report if not e['ok'])} failed)"
@@ -633,6 +911,35 @@ class PlannerTools:
             "executed": len(report),
             "planned": len(steps),
         }
+        if failed_at is not None:
+            # Always present on a failure, so a caller can branch without asking
+            # whether the key exists. "Nothing was created" and "I could not tell"
+            # are different answers and get different statuses.
+            data["created_features"] = created
+            if before_tree is None:
+                data["created_features_status"] = "unknown"
+                data["created_features_note"] = (
+                    "the tree could not be read before the first step, so what this "
+                    "plan created cannot be named - and nothing was rolled back. "
+                    "Compare with catia_list_features / catia_gsd_list_elements.")
+            elif rollback_report is not None:
+                survived = rollback_report.get("left") or []
+                if not rollback_report.get("verified"):
+                    data["created_features_status"] = "rollback_unverified"
+                elif survived:
+                    data["created_features_status"] = "partly_rolled_back"
+                else:
+                    data["created_features_status"] = "rolled_back"
+                data["rollback"] = rollback_report
+            elif created:
+                data["created_features_status"] = "kept"
+                data["created_features_note"] = (
+                    "these are IN THE MODEL NOW: the steps before the failure "
+                    "built them and nothing removed them. Add 'rollback': true to "
+                    "the same call to have a failed plan take its own work back, or "
+                    "delete them with catia_delete_feature(names=[...]).")
+            else:
+                data["created_features_status"] = "nothing_created"
         if assertions_skipped_because:
             data["assertions_status"] = "skipped"
             data["assertions_skipped_because"] = assertions_skipped_because

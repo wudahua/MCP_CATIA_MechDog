@@ -27,14 +27,50 @@ from catia_mcp.tools.diagnostics import _CAPABILITY_CEILINGS
 from catia_mcp.tools.part_design import PartDesignTools
 
 
-def test_hiding_construction_warns_that_the_solid_can_go_with_it():
-    source = inspect.getsource(PartDesignTools._set_visibility_kind)
+def test_hiding_construction_says_the_solid_stays_and_names_what_used_to_go_wrong():
+    """Rewritten in 0.3.126, because the sentence this test used to demand - "this
+    can take the SOLID off the screen too" - was measured to be about the wrong
+    cause.
 
-    assert "can take the SOLID off the screen" in source
-    # And the way back, which was measured, not assumed.
-    assert "with show=true to get the picture back" in source
+    The old assertion (`"can take the SOLID off the screen" in source`) was correct
+    for what 0.3.115 had seen: hiding kind='construction' on a solid loft whose
+    sections are sketches left the window with only the ground grid. What 0.3.126
+    added is WHY, with four captures of one document compared by SHA-256 on B30
+    2026-11-14:
+
+      hide only the sketches ........ solid VISIBLE, profiles gone
+      hide only the 3 origin planes .. picture identical to "all shown"
+      hide body.HybridShapes ........ SOLID GONE, grid only
+      SetShow(1) on the loft then ... identical to "solid gone"
+
+    body.HybridShapes holds ['Datum_xy_20', 'Body'] on that part, and 'Body' is the
+    loft - so the loop was switching the solid off directly. It now skips names
+    that are also in body.Shapes. Hiding construction no longer removes the solid,
+    and the warning has to stop saying it does; keeping the old string would have
+    kept a true-sounding sentence whose cause is gone.
+    """
+    source = inspect.getsource(PartDesignTools._set_visibility_kind)
+    flat = " ".join(source.split())
+
+    # The solid stays - that is the new fact, and it is the one a caller acts on.
+    assert "SOLID stays exactly where it is" in flat
+    # The correction is stated in the same breath, with its measurement.
+    assert "entry in body.HybridShapes" in flat
+    assert "measured on B30 2026-11-14" in flat
+    # The rule itself: material names are skipped, not hidden.
+    assert "kept_material" in source and "_material_names" in source
     # Only on the hiding side: showing cannot hide anything.
     assert 'vanish = "" if show else' in source
+
+
+def test_the_material_names_are_read_from_the_body_shapes():
+    """The skip list is body.Shapes by name, which is the only collection that
+    means "this feature makes material" (measured on B30 2026-11-14)."""
+    source = inspect.getsource(
+        __import__("catia_mcp.tools.part_design", fromlist=["_material_names"])
+        ._material_names)
+    assert "body.Shapes" in source
+    assert "names.add" in source
 
 
 def test_showing_a_body_also_shows_the_features_in_it():

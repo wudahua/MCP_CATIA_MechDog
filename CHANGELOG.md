@@ -2,6 +2,109 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.126] — 2026-11-14 · three things the report had measured and the code had not
+
+The 2026-11-14 report's P0-4, P1-1 and P1-3 were each described as
+"a real problem with measurements, needing a design". This is that design, and
+each of the three turned out to have a cause different from the one in the report.
+
+### P0-4: an elliptic section, because GSD has no ellipse
+
+`sections` now takes `[[t, rx, ry], ...]` beside `[[t, radius], ...]` and
+`[r0, r1, ...]`, and the three mix wherever they agree on `t`
+(`[[0, 8], [0.5, 5, 3]]` is a round stem that flattens). `rx` and `ry` are
+SEMI-axes - the report's earbud stem is 5.4 x 4.8 mm across, so `rx=2.7 ry=2.4`.
+
+The report said the gap was "only circles". It was worse than that: measured on
+B30 2026-11-14, `HybridShapeFactory` answers **no** to `AddNewEllipse` while it
+answers yes to `AddNewConic` and `AddNewSpline` - and a conic is an OPEN curve, so
+a loft through one does not close into a solid. So an elliptic station is a
+CLOSED SPLINE through 64 points that lie on the ellipse, which is the one shape
+where an interpolating spline is the right primitive (the standing warning about
+splines is about POLYGONS, where the corners are the specification and the curve
+bulges across them):
+
+```
+10 x 6 ellipse, spline length ......  51.0540 mm against the exact 51.0543  (-0.001 %)
+10x6 -> 5x3 loft, volume ...........  1099.56 mm3 against the analytic 1099.56 (-0.000 %)
+circular baseline r8 -> r16, 40 mm .  18765.82 mm3 against 18767.78, CATIA 18765.8 (-0.002 %)
+```
+
+Stations are oriented from the plane CATIA already builds. `GetPlane` answers for
+a datum plane **only** through `SystemService.Evaluate` (a direct call raises
+方法 GetPlane 失败): it returns the station's origin and two ORTHONORMAL axes,
+dot products with the tangent 0.0000. On a bent spine those axes are carried from
+station to station, so the loft does not twist; `major_axis` picks the first
+direction when CATIA's own choice is not the one you meant.
+
+The volume check is now ONE formula, `pi*h/6*(f0 + 4*fmid + f1)` per segment with
+`f = rx*ry`, because Simpson is exact for it (`rx` and `ry` are linear, so their
+product is quadratic). With `rx == ry` it collapses algebraically to the
+truncated-cone sum 0.3.124 compared against - measured identity on the documented
+8 -> 16 over 40 mm case - so the circle path is not a branch, it is the same
+formula with one fewer term.
+
+### P1-1: a dry run that runs the tools' own checks, and a failed plan that can undo itself
+
+`dry_run` used to check argument schemas only, so a 21-step plan passed it and
+then died at step 10 of 21 on `major (5.2) is shorter than minor (5.8)` - with
+three sketches and three datum planes already in the model.
+
+  * **Semantic pre-checks.** Tools declare `PRE_CHECKS` next to themselves
+    (`catia_sketch_ellipse`, `catia_solid_sweep_variable`, `catia_solid_loft`),
+    and the planner runs them before the first step and during `dry_run`. The
+    rule is the tool's OWN classmethod, so a dry run cannot disagree with the
+    run: measured, the planner answers `BAD_ARGS` naming step 3 with the tool's
+    code `BAD_ARGUMENT`. `data.semantic_checks` says how many steps were checked
+    that way, so "0" is not read as "all of them".
+  * **`created_features` on every failure**, from a tree snapshot taken before
+    step 1: the failure sentence now says *"1 element(s) this plan had already
+    built are STILL IN THE MODEL (草图.1)"* instead of only "1 of 4 steps failed".
+  * **`rollback: true`** deletes them newest first - the only order that works
+    without asking the model what depends on what - and the verdict is read BACK
+    FROM THE TREE, never from the delete's own reply, because a name can resolve
+    to a different element. Measured: `verified: true, left: []`, and
+    `catia_list_features` afterwards holds nothing.
+
+### P1-3: `clean="solid_only"`, and the reason hiding construction took the solid
+
+`clean=true` only ever hid geometrical sets, so the report's sketch-section part
+answered *"this part has no geometrical sets, so nothing was hidden"* while seven
+profile curves sat on the solid. `clean="solid_only"` hides the sets AND the
+sketches inside the bodies; `clean=true` keeps its 0.3.53 meaning so an older
+plan does not silently start hiding sketches.
+
+**AND THE OLD EXPLANATION WAS WRONG.** 0.3.115 measured that hiding
+`kind="construction"` takes a solid loft off the screen and wrote that the section
+curves are construction, so CATIA stops displaying a feature whose input is
+hidden. Four captures of one document compared by SHA-256 on B30 2026-11-14:
+
+```
+hide only the sketches .......... solid VISIBLE, profiles gone   (47 066 bytes)
+hide only the 3 origin planes ... IDENTICAL to "all shown"       (55 726 bytes)
+hide body.HybridShapes .......... SOLID GONE, grid only          (46 957 bytes)
+SetShow(1) on the loft then ..... IDENTICAL to "solid gone"
+UpdateObject(loft) then ......... IDENTICAL to "sketches hidden"
+```
+
+`body.HybridShapes` reads `['Datum_xy_20', 'Body']` - **the loft itself is a
+member of the collection being emptied**, so the solid was switched off directly,
+not withdrawn by a display dependency. That also explains why setting its own flag
+back did nothing. `catia_set_visibility` now skips any entry whose name is also a
+`body.Shape`, and the 0.3.115 warning was rewritten rather than deleted: it was a
+true observation with the wrong cause. Re-measured: 83.5 % of the centre box still
+light against 14 % for the old failure.
+
+### Also
+
+  * `catia_solid_loft` with one section answers `NOT_ENOUGH_SECTIONS` instead of
+    a bare argument error.
+  * The acceptance scripts are `scripts/b30_v0428_audit.py` (12/12),
+    `b30_v0428_audit_clean.py` (10/10) and `b30_v0428_audit_plan.py` (11/11).
+
+2022 tests. 148 tools. P0-1 (a drawing entrance) is still a new subsystem, and
+P1-5's ASCII policy / P2-1's `catia_server_info` remain queued.
+
 ## [0.3.125] — 2026-11-14 · a sketch that can be read and driven
 
 The 2026-11-14 report's two P0s were the same hole seen from two sides: a sketch

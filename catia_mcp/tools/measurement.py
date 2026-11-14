@@ -273,6 +273,72 @@ def _restore_visibility(records: list[tuple[Any, int]], selection: Any) -> int:
     return done
 
 
+def _hide_body_sketches(part: Any, selection: Any
+                        ) -> tuple[list[tuple[Any, int]], dict[str, Any]]:
+    """Hide the SKETCHES inside the solid bodies - the other half of a clean shot.
+
+    catia_screenshot(clean=true) only ever knew about geometrical sets, so a part
+    whose loft sections are SKETCHES answered "this part has no geometrical sets,
+    so nothing was hidden" and photographed every profile curve over the solid
+    (the 2026-11-14 report's P1-3, first half, reproduced on B30 the same day).
+
+    AND THIS CLASS IS THE ONLY ONE THAT CAN BE HIDDEN WITHOUT TAKING THE SOLID.
+    Measured on B30 2026-11-14, one fresh document (2 sketch ellipses + a solid
+    loft), four captures compared by SHA-256:
+
+      hide only the sketches ....... solid still on screen, profile curves gone
+      hide only the 3 origin planes. picture IDENTICAL to "all shown" - no effect
+      hide body.HybridShapes ...... SOLID GONE, window empty but for the grid
+      SetShow(1) on the loft after. picture IDENTICAL to "solid gone" - no help
+      UpdateObject(loft) after ..... picture IDENTICAL to "sketches hidden"
+      body hide + body show ........ picture of "all shown" again
+
+    The third line is the correction 0.3.115 owes. Its warning on
+    catia_set_visibility says a solid loft "disappeared with" its construction
+    section curves and blames the dependency. Measured now:
+    body.HybridShapes holds ['Datum_xy_20', 'Body'] on this part - THE LOFT
+    ITSELF is a member of the collection that call empties. The solid was not
+    taken away by a downstream display rule; it was switched off directly, which
+    is also why setting its own flag back did not help: it was set back, and the
+    next call that walks the body emptied the same collection again.
+
+    So a clean capture hides sketches and NOTHING from body.HybridShapes.
+    """
+    info: dict[str, Any] = {"sketch_hidden": 0, "sketch_failed": 0,
+                            "bodies": 0}
+    records: list[tuple[Any, int]] = []
+    if selection is None:
+        return records, info
+    try:
+        bodies = int(part.Bodies.Count)
+    except Exception:  # noqa: BLE001 - a document with no part
+        return records, info
+    info["bodies"] = bodies
+    for index in range(1, bodies + 1):
+        try:
+            sketches = part.Bodies.Item(index).Sketches
+            count = int(sketches.Count)
+        except Exception:  # noqa: BLE001 - one body without sketches
+            continue
+        for position in range(1, count + 1):
+            try:
+                sketch = sketches.Item(position)
+            except Exception:  # noqa: BLE001 - one sketch
+                continue
+            before = _read_show(selection, sketch)
+            if before is None:
+                info["sketch_failed"] += 1
+                continue
+            records.append((sketch, before))
+            if before == 0 and _write_show(selection, sketch, 1):
+                info["sketch_hidden"] += 1
+            elif before != 0:
+                # Already hidden by the caller: keep the record so the restore
+                # puts it back hidden, but do not count it as our doing.
+                pass
+    return records, info
+
+
 def _fold_stats(path: str, crease_deg: float, cap: int,
                 region: dict[str, tuple[float, float]] | None = None,
                 top: int = 8) -> dict[str, Any]:

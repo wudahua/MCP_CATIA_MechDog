@@ -3982,6 +3982,58 @@ class SketcherTools:
                 return full
         return None
 
+    #: Which of this class's tools carry a semantic check that catia_run_plan can
+    #: pre-run (see planner's _semantic_problems). The 2026-11-14 report's 21-step
+    #: plan died at step 10 on the major/minor rule below - after nine steps had
+    #: already put geometry in the model - while dry_run had answered PLAN_VALID
+    #: for that same plan. The rule is declared here, next to the tool that owns
+    #: it, so it cannot drift away from what the tool actually enforces.
+    PRE_CHECKS = {"catia_sketch_ellipse": "_precheck_ellipse"}
+
+    @classmethod
+    def _check_ellipse_axes(cls, major: float, minor: float) -> None:
+        """The two rules that make an ellipse an ellipse.
+
+        Shared by catia_sketch_ellipse and by the planner's pre-run, because a
+        dry run that answers PLAN_VALID for a plan the tool will refuse is worse
+        than no dry run at all - that is exactly what the report hit.
+        """
+        if major <= 0 or minor <= 0:
+            raise ArgumentOutOfRange(
+                f"major and minor have to be positive radii in mm; got {major:g} "
+                f"and {minor:g}. An ellipse with a zero radius is a line.",
+                code="RADIUS_OUT_OF_RANGE", stage="validate")
+        if major < minor:
+            raise ArgumentRejected(
+                f"major ({major:g}) is shorter than minor ({minor:g}); 'major' is "
+                "the LONG semi-axis and it sets the direction of the ellipse. Pass "
+                f"major={minor:g}, minor={major:g} if that is what you meant.",
+                code="BAD_ARGUMENT", stage="validate")
+
+    def _precheck_ellipse(self, args: dict[str, Any]) -> None:
+        """Refuse what catia_sketch_ellipse would refuse, without drawing it.
+
+        Returns None when the arguments are usable. Raises the tool's own
+        CodedError otherwise, so the dry run reports the same code the real call
+        would - a check that invents a new code is a check a caller cannot branch
+        on. Missing or non-numeric axes are LEFT to the schema: those are already
+        refused before a plan starts, and saying it twice reads as two faults.
+        """
+        try:
+            major = float(args.get("major"))
+            minor = float(args.get("minor"))
+        except (TypeError, ValueError):
+            return
+        self._check_ellipse_axes(major, minor)
+        if args.get("angle") is not None:
+            try:
+                float(args.get("angle"))
+            except (TypeError, ValueError) as error:
+                raise ArgumentRejected(
+                    f"'angle' has to be a number of degrees; got "
+                    f"{args.get('angle')!r}.", code="BAD_ARGUMENT",
+                    stage="validate") from error
+
     def _draw_circle(self, cx: float, cy: float, radius: float,
                      driven: bool = True) -> str:
         self._ensure_sketch_open()
@@ -4019,17 +4071,7 @@ class SketcherTools:
                 f"cx, cy, major, minor and angle have to be numbers; got "
                 f"{cx!r}, {cy!r}, {major!r}, {minor!r}, {angle!r}.",
                 code="BAD_ARGUMENT", stage="validate") from error
-        if major <= 0 or minor <= 0:
-            raise ArgumentOutOfRange(
-                f"major and minor have to be positive radii in mm; got {major:g} "
-                f"and {minor:g}. An ellipse with a zero radius is a line.",
-                code="RADIUS_OUT_OF_RANGE", stage="validate")
-        if major < minor:
-            raise ArgumentRejected(
-                f"major ({major:g}) is shorter than minor ({minor:g}); 'major' is "
-                "the LONG semi-axis and it sets the direction of the ellipse. Pass "
-                f"major={minor:g}, minor={major:g} if that is what you meant.",
-                code="BAD_ARGUMENT", stage="validate")
+        self._check_ellipse_axes(major, minor)
 
         import math
 

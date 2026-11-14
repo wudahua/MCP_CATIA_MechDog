@@ -223,8 +223,48 @@ def _removed_centroid(v0: Any, g0: Any, v1: Any, g1: Any
     return point, abs(float(v1) / removed)
 
 
+def _material_names(body: Any) -> set[str]:
+    """Names of the features that MAKE MATERIAL in this body.
+
+    ``body.HybridShapes`` is not "the construction inside the body". On a Part
+    Design loft it also lists the loft itself - measured on B30 2026-11-14, a
+    two-sketch loft in 零件几何体 gave ``body.HybridShapes`` =
+    ['Datum_xy_20', 'Body'] where 'Body' is the solid, and ``body.Shapes`` =
+    ['Body']. Anything whose name is a shape here is material, whichever
+    collection it also appears in, and hiding it takes the model off the screen.
+    """
+    names: set[str] = set()
+    try:
+        shapes = body.Shapes
+        for index in range(1, int(shapes.Count) + 1):
+            try:
+                names.add(str(shapes.Item(index).Name))
+            except Exception:  # noqa: BLE001 - one unreadable shape
+                pass
+    except Exception:  # noqa: BLE001 - a body with no shapes
+        pass
+    return names
+
+
 class PartDesignTools:
     """Tools for 3D Part Design features in CATIA V5."""
+
+    #: Tools of this class that carry a semantic check catia_run_plan can pre-run
+    #: (see planner's _semantic_problems). Only the loft is here: its minimum is a
+    #: COUNT, which no argument schema can express, and a one-section loft used to
+    #: be refused after the plan had already built the section.
+    PRE_CHECKS = {"catia_solid_loft": "_precheck_loft"}
+
+    def _precheck_loft(self, args: dict[str, Any]) -> None:
+        """Refuse a loft the tool would refuse, without touching CATIA."""
+        sections = args.get("sections")
+        if not isinstance(sections, (list, tuple)):
+            return
+        if len(sections) < 2:
+            raise ArgumentRejected(
+                "A loft needs at least two sections - one section is a face, not "
+                "a solid. Nothing was created.",
+                code="NOT_ENOUGH_SECTIONS", stage="validate")
 
     def __init__(self, connection: CATIAConnection) -> None:
         self.conn = connection
@@ -6019,7 +6059,10 @@ class PartDesignTools:
         if len(sections) < 2:
             # Checked before touching CATIA: a bad argument should not depend on
             # a document being open.
-            raise ArgumentRejected("A loft needs at least two sections.")
+            raise ArgumentRejected(
+                "A loft needs at least two sections - one section is a face, not "
+                "a solid. Nothing was created.",
+                code="NOT_ENOUGH_SECTIONS", stage="validate")
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
         body = self._prepare_body(part)
@@ -7128,6 +7171,7 @@ class PartDesignTools:
             active = "<the active document>"
         total = {"sketch": 0, "datum_plane": 0, "datum_element": 0}
         touched: list[str] = []
+        kept_material: list[str] = []
 
         want_sketch = kind in ("sketch", "construction")
         want_plane = kind in ("datum_plane", "construction")
@@ -7175,14 +7219,40 @@ class PartDesignTools:
                     # (P2-3). Nothing in a BODY but the solid is construction, so the
                     # whole collection goes; geometrical sets are left alone, because
                     # there a surface is usually the design.
+                    #
+                    # 0.3.126: "nothing in a body but the solid is construction" was
+                    # the wrong sentence in the right place - the SOLID IS IN THIS
+                    # COLLECTION TOO. Measured on B30 2026-11-14 on a two-sketch
+                    # solid loft: body.HybridShapes = ['Datum_xy_20', 'Body'], and
+                    # hiding it left the window with nothing but the ground grid.
+                    # That is the real cause of the effect 0.3.115 wrote down as
+                    # "hiding the construction takes the solid with it" and blamed
+                    # on the section curves being construction. They are not the
+                    # cause: hiding the sketches ALONE leaves the solid fully
+                    # visible (same measurement, picture compared by hash), and
+                    # setting the loft's own flag back does not undo this, because
+                    # it is the same node that was just switched off. So material
+                    # features are skipped by name.
                     for i in range(1, part.Bodies.Count + 1):
                         try:
                             hybrids = part.Bodies.Item(i).HybridShapes
                         except Exception:      # noqa: BLE001 - body without any
                             continue
+                        material = _material_names(part.Bodies.Item(i))
                         for j in range(1, hybrids.Count + 1):
                             try:
-                                apply(hybrids.Item(j))
+                                node = hybrids.Item(j)
+                            except Exception:  # noqa: BLE001 - one element
+                                continue
+                            try:
+                                label = str(node.Name)
+                            except Exception:  # noqa: BLE001 - an unnamed node
+                                label = ""
+                            if label and label in material:
+                                kept_material.append(label)
+                                continue
+                            try:
+                                apply(node)
                                 counts["datum_element"] += 1
                             except Exception:  # noqa: BLE001 - one element
                                 pass
@@ -7217,21 +7287,35 @@ class PartDesignTools:
         if total["datum_element"]:
             counted.append(f"{total['datum_element']} datum element(s) inside bodies")
         body = " and ".join(counted)
-        # 0.3.115: HIDING THESE CAN TAKE THE SOLID WITH THEM. Measured on B30
-        # 2026-11-13 (scripts/b30_v0417_visibility_fix.py): a 2-section solid loft
-        # whose circles live in GSD_Set stayed on screen when that set was hidden,
-        # and vanished when kind='construction' was hidden - those circles ARE
-        # construction, and CATIA stops displaying a feature whose input is
-        # hidden. The recovery is this same call with show=true (the picture came
-        # back and re-compressed to the byte size it had before). Hiding the SET
-        # does not do this, which is why the sentence is here and not there.
+        # 0.3.115 WROTE A WARNING HERE THAT 0.3.126 MEASURED TO BE ABOUT THE WRONG
+        # CAUSE. The old text said a solid loft "disappeared with" its construction
+        # section curves, because CATIA stops displaying a feature whose input is
+        # hidden. Measured on B30 2026-11-14, four captures of one document compared
+        # by SHA-256:
+        #   sketches hidden .................. solid VISIBLE, profiles gone
+        #   3 origin planes hidden ........... picture identical to "all shown"
+        #   body.HybridShapes hidden ......... SOLID GONE (grid only)
+        #   SetShow(1) on the loft after ..... identical to "solid gone"
+        # body.HybridShapes = ['Datum_xy_20', 'Body'] there - the loft itself is a
+        # member of the collection the old loop emptied. So the solid was never
+        # removed by a display dependency on its sections; it was switched off
+        # directly, which is also why setting its flag back could not undo it.
+        # That is fixed above (material names are skipped), so the warning is now
+        # about what is still true: the sections' OWN curves go with them.
+        skipped = (f" Kept {', '.join(repr(k) for k in kept_material[:3])}"
+                   f"{f' and {len(kept_material) - 3} more' if len(kept_material) > 3 else ''}"
+                   " visible on purpose: that name is also a feature in the body's"
+                   " Shapes, i.e. it makes material. body.HybridShapes mixes the"
+                   " two, and hiding the solid's own entry leaves the window empty"
+                   " (measured on B30 2026-11-14)."
+                   if kept_material else "")
         vanish = "" if show else (
-            " WARNING: this can take the SOLID off the screen too - measured on "
-            "B30 2026-11-13, a solid loft whose section curves are construction "
-            "elements disappeared with them, and the viewport went empty while "
-            "this call still reported how many elements it hid. Call this again "
-            "with show=true to get the picture back. Untick this kind only for a "
-            "screenshot, and say so in the reply you send to whoever reads it.")
+            " The sketches and datum elements go with their profile curves; the"
+            " SOLID stays exactly where it is - measured on B30 2026-11-14. (An"
+            " earlier version of this sentence warned that the solid could vanish"
+            " too. It could, and the cause was this call hiding the loft's own"
+            " entry in body.HybridShapes - fixed, and the measurement is in the"
+            " code comment.)" + skipped)
         if len(targets) == 1:
             return (f"{body} now {'shown' if show else 'hidden'}." + vanish)
         return (f"{body} now {'shown' if show else 'hidden'} in {len(touched)} of "

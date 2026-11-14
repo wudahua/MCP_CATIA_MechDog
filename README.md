@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.125** · [what changed](CHANGELOG.md) ·
+**0.3.126** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -74,7 +74,7 @@ two - `catia_delete_body`, `catia_solid_loft`; 0.3.19: one - `catia_copy_compone
 98 + 50 added = 148: the 31 below, `catia_apply_design_table` under Knowledgeware,
 `catia_drawing_set_sheet` and `catia_drawing_add_frame` under Drafting (0.3.65),
 the three colour tools in their own table below (0.3.79), `catia_replace_component` (0.3.80), `catia_split_solid` (0.3.94), `catia_measure_deviation` (0.3.119), `catia_solid_tube` (0.3.121), `catia_gsd_splines` (0.3.122), and
-`catia_solid_sweep_variable` (0.3.124), and
+`catia_solid_sweep_variable` (0.3.124, elliptic sections since 0.3.126), and
 `catia_set_constraint_value` (0.3.125). 0.3.85 added arguments instead of tools:
 `catia_gsd_boundary(edge=N, propagation=…)` takes one loop of a border (a
 selector `AddNewBoundaryOfSurface` does not have), `catia_gsd_fill` accepts
@@ -86,7 +86,7 @@ several documents.
 
 | Tool | What it gives you |
 |---|---|
-| `catia_run_plan` | Runs an ordered `{tool, args}` recipe in **one** call, then asserts volume / area / face / edge / vertex counts / centre of gravity |
+| `catia_run_plan` | Runs an ordered `{tool, args}` recipe in **one** call, then asserts volume / area / face / edge / vertex counts / centre of gravity. `dry_run` runs the **tools' own semantic checks**, not just the argument schemas (0.3.126) - a 2026-11-14 plan passed dry_run and then died at step 10 of 21 on `major (5.2) is shorter than minor (5.8)` after nine steps had already built geometry. `rollback: true` deletes what a failed plan had built, newest first, and reads the tree back to say which names are gone - `data.created_features` is reported whether or not you ask for it |
 | `catia_measure_topology` | Face, edge and vertex counts — the cheapest guard against a part with the right volume and the wrong shape |
 | `catia_set_component_transform` | Absolute placement from a 3×3 in either convention (`matrix` = `P = A·p + T`, `basis` = row i is where local axis i points) or CATIA's native 12 numbers; reads back and reports deviation, det, orthogonality **and where each local axis ended up** |
 | `catia_get_component_transform` | The same placement in both conventions, plus where local X/Y/Z point in the assembly |
@@ -1320,7 +1320,7 @@ while a reply that only reports success cannot.
 | Document | 12 | new/open/save/close/list + `catia_save_as_copy`; `catia_save_document` retries around dialogs |
 | Sketcher | 19 | lines, rectangles, circles, constraints; reopen a closed sketch and delete one element; `catia_sketch_copy` replays a profile onto another plane; `catia_sketch_strokes` draws a whole letter outline in one call, and `catia_text_strokes` supplies those outlines from a built-in single-line font (it can hand the points back, and always reports the box the text occupies; its baseline runs along the sketch's own +H); `catia_sketch_ellipse` draws a slanted ellipse in one curve AND makes both semi-axes dimensional constraints (so a user parameter drives them - `set_parameter` on 7 undriven ellipses changed nothing, measured 2026-11-14); `catia_set_constraint_value` changes one sketch dimension and reports what moved; `catia_sketch_profile` draws a MIXED outline - straight runs and arcs, each with its own primitive - in one call, and checks the junctions on the endpoints that will be DRAWN (it rebuilds each arc's circle through them) |
 | Part Design | 26 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, solid loft, bodies (create / list / delete)… |
-| Generative Shape Design | 40 | wireframe and surfaces, extract, `boundary`, `heal`, `fillet_surface`, `spine`, `rotate`, `translate`, `circ_pattern` (rotate+join), `plane_normal_to_curve`, `plane_angle`, revolve + close surface, and `catia_surface_engrave` (a constant-depth groove along a curve on a curved face, with `curves=[...]` for a whole word in one boolean); `catia_solid_tube` sweeps one circle along a curve into a closed solid (the six-step bend in one call); `catia_gsd_splines` builds a whole section chain in one call (17 calls become 1, a mid-chain refusal reports what exists instead of rolling back, and `source_file=` reads those sections from a JSON or CSV file); `catia_solid_sweep_variable` sweeps a RADIUS TABLE along a spine - one circle per station, one loft through them, judged against the ruled-cone sum (8 168.2 mm³ against 8 168.1 on a 50 mm cone); `catia_measure_deviation` samples a curve along its length and reports how far each sample sits from a body or a face; a GSD element or set is removed with `catia_delete_feature` |
+| Generative Shape Design | 40 | wireframe and surfaces, extract, `boundary`, `heal`, `fillet_surface`, `spine`, `rotate`, `translate`, `circ_pattern` (rotate+join), `plane_normal_to_curve`, `plane_angle`, revolve + close surface, and `catia_surface_engrave` (a constant-depth groove along a curve on a curved face, with `curves=[...]` for a whole word in one boolean); `catia_solid_tube` sweeps one circle along a curve into a closed solid (the six-step bend in one call); `catia_gsd_splines` builds a whole section chain in one call (17 calls become 1, a mid-chain refusal reports what exists instead of rolling back, and `source_file=` reads those sections from a JSON or CSV file); `catia_solid_sweep_variable` sweeps a RADIUS TABLE along a spine - one profile per station, one loft through them, judged against the ruled-cone sum (8 168.2 mm³ against 8 168.1 on a 50 mm cone); since 0.3.126 a station may be an ELLIPSE (`[[t, rx, ry], ...]`, semi-axes), built as a closed spline through 64 points that lie on it because GSD has no ellipse primitive - measured at -0.001 % of the exact perimeter, and 1 099.56 mm³ against the analytic 1 099.56 for a 10x6 -> 5x3 loft; `catia_measure_deviation` samples a curve along its length and reports how far each sample sits from a body or a face; a GSD element or set is removed with `catia_delete_feature` |
 | Assembly | **14** | upstream 9 + get/set component transform, rename, list constraints, copy component, replace component |
 | Appearance | **3** | `catia_colorize_assembly`, `catia_set_color`, `catia_get_color` - per-instance colour in an assembly, per-node in a part |
 | Measurement | 8 | inertia, distance, bounding box\*, parameters, `catia_check_surface`, `catia_shape_audit` |

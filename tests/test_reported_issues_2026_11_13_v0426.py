@@ -20,6 +20,7 @@ sum of 8168.1; the same line with [8, 8, 8] gives 10052.7 against pi*64*50 =
 from __future__ import annotations
 
 import json
+import math
 
 import pytest
 
@@ -177,10 +178,74 @@ def test_entries_and_source_file_together_are_refused(tmp_path):
 
 
 def test_pairs_and_bare_radii_are_the_same_table():
+    # A station is (t, rx, ry) since 0.3.126, not (t, radius): the 2026-11-14
+    # report's P0-4 needs an elliptic station, and a circle is the case rx == ry.
+    # These two assertions were `[(0.0, 10.0), ...]` when this file was written,
+    # and they were right then - the table had one radius because every station
+    # was a circle. The change is in the SHAPE of the table, not in what a bare
+    # [r0, r1, ...] means.
     assert GSDTools._sweep_stations([[0, 10], [0.5, 7], [1, 4]]) == [
-        (0.0, 10.0), (0.5, 7.0), (1.0, 4.0)]
+        (0.0, 10.0, 10.0), (0.5, 7.0, 7.0), (1.0, 4.0, 4.0)]
     assert GSDTools._sweep_stations([10, 7, 4]) == [
-        (0.0, 10.0), (0.5, 7.0), (1.0, 4.0)]
+        (0.0, 10.0, 10.0), (0.5, 7.0, 7.0), (1.0, 4.0, 4.0)]
+
+
+def test_an_elliptic_station_carries_its_two_semi_axes():
+    assert GSDTools._sweep_stations([[0, 5.4, 4.8], [1, 2.7, 2.4]]) == [
+        (0.0, 5.4, 4.8), (1.0, 2.7, 2.4)]
+    # The forms mix where they agree on t: a round stem that becomes a flat
+    # section is the shape this was added for.
+    assert GSDTools._sweep_stations([[0, 8], [0.5, 5, 3], [1, 2, 1.5]]) == [
+        (0.0, 8.0, 8.0), (0.5, 5.0, 3.0), (1.0, 2.0, 1.5)]
+
+
+@pytest.mark.parametrize("bad, code", [
+    ([[0, 5.4, -4.8], [1, 2.7, 2.4]], "RADIUS_OUT_OF_RANGE"),
+    ([[0, 5.4, 4.8, 1], [1, 2.7, 2.4, 1]], "BAD_SECTIONS"),
+])
+def test_bad_elliptic_stations_are_refused(bad, code):
+    with pytest.raises(Exception) as caught:
+        GSDTools._sweep_stations(bad)
+    assert getattr(caught.value, "code", "") == code
+
+
+def test_the_elliptic_volume_formula_agrees_with_the_cone_formula():
+    # rx == ry must collapse to pi*h/3*(r0^2 + r0*r1 + r1^2) exactly, because that
+    # is the number 0.3.124 compared against the documented 8 -> 16 over 40 mm
+    # case (18765.8 mm3 measured). If the two disagreed, the circle path would
+    # have been silently re-baselined by adding ellipse support.
+    stations = GSDTools._sweep_stations([[0, 8], [1, 16]])
+    cone = math.pi * 40.0 / 3.0 * (8 * 8 + 8 * 16 + 16 * 16)
+    assert abs(GSDTools._swept_volume(stations, 40.0) - cone) < 1e-9
+
+    # And an elliptic pair against its own Simpson value: f = rx*ry is quadratic
+    # along a segment, so 1099.56 is analytic, not fitted.
+    ellipse = GSDTools._sweep_stations([[0, 10, 6], [1, 5, 3]])
+    assert abs(GSDTools._swept_volume(ellipse, 10.0) - math.pi * 350.0) < 1e-9
+
+
+def test_the_axes_are_carried_and_a_ninety_degree_bend_refuses():
+    # Straight ahead: the axis is unchanged.
+    carried = GSDTools._carry_frame([1.0, 0.0, 0.0], [0.0, 0.0, 1.0])
+    assert carried == [1.0, 0.0, 0.0]
+    # A bend: the axis stays in the new plane, and stops being the old vector.
+    bent = GSDTools._carry_frame([1.0, 0.0, 0.0], [0.7071068, 0.7071068, 0.0])
+    assert abs(sum(a * b for a, b in zip(bent, [0.7071068, 0.7071068, 0.0]))) < 1e-6
+    # 90 degrees: no continuous answer, and the caller says so instead of guessing.
+    assert GSDTools._carry_frame([1.0, 0.0, 0.0], [1.0, 0.0, 0.0]) is None
+
+
+def test_the_ellipse_ring_lies_on_the_ellipse():
+    ring = GSDTools._ellipse_ring([0.0, 0.0, 0.0], [1.0, 0.0, 0.0],
+                                  [0.0, 1.0, 0.0], 10.0, 6.0, count=16)
+    assert len(ring) == 16
+    for x, y, z in ring:
+        assert abs((x / 10.0) ** 2 + (y / 6.0) ** 2 - 1.0) < 1e-12
+        assert z == 0.0
+    # The ring's own extents ARE the semi-axes - the point of building it from
+    # points on the curve rather than sampling a bounding box.
+    assert abs(max(p[0] for p in ring) - 10.0) < 1e-9
+    assert abs(max(p[1] for p in ring) - 6.0) < 1e-9
 
 
 @pytest.mark.parametrize("bad, code", [
@@ -213,8 +278,10 @@ def test_the_new_tool_and_its_arguments_exist():
     assert "catia_solid_sweep_variable" in definitions
     schema = definitions["catia_solid_sweep_variable"]["inputSchema"]
     assert schema["required"] == ["spine", "sections"]
+    # major_axis joined in 0.3.126 with elliptic stations: rx has to run along a
+    # direction the caller can name, or the ellipse's orientation is CATIA's.
     assert set(schema["properties"]) == {"spine", "sections", "name", "body",
-                                         "helpers"}
+                                         "helpers", "major_axis"}
 
     splines = definitions["catia_gsd_splines"]["inputSchema"]
     assert "source_file" in splines["properties"]

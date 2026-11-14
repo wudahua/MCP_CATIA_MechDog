@@ -121,18 +121,35 @@ class ExportTools:
                             "default": 1080,
                         },
                         "clean": {
-                            "type": "boolean",
+                            "type": ["boolean", "string"],
                             "default": False,
                             "description": (
-                                "Hide the geometrical sets, capture, and put every "
-                                "visibility flag back. This is what makes a picture "
-                                "of the SOLID: with construction surfaces on screen "
-                                "they draw over it, and if the solid itself lives in "
-                                "one of those sets (a ThickSurface does) hiding the "
-                                "set by hand gives a blank window - reported "
-                                "2026-11-10. The elements carrying the solid are kept "
-                                "visible, so the model is still in the picture, and "
-                                "the reply says how many flags were restored. "
+                                "Leave construction geometry out of the picture: "
+                                "hide it, capture, then put every visibility flag "
+                                "back. TWO MODES, because two kinds of part need "
+                                "cleaning and only one of them has geometrical "
+                                "sets. "
+                                "false (default): nothing is changed. "
+                                "true or 'sets': hide the GEOMETRICAL SETS, "
+                                "keeping whatever carries the solid visible - right "
+                                "for a part built from GSD surfaces, and what "
+                                "clean=true has meant since 0.3.53. "
+                                "'solid_only': the sets AND THE SKETCHES INSIDE THE "
+                                "SOLID BODIES. Pass this for a part whose features "
+                                "are sketch-based: clean=true answers 'this part "
+                                "has no geometrical sets, so nothing was hidden' "
+                                "there while every profile curve sits on top of the "
+                                "solid (the 2026-11-14 report's P1-3). "
+                                "WHAT IS DELIBERATELY NOT HIDDEN, measured on B30 "
+                                "2026-11-14 with four captures compared by hash: "
+                                "the datum planes (hiding the 3 origin planes "
+                                "changes nothing at all) and the elements inside "
+                                "the bodies - body.HybridShapes there holds "
+                                "['Datum_xy_20', 'Body'], so hiding that collection "
+                                "switches the SOLID ITSELF off and the window shows "
+                                "only the grid; setting the loft's own flag back "
+                                "does not help. Hiding only the sketches leaves the "
+                                "solid fully visible with its profiles gone. "
                                 "THE TREE IS STILL IN THE PICTURE: no automation "
                                 "member hides it (Viewer3D exposes 58 members on B30 "
                                 "and no HideTree/ShowTree, measured 2026-11-10) - "
@@ -243,7 +260,7 @@ class ExportTools:
                     arguments["file_path"],
                     arguments.get("width", 1920),
                     arguments.get("height", 1080),
-                    bool(arguments.get("clean", False)),
+                    self._clean_mode(arguments.get("clean")),
                 )
             case "catia_set_view":
                 return self._set_view(
@@ -438,8 +455,33 @@ class ExportTools:
             return None
         return None
 
+    _CLEAN_MODES = ("sets", "solid_only")
+
+    @classmethod
+    def _clean_mode(cls, value: Any) -> str:
+        """``clean`` as a mode name, or "" for "leave the picture alone".
+
+        ``true`` keeps meaning what it has meant since 0.3.53 - the geometrical
+        sets - so a plan written against an older release does not silently start
+        hiding sketches too. A string says which one.
+        """
+        if value is None or value is False:
+            return ""
+        if value is True:
+            return "sets"
+        mode = str(value).strip().lower()
+        if mode in cls._CLEAN_MODES:
+            return mode
+        raise ArgumentRejected(
+            f"clean={value!r} is not a mode. Use false (leave the picture alone), "
+            "true (same as 'sets'), 'sets' (hide the geometrical sets), or "
+            "'solid_only' (hide the sets AND the sketches inside the bodies - what "
+            "a part built from sketch sections needs; measured on B30 2026-11-14, "
+            "this is the only class that can be hidden without taking the solid "
+            "off the screen).", code="BAD_CLEAN_MODE", stage="validate")
+
     def _screenshot(self, file_path: str, width: int = 1920, height: int = 1080,
-                    clean: bool = False) -> str:
+                    clean: str = "") -> str:
         self.conn.ensure_connected()
 
         # Ensure output directory exists
@@ -472,7 +514,7 @@ class ExportTools:
         hidden_note = ""
         records: list[Any] = []
         if clean:
-            records, hidden_note = self._clean_view()
+            records, hidden_note = self._clean_view(clean)
         try:
             viewer.CaptureToFile(capture_format, os.path.normpath(file_path))
         finally:
@@ -507,33 +549,71 @@ class ExportTools:
         "exposes 58 members on B30 and the only display switches are lighting "
         "(measured 2026-11-13). Crop it out of a report image.")
 
-    def _clean_view(self) -> tuple[list[Any], str]:
+    def _clean_view(self, mode: str = "sets") -> tuple[list[Any], str]:
         """Hide construction geometry for one capture; returns what to restore.
 
         The 2026-11-10 report followed this tool's own advice - hide the
         geometrical set before a screenshot - and got a blank picture, because
         the solid was a ThickSurface INSIDE that set. Hiding the set hides the
         model, and no reply said so.
+
+        ``mode`` decides WHICH construction:
+
+          "sets"       geometrical sets only - the original behaviour of
+                       clean=true, right for a part built from GSD surfaces.
+          "solid_only" the sets AND the sketches inside the solid bodies, which
+                       is what a sketch-section part needs. The 2026-11-14 report
+                       (P1-3) pointed a clean=true call at exactly that part and
+                       got "this part has no geometrical sets, so nothing was
+                       hidden" while 7 ellipse profiles sat on top of the solid.
+
+        Neither mode touches body.HybridShapes, and that is a measurement, not a
+        preference: that collection holds the solid itself on a Part Design loft
+        (measured on B30 2026-11-14: body.HybridShapes = ['Datum_xy_20', 'Body'])
+        and hiding it empties the window. See _hide_body_sketches.
         """
         try:
             part = self.conn.get_active_part()
         except Exception:  # noqa: BLE001 - an assembly or no document
             return [], (" [clean was asked for but the active document has no part "
                         "to clean: no visibility was changed]")
-        from catia_mcp.tools.measurement import _hide_construct_geometry
-        records, info = _hide_construct_geometry(part, getattr(self.conn, "hso",
-                                                               None))
+        from catia_mcp.tools.measurement import (_hide_body_sketches,
+                                                _hide_construct_geometry)
+        selection = getattr(self.conn, "hso", None)
+        records, info = _hide_construct_geometry(part, selection)
+        sketch_info: dict[str, Any] = {}
+        if mode == "solid_only":
+            sketch_records, sketch_info = _hide_body_sketches(part, selection)
+            records = records + sketch_records
+
+        parts: list[str] = []
+        if info.get("sets"):
+            parts.append(f"{info.get('hidden', 0)} construction element(s) in "
+                         f"{info.get('sets', 0)} set(s)")
+        if sketch_info.get("sketch_hidden"):
+            parts.append(f"{sketch_info['sketch_hidden']} sketch(es) inside "
+                         f"{sketch_info.get('bodies', 0)} body/bodies")
         if not records:
-            return [], (" [clean was asked for but this part has no geometrical "
-                        "sets, so nothing was hidden]")
+            return [], (" [clean was asked for but there was nothing this mode can "
+                        "hide without taking the solid with it: this part has no "
+                        "geometrical sets"
+                        + (" and no sketches inside its bodies" if mode == "solid_only"
+                           else "")
+                        + ", so nothing was hidden. That is not a failure - the "
+                        "picture is as clean as it gets without a support the solid "
+                        "draws from, measured on B30 2026-11-14]")
         kept = info.get("kept") or []
         return records, (
-            f" [clean: {info.get('hidden', 0)} construction element(s) in "
-            f"{info.get('sets', 0)} set(s) hidden for the capture"
+            f" [clean ({mode}): " + " and ".join(parts) + " hidden for the capture"
             + (f", keeping {', '.join(repr(k) for k in kept[:3])} visible because "
                f"it carries the solid" if kept else "")
-            + "; all flags restored afterwards. The specification tree is still in "
-              "the picture - no automation member hides it (measured 2026-11-10)]")
+            + "; all flags restored afterwards. NOT HIDDEN, on purpose: the datum "
+              "planes and the elements inside the bodies - measured on B30 "
+              "2026-11-14, hiding the body's own HybridShapes switches the SOLID "
+              "off (the loft is a member of that collection) and setting its flag "
+              "back does not help; hiding only the sketches leaves the solid fully "
+              "visible. The specification tree is still in the picture - no "
+              "automation member hides it (measured 2026-11-10)]")
 
     def _restore_view(self, records: list[Any]) -> None:
         """Put every visibility flag back after a capture."""
