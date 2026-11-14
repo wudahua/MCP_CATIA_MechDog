@@ -577,13 +577,30 @@ class SketcherTools:
             },
             {
                 "name": "catia_sketch_circle",
-                "description": "Draw a circle in the active sketch. Coordinates and radius in mm.",
+                "description": (
+                    "Draw a circle in the active sketch. Coordinates and radius in "
+                    "mm. The radius becomes a DIMENSIONAL CONSTRAINT by default "
+                    "(driven=true), which is what puts it in catia_get_parameters "
+                    "as '<part>\\<body>\\<sketch>\\<constraint>\\半径' - without one "
+                    "a user parameter has nothing to drive, which is the hole the "
+                    "2026-11-14 report measured (set_parameter answered 'changed: "
+                    "23.8 -> 30' and the volume did not move)."
+                ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "cx": {"type": "number", "description": "Center X (mm)", "default": 0},
                         "cy": {"type": "number", "description": "Center Y (mm)", "default": 0},
                         "radius": {"type": "number", "description": "Radius in mm"},
+                        "driven": {
+                            "type": "boolean", "default": True,
+                            "description": (
+                                "Add a radius constraint so the circle can be "
+                                "driven by a parameter (default true). Pass false "
+                                "for throwaway geometry that would only clutter "
+                                "catia_get_parameters."
+                            ),
+                        },
                     },
                     "required": ["radius"],
                 },
@@ -598,7 +615,20 @@ class SketcherTools:
                     "CreateClosedEllipse(cx, cy, majorX, majorY, majorR, minorR) and "
                     "CreateEllipse with start/end parameters as well (37 members, "
                     "read on B30). This wraps the closed one, so the hole is one "
-                    "curve instead of 28 flat walls."
+                    "curve instead of 28 flat walls. "
+                    "MAJOR AND MINOR ARE SEMI-AXES, NOT FULL WIDTHS: major=9 gives "
+                    "an ellipse 18 mm across its long axis. major also sets the "
+                    "DIRECTION (angle rotates it), so major < minor is REFUSED "
+                    "rather than silently drawn the other way round - the "
+                    "2026-11-14 report lost a build step to exactly that "
+                    "(major=5.2, minor=5.8). "
+                    "BOTH SEMI-AXES BECOME DIMENSIONAL CONSTRAINTS by default "
+                    "(driven=true), which is what makes them appear in "
+                    "catia_get_parameters and lets a user parameter drive the "
+                    "ellipse; without them a character-for-character correct "
+                    "parameter still moves nothing (measured 2026-11-14: 7 driven "
+                    "sections were the difference between 'changed: 23.8 -> 30' "
+                    "and a volume that did not budge)."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -608,11 +638,13 @@ class SketcherTools:
                         "cy": {"type": "number", "description": "Centre Y (mm)",
                                "default": 0},
                         "major": {"type": "number",
-                                  "description": "Semi-major radius in mm (the long "
-                                                 "one)."},
+                                  "description": "HALF the long axis, in mm (the "
+                                                 "semi-major radius). major=9 draws "
+                                                 "an ellipse 18 mm long."},
                         "minor": {"type": "number",
-                                  "description": "Semi-minor radius in mm (the short "
-                                                 "one)."},
+                                  "description": "HALF the short axis, in mm (the "
+                                                 "semi-minor radius). Must not "
+                                                 "exceed major."},
                         "angle": {"type": "number",
                                   "description": ("Direction of the MAJOR axis, in "
                                                   "degrees counter-clockwise from "
@@ -621,6 +653,15 @@ class SketcherTools:
                         "construction": {"type": "boolean", "default": False,
                                          "description": "Draw as construction "
                                                         "geometry."},
+                        "driven": {
+                            "type": "boolean", "default": True,
+                            "description": (
+                                "Add semi-major and semi-minor constraints so the "
+                                "ellipse can be driven by parameters (default "
+                                "true; ignored for construction geometry, which "
+                                "carries no dimension)."
+                            ),
+                        },
                     },
                     "required": ["major", "minor"],
                 },
@@ -837,16 +878,58 @@ class SketcherTools:
                 },
             },
             {
+                "name": "catia_set_constraint_value",
+                "description": (
+                    "Change ONE value in a sketch - the tool the 2026-11-14 report "
+                    "(P0-2) asked for, after finding that 'the section dimension is "
+                    "wrong' could only be answered by deleting the sketch and "
+                    "drawing it again. A sketch dimension is a Constraint with a "
+                    "Dimension, and that Value is writable: measured on B30 "
+                    "2026-11-14, 6 -> 11 mm on a radius constraint moved the circle "
+                    "and took the pad from 1131.0 to 3801.3 mm3 (= pi*121*10). "
+                    "THE REPLY REPORTS WHAT MOVED, not just what was written, "
+                    "because a constraint can drive something other than the "
+                    "dimension you had in mind. Use catia_sketch_get_geometry for "
+                    "the names (it lists value_mm per constraint and marks the ones "
+                    "with no value). A constraint that already carries a FORMULA "
+                    "refuses the write - change the parameter instead."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "sketch_name": {
+                            "type": "string",
+                            "description": "Sketch to modify. Omit for the open or "
+                                           "last-created sketch.",
+                        },
+                        "constraint": {
+                            "description": ("Constraint name from "
+                                            "catia_sketch_get_geometry, or its "
+                                            "1-based index."),
+                        },
+                        "value": {
+                            "type": "number",
+                            "description": "New value in mm (or degrees for an "
+                                           "angle constraint).",
+                        },
+                    },
+                    "required": ["constraint", "value"],
+                },
+            },
+            {
                 "name": "catia_sketch_get_geometry",
                 "description": (
                     "List a sketch's geometry elements - index, name, type, "
                     "construction flag - whether or not the sketch is open. "
                     "Omitting sketch_name falls back to the open sketch, then to "
-                    "the last sketch created in this session. Coordinates are NOT "
-                    "returned: a CATIA Point2D exposes no readable X/Y through "
-                    "automation on this build, so 'what did I draw' is answered by "
-                    "the element list plus the profile summary that "
-                    "catia_close_sketch echoes."
+                    "the last sketch created in this session. Each curve reports "
+                    "its own DIMENSION: radius_mm for a circle, major_radius_mm and "
+                    "minor_radius_mm for an ellipse; the sketch's constraints are "
+                    "listed with their values. What is NOT returned is a LINE'S "
+                    "ENDPOINTS - a CATIA Point2D exposes no readable X/Y through "
+                    "automation on this build - which is a limit of Point2D and not "
+                    "of sketches: the curve dimensions above were measured on B30 "
+                    "2026-11-14 (circle 6.0, ellipse 9.0 / 4.5)."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1312,13 +1395,15 @@ class SketcherTools:
                 return self._draw_circle(
                     arguments.get("cx", 0), arguments.get("cy", 0),
                     arguments["radius"],
+                    bool(arguments.get("driven", True)),
                 )
             case "catia_sketch_ellipse":
                 return self._draw_ellipse(
                     arguments.get("cx", 0), arguments.get("cy", 0),
                     arguments["major"], arguments["minor"],
                     arguments.get("angle", 0),
-                    bool(arguments.get("construction", False)))
+                    bool(arguments.get("construction", False)),
+                    bool(arguments.get("driven", True)))
             case "catia_sketch_arc":
                 return self._draw_arc(
                     arguments["cx"], arguments["cy"], arguments["radius"],
@@ -1336,6 +1421,10 @@ class SketcherTools:
                                         bool(arguments.get("construction", False)))
             case "catia_sketch_constraint":
                 return self._add_constraint(arguments)
+            case "catia_set_constraint_value":
+                return self._set_constraint_value(arguments.get("sketch_name"),
+                                                  arguments["constraint"],
+                                                  arguments["value"])
             case "catia_sketch_get_geometry":
                 return self._get_geometry(arguments.get("sketch_name"),
                                           bool(arguments.get("hide_construction", True)))
@@ -3776,19 +3865,140 @@ class SketcherTools:
         hw, hh = width / 2, height / 2
         return self._draw_rectangle(cx - hw, cy - hh, cx + hw, cy + hh)
 
-    def _draw_circle(self, cx: float, cy: float, radius: float) -> str:
+    #: CatConstraintType values, measured on B30 2026-11-14 with one fresh sketch
+    #: per case (scripts/b30_v0427_probe_radius_clean.py): **7** makes a RADIUS on
+    #: a circle and the SEMI-MAJOR on an ellipse, **19** makes the SEMI-MINOR (the
+    #: only type that answered 4.5 where the major radius was 9.0). 0 made a Fix,
+    #: 10 and 13 made Parallel, and everything else refused.
+    #:
+    #: The names these produce are CATIA's own - '半径.N' on a Chinese build - so
+    #: the reply quotes the path it actually read from part.Parameters instead of
+    #: constructing one from a guess.
+    #: Named _CST_DIM_* on purpose: _CST_RADIUS already means 14 here (a
+    #: two-element distance constraint), and a second class attribute with the
+    #: same name silently replaced the first - caught by the 0.3.125 test that
+    #: asserts the measured numbers, which is the only reason this did not ship
+    #: as "a radius constraint that happens to be a distance".
+    _CST_DIM_RADIUS = 7
+    _CST_DIM_SEMI_MAJOR = 7
+    _CST_DIM_SEMI_MINOR = 19
+
+    def _drive_curve(self, curve: Any, specs: list[tuple[int, str]]) -> str:
+        """Make a freshly drawn curve DRIVEN, and name the parameter that drives it.
+
+        The 2026-11-14 report (P0-3) is why this exists, and its evidence is exact:
+        7 elliptical sections, a user parameter StemLength, and
+        ``catia_set_parameter`` answering "changed: 23.8 -> 30" while
+        ``catia_get_inertia`` stayed at 2621.886 mm3. Nothing in the sketch was a
+        DIMENSION, so there was nothing for a parameter to drive - the whole
+        knowledgeware layer was wired to planes and fillet radii, which do carry
+        dimensions, and to nothing else.
+
+        A dimensional constraint is the missing link. Measured on B30 2026-11-14:
+        one radius constraint on a circle put
+        ``<part>\\零件几何体\\草图.1\\半径.1\\半径`` into ``catia_get_parameters``;
+        driving ``Dimension.Value`` from 6 to 11 moved the pad from 1131.0 to
+        3801.3 mm3 (= pi*121*10); and a formula on that path made a user parameter
+        drive it (BoreR 6 -> 12 gave pi*144*10 = 4523.9 exactly).
+
+        A constraint that cannot be added is REPORTED, not raised: the curve is
+        already drawn, so the loss is a parameter, not the geometry - and
+        ``catia_sketch_constraint`` can still add one later.
+        """
+        sketch = self._active_sketch
+        if sketch is None:
+            return ""
+        made: list[str] = []
+        failed: list[str] = []
+        paths: list[str] = []
+        # TWO lookups, not one: with no connection the body lookup raises, and a
+        # single try would then discard the part this session already knows -
+        # silently turning every parameter path into None.
+        part = getattr(self, "_sketch_part", None)
+        if part is None:
+            try:
+                part = self.conn.get_active_part()
+            except Exception:  # noqa: BLE001
+                part = None
+        for kind, label in specs:
+            try:
+                constraint = sketch.Constraints.AddMonoEltCst(kind, curve)
+            except Exception as error:  # noqa: BLE001 - geometry is already drawn
+                failed.append(f"{label}: {str(error).splitlines()[0][:70]}")
+                continue
+            name = str(getattr(constraint, "Name", "") or "?")
+            try:
+                value = float(constraint.Dimension.Value)
+                made.append(f"'{name}' = {value:g} mm ({label})")
+            except Exception:  # noqa: BLE001 - a non-dimensional constraint
+                made.append(f"'{name}' ({label})")
+            # READ the real parameter path rather than building it: the suffix is
+            # CATIA's localised name ('半径'), and whether the sketch sits under
+            # the body or under a feature depends on what consumes it.
+            path = self._constraint_parameter_path(part, name)
+            if path:
+                paths.append(path)
+        if not made:
+            return (" The curve is drawn, but no dimensional constraint could be "
+                    "added (" + "; ".join(failed) + "), so it has no parameter "
+                    "yet - catia_sketch_constraint can still add one.")
+        text = (" DRIVEN: " + " and ".join(made)
+                + " are now dimensional constraints on this curve.")
+        if paths:
+            text += (" In catia_get_parameters they are "
+                     + ", ".join(f"'{path}'" for path in paths[:2])
+                     + " - RE-READ that name after a feature consumes the sketch, "
+                     "because the sketch then moves under the feature "
+                     "('凸台.1\\草图.1\\...').")
+        text += (" Change one with catia_set_constraint_value, or attach a user "
+                 "parameter to that path with catia_set_formula.")
+        if failed:
+            text += " Not added: " + "; ".join(failed) + "."
+        return text
+
+    @staticmethod
+    def _constraint_parameter_path(part: Any, constraint_name: str) -> str | None:
+        """The full parameters path of one constraint's value, read not built."""
+        if part is None or not constraint_name or constraint_name == "?":
+            return None
+        try:
+            params = part.Parameters
+            count = int(params.Count)
+        except Exception:  # noqa: BLE001 - no Parameter collection to ask
+            return None
+        for index in range(1, count + 1):
+            try:
+                full = str(params.Item(index).Name)
+            except Exception:  # noqa: BLE001
+                continue
+            if constraint_name in full and full.count("\\") >= 3:
+                # '<part>\<body>\<sketch>\<constraint>\<dimension>' - the last
+                # segment is the dimension itself ('半径'), the one before it the
+                # constraint. Anything shorter is the constraint's own '活动' or
+                # '模式' flag, which is not a length.
+                tail = full.rsplit("\\", 1)[-1]
+                if tail in ("活动", "模式", "Activated", "Mode"):
+                    continue
+                return full
+        return None
+
+    def _draw_circle(self, cx: float, cy: float, radius: float,
+                     driven: bool = True) -> str:
         self._ensure_sketch_open()
         factory = self._active_factory
-        factory.CreateClosedCircle(cx, cy, radius)
+        curve = factory.CreateClosedCircle(cx, cy, radius)
         import math
         self._profile_closed_curves = getattr(
             self, "_profile_closed_curves", 0) + 1
         self._note_element("circle", cx=cx, cy=cy, radius=radius,
                            sweep_rad=2 * math.pi)
-        return f"Circle created at ({cx}, {cy}) with radius {radius} mm"
+        note = (self._drive_curve(curve, [(self._CST_DIM_RADIUS, "radius")])
+                if driven else "")
+        return f"Circle created at ({cx}, {cy}) with radius {radius} mm{note}"
 
     def _draw_ellipse(self, cx: float, cy: float, major: float, minor: float,
-                      angle: float, construction: bool) -> str:
+                      angle: float, construction: bool,
+                      driven: bool = True) -> str:
         """A full ellipse: ``CreateClosedEllipse`` with the major axis direction.
 
         Why it is worth a tool: the 2026-11-11 report approximated a slanted handle
@@ -3839,9 +4049,18 @@ class SketcherTools:
         self._note_element("ellipse", cx=cx, cy=cy, major=major, minor=minor,
                            angle=angle, construction=construction)
         where = " as construction geometry" if construction else ""
+        note = ""
+        if driven and not construction:
+            note = self._drive_curve(
+                curve, [(self._CST_DIM_SEMI_MAJOR, "semi-major"),
+                        (self._CST_DIM_SEMI_MINOR, "semi-minor")])
+        elif driven:
+            note = (" Construction geometry carries no dimension here, so this "
+                    "ellipse is not driven.")
         return (f"Ellipse created at ({cx:g}, {cy:g}){where}: semi-major {major:g} mm "
                 f"along {angle:g} deg from +X, semi-minor {minor:g} mm. One curve, "
-                "not a polyline - a hole cut from it has one smooth wall.")
+                "not a polyline - a hole cut from it has one smooth wall."
+                + note)
 
     def _draw_arc(
         self, cx: float, cy: float, radius: float,
@@ -4326,6 +4545,129 @@ class SketcherTools:
             return True
         return index == 1
 
+    @staticmethod
+    def _curve_dimensions(sketch: Any) -> dict[str, dict[str, float]]:
+        """Every readable dimension of every curve in a sketch, by element name."""
+        out: dict[str, dict[str, float]] = {}
+        try:
+            geometry = sketch.GeometricElements
+            count = int(geometry.Count)
+        except Exception:  # noqa: BLE001 - an unreadable sketch is not an error here
+            return out
+        for index in range(1, count + 1):
+            try:
+                element = geometry.Item(index)
+            except Exception:  # noqa: BLE001
+                continue
+            name = str(getattr(element, "Name", index))
+            values: dict[str, float] = {}
+            for attribute, key in (("Radius", "radius_mm"),
+                                   ("MajorRadius", "major_radius_mm"),
+                                   ("MinorRadius", "minor_radius_mm")):
+                try:
+                    values[key] = round(float(getattr(element, attribute)), 6)
+                except Exception:  # noqa: BLE001
+                    continue
+            if values:
+                out[name] = values
+        return out
+
+    def _set_constraint_value(self, sketch_name: Any, constraint: Any,
+                              value: Any) -> str:
+        """Change one sketch constraint's value - the tool the report asked for.
+
+        The 2026-11-14 report (P0-2) put it exactly: "发现某个截面尺寸抄错了，
+        不能改约束，只能删草图重建". A sketch dimension is a Constraint with a
+        Dimension, and that Dimension's Value is writable - measured on B30
+        2026-11-14, 6 -> 11 mm moved the circle and the pad from 1131.0 to
+        3801.3 mm3. What was missing was a way in.
+
+        The reply reports what MOVED, not just what was written: a constraint can
+        drive something other than the radius you had in mind, and "Value := 11"
+        on its own would not tell you that the geometry ignored it.
+        """
+        sketch, how = self._locate_sketch(sketch_name)
+        constraints = sketch.Constraints
+        count = int(constraints.Count)
+        target = None
+        if isinstance(constraint, bool):
+            constraint = str(constraint)
+        if isinstance(constraint, int):
+            if not 1 <= constraint <= count:
+                raise ArgumentOutOfRange(
+                    f"constraint index {constraint} is outside 1..{count} on "
+                    f"'{sketch.Name}'. Nothing was changed.",
+                    code="CONSTRAINT_INDEX", stage="validate")
+            target = constraints.Item(constraint)
+        else:
+            wanted = str(constraint or "").strip()
+            names = []
+            for index in range(1, count + 1):
+                candidate = constraints.Item(index)
+                name = str(getattr(candidate, "Name", "?"))
+                names.append(name)
+                if name == wanted:
+                    target = candidate
+                    break
+            if target is None:
+                raise ArgumentRejected(
+                    f"no constraint called '{wanted}' on '{sketch.Name}'"
+                    + (f". It has: {', '.join(names[:10])}" if names else
+                       ", and it has no constraints at all")
+                    + ". Nothing was changed.", code="CONSTRAINT_NOT_FOUND",
+                    stage="validate")
+        name = str(getattr(target, "Name", "?"))
+        try:
+            old = float(target.Dimension.Value)
+            new = float(value)
+        except Exception as error:  # noqa: BLE001 - a Fix has no Dimension
+            raise PreconditionRejected(
+                f"constraint '{name}' carries no numeric dimension, so there is no "
+                "value to set. A Fix, Parallel or Vertical has no length - list the "
+                "ones that do with catia_sketch_get_geometry, which marks the rest "
+                "'non_dimensional'. Nothing was changed.",
+                code="NOT_A_DIMENSION", stage="validate") from error
+        if abs(new - old) < 1e-9:
+            return (f"Constraint '{name}' on '{sketch.Name}' already reads {old:g}; "
+                    "nothing was changed.")
+        before = self._curve_dimensions(sketch)
+        try:
+            target.Dimension.Value = new
+        except Exception as error:  # noqa: BLE001 - reported with the value
+            raise CodedError(
+                f"CATIA refused to set constraint '{name}' to {new:g} mm "
+                f"({str(error).splitlines()[0][:120]}). It reads {old:g} before and "
+                "after. A driven constraint (one with a formula on it) cannot be "
+                "edited directly - change the user parameter, or remove the "
+                "relation with catia_delete_relation first.",
+                code="CONSTRAINT_VALUE_REFUSED", stage="execute") from error
+        update_note = ""
+        try:
+            self.conn.get_active_part().Update()
+        except Exception as error:  # noqa: BLE001 - reported, not fatal
+            update_note = (" The part did NOT update afterwards ("
+                           + str(error).splitlines()[0][:100]
+                           + "), so the sketch reads the new value but the solid "
+                           "has not been rebuilt.")
+        after = self._curve_dimensions(sketch)
+        moved = []
+        for element_name, values in after.items():
+            previous = before.get(element_name) or {}
+            for key, current in values.items():
+                was = previous.get(key)
+                if was is not None and abs(was - current) > 1e-9:
+                    moved.append(f"{element_name} {key[:-3]} {was:g} -> {current:g}")
+        self.conn.refresh_display()
+        if moved:
+            return (f"Constraint '{name}' on '{sketch.Name}': {old:g} -> {new:g} mm. "
+                    "The geometry moved with it: " + "; ".join(moved[:4]) + "."
+                    + update_note)
+        return (f"Constraint '{name}' on '{sketch.Name}': {old:g} -> {new:g} mm, but "
+                "no curve dimension in this sketch changed - this constraint drives "
+                "something other than a radius or a semi-axis (a length between two "
+                "points, an angle). Check where it acts with catia_sketch_get_geometry."
+                + update_note)
+
     def _get_geometry(self, sketch_name: str | None = None,
                       hide_construction: bool = True) -> str:
         """List a sketch's elements, open or closed.
@@ -4351,6 +4693,19 @@ class SketcherTools:
                 info["type"] = str(elem.GeometricType)
             except Exception:
                 pass
+            # THE CURVES ANSWER their own dimensions, even though a Point2D does
+            # not answer its coordinates. Measured on B30 2026-11-14: 圆.1.Radius
+            # = 6.0, 椭圆.1.MajorRadius = 9.0 and MinorRadius = 4.5. The old note
+            # here said "coordinates are NOT returned" and was read - reasonably -
+            # as "a sketch cannot be checked", which cost the 2026-11-14 report a
+            # whole verification loop.
+            for attribute, key in (("Radius", "radius_mm"),
+                                   ("MajorRadius", "major_radius_mm"),
+                                   ("MinorRadius", "minor_radius_mm")):
+                try:
+                    info[key] = round(float(getattr(elem, attribute)), 6)
+                except Exception:  # noqa: BLE001 - not every curve has every one
+                    continue
             is_construction = False
             try:
                 is_construction = bool(elem.Construction)
@@ -4369,6 +4724,26 @@ class SketcherTools:
         # the drawn record travels beside it under its own key rather than being
         # spliced in and shifting indices.
 
+        # The constraints are the other half of "what is this sketch": a curve's
+        # own MajorRadius says what it IS, a semi-axis constraint says whether a
+        # parameter can CHANGE it.
+        constraint_list: list[dict[str, Any]] = []
+        try:
+            constraints = sketch.Constraints
+            for index in range(1, int(constraints.Count) + 1):
+                constraint = constraints.Item(index)
+                entry: dict[str, Any] = {
+                    "index": index,
+                    "name": str(getattr(constraint, "Name", "?")),
+                }
+                try:
+                    entry["value_mm"] = round(float(constraint.Dimension.Value), 6)
+                except Exception:  # noqa: BLE001 - Fix/Parallel carry no value
+                    entry["non_dimensional"] = True
+                constraint_list.append(entry)
+        except Exception:  # noqa: BLE001 - not being able to list them is not fatal
+            constraint_list = []
+
         payload: dict[str, Any] = {
             "sketch": str(sketch.Name),
             "document": str(getattr(self.conn.active_document, "Name", "")),
@@ -4376,10 +4751,14 @@ class SketcherTools:
             "count": len(elements),
             "construction_collapsed": construction_count if hide_construction else 0,
             "elements": elements,
+            "constraints": constraint_list,
             "note": (
-                "Coordinates cannot be read back from a closed sketch: CATIA's "
-                "Point2D exposes no readable X/Y through automation on this build. "
-                "Use catia_sketch_edit to reopen it and append, or "
+                "A CURVE'S DIMENSION IS READABLE: radius_mm on a circle, "
+                "major_radius_mm / minor_radius_mm on an ellipse (measured on B30 "
+                "2026-11-14). What is NOT readable is a straight line's ENDPOINTS - "
+                "a CATIA Point2D exposes no X/Y through automation on this build - "
+                "so a line is known by its index and its neighbours, not by its "
+                "coordinates. Use catia_sketch_edit to reopen it and append, or "
                 "catia_sketch_delete_element to remove one element. "
                 "absolute_axis: true marks the sketch's own reference frame at "
                 "index 1 - it is not geometry you drew, and the first element you "

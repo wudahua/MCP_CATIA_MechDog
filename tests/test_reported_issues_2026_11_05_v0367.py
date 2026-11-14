@@ -159,8 +159,8 @@ def test_the_real_server_still_matches_its_router():
     """
     # 0.3.119: catia_measure_deviation is the 144th; 0.3.121 adds
     # catia_solid_tube and 0.3.122 catia_gsd_splines, for 146; 0.3.124
-    # catia_solid_sweep_variable for 147.
-    assert _check_tools_match_router() == 147
+    # catia_solid_sweep_variable for 147; 0.3.125 set_constraint_value for 148.
+    assert _check_tools_match_router() == 148
 
 
 # ── the two hanging suggestions from the 0.3.60 report ─────────────────────

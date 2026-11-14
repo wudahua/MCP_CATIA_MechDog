@@ -2,6 +2,101 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.125] — 2026-11-14 · a sketch that can be read and driven
+
+The 2026-11-14 report's two P0s were the same hole seen from two sides: a sketch
+could not be READ (so a dimension could not be checked) and could not be DRIVEN
+(so a parameter moved nothing). Both are fixed, and the measurements that decide
+them were taken on B30 the same day.
+
+### P0-3: a parameter now drives the geometry, because the geometry has a dimension
+
+The report's evidence was exact: 7 elliptical sections, a parameter `StemLength`,
+`catia_set_parameter` answering "changed: 23.8 -> 30", and `catia_get_inertia`
+still at **2621.886 mm3**. Nothing in the sketch was a dimension - the
+knowledgeware layer was wired to plane offsets and fillet radii, which do carry
+dimensions, and to nothing else.
+
+`catia_sketch_ellipse` and `catia_sketch_circle` now add **dimensional
+constraints** as they draw (`driven=true` by default). Measured on B30
+2026-11-14:
+
+| step | measured |
+|---|---|
+| one radius constraint on a circle | `…\草图.1\半径.1\半径` appears in `catia_get_parameters` |
+| `Dimension.Value` 6 → 11, `part.Update()` | `circle.Radius` reads 11.0; pad 1131.0 → **3801.3 mm3** = π·121·10 |
+| formula `DriveTip = TipMajor`, then `TipMajor` 9 → 14 | **1979.2 mm3** = π·14·4.5·10 |
+
+The constraint types are measured, not guessed: **7** is the radius on a circle
+and the semi-major on an ellipse, **19** is the semi-minor (the only number that
+answered 4.5 where the major radius is 9.0). A constraint that cannot be added is
+reported rather than raised - the curve is already drawn, so the loss is a
+parameter, not the geometry.
+
+### P0-2: a curve answers its own dimension - the limit was about Point2D
+
+The tool said "coordinates are NOT returned", and that was read as "a sketch
+cannot be checked". It was about `Point2D`. Measured on B30 2026-11-14:
+`圆.1.Radius = 6.0`, `椭圆.1.MajorRadius = 9.0`, `MinorRadius = 4.5`. So
+`catia_sketch_get_geometry` now reports `radius_mm` / `major_radius_mm` /
+`minor_radius_mm` per element, plus the sketch's constraints with their values
+(the non-dimensional ones marked as such).
+
+A line's ENDPOINTS are still unreadable - that part of the old sentence is true
+and is now stated as a limit of `Point2D` instead of of sketches.
+
+New tool **`catia_set_constraint_value`** is the "the dimension is wrong" repair
+the report asked for: it changes one value and reports **what moved**
+(`9 -> 12 mm`, `椭圆.1 major_radius 9 -> 12`), because a constraint can drive
+something other than the dimension you had in mind. A Fix or Parallel is refused
+with `NOT_A_DIMENSION`.
+
+### P1-2: a formula-driven parameter says so, instead of a bare COM error
+
+`set_parameter` on a parameter that a relation writes died with
+`(-2147352567, '发生意外。', … '方法 Value 失败' …)`, no code, and a recovery block
+that talked about `in_work_object` and the selection - none of it related.
+
+`Relation` exposes `NbOutParameters` / `GetOutParameter(i)`, so the relation that
+WRITES a parameter is readable rather than guessed from its expression text (the
+report's `DriveStem` is `23.8mm`, which never names `StemLength`). Now:
+
+> Parameter 'StemLength' is DRIVEN BY A FORMULA (DriveStem), so its value is
+> computed and cannot be assigned … Three ways out: (1) change what the formula
+> reads, (2) rewrite the relation, (3) remove it with catia_delete_relation.
+
+and the report's own sequence - delete the relation, call again - still works
+(`changed: 23.8 -> 30`).
+
+### P2-4: a renamed feature still knows what it is
+
+`catia_list_features` typed features by their NLS name prefix, so the report's
+solid loft named `AirPods_Body` came back `"type": "unknown"`. The prefix cannot
+help with a name the caller chose, but the OBJECT can: `body.Shapes.Item(i)`
+hands back a bare Item (21 members, no `Type`), while `part.FindObjectByName`
+returns the full interface - 78 members for a loft, including `AddSectionToLoft`.
+Renamed features are now resolved from their members; `AirPods_Body` reads
+`"type": "loft"`.
+
+### A name that was already taken
+
+The first version defined `_CST_RADIUS = 7`, and the class already had
+`_CST_RADIUS = 14` (a two-element distance constraint) 460 lines below - the
+second definition silently won, and every radius would have been a distance. The
+new test that asserts the measured numbers caught it; the constants are now
+`_CST_DIM_*`.
+
+### Not done in this version, and why
+
+`P0-1` (a DXF/SVG/PDF drawing entrance) is a new subsystem, not a fix - it gets
+its own version rather than a corner of this one. `P0-4` (elliptic sweep
+sections), `P1-1` (a semantic `dry_run` and a rollback for `catia_run_plan`) and
+`P1-3` (`clean="solid_only"` for screenshots) are all real and all measured by
+the report; each needs its own design pass. `P1-5`'s ASCII policy and the
+`catia_server_info` of `P2-1` are small and are queued behind those.
+
+148 tools (Sketcher 19), 1 992 tests, `scripts/b30_v0427_audit.py` 13/13.
+
 ## [0.3.124] — 2026-11-14 · a section chain from a file, and a radius that changes
 
 The last open item of the 2026-11-13 report (P1-4), plus the tool it asked for

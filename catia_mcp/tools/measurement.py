@@ -6246,14 +6246,80 @@ class MeasurementTools:
             return "No parameters found" + (f" matching '{name_filter}'" if name_filter else "")
         return json.dumps(result, indent=2, ensure_ascii=False)
 
+    @staticmethod
+    def _driving_relations(part: Any, parameter_name: str) -> list[str]:
+        """Which relations WRITE this parameter - the answer the raw error lacked.
+
+        Measured on B30 2026-11-14: a Relation exposes ``NbOutParameters`` and
+        ``GetOutParameter(i)``, so "StemLength is an output of DriveStem" is
+        readable rather than guessed from the expression text. The 2026-11-14
+        report (P1-2) got ``方法 Value 失败`` with no code and a diagnostic block
+        pointing at in_work_object and the selection - all unrelated - and only
+        deleting the relation made the same call work.
+        """
+        found: list[str] = []
+        if not parameter_name:
+            return found
+        try:
+            relations = part.Relations
+            count = int(relations.Count)
+        except Exception:  # noqa: BLE001 - no Relations collection to ask
+            return found
+        for index in range(1, count + 1):
+            try:
+                relation = relations.Item(index)
+                outputs = int(relation.NbOutParameters)
+            except Exception:  # noqa: BLE001
+                continue
+            for slot in range(1, outputs + 1):
+                try:
+                    driven = str(relation.GetOutParameter(slot).Name)
+                except Exception:  # noqa: BLE001
+                    continue
+                if driven == parameter_name:
+                    found.append(str(getattr(relation, "Name", "?")))
+                    break
+        return found
+
     def _set_parameter(self, name: str, value: float) -> str:
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
         params = part.Parameters
 
         param = params.Item(name)
+        full = str(getattr(param, "Name", name))
+        # CHECK THE RELATIONS FIRST, because CATIA's own refusal is a bare COM
+        # exception: "方法 Value 失败", no code, and a recovery block that talks
+        # about the work object. A parameter that is an OUTPUT of a relation is
+        # computed, not stored, so writing it cannot work by construction.
+        drivers = self._driving_relations(part, full)
+        if drivers:
+            raise CodedError(
+                f"Parameter '{name}' is DRIVEN BY A FORMULA ({', '.join(drivers)}), "
+                "so its value is computed and cannot be assigned - CATIA answers "
+                "only '方法 Value 失败'. Nothing was changed. Three ways out: "
+                "(1) change what the formula reads (it is computed FROM those, so "
+                "setting an input does move this one); (2) rewrite the relation "
+                "with catia_set_formula; (3) remove it with catia_delete_relation "
+                "and set the value directly. catia_list_relations lists them all.",
+                code="PARAMETER_FORMULA_DRIVEN", stage="validate",
+                data={"parameter": full, "relations": drivers},
+                next_actions=[
+                    "Set the parameter the formula READS instead - the driven one "
+                    "then follows",
+                    "Or catia_delete_relation(name=...) and set this value directly",
+                ])
         old_value = param.Value
-        param.Value = value
+        try:
+            param.Value = value
+        except Exception as error:  # noqa: BLE001 - not a formula, something else
+            raise CodedError(
+                f"CATIA refused to set '{name}' to {value} "
+                f"({str(error).splitlines()[0][:120]}). It is not driven by any "
+                "relation (catia_list_relations shows none that writes it), so the "
+                "cause is something else - a design table, or a read-only parameter "
+                "type. It still reads " + str(old_value) + ".",
+                code="PARAMETER_WRITE_FAILED", stage="execute") from error
         part.Update()
 
         self.conn.refresh_display()

@@ -5756,6 +5756,48 @@ class PartDesignTools:
                 return kind
         return "unknown"
 
+    #: Which members a feature's FULL interface carries, for the case the name
+    #: prefix cannot answer: a feature the caller renamed. `body.Shapes.Item(i)`
+    #: hands back a bare Item (21 members, no `Type`), so nothing about it is
+    #: readable there - but `part.FindObjectByName` returns the real interface
+    #: (78 members for a loft, measured on B30 2026-11-14), and a solid loft is
+    #: the one that answers `AddSectionToLoft`.
+    _RICH_SIGNATURES = (
+        ("loft", ("AddSectionToLoft", "GetSectionFromLoft")),
+    )
+
+    def _feature_kind_resolved(self, part: Any, shape: Any) -> str:
+        """The feature's kind, from its name if possible and from the object if not.
+
+        The 2026-11-14 report (P2-4) renamed its solid loft to 'AirPods_Body' and
+        got `"type": "unknown", "catia_type": null`, so anything branching on the
+        feature type silently skipped it. The prefix table cannot help with a
+        name the caller chose - the OBJECT can.
+        """
+        name = str(getattr(shape, "Name", ""))
+        kind = self._feature_kind(name)
+        if kind != "unknown":
+            return kind
+        return self._kind_from_members(part, name) or "unknown"
+
+    def _kind_from_members(self, part: Any, name: str) -> str | None:
+        try:
+            richer = part.FindObjectByName(name)
+        except Exception:  # noqa: BLE001 - no lookup is not "no type"
+            return None
+        if richer is None:
+            return None
+        try:
+            info = richer._oleobj_.GetTypeInfo()
+            members = {str(info.GetNames(info.GetFuncDesc(i).memid)[0])
+                       for i in range(info.GetTypeAttr().cFuncs)}
+        except Exception:  # noqa: BLE001
+            return None
+        for kind, signatures in self._RICH_SIGNATURES:
+            if all(signature in members for signature in signatures):
+                return kind
+        return None
+
     @classmethod
     def _feature_type_name(cls, name: str) -> str | None:
         """The prefix this build actually used ('凸台', 'Pocket'), or None.
@@ -5786,7 +5828,7 @@ class PartDesignTools:
             features.append({
                 "index": i,
                 "name": shape.Name,
-                "type": self._feature_kind(shape.Name),
+                "type": self._feature_kind_resolved(part, shape),
                 # The host's own name for it - not shape.Type, which is None or 0
                 # on this API and made this field a permanent null (§5.5).
                 "catia_type": self._feature_type_name(shape.Name),
