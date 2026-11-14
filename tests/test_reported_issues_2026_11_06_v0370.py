@@ -58,9 +58,17 @@ def test_an_invented_route_is_internal_not_a_com_failure():
     assert caught.value.stage == "internal"
 
 
-def test_the_envelope_of_an_internal_error_has_no_model_advice():
+def test_the_envelope_of_an_internal_error_has_no_model_advice(monkeypatch):
     """The whole point: nothing to inspect, nothing to repair."""
+    from catia_mcp.connection import CATIAConnection
     from catia_mcp.server import CATIAMCPServer
+
+    # A bug in this package is a bug whether or not CATIA is running. Without
+    # this the server died at the connect stage first and the test asserted the
+    # envelope of the WRONG failure - it passed only where CATIA was open
+    # (found on CI 2026-11-14, where all 141 runs had been failing).
+    monkeypatch.setattr(CATIAConnection, "ensure_connected",
+                        lambda self, *a, **k: None)
 
     class _Boom:
         def get_tool_definitions(self):

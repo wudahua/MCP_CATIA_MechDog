@@ -1034,6 +1034,13 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
 class DiagnosticsTools:
     """Diagnostics for the running CATIA installation."""
 
+    #: Tools the server must NOT open a session for. Without this the server
+    #: connected before dispatching everything, so catia_server_info - whose
+    #: whole point is answering "there is no session" without starting one -
+    #: launched CATIA to look up a version. Measured 2026-11-14: CI has no
+    #: CATIA and every call through the server died at the connect stage.
+    NO_SESSION = frozenset({"catia_server_info"})
+
     def __init__(self, connection: CATIAConnection) -> None:
         self.conn = connection
         # Set by the server once the router is built, so a diagnosis can state

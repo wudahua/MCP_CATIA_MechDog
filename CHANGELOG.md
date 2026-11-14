@@ -2,6 +2,43 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.129] — 2026-11-14 · two promises about not connecting
+
+Found from CI, not from a report: of 141 workflow runs, every single one had
+failed. The last two failures were a validate-stage assertion and an
+internal-error assertion, both reading `connect`/`COM_ERROR` instead of what they
+assert - because they ran on a machine with **no CATIA**.
+
+The tests were only the symptom. The cause:
+
+**The server opened a session before dispatching EVERY tool** except
+connect/disconnect. So `catia_server_info` - added in 0.3.127 and documented as
+"never connects, it answers connected=false" - started CATIA to read a version,
+and `catia_read_drawing` (0.3.128, "parses a file, nothing else") could not read
+a file without a session either. Both tools now declare `NO_SESSION` and the
+server honours it; the declaration is opt-in, so a tool that needs a session
+still gets one (asserted both ways).
+
+**`catia_drawing_add_frame` connected before checking its own arguments.** Its
+comment has said "everything that can be refused BEFORE the sheet is touched"
+since 0.3.68, but the four lines above that comment connected and grabbed the
+active drawing - so `margin=-5` and `title_block.width=0` needed a live session
+to be told they were typos, and on CI came back as a connect-stage COM error.
+The connect now sits below the argument checks, at the sheet.
+
+**Two tests depended on the author's machine.** They are about the SHAPE of a
+failure envelope, not about CATIA, but both built a real server, so they passed
+only where CATIA happened to be running. One now uses a refusal that depends on
+nothing but its arguments (a zero-width title block instead of an oversized one,
+which needs the sheet size to judge); the other stubs the connect. Three new
+tests hold the line: a session-free tool must not open a session, a tool that
+needs one must still get it, and `add_frame` must refuse before it connects.
+
+Verified by running those files with `ensure_connected` replaced by a COM error -
+the CI condition - where all 57 pass.
+
+2 076 tests. 151 tools.
+
 ## [0.3.128] — 2026-11-14 · a drawing goes in
 
 The 2026-11-14 report's P0-1: 147 tools, none of which could read a 2D drawing.

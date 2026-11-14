@@ -770,11 +770,13 @@ class DraftingTools:
         )
 
     def _add_frame(self, args: dict[str, Any]) -> str:
-        self.conn.ensure_connected()
-        drawing = self._find_active_drawing()
-        drawing.Activate()
-        sheet = drawing.Sheets.ActiveSheet
         # ── everything that can be refused BEFORE the sheet is touched ──
+        # ...and before CATIA is even asked whether it is running. This comment
+        # has been here since 0.3.68, but the first four lines of the function
+        # connected and grabbed the active drawing ABOVE it, so a margin of -5
+        # or a title block of width 0 needed a live session to be told it was a
+        # typo. Found on CI 2026-11-14, where the refusal came back as a
+        # connect-stage COM error and sent the caller to check their session.
         # 0.3.68: this function used to call _apply_paper first, so
         # `{paper:'A4', margin:0}` left the sheet on A4 and then reported a
         # rejection - a refused call that had written (reported 2026-11-05, P1;
@@ -817,7 +819,11 @@ class DraftingTools:
                               "both > 0 - nothing was drawn"],
             )
 
-        # ── now the sheet ──
+        # ── now the sheet ── (the first COM call of this function)
+        self.conn.ensure_connected()
+        drawing = self._find_active_drawing()
+        drawing.Activate()
+        sheet = drawing.Sheets.ActiveSheet
         state = self._apply_paper(sheet, args.get("paper"),
                                   args.get("orientation"), args.get("scale"))
         if state.get("width") is None or state.get("height") is None:

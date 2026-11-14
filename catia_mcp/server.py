@@ -292,7 +292,16 @@ class CATIAMCPServer:
         logger.info("Tool call: %s(%s)", name, arguments)
         stage = "connect"
         try:
-            if name not in {"catia_connect", "catia_disconnect"}:
+            # A tool that declares NO_SESSION must not open one. Until 0.3.129
+            # this connected for everything but connect/disconnect, so
+            # catia_server_info - documented in 0.3.127 as "never connects, it
+            # answers connected=false" - started CATIA to read a version, and
+            # catia_read_drawing, which parses a file, could not run without a
+            # session either. Found from CI: a machine with no CATIA failed two
+            # envelope tests at the connect stage before their tool ever ran.
+            session_free = getattr(module, "NO_SESSION", ())
+            if (name not in {"catia_connect", "catia_disconnect"}
+                    and name not in session_free):
                 self.connection.ensure_connected()
             stage = "connect" if name == "catia_connect" else "execute"
             result = module.execute(name, arguments)

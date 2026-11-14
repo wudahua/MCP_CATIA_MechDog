@@ -487,3 +487,71 @@ def test_import_refuses_when_every_contour_was_filtered_out(tmp_path):
 
 def test_the_import_limit_is_a_number_a_caller_can_reason_about():
     assert MAX_ELEMENTS == 2000
+
+
+# ── tools that must not open a session ───────────────────────────────────
+def test_a_session_free_tool_never_opens_catia(tmp_path, monkeypatch):
+    """catia_read_drawing parses a file; catia_server_info answers "no session".
+
+    BOTH are documented as never connecting, and until 0.3.129 the server
+    connected before dispatching EVERY tool except connect/disconnect - so
+    reading a drawing needed CATIA, and so did asking whether CATIA was there.
+    Found from CI, where two unrelated tests died at the connect stage before
+    their tool ever ran.
+    """
+    from catia_mcp.connection import CATIAConnection
+    from catia_mcp.server import CATIAMCPServer
+
+    def _never(self, *args, **kwargs):
+        raise AssertionError("the server opened a session for a session-free tool")
+
+    monkeypatch.setattr(CATIAConnection, "ensure_connected", _never)
+    server = CATIAMCPServer()
+
+    path = write(tmp_path, "plate.dxf",
+                 dxf(dxf_polyline([(0, 0, 0), (40, 0, 0), (40, 20, 0),
+                                   (0, 20, 0)])))
+    reply = json.loads(server._execute_tool(
+        "catia_read_drawing", {"file_path": path}).content[0].text)
+    assert reply["counts"]["elements"] == 4
+
+    info = json.loads(server._execute_tool("catia_server_info", {}).content[0].text)
+    assert info["data"]["catia"]["connected"] is False
+
+
+def test_a_tool_that_needs_a_session_still_opens_one(monkeypatch):
+    """The other half of the declaration: NO_SESSION is opt-in, not a default."""
+    from catia_mcp.connection import CATIAConnection
+    from catia_mcp.server import CATIAMCPServer
+
+    opened: list[bool] = []
+
+    def _record(self, *args, **kwargs):
+        opened.append(True)
+        raise RuntimeError("stopped here on purpose")
+
+    monkeypatch.setattr(CATIAConnection, "ensure_connected", _record)
+    server = CATIAMCPServer()
+    server._execute_tool("catia_list_documents", {})
+    assert opened == [True]
+
+
+def test_add_frame_refuses_a_bad_title_block_before_it_connects(monkeypatch):
+    """The refusal is about the arguments, so it must not need a session.
+
+    Measured on CI 2026-11-14: with no CATIA the same call came back as a
+    connect-stage COM error, which sends the caller to check their session
+    instead of the number they passed.
+    """
+    from catia_mcp.connection import CATIAConnection
+    from catia_mcp.tools.drawing import DraftingTools
+
+    def _never(self, *args, **kwargs):
+        raise AssertionError("_add_frame connected before checking its arguments")
+
+    monkeypatch.setattr(CATIAConnection, "ensure_connected", _never)
+    tools = DraftingTools(connection=None)
+    tools.conn = CATIAConnection()
+    with pytest.raises(ArgumentRejected) as caught:
+        tools.execute("catia_drawing_add_frame", {"title_block": {"width": 0}})
+    assert caught.value.stage == "validate"

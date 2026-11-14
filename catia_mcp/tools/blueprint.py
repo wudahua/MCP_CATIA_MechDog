@@ -50,6 +50,12 @@ MAX_ELEMENTS = 2000
 class BlueprintTools:
     """Tools for reading DXF/SVG/PDF drawings into sketches."""
 
+    #: catia_read_drawing parses a file and nothing else, so the server must not
+    #: open a session for it - reading a drawing has to work while CATIA is busy
+    #: with something else, and on a machine where it is not installed at all.
+    #: catia_import_drawing is NOT here: it creates a sketch.
+    NO_SESSION = frozenset({"catia_read_drawing"})
+
     def __init__(self, connection: Any, sketcher: SketcherTools | None = None) -> None:
         self.conn = connection
         self._sketcher = sketcher

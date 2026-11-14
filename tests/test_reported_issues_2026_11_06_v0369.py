@@ -195,18 +195,26 @@ def test_the_baseline_file_is_gone():
 # ── the envelope a precondition produces, end to end (offline) ─────────────
 
 
-def test_a_precondition_still_arrives_with_the_validate_shape(monkeypatch):
+def test_a_precondition_still_arrives_with_the_validate_shape():
     """The server reads `stage` off the exception; this is that path.
 
-    `catia_drawing_add_frame` refuses an oversized title block before drawing,
-    through ArgumentRejected - the same code path a PreconditionRejected takes.
+    `catia_drawing_add_frame` refuses a title block whose width is not positive
+    before it touches CATIA - the same code path a PreconditionRejected takes.
     The reply is what a caller branches on, so the reply is what is asserted.
+
+    THE INPUT IS A ZERO WIDTH ON PURPOSE. It used to be 4000 mm, which is only
+    oversized relative to the sheet - so the refusal needed a live session to
+    read the sheet size, and on CI (no CATIA) the call died at the connect stage
+    and this test asserted the envelope of the wrong failure. A refusal that
+    depends on nothing but the arguments is the one that can be checked on any
+    machine, and 0.3.129 moved the connect below these checks so it also runs
+    before CATIA is started.
     """
     from catia_mcp.server import CATIAMCPServer
 
     reply = json.loads(CATIAMCPServer()._execute_tool(
         "catia_drawing_add_frame",
-        {"title_block": {"width": 4000}}).content[0].text)
+        {"title_block": {"width": 0}}).content[0].text)
     assert reply["ok"] is False
     assert reply["data"]["failure_stage"] == "validate"
     assert reply["effects"]["modified"] is False
