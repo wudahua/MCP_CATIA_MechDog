@@ -27,6 +27,7 @@ from catia_mcp.results import (
     reject_validation,
 )
 from catia_mcp.tools.assembly import AssemblyTools
+from catia_mcp.tools.blueprint import BlueprintTools
 from catia_mcp.tools.appearance import AppearanceTools
 from catia_mcp.tools.diagnostics import DiagnosticsTools
 from catia_mcp.tools.document import DocumentTools
@@ -117,6 +118,10 @@ class CATIAMCPServer:
         self.export_tools = ExportTools(self.connection)
         self.knowledge_tools = KnowledgeTools(self.connection)
         self.drafting_tools = DraftingTools(self.connection)
+        # The SAME sketcher instance: it owns the open-sketch state, so an import
+        # drawn through a second instance would leave the server's copy believing
+        # no sketch is open (and _ensure_sketch_open would refuse the next call).
+        self.blueprint_tools = BlueprintTools(self.connection, self.sketcher_tools)
         self.planner_tools = PlannerTools(self.connection)
         self._tool_modules = [
             self.document_tools,
@@ -130,6 +135,7 @@ class CATIAMCPServer:
             self.export_tools,
             self.knowledge_tools,
             self.drafting_tools,
+            self.blueprint_tools,
             self.planner_tools,
         ]
         self._tool_router: dict[str, Any] = {}

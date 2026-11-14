@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.127** · [what changed](CHANGELOG.md) ·
+**0.3.128** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -12,7 +12,7 @@ defects that make that loop lie to you. Most of the work since 0.3.0 came from
 people rebuilding real assemblies with it: the changelog is a list of things that
 produced a plausible number, a wrong number, or no explanation at all.
 
-**149 tools** (upstream 98 + 51 added, and nothing dropped any more: knowledge
+**151 tools** (upstream 98 + 53 added, and nothing dropped any more: knowledge
 came back in 0.3.63 and drafting in 0.3.64, each after its tools were measured on
 B30 rather than trusted). Nothing in the COM layer was rewritten — the value of upstream is
 the field-verified knowledge in its comments, so this fork is strictly add /
@@ -71,11 +71,13 @@ two - `catia_delete_body`, `catia_solid_loft`; 0.3.19: one - `catia_copy_compone
 `catia_gsd_rotate`, `catia_gsd_translate`; 0.3.82: three - `catia_sketch_copy`,
 `catia_gsd_circ_pattern`, `catia_gsd_plane_normal_to_curve`; 0.3.84: one -
 `catia_gsd_plane_angle`).
-98 + 50 added = 148, plus `catia_server_info` (0.3.127) = 149: the 31 below, `catia_apply_design_table` under Knowledgeware,
+98 + 50 added = 148, plus `catia_server_info` (0.3.127) = 149, plus the two
+drawing readers (0.3.128) = 151: the 31 below, `catia_apply_design_table` under Knowledgeware,
 `catia_drawing_set_sheet` and `catia_drawing_add_frame` under Drafting (0.3.65),
 the three colour tools in their own table below (0.3.79), `catia_replace_component` (0.3.80), `catia_split_solid` (0.3.94), `catia_measure_deviation` (0.3.119), `catia_solid_tube` (0.3.121), `catia_gsd_splines` (0.3.122), and
 `catia_solid_sweep_variable` (0.3.124, elliptic sections since 0.3.126), and
-`catia_set_constraint_value` (0.3.125), and `catia_server_info` (0.3.127). 0.3.85 added arguments instead of tools:
+`catia_set_constraint_value` (0.3.125), `catia_server_info` (0.3.127), and
+`catia_read_drawing` / `catia_import_drawing` (0.3.128). 0.3.85 added arguments instead of tools:
 `catia_gsd_boundary(edge=N, propagation=…)` takes one loop of a border (a
 selector `AddNewBoundaryOfSurface` does not have), `catia_gsd_fill` accepts
 `Edge.N`, and `catia_gsd_circ_pattern(cap_center=true, cap_curve=…)` closes the
@@ -1313,6 +1315,39 @@ the reason `catia_circ_pattern` now says which mode produced its copies: a reply
 that states its own assumptions can be contradicted by the next measurement,
 while a reply that only reports success cannot.
 
+## From a drawing to a sketch (0.3.128)
+
+`catia_read_drawing` answers "what is in this file" without touching CATIA:
+format, the file's own units and the resulting millimetres per unit, contour and
+element counts, which layers the geometry sits on, how small the smallest contour
+is (text and arrowheads are tiny), the bounds in mm, and how much text was drawn
+as TEXT and therefore cannot be read. `catia_import_drawing` parses the same way
+and draws the result into a sketch at 1:1, one call, closed at the end.
+
+DXF (ASCII), SVG and **vector** PDF are read with no external library and no
+rasterising step. Lines stay lines, arcs stay arcs - DXF bulges included - and
+circles stay circles, so a pad on the import is not faceted. Measured on B30
+2026-11-14: an SVG plate 40 x 20 with a D6 hole padded to **7 717.26 mm³**
+against the analytic 7 717.26; a DXF stadium with `bulge=1` caps padded to
+**5 570.80** against 5 570.80, where chord-approximating the caps would have
+given 4 000; a 1 x 0.5 **inch** rectangle read through `$INSUNITS` landed at
+25.4 x 12.7 mm; the same rectangle with `scale=100` (a 1:100 sheet) came out
+100 x 50 mm and padded to 10 000.
+
+Two facts about real drawings that this had to accept:
+
+* **A CAD export writes one entity per EDGE, not one per profile.** The A3
+  sample in this workspace parses to 672 contours of which 83 are closed - and
+  all 83 are 3.4-4.6 mm arrowheads. So the parsers **stitch** edges that share an
+  endpoint; where more than one unused edge meets a joint they leave it open and
+  report the count rather than guess, because a wrong guess is a profile the
+  drawing never had.
+* **Text is not converted.** A glyph's outline lives in the font program. A
+  drawing exported with its text converted to curves has no text runs and imports
+  whole; one with live text imports the geometry and says how many runs it
+  skipped. DWG and raster images are refused with the way out - re-save as DXF,
+  and a scan has no geometry to read.
+
 ## Tool reference
 
 | Group | Tools | Notes |
@@ -1329,6 +1364,7 @@ while a reply that only reports success cannot.
 | Drawing | 13 | upstream's drafting module, measured, plus `catia_drawing_set_sheet` and `catia_drawing_add_frame`: new drawing, generative view (plane / face / body), projection, section, detail, text, table, generated and manual dimensions, paper size, border and title block |
 | Planner | **2** | `run_plan`, `measure_topology` |
 | Diagnostics | 2 | `catia_diagnose` (full probe: factories, type libraries, ceilings), `catia_server_info` (0.3.127 - name, version, tool count, CATIA release; no probes, never connects) |
+| Blueprint | 2 | `catia_read_drawing` (0.3.128 - DXF/SVG/vector-PDF to contours, counts, layers, bounds in mm; never connects), `catia_import_drawing` (0.3.128 - the same, drawn into a sketch at 1:1 and closed) |
 
 #### Knowledgeware (6 tools, 0.3.63)
 

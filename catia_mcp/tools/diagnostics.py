@@ -997,6 +997,37 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
             "catia_solid_loft."
         ),
     },
+    {
+        "member": "reading a 2D drawing (DXF / SVG / PDF) into a sketch",
+        "status": "AVAILABLE_WITH_LIMIT",
+        "detail": (
+            "catia_read_drawing and catia_import_drawing (0.3.128) close the gap "
+            "the 2026-11-14 report opened as P0-1. DXF (ASCII), SVG and VECTOR "
+            "PDF are read with no external library and no rasterising: lines stay "
+            "lines, arcs stay arcs (DXF bulges included) and circles stay "
+            "circles, so a pad on the import is not faceted. Measured on B30 "
+            "2026-11-14: an SVG plate 40x20 with a D6 hole padded to 7 717.26 "
+            "mm3 against the analytic 7 717.26; a DXF stadium whose caps are "
+            "bulge=1 arcs padded to 5 570.80 against 5 570.80 (chords would have "
+            "given 4 000); a 1 x 0.5 INCH rectangle read through $INSUNITS landed "
+            "at 25.4 x 12.7 mm and padded to 645.16. Three limits, all measured: "
+            "(1) DWG is refused outright - it is a binary container and CATIA "
+            "itself needs a translator, so the reply says to re-save as DXF. "
+            "(2) RASTER images cannot be read at all: a scanned sheet has no "
+            "geometry, only pixels. (3) TEXT drawn as text is not converted - a "
+            "glyph's outline lives in the font program - and the reply counts the "
+            "text runs it skipped, so \"the dimensions are missing\" is stated "
+            "rather than discovered. A drawing whose text was converted to curves "
+            "has no text runs and imports whole. One more, and it is the one that "
+            "surprises: a CAD export writes one entity per EDGE, so almost "
+            "nothing is a closed profile (the A3 sample: 672 contours, 83 closed, "
+            "and all 83 were 3.4-4.6 mm arrowheads). The parsers therefore STITCH "
+            "edges that share an endpoint, and where more than one unused edge "
+            "meets a joint they leave it open and report the count instead of "
+            "guessing - a wrong guess is a profile the drawing never had, and it "
+            "pads to a plausible-looking solid."
+        ),
+    },
 ]
 
 

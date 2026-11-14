@@ -2,6 +2,58 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.128] — 2026-11-14 · a drawing goes in
+
+The 2026-11-14 report's P0-1: 147 tools, none of which could read a 2D drawing.
+The chain it forced was "pip install a PDF renderer outside the MCP, render to
+PNG, crop, read the numbers with a vision model, type them into 21 plan steps" -
+unreproducible, uncheckable, and with no machine-readable link to the drawing.
+The fix is not OCR: it is reading the geometry the drawing already contains.
+
+**New: `catia_read_drawing` and `catia_import_drawing`.** DXF (ASCII), SVG and
+vector PDF, parsed with the standard library only. `read_drawing` answers the
+questions that decide whether an import is worth doing - units and mm-per-unit,
+contour and element counts, the layer table, the smallest contour, the bounds in
+mm, and how many text runs were skipped - and never connects to CATIA.
+`import_drawing` parses the same way and draws into a sketch at 1:1, one call.
+
+Pieces keep their own kind: lines stay lines, arcs stay arcs (DXF **bulges**
+included, which are arc segments inside a polyline), circles stay circles, and
+only Beziers and elliptical arcs are sampled - and the contour records that it
+was. Sketch elements that are the primitive they should be are the difference
+between a round hole and a 24-sided one.
+
+Measured on B30 2026-11-14, each case one fresh document:
+
+| file | expected | got |
+|---|---|---|
+| SVG 40 x 20 plate, D6 hole, pad 10 | 7 717.26 mm³ | **7 717.26** |
+| DXF square as four separate LINE entities, pad 4 | 3 600.00 | **3 600.00** |
+| DXF stadium, `bulge=1` caps, pad 5 | 5 570.80 (chords: 4 000) | **5 570.80** |
+| DXF 1 x 0.5 **inch**, `$INSUNITS=1`, pad 2 | 645.16 | **645.16** |
+| DXF 1 x 0.5 mm at 1:100, `scale=100`, pad 2 | 10 000 | **10 000.00** |
+
+**Stitching, because a CAD export has one entity per EDGE.** The workspace's A3
+sample parses to 672 contours of which 83 are closed - and every one of those 83
+is a 3.4-4.6 mm arrowhead, so `closed_only` used to remove the entire model and a
+pad was impossible. Edges that share an endpoint are now joined into loops. Where
+more than one unused edge meets a joint the chain stops and the count is
+reported: a guess there is a profile the drawing never had, and it pads to a
+solid that looks right.
+
+**Refuses rather than truncates.** An import that would create more than 2 000
+sketch elements is refused with the count, the contour count and the smallest
+contour - enough to choose `min_size`/`layers`/`region` from data. `max_elements`
+overrides it; on the vectorised sample (6 489 elements) the refusal is the
+correct answer, and the audit checks the document still holds no sketch.
+
+Ceilings recorded, all measured: DWG is refused (binary container, CATIA needs a
+translator - re-save as DXF); raster images cannot be read at all; text drawn as
+text is not converted, because a glyph's outline lives in the font program, and
+the reply counts what it skipped.
+
+2 073 tests. 151 tools. B30: 12/12.
+
 ## [0.3.127] — 2026-11-14 · a name that could be worked around, and an identity that costs nothing
 
 The 2026-11-14 report's last two items. Both were small, and both had a detail

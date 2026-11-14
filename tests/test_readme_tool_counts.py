@@ -33,6 +33,7 @@ MODULES: dict[str, tuple[str, str]] = {
     "Drawing": ("catia_mcp.tools.drawing", "DraftingTools"),
     "Planner": ("catia_mcp.tools.planner", "PlannerTools"),
     "Diagnostics": ("catia_mcp.tools.diagnostics", "DiagnosticsTools"),
+    "Blueprint": ("catia_mcp.tools.blueprint", "BlueprintTools"),
 }
 
 ROW = re.compile(r"^\|\s*([A-Za-z][A-Za-z ]*?)\s*\|\s*\*{0,2}(\d+)\*{0,2}\s*\|")
