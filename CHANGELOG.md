@@ -2,6 +2,79 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.124] — 2026-11-14 · a section chain from a file, and a radius that changes
+
+The last open item of the 2026-11-13 report (P1-4), plus the tool it asked for
+instead. Both are the same story: 17 sections and 380 coordinates pasted into one
+call, then 15 sections and 1 440 more for a flare body.
+
+### `catia_solid_sweep_variable` — the radius table, not one radius
+
+At each station it places a point on the spine, a datum plane normal to it, and a
+circle of that station's radius; then ONE `catia_solid_loft` runs through them. No
+new CATIA capability - the chain the report did by hand, with the stations
+generated instead of typed.
+
+Sections are `[[t, radius], ...]` (t a fraction of the spine's length, strictly
+increasing) or a bare `[r0, r1, ...]` spread evenly. Measured on B30 2026-11-14,
+one fresh document per case:
+
+| case | measured | ruled sum |
+|---|---|---|
+| 50 mm line, r 10 → 7 → 4 at t=0/0.5/1 | **8 168.2 mm³** | 8 168.1 |
+| 50 mm line, `[8, 8, 8]` (a cylinder) | **10 052.7 mm³** | π·64·50 = 10 053.1 |
+| 40×40×10 pad, then `body=`, r 8 → 4 | **+3 518.4 mm³** | 3 518.6 |
+| bent 55.642 mm spline, r 6 → 9 → 3 | **10 119.1 mm³** | 8 390.6 (**+20.60 %**) |
+
+That last row is why the reply does not simply compare with the ruled sum. The sum
+of truncated cones is the answer only when consecutive section planes are PARALLEL,
+which is a straight spine; on a bent one the sections are oblique and the solid is
+legitimately bigger. An earlier draft of this call said "THAT IS NOT A RULED LOFT"
+there - a false accusation about a correct solid, caught in the acceptance run
+before it shipped. The sentence now carries both cases.
+
+The increment is judged, not the body's total: the same draft compared 19 518.4
+against 3 518.6 and answered **+454 %** for a perfect union.
+
+A closed spine (a `gsd_circle`) is refused with `POINT_ON_CURVE_FAILED` and the
+point it had already added is removed again - measured, tree unchanged, 3 → 3
+entries. Every helper element stays (the loft references them; deleting one breaks
+the update for good) and is hidden by default.
+
+### `catia_gsd_splines(source_file=...)`
+
+Reads the same entries from a JSON or CSV file, then puts them through **exactly**
+the inline validation - so the file form cannot accept what the inline form
+rejects. JSON is `{"entries": [...]}` or the list itself. CSV is one point per row,
+`x,y,z` or `name,x,y,z`, blank line or `#` comment ending a section.
+
+Two things the format has to say out loud, both found by running it:
+
+* `[[0,0,0],[5,0,0]]` is ambiguous - one section of two points, or two of one
+  point each. The SHAPE decides (a list whose elements are all points is one
+  section), so the unambiguous way to write two sections is one more level of
+  nesting. The other reading would turn a 12-point ring into 12 splines and still
+  answer ok.
+* CSV has no boolean column, so a ring built as an **open** spline and
+  `catia_solid_loft` refused the chain (measured: three 18-point rings read as
+  "18 point(s), open", `方法 Update 失败`). A section is now CLOSED when its last
+  point repeats its first, or when the file carries a `# closed` line.
+
+Measured end to end on B30 2026-11-14: three 18-point rings from a CSV, r 10/14/6
+at z 0/30/60, loft to **27 945.3 mm³** - the same number the inline entries gave
+in 0.3.122, which is what makes this an entry point and not a fork.
+
+### One wrong sentence corrected
+
+`capability_ceilings` said there was no ellipse primitive in this server, and two
+tool descriptions repeated it. `catia_sketch_ellipse` has existed since **0.3.106**
+(`Factory2D.CreateClosedEllipse`). What does not exist is a 3D GSD ellipse CURVE.
+All three texts now say that, the ceiling for a variable-section solid moved from
+`UNSUPPORTED_ON_B30` to `AVAILABLE_WITH_LIMIT`, and its two real limits are stated:
+the spine must carry a point-on-curve parameter, and every station is a circle.
+
+147 tools (GSD 40), 1 978 tests, `scripts/b30_v0426_audit.py` 13/13.
+
 ## [0.3.123] — 2026-11-14 · two sentences that would have cost the model
 
 The 2026-11-13 acceptance report (13th round) opened with two P0s, and both were

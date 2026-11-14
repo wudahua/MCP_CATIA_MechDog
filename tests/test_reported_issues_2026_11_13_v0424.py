@@ -190,9 +190,17 @@ def test_a_mid_chain_refusal_reports_what_exists_and_does_not_roll_back():
 
 
 def test_the_batch_is_registered_with_one_required_list():
+    """0.3.124: 'entries' stopped being required, because source_file replaces it.
+
+    Neither is required on its own and exactly one of them has to be given - which
+    the schema cannot say, so _splines says it (`ENTRIES_OR_FILE`) before CATIA is
+    touched. What must NOT happen is a schema that demands 'entries' and then
+    refuses the file form the description advertises.
+    """
     definition = next(d for d in GSDTools(connection=None).get_tool_definitions()
                       if d["name"] == "catia_gsd_splines")
-    assert definition["inputSchema"]["required"] == ["entries"]
+    assert definition["inputSchema"]["required"] == []
+    assert "source_file" in definition["inputSchema"]["properties"]
     text = definition["description"]
     assert "catia_gsd_spline" in text, "the batch has to point at the single call"
     assert "PARTIAL FAILURE IS NOT A SUCCESS" in text

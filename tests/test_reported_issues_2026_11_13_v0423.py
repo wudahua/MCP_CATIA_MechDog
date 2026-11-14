@@ -345,6 +345,12 @@ def test_the_three_new_ceilings_are_recorded_with_their_evidence():
     assert "44 members" in face["detail"]
     assert "GetCOG" in face["detail"]
 
+    # 0.3.124 turned this one into a tool, so the entry moved from "not
+    # supported" to "supported with limits" - and the limits are the two that
+    # survived: the spine must carry a point-on-curve parameter, and every
+    # station is a CIRCLE.
     tube = members["a solid tube whose section changes along the spine"]
-    assert tube["status"] == "UNSUPPORTED_ON_B30"
-    assert "catia_solid_loft" in tube["detail"]
+    assert tube["status"] == "AVAILABLE_WITH_LIMIT"
+    assert "catia_solid_sweep_variable" in tube["detail"]
+    assert "circle and a closed spline do not" in tube["detail"]
+    assert "catia_sketch_ellipse" in tube["detail"]

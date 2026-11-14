@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from typing import Any
 
@@ -714,7 +715,11 @@ class GSDTools:
                     "the curve interpolates and bulges between points (+20 % / +79 % "
                     "measured on a 20 x 12 rectangle's corners), so a chain of "
                     "sections made this way is an approximation of the polygon it "
-                    "came from."
+                    "came from. "
+                    "PASS A FILE INSTEAD OF A LIST: source_file= reads the same "
+                    "entries from a JSON or CSV file, so coordinates that already "
+                    "live in a file do not have to be pasted into a tool call and "
+                    "retyped into the next one."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -745,8 +750,31 @@ class GSDTools:
                                 "cannot silently produce an open section."
                             ),
                         },
+                        "source_file": {
+                            "type": "string",
+                            "description": (
+                                "Read the entries from a file instead of passing "
+                                "them inline - the 2026-11-13 report (P1-4) had to "
+                                "paste 380 coordinates into one call, then 1 440 "
+                                "more for a 15-section flare body. JSON is either "
+                                "{'entries': [...]} or the list itself (a bare list "
+                                "of points is wrapped as one entry); CSV is one "
+                                "point per row, 'x,y,z' or 'name,x,y,z', a blank "
+                                "line or a '#' comment ending a section, and a run "
+                                "of rows sharing a name is one section. A section "
+                                "is CLOSED when its last point repeats its first or "
+                                "when the file has a '# closed' line ('# closed: "
+                                "false' turns that off) - CSV has no boolean "
+                                "column, and a ring read as an open spline lofts "
+                                "to nothing. Files are "
+                                "read as UTF-8 (a BOM is ignored), capped at 8 MB, "
+                                "and must end in .json/.csv/.txt. Entries from a "
+                                "file are validated by exactly the same rules as "
+                                "inline ones. Mutually exclusive with 'entries'."
+                            ),
+                        },
                     },
-                    "required": ["entries"],
+                    "required": [],
                 },
             },
             {
@@ -1590,10 +1618,14 @@ class GSDTools:
                     "catia_solid_loft does with a chain of closed splines (the "
                     "route the 2026-11-13 report used for its 17-section handle, "
                     "and the one to keep using when the section changes). An "
-                    "ELLIPSE section is not offered either - there is no "
-                    "ellipse primitive in this server (a real gap, recorded in "
-                    "capability_ceilings), so a flattened tube has to go through "
-                    "catia_solid_loft as well. "
+                    "THE SECTION CAN VARY by using catia_solid_sweep_variable, which "
+                    "places one circle per station and lofts through them. "
+                    "AN ELLIPSE SECTION is not offered BY THIS TOOL, because it "
+                    "makes one circle - but the ellipse primitive does exist, in "
+                    "the SKETCH: catia_sketch_ellipse wraps "
+                    "Factory2D.CreateClosedEllipse, and catia_solid_loft takes "
+                    "those sketches as sections. (An earlier version of this text "
+                    "said no ellipse primitive existed anywhere, which was wrong.) "
                     "WHERE THE SOLID GOES: into a NEW body by default (named after "
                     "'name'), so nothing merges behind the caller's back - pass "
                     "'body' to put it into an existing body, where Part Design "
@@ -1670,6 +1702,104 @@ class GSDTools:
                         },
                     },
                     "required": ["curve", "radius"],
+                },
+            },
+            {
+                "name": "catia_solid_sweep_variable",
+                "description": (
+                    "A solid whose RADIUS CHANGES along the spine - the take on "
+                    "catia_solid_tube that the 2026-11-13 report (P1-4) needed for "
+                    "a 'rounded, thick handle with a soft dome' and could only "
+                    "reach with 17 sections and 380 hand-fed coordinates. "
+                    "HOW IT WORKS, and it is deliberately not a new CATIA "
+                    "capability: at each station it puts a point on the spine, a "
+                    "datum plane normal to it, and a circle of that station's "
+                    "radius on the plane; then ONE catia_solid_loft runs through "
+                    "the circles. Measured on B30 (2026-10-25) that a loft through "
+                    "two circles is the RULED surface between them - r8 at z=0 and "
+                    "r16 at z=40 gave 18765.8 mm3, exactly pi*h/3*(R^2+Rr+r^2) - so "
+                    "the reply can compare the volume with that formula instead of "
+                    "printing it and hoping. "
+                    "SECTIONS: either [[t, radius], ...] where t is a FRACTION of "
+                    "the spine's length in 0..1 (strictly increasing, same "
+                    "convention as catia_gsd_plane_normal_to_curve), or a bare "
+                    "[r0, r1, ...] spread evenly from t=0 to t=1. The first and "
+                    "last station's planes are the end faces; the result is always "
+                    "a solid. "
+                    "THE SPINE HAS TO CARRY A POINT-ON-CURVE PARAMETER: an open "
+                    "catia_gsd_line or an OPEN catia_gsd_spline does, a circle and "
+                    "a CLOSED spline do not (the matrix measured on B30 2026-11-11 "
+                    "and written into the engrave code). A closed spine is refused "
+                    "before anything is built. "
+                    "ELLIPSE SECTIONS ARE NOT OFFERED HERE: every station is a "
+                    "circle. For a flattened or non-circular section, draw the "
+                    "profiles with catia_sketch_ellipse (there IS an ellipse "
+                    "primitive - Factory2D.CreateClosedEllipse) or "
+                    "catia_sketch_profile and feed them to catia_solid_loft "
+                    "directly. "
+                    "THE HELPERS CANNOT BE DELETED, only hidden: the points, planes "
+                    "and circles are the loft's history, and removing one leaves a "
+                    "part whose update fails for good (measured 2026-11-13 on the "
+                    "engrave chain, same structure). 'helpers' controls their "
+                    "display state, defaulting to hidden."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "spine": {
+                            "type": "string",
+                            "description": (
+                                "Curve to sweep along, by tree name - an open "
+                                "catia_gsd_line or an open catia_gsd_spline. A "
+                                "circle or a closed spline cannot carry a "
+                                "point-on-curve parameter and is refused."
+                            ),
+                        },
+                        "sections": {
+                            "type": "array",
+                            "minItems": 2,
+                            "description": (
+                                "[[t, radius], ...] with t in 0..1 as a fraction of "
+                                "the spine's length, strictly increasing - or a bare "
+                                "[r0, r1, ...] spread evenly from start to end. At "
+                                "least two stations. Radii are in mm and must be "
+                                "positive."
+                            ),
+                            "items": {},
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": (
+                                "Base name: '<name>_01_P' point, '_N' plane, '_S' "
+                                "circle per station, and '<name>.Body' for the body "
+                                "when 'body' is omitted. Default 'Sweep'."
+                            ),
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": (
+                                "Existing body to build the solid into. Omit it and "
+                                "the solid gets a body of its own, so a caller who "
+                                "wanted a separate solid is not surprised by a "
+                                "union. When the body already holds material, Part "
+                                "Design UNIONS the new solid with it - the volume in "
+                                "the reply is then the body's total."
+                            ),
+                        },
+                        "helpers": {
+                            "type": "string",
+                            "enum": ["hide", "show", "keep"],
+                            "default": "hide",
+                            "description": (
+                                "What to do with the station helpers (points, "
+                                "planes, circles). 'hide' (default) sets them "
+                                "invisible; 'show' leaves them visible; 'keep' does "
+                                "not touch their visibility. None of them deletes: "
+                                "they are the loft's history."
+                            ),
+                        },
+                    },
+                    "required": ["spine", "sections"],
                 },
             },
             {
@@ -2577,6 +2707,19 @@ class GSDTools:
                     # to know the operation was interfered with.
                     try:
                         reply = self._surface_engrave(arguments)
+                    except Exception as error:                # noqa: BLE001
+                        if boxes.clicks:
+                            error.args = (str(error)
+                                          + _answered_boxes("", boxes.clicks),)
+                        raise
+                return _answered_boxes(reply, boxes.clicks)
+            case "catia_solid_sweep_variable":
+                with dialogs.watch() as boxes:
+                    # Same reason as the tube case: a loft through generated
+                    # circles can raise a modal, and a box answered before a
+                    # failure is still a box that was answered.
+                    try:
+                        reply = self._solid_sweep_variable(arguments)
                     except Exception as error:                # noqa: BLE001
                         if boxes.clicks:
                             error.args = (str(error)
@@ -3627,6 +3770,195 @@ class GSDTools:
         except (TypeError, ValueError):
             return None
 
+    #: A section file is read whole into memory, so it has a ceiling. 8 MB is
+    #: roughly 400 000 points - far past any loft chain - and small enough that a
+    #: wrong path pointing at a video fails in a second instead of hanging.
+    _SPLINE_FILE_MAX_BYTES = 8 * 1024 * 1024
+    _SPLINE_FILE_SUFFIXES = (".json", ".csv", ".txt")
+
+    @classmethod
+    def _entries_from_file(cls, path: Any) -> tuple[list[Any], str]:
+        """Read ``catia_gsd_splines`` entries from a JSON or CSV file.
+
+        Asked for by the 2026-11-13 report (P1-4): 17 sections and 380 coordinates
+        had to be pasted into one tool call, and a 15-section flare body was
+        1 440 more. The coordinates are the caller's own data, so the file has to
+        be readable, and the FORMAT has to be stated rather than guessed - an
+        ambiguous section file is exactly the kind of thing that produces a
+        plausible solid with the wrong profile.
+
+        Two formats, both reduced to the same entries list and then put through
+        the same validation as inline ``entries`` (unknown keys, repeated names,
+        a repeated closing point) - so nothing here can accept what the inline
+        form rejects.
+
+        JSON, either shape::
+
+            {"entries": [{"name": "S01", "points": [[0, 0, 0], ...], "closed": true}]}
+            [{"name": "S01", "points": [[0, 0, 0], ...]}]
+            [[[0, 0, 0], [10, 0, 0]], ...]     # bare point lists are wrapped
+
+        CSV, one point per row, blank line between sections, ``#`` starts a
+        comment. Three columns are ``x,y,z``; four are ``name,x,y,z`` and a run of
+        rows sharing a name is one section::
+
+            # handle dome, 3 stations
+            S01, 0, 0, 0
+            S01, 10, 0, 0
+            <blank>
+            S02, 0, 0, 30
+            S02, 12, 0, 30
+
+        A section is CLOSED when its last point repeats its first, or when the
+        file carries a ``# closed`` line (``# closed: false`` turns it off again).
+        CSV has no boolean column, and a ring read as an open spline lofts to
+        nothing - that is how this rule came to exist.
+        """
+        text_path = os.path.abspath(os.fspath(path))
+        if not os.path.isfile(text_path):
+            raise ArgumentRejected(
+                f"source_file '{text_path}' does not exist. Nothing was created.",
+                code="FILE_NOT_FOUND", stage="validate")
+        suffix = os.path.splitext(text_path)[1].lower()
+        if suffix not in cls._SPLINE_FILE_SUFFIXES:
+            raise ArgumentRejected(
+                f"source_file must be one of "
+                f"{', '.join(cls._SPLINE_FILE_SUFFIXES)}; got '{suffix or 'no suffix'}'. "
+                "Nothing was created.", code="UNSUPPORTED_FILE", stage="validate")
+        size = os.path.getsize(text_path)
+        if size > cls._SPLINE_FILE_MAX_BYTES:
+            raise ArgumentOutOfRange(
+                f"source_file is {size} bytes; the limit is "
+                f"{cls._SPLINE_FILE_MAX_BYTES}. That is far more points than any "
+                "section chain needs. Nothing was created.",
+                code="FILE_TOO_LARGE", stage="validate")
+        try:
+            with open(text_path, "r", encoding="utf-8-sig") as handle:
+                text = handle.read()
+        except OSError as error:
+            raise PreconditionRejected(
+                f"source_file '{text_path}' could not be read: "
+                f"{str(error).splitlines()[0][:120]}. Nothing was created.",
+                code="FILE_UNREADABLE", stage="validate") from error
+
+        if suffix == ".json":
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError as error:
+                raise ArgumentRejected(
+                    f"source_file '{text_path}' is not valid JSON: {error.msg} at "
+                    f"line {error.lineno} column {error.colno}. Nothing was created.",
+                    code="BAD_FILE", stage="validate") from error
+            raw = payload.get("entries") if isinstance(payload, dict) else payload
+            if not isinstance(raw, list) or not raw:
+                raise ArgumentRejected(
+                    f"source_file '{text_path}' holds no entries: a JSON object "
+                    "needs an 'entries' list, or the file must be the list itself. "
+                    "Nothing was created.", code="BAD_FILE", stage="validate")
+
+            def is_point(value: Any) -> bool:
+                return (isinstance(value, (list, tuple)) and len(value) == 3
+                        and all(isinstance(item, (int, float))
+                                and not isinstance(item, bool) for item in value))
+
+            # [[0,0,0],[5,0,0]] is ambiguous on its face: one section of two
+            # points, or two sections of one point each. The SHAPE decides - a
+            # list whose elements are all points is ONE section - so the
+            # unambiguous way to write two sections is one more level of nesting.
+            # Guessing the other way would turn a 12-point ring into 12 splines
+            # and still answer ok.
+            if all(is_point(item) for item in raw):
+                return ([{"points": list(raw)}],
+                        f"read 1 section from '{text_path}' (JSON, one bare point list)")
+            entries: list[Any] = []
+            for index, item in enumerate(raw, start=1):
+                if isinstance(item, list):
+                    entries.append({"points": item})
+                elif isinstance(item, dict):
+                    entries.append(item)
+                else:
+                    raise ArgumentRejected(
+                        f"source_file entry {index} is {type(item).__name__}; "
+                        "each entry must be an object or a bare list of points. "
+                        "Nothing was created.", code="BAD_FILE", stage="validate")
+            return entries, f"read {len(entries)} entries from '{text_path}' (JSON)"
+
+        # CSV: a run of rows with the same name is one section, and a blank line
+        # closes one whatever its name - so both named groups and unnamed blocks
+        # work without a header deciding which mode you are in.
+        #
+        # CLOSED, because a section usually is and CSV has no boolean column: a
+        # section whose LAST point repeats its FIRST is marked closed (catia_
+        # gsd_splines then drops the repeat and says so), and a '# closed' line
+        # marks every section closed without the repeat. Without one of these a
+        # CSV ring builds as an OPEN spline, which lofts to nothing - measured on
+        # B30 2026-11-14: three 18-point rings read as "18 point(s), open", and
+        # catia_solid_loft refused the chain.
+        entries = []
+        file_closed = False
+        current: dict[str, Any] = {"name": None, "points": []}
+
+        def close_current() -> None:
+            points = current["points"]
+            if not points:
+                return
+            repeats = (len(points) >= 3
+                       and all(abs(a - b) <= 1e-9
+                               for a, b in zip(points[0], points[-1])))
+            entry: dict[str, Any] = {"points": points}
+            if current["name"]:
+                entry["name"] = current["name"]
+            if file_closed or repeats:
+                entry["closed"] = True
+            entries.append(entry)
+
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            stripped = line.strip()
+            if not stripped:
+                close_current()
+                current = {"name": None, "points": []}
+                continue
+            if stripped.startswith("#"):
+                lowered = stripped.lstrip("#").strip().lower()
+                if lowered.startswith("closed"):
+                    value = (lowered.split(":", 1)[1].strip()
+                             if ":" in lowered else "")
+                    file_closed = value not in ("false", "0", "no", "off")
+                close_current()
+                current = {"name": None, "points": []}
+                continue
+            parts = [part.strip() for part in stripped.split(",")]
+            if len(parts) == 3:
+                name, coords = None, parts
+            elif len(parts) == 4:
+                name, coords = (parts[0] or None), parts[1:]
+            else:
+                raise ArgumentRejected(
+                    f"source_file line {lineno} has {len(parts)} column(s); a CSV "
+                    "row is 'x,y,z' or 'name,x,y,z'. Nothing was created.",
+                    code="BAD_FILE", stage="validate")
+            try:
+                point = [float(value) for value in coords]
+            except ValueError as error:
+                raise ArgumentRejected(
+                    f"source_file line {lineno} is not numeric: {coords!r}. "
+                    "Nothing was created.", code="BAD_FILE", stage="validate") from error
+            if current["points"] and name and current["name"] != name:
+                close_current()
+                current = {"name": None, "points": []}
+            if name and not current["name"]:
+                current["name"] = name
+            current["points"].append(point)
+        close_current()
+        if not entries:
+            raise ArgumentRejected(
+                f"source_file '{text_path}' holds no coordinate rows. Nothing was "
+                "created.", code="BAD_FILE", stage="validate")
+        closed_count = sum(1 for entry in entries if entry.get("closed"))
+        return entries, (f"read {len(entries)} sections from '{text_path}' (CSV"
+                         + (f", {closed_count} closed" if closed_count else "")
+                         + ")")
+
     #: The keys one entry of catia_gsd_splines may carry - exactly the arguments
     #: catia_gsd_spline takes, so the batch cannot grow a private vocabulary.
     _SPLINE_ENTRY_KEYS = ("name", "points", "element", "closed", "create_points")
@@ -3651,12 +3983,24 @@ class GSDTools:
           after the spline went), so a rollback trades a named partial chain for
           unnamed clutter. The error carries what exists and what failed instead.
         """
-        entries = args.get("entries")
+        source = args.get("source_file")
+        file_note = ""
+        if source and args.get("entries"):
+            raise ArgumentRejected(
+                "Pass 'entries' or 'source_file', not both - which one wins would "
+                "be a coin toss, and the losing one would look like it was used. "
+                "Nothing was created.", code="ENTRIES_OR_FILE",
+                stage="validate")
+        if source:
+            entries, file_note = self._entries_from_file(source)
+        else:
+            entries = args.get("entries")
         if not isinstance(entries, (list, tuple)) or not entries:
             raise ArgumentRejected(
                 "'entries' must be a non-empty list, one object per spline: "
-                "{name?, points?|element?, closed?, create_points?}. Nothing was "
-                "created.", code="ENTRIES_REQUIRED", stage="validate")
+                "{name?, points?|element?, closed?, create_points?} - or pass "
+                "'source_file' (JSON or CSV) instead. Nothing was created.",
+                code="ENTRIES_REQUIRED", stage="validate")
 
         # EVERY ENTRY IS CHECKED BEFORE ANY CURVE IS BUILT. A typo in entry 12
         # would otherwise cost eleven splines and a partial-failure report, when
@@ -3805,7 +4149,8 @@ class GSDTools:
                 ]) from error
 
         return (
-            f"Built {len(made)} spline(s) in one call: {listing}.{checks}"
+            (file_note + ". " if file_note else "")
+            + f"Built {len(made)} spline(s) in one call: {listing}.{checks}"
             f"{drop_note}{points_note} NEXT: catia_solid_loft(sections=[...]) takes "
             "them as the section chain.")
 
@@ -6067,6 +6412,320 @@ class GSDTools:
                 code="ENGRAVE_TUBE_NOT_CLOSED", stage="execute",
                 modified=False) from error
 
+    #: How many stations a variable sweep will build. Each station is a point, a
+    #: plane and a circle, and the whole thing is ONE loft; 200 is far past any
+    #: real transition and stops a typo from turning into a ten-minute build.
+    _SWEEP_MAX_STATIONS = 200
+
+    @classmethod
+    def _sweep_stations(cls, raw: Any) -> list[tuple[float, float]]:
+        """``[(t, radius), ...]`` from ``[[t, r], ...]`` or a bare ``[r0, r1, ...]``.
+
+        Kept pure so the accept/refuse line can be tested without CATIA: a station
+        table is the one part of a variable sweep that cannot be inspected
+        afterwards, and getting it wrong produces a solid that looks plausible.
+        """
+        if not isinstance(raw, (list, tuple)):
+            raise ArgumentRejected(
+                "'sections' must be a list: [[t, radius], ...] with t a fraction of "
+                "the spine's length in 0..1, or [r0, r1, ...] spread evenly. "
+                "Nothing was created.", code="BAD_SECTIONS", stage="validate")
+        if len(raw) < 2:
+            raise ArgumentRejected(
+                f"'sections' has {len(raw)} station(s); a sweep needs at least two, "
+                "because one station is a disc and not a solid. Nothing was "
+                "created.", code="BAD_SECTIONS", stage="validate")
+        if len(raw) > cls._SWEEP_MAX_STATIONS:
+            raise ArgumentOutOfRange(
+                f"'sections' has {len(raw)} stations; the limit is "
+                f"{cls._SWEEP_MAX_STATIONS}. Nothing was created.",
+                code="TOO_MANY_STATIONS", stage="validate")
+
+        uniform = all(isinstance(item, (int, float)) and not isinstance(item, bool)
+                      for item in raw)
+        partial = any(isinstance(item, (int, float)) and not isinstance(item, bool)
+                      for item in raw)
+        if not uniform and partial:
+            raise ArgumentRejected(
+                "'sections' mixes bare radii with [t, radius] pairs. Use one form: "
+                "either [[t, radius], ...] throughout, or [r0, r1, ...] throughout "
+                "- a mixed list has no single reading. Nothing was created.",
+                code="BAD_SECTIONS", stage="validate")
+
+        stations: list[tuple[float, float]] = []
+        for index, item in enumerate(raw):
+            if uniform:
+                t, radius = index / (len(raw) - 1), item
+            else:
+                if not isinstance(item, (list, tuple)) or len(item) != 2:
+                    raise ArgumentRejected(
+                        f"sections[{index}] is {item!r}; a station is "
+                        "[t, radius] or a bare radius. Nothing was created.",
+                        code="BAD_SECTIONS", stage="validate")
+                t, radius = item
+            try:
+                t, radius = float(t), float(radius)
+            except (TypeError, ValueError) as error:
+                raise ArgumentRejected(
+                    f"sections[{index}] is not numeric: {item!r}. Nothing was "
+                    "created.", code="BAD_SECTIONS", stage="validate") from error
+            if not 0.0 <= t <= 1.0:
+                raise ArgumentOutOfRange(
+                    f"sections[{index}] has t={t:g}; t is a FRACTION of the spine's "
+                    "length, so it runs from 0 (start) to 1 (end). Nothing was "
+                    "created.", code="T_OUT_OF_RANGE", stage="validate")
+            if radius <= 0:
+                raise ArgumentOutOfRange(
+                    f"sections[{index}] has radius {radius:g}; a station needs a "
+                    "positive radius - zero would collapse the solid to a point. "
+                    "Nothing was created.", code="RADIUS_OUT_OF_RANGE",
+                    stage="validate")
+            if stations and t <= stations[-1][0]:
+                raise ArgumentRejected(
+                    f"sections[{index}] has t={t:g} after t={stations[-1][0]:g}; "
+                    "stations must run strictly forward along the spine, or the "
+                    "loft doubles back on itself. Nothing was created.",
+                    code="T_NOT_INCREASING", stage="validate")
+            stations.append((t, radius))
+        return stations
+
+    def _solid_sweep_variable(self, args: dict[str, Any]) -> str:
+        """N circular stations along a spine, one loft through them.
+
+        Not a new CATIA capability - it is the chain the 2026-11-13 report did by
+        hand (17 sections, 380 coordinates, then 15 sections and 1 440 more for a
+        flare body), with the stations generated instead of typed. The volume is
+        compared with the ruled-cone sum, because that sum is what a loft through
+        circles IS when it works, and a number that misses it is a station that
+        did not take.
+        """
+        self.conn.ensure_connected()
+        spine = args.get("spine")
+        if not isinstance(spine, str) or not spine.strip():
+            raise ArgumentRejected(
+                "'spine' must be the tree name of a curve - an open catia_gsd_line "
+                "or an open catia_gsd_spline. Nothing was created.",
+                code="SPINE_REQUIRED", stage="validate")
+        spine = spine.strip()
+        stations = self._sweep_stations(args.get("sections"))
+
+        part = self.conn.get_active_part()
+        base = str(args.get("name") or "Sweep")
+
+        # WHICH BODY, RESOLVED BEFORE ANYTHING IS BUILT: a name that does not
+        # exist has to cost nothing, and it is checked here rather than after
+        # twenty helpers are in the tree.
+        body = None
+        wanted_body = args.get("body")
+        if wanted_body:
+            for index in range(1, int(part.Bodies.Count) + 1):
+                candidate = part.Bodies.Item(index)
+                if str(candidate.Name) == str(wanted_body):
+                    body = candidate
+                    break
+            if body is None:
+                raise ArgumentRejected(
+                    f"no body named '{wanted_body}' in this part - use "
+                    "catia_list_bodies for the names. Nothing was created.",
+                    code="BODY_NOT_FOUND", stage="validate")
+        else:
+            body = part.Bodies.Add()
+            try:
+                body.Name = f"{base}.Body"
+            except Exception:  # noqa: BLE001 - the auto name is good enough
+                pass
+
+        factory = self._factory()
+        geoset = self._get_geoset()
+        spine_ref = self._ref(spine)
+        length = None
+        try:
+            spa = self.conn.active_document.GetWorkbench("SPAWorkbench")
+            length = float(spa.GetMeasurable(spine_ref).Length)
+        except Exception:  # noqa: BLE001 - the build still works without it
+            length = None
+
+        helpers: list[str] = []
+        section_names: list[str] = []
+        rows: list[str] = []
+        for index, (t, radius) in enumerate(stations, start=1):
+            tag = f"{base}_{index:02d}"
+            try:
+                point = factory.AddNewPointOnCurveFromPercent(spine_ref, t, 0)
+            except Exception as error:  # noqa: BLE001 - the spine is the blocker
+                raise PreconditionRejected(
+                    f"CATIA refused a point at t={t:g} along '{spine}' "
+                    f"({str(error).splitlines()[0][:100]}), so no station was "
+                    "built. A variable sweep places its profile plane NORMAL TO "
+                    "THE SPINE at that point, so the spine has to carry a "
+                    "point-on-curve parameter: an open catia_gsd_line or an open "
+                    "catia_gsd_spline does, a circle and a CLOSED spline do not "
+                    "(measured on B30 2026-11-11, one fresh document per case). "
+                    + (f"{len(helpers)} helper element(s) were already built and are "
+                       "still in the tree." if helpers else
+                       "Nothing had been created yet."),
+                    code="POINT_ON_CURVE_FAILED", stage="execute",
+                    modified=bool(helpers)) from error
+            point_name, _ = self._free_name(part, f"{tag}_P")
+            point.Name = point_name
+            geoset.AppendHybridShape(point)
+            try:
+                part.UpdateObject(point)
+            except Exception as error:  # noqa: BLE001 - a closed spine lands here
+                # THE POINT IS ALREADY IN THE TREE WHEN THIS RAISES. Measured on
+                # B30 2026-11-14: a gsd circle as the spine left 'Bad_01_P' behind
+                # and the caller got a raw COM error instead of a sentence. Take
+                # it out, then say what a spine has to be.
+                self._drop_element(point)
+                gone = self._name_gone(part, point_name)
+                raise PreconditionRejected(
+                    f"CATIA could not place a point at t={t:g} along '{spine}' "
+                    f"({str(error).splitlines()[0][:100]}), so the sweep stopped "
+                    "before any station was complete. A variable sweep places its "
+                    "profile plane NORMAL TO THE SPINE there, so the spine has to "
+                    "carry a point-on-curve parameter: an open catia_gsd_line or an "
+                    "open catia_gsd_spline does, a circle and a CLOSED spline do "
+                    "not (measured on B30 2026-11-11, one fresh document per case). "
+                    + (f"The point this call had already added ('{point_name}') was "
+                       "removed again, so the tree is as it was." if gone else
+                       f"THE POINT THIS CALL ADDED ('{point_name}') COULD NOT BE "
+                       "REMOVED - if it is still in the tree it will stop every "
+                       "later update; delete it with catia_delete_feature.")
+                    + (f" {len(helpers)} earlier helper element(s) are still in the "
+                       "tree." if helpers else ""),
+                    code="POINT_ON_CURVE_FAILED", stage="execute",
+                    modified=bool(helpers) or not gone) from error
+            helpers.append(point_name)
+
+            plane = factory.AddNewPlaneNormal(
+                spine_ref, part.CreateReferenceFromObject(point))
+            plane_name, _ = self._free_name(part, f"{tag}_N")
+            plane.Name = plane_name
+            geoset.AppendHybridShape(plane)
+            try:
+                part.UpdateObject(plane)
+            except Exception as error:  # noqa: BLE001 - reported, not a stack trace
+                self._drop_element(plane)
+                gone = self._name_gone(part, plane_name)
+                raise PreconditionRejected(
+                    f"the plane normal to '{spine}' at t={t:g} could not be built "
+                    f"({str(error).splitlines()[0][:100]}), so the sweep stopped at "
+                    f"station {index}. "
+                    + (f"That plane ('{plane_name}') was removed again; "
+                       if gone else
+                       f"THAT PLANE ('{plane_name}') MAY STILL BE IN THE TREE - "
+                       "delete it with catia_delete_feature if it is. ")
+                    + f"{len(helpers)} helper element(s) from this call remain.",
+                    code="STATION_PLANE_FAILED", stage="execute",
+                    modified=bool(helpers) or not gone) from error
+            helpers.append(plane_name)
+
+            circle = factory.AddNewCircleCtrRad(
+                part.CreateReferenceFromObject(point),
+                part.CreateReferenceFromObject(plane), False, radius)
+            circle.SetLimitation(1)
+            circle_name, _ = self._free_name(part, f"{tag}_S")
+            circle.Name = circle_name
+            geoset.AppendHybridShape(circle)
+            try:
+                part.UpdateObject(circle)
+            except Exception as error:  # noqa: BLE001 - reported, not a stack trace
+                self._drop_element(circle)
+                gone = self._name_gone(part, circle_name)
+                raise PreconditionRejected(
+                    f"the circle of radius {radius:g} at station {index} could not "
+                    f"be built ({str(error).splitlines()[0][:100]}). The plane it "
+                    "sits on and the point it is centred on are both valid, so the "
+                    "radius or the spine's local geometry is the suspect. "
+                    + (f"That circle ('{circle_name}') was removed again; "
+                       if gone else
+                       f"THAT CIRCLE ('{circle_name}') MAY STILL BE IN THE TREE - "
+                       "delete it with catia_delete_feature if it is. ")
+                    + f"{len(helpers)} helper element(s) from this call remain.",
+                    code="STATION_PROFILE_FAILED", stage="execute",
+                    modified=bool(helpers) or not gone) from error
+            helpers.append(circle_name)
+            section_names.append(circle_name)
+            rows.append(f"t={t:g} "
+                        + (f"({t * length:.3f} mm) " if length else "")
+                        + f"r={radius:g}")
+
+        # THE LOFT GOES INTO THE BODY CHOSEN ABOVE. _prepare_body reads
+        # connection.active_body, so it has to be told, not just InWorkObject.
+        self.conn.active_body = body
+        try:
+            part.InWorkObject = body
+        except Exception:  # noqa: BLE001 - _prepare_body retries it
+            pass
+        from catia_mcp.tools.part_design import PartDesignTools
+
+        pd = PartDesignTools(self.conn)
+        # BEFORE the loft, or the "increment" is measured against itself.
+        before_volume = pd._body_volume_mm3(part, body)
+        before_volume = 0.0 if before_volume is None else before_volume
+        loft_reply = pd.execute("catia_solid_loft",
+                                {"sections": section_names,
+                                 "name": args.get("name")})
+
+        # THE VOLUME IS JUDGED AS AN INCREMENT, not as the body's total: a body
+        # that already held material unions with the new solid, and comparing the
+        # SUM with the stations' own volume answers "+454 %" for a perfect sweep
+        # (measured on B30 2026-11-14, 16000 + 3518.4 against a ruled 3518.6).
+        volume = pd._body_volume_mm3(part, body)
+        gained = None if volume is None else volume - before_volume
+        expected = None
+        if length is not None:
+            expected = 0.0
+            for (t0, r0), (t1, r1) in zip(stations, stations[1:]):
+                height = (t1 - t0) * length
+                expected += math.pi * height / 3.0 * (r0 * r0 + r0 * r1 + r1 * r1)
+
+        verdict = ""
+        if gained is None:
+            verdict = (" The volume could not be measured, so whether the loft took "
+                       "the stations is UNKNOWN - check it with catia_get_inertia.")
+        elif expected is not None and expected > 0:
+            off = (gained - expected) / expected * 100.0
+            if abs(off) <= 2.0:
+                verdict = (f" The solid added {gained:.1f} mm3 to "
+                           f"'{getattr(body, 'Name', '?')}' (now {volume:.1f}); the "
+                           f"ruled sum of these stations is {expected:.1f} mm3, "
+                           f"{off:+.2f} % off. Agreement here means the loft IS the "
+                           "chain of truncated cones the stations describe.")
+            else:
+                # THE SUM ONLY MEANS SOMETHING ON A STRAIGHT SPINE. It is the sum
+                # of truncated cones, which is what a loft between PARALLEL
+                # sections is; on a curved spine consecutive sections are oblique
+                # and the solid is legitimately bigger - measured on B30
+                # 2026-11-14, a 55.642 mm bent spline with r 6 -> 9 -> 3 came out
+                # +20.60 % above the sum. Saying "that is not a ruled loft" there
+                # would be a false accusation, so the sentence carries both cases.
+                verdict = (f" The solid added {gained:.1f} mm3 to "
+                           f"'{getattr(body, 'Name', '?')}' (now {volume:.1f}); the "
+                           f"ruled sum of these stations is {expected:.1f} mm3, "
+                           f"{off:+.2f} % off. THAT SUM ONLY APPLIES TO A STRAIGHT "
+                           "SPINE: it is the sum of truncated cones, which is what "
+                           "this loft is when consecutive section planes are "
+                           "parallel. On a curved spine the sections are oblique to "
+                           "each other and the solid is legitimately larger "
+                           "(measured 2026-11-14: a 55.642 mm bent spline, "
+                           "r 6 -> 9 -> 3, came out +20.60 %). So if the spine is "
+                           "straight, this gap means a station did not take; if it "
+                           "is curved, do not read this as a verdict.")
+        else:
+            verdict = (f" Volume {volume:.1f} mm3; the spine's length could not be "
+                       "measured, so there is no ruled sum to compare it with.")
+
+        helper_note = self._engrave_helpers(
+            helpers, str(args.get("helpers") or "hide"), owner="the loft")
+        return (
+            f"Swept {len(stations)} stations along '{spine}'"
+            + (f" ({length:.3f} mm)" if length else "")
+            + ": " + ", ".join(rows) + ". "
+            + " ".join(str(loft_reply).split())[:260]
+            + " " + verdict + f" Body '{getattr(body, 'Name', '?')}'."
+            + helper_note)
+
     def _solid_tube(self, args: dict[str, Any]) -> str:
         """A solid round tube along a curve - the six-step chain, once.
 
@@ -6079,10 +6738,11 @@ class GSDTools:
         capability, and the reply says so - it is the same primitives in one
         call, with the frame work done by the tool.
 
-        Constant section only. A varying radius would need one section per
-        station, which is catia_solid_loft's job; an ellipse section would need
-        an ellipse primitive, which this server does not have (a real gap, in
-        the ceilings).
+        Constant section only. A varying radius is
+        catia_solid_sweep_variable's job (one circle per station, one loft); an
+        ellipse section is a SKETCH ellipse - catia_sketch_ellipse wraps
+        Factory2D.CreateClosedEllipse, which does exist - lofted with
+        catia_solid_loft. What does not exist is a 3D GSD ellipse CURVE.
         """
         curve = str(args.get("curve") or "").strip()
         if not curve:

@@ -959,17 +959,20 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
     },
     {
         "member": "a solid tube whose section changes along the spine",
-        "status": "UNSUPPORTED_ON_B30",
+        "status": "AVAILABLE_WITH_LIMIT",
         "detail": (
-            "catia_solid_tube sweeps ONE circle, so the radius is constant. A "
-            "varying section needs one section per station, which is what "
-            "catia_solid_loft does with a chain of closed splines - the route the "
-            "2026-11-13 handle-dome report used with 17 sections, and it works. An "
-            "ELLIPSE profile would be the cheaper way to a flattened tube, and it "
-            "does not exist: this server has no ellipse primitive at all, and the "
-            "reporter's own workaround - 20 sampled points as a closed spline - is "
-            "the one to keep using. Neither gap is a CATIA limit; both are surface "
-            "not yet written here, and the loft route covers both today."
+            "catia_solid_sweep_variable (0.3.124) builds it: at each station it "
+            "places a point on the spine, a plane normal to it and a circle of that "
+            "station's radius, then ONE catia_solid_loft runs through the circles. "
+            "Measured on B30 with a 50 mm line, r 10 -> 7 -> 4: 8 167 mm3 against "
+            "the ruled sum 8 167 mm3. Two limits remain, both real: the spine has to "
+            "carry a point-on-curve parameter (an open line or an open spline - a "
+            "circle and a closed spline do not, measured 2026-11-11), and every "
+            "station is a CIRCLE. A flattened section is not beyond reach: "
+            "catia_sketch_ellipse draws one (Factory2D.CreateClosedEllipse - an "
+            "ellipse primitive exists in the sketch, which an earlier version of "
+            "this entry wrongly denied), and catia_solid_loft lofts those sketches "
+            "directly."
         ),
     },
 ]
