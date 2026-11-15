@@ -250,6 +250,12 @@ class SessionBooks:
         self._last_cold[book] = is_cold
 
         warm_key = (book, doc_key, tuple(scope))
+        # `None` means "no previous warm call", and 0.0 means "one that the clock
+        # could not resolve" - two different facts. `if previous:` collapsed them,
+        # so a sub-millisecond warm reading made this call say "no earlier warm
+        # call on this document" (CI, Python 3.10 runner, 2026-11-15 - the same
+        # code passed on 3.12 because the second call there took longer than the
+        # timer's resolution).
         previous = self._warm.get(warm_key) if not is_cold else None
         if not is_cold:
             self._warm[warm_key] = elapsed_ms
@@ -285,10 +291,19 @@ class SessionBooks:
                    f"({round(elapsed_ms - previous, 1):+.1f} ms, "
                    f"{(elapsed_ms / previous - 1) * 100:+.1f} %)."
                    if previous else "")
+                # 0 ms is a READING, not an absence: the timer's resolution is
+                # coarser than the call. A percentage against it would be a
+                # division by zero dressed as a measurement, so it is not quoted -
+                # but the previous call is still named, because it happened.
+                + (" The previous warm call on this document with the same scope "
+                   "came back as 0 ms, below this timer's resolution, so no delta "
+                   "or percentage is quoted: the two readings are equal to the "
+                   "clock, not to each other."
+                   if previous == 0 and not is_cold else "")
                 + ((self._scope_refusal(book, doc_key, scope)
                     or " There is no earlier warm call on this document in this "
                        "session yet, so this is one reading, not a trend.")
-                   if not previous and doc_key else "")
+                   if previous is None and doc_key and not is_cold else "")
                 + (" It is also the FIRST call after a cold pass, and across "
                    "versions that has measured both ways, so the direction is not a "
                    "property of this code: read the number as 'not yet the steady "

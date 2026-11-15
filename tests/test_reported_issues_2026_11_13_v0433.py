@@ -138,3 +138,51 @@ def test_the_screenshot_schema_states_why_there_is_no_crop():
     zoom = definition["inputSchema"]["properties"]["zoom"]
     assert "24 668" in zoom["description"], "the pixel measurement is the evidence"
     assert "RESTORED" in zoom["description"], "the camera has to be put back"
+
+# ── a zero-millisecond reading is a reading (found by CI, 2026-11-15) ────────
+
+
+def test_a_zero_ms_warm_reading_is_still_a_previous_call():
+    """`if previous:` treated 0.0 ms as "there was no previous call".
+
+    CI's Python 3.10 runner returned a warm call faster than the clock could
+    resolve, and the reply then said "There is no earlier warm call on this
+    document in this session yet" about one that had just happened. The branch is
+    now `is None` for absence and a separate sentence for 0 ms, which quotes no
+    percentage because it would be a division by zero dressed as a measurement.
+    """
+    from catia_mcp.regime import SessionBooks
+
+    books = SessionBooks()
+    common = {"book": "box", "route": "box.assembly", "measured": True,
+              "parts_total": 1, "doc_key": "ASM.CATProduct", "scope": ("all",)}
+    # A COLD call does not store its timing - that is the first warm call's whole
+    # point ("no earlier warm call"). So the 0 ms reading has to be the SECOND
+    # warm call, which is the sequence CI hit.
+    books.describe(session_first=1, elapsed_ms=12.5, **common)
+    books.describe(session_first=0, elapsed_ms=0.0, **common)
+    note = books.describe(session_first=0, elapsed_ms=6.0, **common)["elapsed_note"]
+    assert "previous warm call on this document" in note
+    assert "no earlier warm call" not in note
+    assert "below this timer's resolution" in note
+    assert "%" not in note, "a percentage against 0 ms is not a measurement"
+
+    # And the ordinary case still quotes a delta.
+    books2 = SessionBooks()
+    books2.describe(session_first=1, elapsed_ms=10.0, **common)
+    books2.describe(session_first=0, elapsed_ms=4.0, **common)
+    delta = books2.describe(session_first=0, elapsed_ms=6.0, **common)["elapsed_note"]
+    assert "(+2.0 ms, +50.0 %)" in delta
+
+
+def test_no_previous_call_is_still_reported_as_no_previous_call():
+    from catia_mcp.regime import SessionBooks
+
+    books = SessionBooks()
+    books.describe(book="box", route="box.part", measured=True, parts_total=1,
+                   session_first=1, doc_key="P.CATPart", elapsed_ms=9.0,
+                   scope=("all",))
+    note = books.describe(book="box", route="box.part", measured=True,
+                          parts_total=1, session_first=0, doc_key="OTHER.CATPart",
+                          elapsed_ms=3.0, scope=("all",))["elapsed_note"]
+    assert "no earlier warm call on this document" in note

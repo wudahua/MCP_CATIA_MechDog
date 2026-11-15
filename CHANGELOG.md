@@ -2,6 +2,36 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.132] — 2026-11-15 · 0 ms is a reading, not an absence
+
+CI on 0.3.131 went red on **Python 3.10 only**. The failing test was not one of
+the new ones, and the code it failed on was not touched by that release:
+
+    FAILED test_a_repeat_warm_call_quotes_this_sessions_difference
+    AssertionError: assert 'for the previous warm call on this document' in
+    "... There is no earlier warm call on this document in this session yet ..."
+
+The bookkeeping in `regime.py` decided "was there a previous warm call?" with
+`if previous:`, and `previous` is a measured MILLISECOND COUNT. A warm call that
+finishes faster than the clock can resolve stores `0.0`, which is falsy - so the
+reply said "no earlier warm call on this document" about a call that had just
+happened, and quoted neither a delta nor a percentage.
+
+The 3.12 runner's second call happened to take longer than the timer's
+resolution, which is the whole reason this survived: the branch is right whenever
+the machine is slow enough.
+
+`None` now means "no previous call" and `0 ms` gets its own sentence - it names
+the previous call with the same scope (because it happened) and quotes no
+percentage, because a ratio against zero is a division by zero dressed as a
+measurement. Two tests hold both branches, one of them driving `describe` with
+`elapsed_ms=0.0` so it cannot depend on the machine again.
+
+The 0.3.131 zip on the releases page carries this defect; nothing else in this
+release is different from it.
+
+2 120 tests. 151 tools.
+
 ## [0.3.131] — 2026-11-15 · the edges can be read, and the picture can be closer
 
 The 2026-11-13 report (13th round) was already answered by 0.3.123 - its two P0s,
