@@ -79,6 +79,28 @@ _HYBRID_SHAPE_FACTORY_METHODS = [
 #   NOT_IN_TYPELIB         the member (or its parameter) is not in the model
 #   DECLARED_NOT_MEASURED  declared, not wrapped, nobody has measured it yet
 #   AVAILABLE_WITH_LIMIT   works, with a limit that is easy to get wrong
+#   UNAVAILABLE_ON_B30     not there to read at all - the DATA is missing, so
+#                          no wrapper could help (e.g. a drawing whose text was
+#                          converted to curves carries no text runs). Added in
+#                          0.3.135 because "the tool does not do it" and "there
+#                          is nothing to do it on" are different news for the
+#                          caller: the first is a backlog item, the second is a
+#                          fact about their file.
+#   MEASURED_UNEXPLAINED / SEEN_ONCE_NOT_REPRODUCED   anomalies kept on record:
+#                          measured, not explained, and not reproduced.
+#: The status vocabulary, once. Three tests used to spell this out separately,
+#: which meant adding a word cost three edits and a missed one was a red suite
+#: with the same message in three places.
+CEILING_STATUSES = frozenset({
+    "UNSUPPORTED_ON_B30",
+    "NOT_IN_TYPELIB",
+    "DECLARED_NOT_MEASURED",
+    "AVAILABLE_WITH_LIMIT",
+    "UNAVAILABLE_ON_B30",
+    "MEASURED_UNEXPLAINED",
+    "SEEN_ONCE_NOT_REPRODUCED",
+})
+
 _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
     {
         "member": "AddNewSewSurface",
@@ -258,6 +280,26 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
             "this package, and HybridShapeSpline has not been measured to expose one "
             "here; treat 'control points in, same curve out' as unavailable and say so "
             "rather than passing them as interpolation points."
+        ),
+    },
+    {
+        "member": "reading DIMENSION VALUES off a drawing",
+        "status": "UNAVAILABLE_ON_B30",
+        "detail": (
+            "No OCR and no font-outline digitiser, and on the file the 2026-11-15 "
+            "reports used there is nothing to read anyway: catia_read_drawing "
+            "answers text_runs=0 for it, because every dimension was converted to "
+            "CURVES before export - 23.8 / 4.8 / 7.9 exist only as outlines among "
+            "878 contours. So 'read the callouts into named parameters' is not a "
+            "missing wrapper: the numbers are geometry, not text. What IS "
+            "available is the other half of the loop - mm_per_file_unit and "
+            "bounds_mm give the true size of any contour, and "
+            "catia_create_parameter / catia_set_formula turn a value the caller "
+            "measured into a driving parameter (measured 2026-11-14: a parameter "
+            "drives an ellipse's semi-axes through MajorRadius.N / "
+            "MinorRadius.N). A drawing exported WITH live text reports its "
+            "text_runs count, and a future reader would have to work from font "
+            "outlines - that route is not implemented and not measured."
         ),
     },
     {

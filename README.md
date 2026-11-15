@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.134** · [what changed](CHANGELOG.md) ·
+**0.3.135** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1339,6 +1339,28 @@ given 4 000; a 1 x 0.5 **inch** rectangle read through `$INSUNITS` landed at
 25.4 x 12.7 mm; the same rectangle with `scale=100` (a 1:100 sheet) came out
 100 x 50 mm and padded to 10 000.
 
+0.3.135 made the path answer the question the 2026-11-15 reports actually asked -
+"can a loft use this?" - at every step where it was silent:
+
+* **`read_drawing` says how many curves a contour IS** (`curves`, `loft_ready`).
+  `closed: true, free_ends: 0` only promises a pad; a 110-line outline is closed
+  and cannot be a loft section, and nothing in the reply used to distinguish them.
+* **`import_drawing(profile_mode=...)`**: `"segments"` (default) keeps the
+  primitive each piece deserves; `"spline"` draws each multi-element contour as
+  ONE closed spline, so the same sketch feeds `catia_solid_loft` and
+  `catia_sweep_variable`. Measured on B30 2026-11-15 on the report's own sheet
+  (page 2, region [248,111,266,138]): the import writes one spline through 111
+  control points and two sections loft to **4 838.39 mm³** - the value the
+  reporter reached by hand with `catia_gsd_spline` (4 838.70). A circle or an
+  ellipse is left exact, because it is already one curve.
+* **The spline is interpolating**, so the reply reports the sharpest turn and how
+  many corners are sharper than 20°: a 20x12 rectangle as a closed spline lofted
+  to 24.04 x 21.46 mm (measured 2026-11-03).
+* **`plane` now accepts the frame object** (`{"type": "frame", "origin", "u",
+  "v"}`) that `catia_create_sketch` takes - the description had promised it since
+  0.3.128 while the schema refused an object. A frame is how two orthographic
+  views are put on a shared datum.
+
 Two facts about real drawings that this had to accept:
 
 * **A CAD export writes one entity per EDGE, not one per profile.** The A3
@@ -1387,7 +1409,7 @@ asks, on that same file (297.011 x 210.016 mm per page, as a PDF reader reports)
 | Drawing | 13 | upstream's drafting module, measured, plus `catia_drawing_set_sheet` and `catia_drawing_add_frame`: new drawing, generative view (plane / face / body), projection, section, detail, text, table, generated and manual dimensions, paper size, border and title block |
 | Planner | **2** | `run_plan`, `measure_topology` |
 | Diagnostics | 2 | `catia_diagnose` (full probe: factories, type libraries, ceilings), `catia_server_info` (0.3.127 - name, version, tool count, CATIA release; no probes, never connects) |
-| Blueprint | 2 | `catia_read_drawing` (0.3.128 - DXF/SVG/vector-PDF to contours, counts, layers, bounds in mm; never connects), `catia_import_drawing` (0.3.128 - the same, drawn into a sketch at 1:1 and closed) |
+| Blueprint | 2 | `catia_read_drawing` (0.3.128 - DXF/SVG/vector-PDF to contours, counts, layers, bounds in mm, and since 0.3.135 `curves` / `loft_ready` per contour; never connects), `catia_import_drawing` (0.3.128 - the same, drawn into a sketch at 1:1 and closed; since 0.3.135 `profile_mode="spline"` for ONE curve per contour, and a frame `plane`) |
 | Sheet Metal | 2 | `catia_sheetmetal_parameters` (0.3.133 - read and set thickness / bend radius / K factor / relief through `part.Parameters`, cross-checked against `GetThickness()`), `catia_new_sheetmetal` (0.3.133 - a part that carries the set). Geometry is NOT here: no wall, flange, bend, unfold or flat pattern, because `SheetMetalFactory` exposes no `AddNew*` |
 
 #### Knowledgeware (6 tools, 0.3.63)
@@ -2168,6 +2190,18 @@ Place the result with `catia_get_component_transform`.
   A seam that is already joined and has to be smooth needs the surfaces rebuilt
   tangent (`catia_gsd_blend`, `catia_gsd_connect`, or sections that meet
   properly); there is no smoothing operator in this automation.
+* **Dimension VALUES are not read off a drawing.** `catia_read_drawing` reports
+  `text_runs`, and on a drawing whose text was converted to curves that number is
+  **0** - measured on the 2026-11-15 report's own file, where 23.8 / 4.8 / 7.9
+  exist only as outlines. There is no OCR here and no font-outline digitiser, so
+  a dimension has to come from the geometry (`bounds_mm` and a known dimension)
+  or from the caller. What the tool does give is the millimetres-per-unit and the
+  bounds, so a measured value can be written into a parameter with
+  `catia_create_parameter` - the link is manual, not traceable to the callout.
+* **`clean` hides the sketches inside bodies, not geometrical sets.** A GSD
+  element stays visible in a screenshot and can overlay the solid; hide it with
+  `catia_set_visibility` first. (The 2026-11-15 report saw "a black curve" on a
+  lofted part whose own reply listed `GSD_Set` with one SHOWN element.)
 * **No sheet-metal GEOMETRY (Generative Sheetmetal Design).** There is no wall,
   flange, bend, unfold or flat-pattern tool, and there cannot be one from here:
   `Part.SheetMetalFactory` has 23 members, 22 of them the COM base, and the only

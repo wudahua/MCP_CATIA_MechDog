@@ -452,6 +452,23 @@ class SketcherTools:
                                 "when 'plane' is an object."
                             ),
                         },
+                        "name": {
+                            "type": "string",
+                            "description": (
+                                "Name this sketch instead of letting CATIA number "
+                                "it. Why it exists: a new sketch whose default name "
+                                "collides is renamed 草图.1#2, which is invisible "
+                                "while writing a catia_run_plan - the steps' args "
+                                "are static strings, so `sections: ['草图.1','草图.2']` "
+                                "written before the run cannot know that the second "
+                                "sketch will be called 草图.1#2 (2026-11-15 report, "
+                                "R3). Naming it here makes the plan reproducible. A "
+                                "name this part already uses is REFUSED with the "
+                                "list of names in use (SKETCH_NAME_TAKEN), not "
+                                "silently suffixed: a name the caller chose is the "
+                                "only thing that parameter is for."
+                            ),
+                        },
                     },
                 },
             },
@@ -1370,7 +1387,8 @@ class SketcherTools:
         match tool_name:
             case "catia_create_sketch":
                 return self._create_sketch(
-                    arguments.get("plane", "xy"), arguments.get("offset")
+                    arguments.get("plane", "xy"), arguments.get("offset"),
+                    arguments.get("name")
                 )
             case "catia_close_sketch":
                 return self._close_sketch(bool(arguments.get("structured", False)),
@@ -2247,7 +2265,19 @@ class SketcherTools:
                     "before relying on it.")
         return f" Key points in global XYZ: {listed} mm."
 
-    def _create_sketch(self, plane: Any = "xy", offset: float | None = None) -> str:
+    def _create_sketch(self, plane: Any = "xy", offset: float | None = None,
+                       name: str | None = None) -> str:
+        # Checked before the session is opened: a name that is already in use has
+        # to be a refusal, not a silent 草图.1#2 - a plan written against a name
+        # the caller chose is exactly what this parameter exists for.
+        wanted = None
+        if name is not None:
+            wanted = str(name).strip()
+            if not wanted:
+                raise ArgumentRejected(
+                    "name was given but is empty. Pass the sketch name you want, "
+                    "or leave it out to let CATIA number it. Nothing was created.",
+                    code="BAD_ARGUMENT", stage="validate")
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
         body = self.conn.get_active_part_body()
@@ -2257,6 +2287,35 @@ class SketcherTools:
         # Create the sketch on the plane
         sketches = body.Sketches
         sketch = sketches.Add(ref)
+        request_note = ""
+        if wanted is not None:
+            taken = self._all_sketch_names(part)
+            # A hit means somebody else already holds it: this sketch has just
+            # arrived under CATIA's own number.
+            if any(existing == wanted for existing in taken):
+                try:
+                    sketch.Name = wanted + "_new"
+                except Exception:  # noqa: BLE001 - the refusal below still stands
+                    pass
+                raise ArgumentRejected(
+                    f"This part already holds a sketch named '{wanted}' - every "
+                    "by-name tool (loft sections, pad, delete_feature, "
+                    "sketch_edit) would reach one of the two at random, which is "
+                    "the bug that made new sketches rename themselves. Nothing "
+                    "was kept: the sketch just created was relabelled '"
+                    + str(getattr(sketch, "Name", "?")) + "' and an empty sketch "
+                    "is not worth a name. Pick another `name`, or read the ones "
+                    "in use with catia_list_features (its 'sketches' array).",
+                    code="SKETCH_NAME_TAKEN", stage="execute",
+                    data={"name": wanted, "sketches": taken[:40]})
+            try:
+                sketch.Name = wanted
+                part.UpdateObject(sketch)
+                request_note = f" Named '{wanted}' as asked."
+            except Exception as error:  # noqa: BLE001 - reported, not hidden
+                request_note = (f" WARNING: the name '{wanted}' could not be "
+                                f"applied ({str(error).splitlines()[0][:80]}); the "
+                                f"sketch is called '{sketch.Name}'.")
         rename_note = self._make_sketch_name_unique(part, sketch)
 
         # Open the sketch for editing
@@ -2299,7 +2358,7 @@ class SketcherTools:
 
         return (f"Sketch '{sketch.Name}' created on {where}. "
                 f"{self._axis_note(plane, placement)}. Ready for geometry."
-                + rename_note)
+                + request_note + rename_note)
 
     @classmethod
     def _all_sketch_names(cls, part: Any) -> list[str]:
@@ -4418,7 +4477,23 @@ class SketcherTools:
                 "on four 20x15 rectangle corners - so use that when the curve has to "
                 "be genuinely closed (a sweep guide, a loft section)."
             )
-        return f"Spline created through {len(points)} points: {pts_str}" + closed_note
+        # THE POINTS STAY, and nothing said so: CreateSpline takes point OBJECTS,
+        # so every control point is also a sketch element. Measured on B30
+        # 2026-11-15 - a 4-point closed spline leaves 5 point elements (the repeat
+        # included) beside the spline, and GeometricElements has no Remove
+        # ('<unknown>.Remove'), so they cannot be swept up afterwards. They are
+        # not profile geometry: catia_sketch_get_geometry collapses them and pad /
+        # loft read the one curve. A 110-point import therefore shows 113
+        # elements, which looked like a bug in the first 0.3.135 acceptance run.
+        self._last_spline_points = len(control)
+        return (f"Spline created through {len(points)} points: {pts_str}"
+                + closed_note
+                + f" The sketch also holds {len(control)} point element(s) "
+                  "(点.N): CATIA's 2D spline is DEFINED through point objects, so "
+                  "they are part of the sketch and the collection has no Remove "
+                  "(measured 2026-11-15). They are not profile geometry - "
+                  "catia_sketch_get_geometry collapses them, and pad / loft read "
+                  "the one curve.")
 
     def _draw_point(self, x: float, y: float, construction: bool = False) -> str:
         self._ensure_sketch_open()

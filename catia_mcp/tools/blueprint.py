@@ -249,12 +249,22 @@ class BlueprintTools:
                         "file_path": {"type": "string"},
                         **filter_props,
                         "plane": {
-                            "type": "string",
+                            "anyOf": [
+                                {"type": "string"},
+                                {"type": "object"},
+                            ],
                             "default": "xy",
                             "description": (
-                                "Which plane to sketch on: 'xy', 'yz', 'zx', or "
-                                "the name of a datum plane / planar face - the "
-                                "same values catia_create_sketch takes."
+                                "Which plane to sketch on: 'xy', 'yz', 'zx', the "
+                                "name of a datum plane / planar face, or a "
+                                "{'type': 'frame', 'origin': [x,y,z], 'u': [...], "
+                                "'v': [...]} object - EXACTLY the values "
+                                "catia_create_sketch takes, which until 0.3.135 "
+                                "this description claimed and this schema refused "
+                                "('received object; expected string'). The frame "
+                                "form is what places two orthographic views on a "
+                                "shared datum, so it is the one that matters for a "
+                                "multi-view sheet."
                             ),
                         },
                         "offset": {
@@ -265,8 +275,43 @@ class BlueprintTools:
                             "type": "string",
                             "enum": ["bbox", "as_drawn"],
                             "default": "bbox",
-                            "description": "'bbox' puts the drawing's lower-left "
-                                           "corner at the sketch origin.",
+                            "description": (
+                                "'bbox' moves the kept geometry so its lower-left "
+                                "corner sits at the sketch origin - convenient, "
+                                "and it DESTROYS the sheet's own coordinates, so "
+                                "two views imported from one sheet no longer "
+                                "line up. 'as_drawn' keeps them, which is what a "
+                                "multi-view reconstruction needs (the entity then "
+                                "lands 250 mm away from the origin, which is "
+                                "correct and surprising). Same two values and the "
+                                "same meaning as catia_read_drawing's origin."
+                            ),
+                        },
+                        "profile_mode": {
+                            "type": "string",
+                            "enum": ["segments", "spline"],
+                            "default": "segments",
+                            "description": (
+                                "What each contour becomes in the sketch. "
+                                "'segments' (default) draws the primitive each "
+                                "piece deserves - lines stay lines, arcs stay "
+                                "arcs - which a pad/pocket accepts and a "
+                                "loft/sweep section does NOT, because those need "
+                                "ONE curve per section. 'spline' draws each "
+                                "multi-element contour as ONE closed spline "
+                                "through its points, so the same sketch can be a "
+                                "loft or sweep section; single-primitive contours "
+                                "(a circle, an ellipse) are left alone, since "
+                                "they are already one curve. THE SPLINE IS "
+                                "INTERPOLATING: it passes through every point and "
+                                "ROUNDS every corner (measured 2026-11-03: a "
+                                "20x12 rectangle as a closed spline lofted to "
+                                "24.04 x 21.46 mm), and arcs are sampled at 24 "
+                                "points each. The reply reports the point count, "
+                                "the sharpest turn and how many corners are "
+                                "sharper than 20 degrees, so a profile with real "
+                                "corners can go back to 'segments'."
+                            ),
                         },
                         "construction": {
                             "type": "boolean",
@@ -363,6 +408,11 @@ class BlueprintTools:
             "size_histogram_mm": blueprint.size_histogram(diagonals),
             "layers": _layer_table(contours),
             "stitching": drawing.get("stitch"),
+            # PAGE-WIDE, not about this one contour: 775 arcs fitted and 110
+            # lines in the chosen profile are both true of the same file. The
+            # key says which frame of reference it is in, because "775 arcs but
+            # Profile: 110 line(s)" read like a bug in two reports.
+            "page_level_stats": drawing["stats"],
             "stats": drawing["stats"],
             "notes": drawing["notes"],
             "contours": [
@@ -381,6 +431,14 @@ class BlueprintTools:
                     # any min_size, and 2000:1 - the number that says so is here so
                     # `max_aspect` can be chosen from data (N9).
                     "aspect": _aspect(blueprint.contour_bbox(contour)),
+                    # How many SEPARATE curves this contour becomes, and what
+                    # that allows. `closed` and `free_ends` answer "can it be
+                    # padded"; they do not answer "can it be a loft section",
+                    # and a 110-line closed outline cannot (2026-11-15 reports
+                    # R1/R5: closed=1, free_ends=0, elements=110 read as
+                    # loft-ready and the loft then refused it).
+                    "curves": blueprint.curve_count(contour),
+                    "loft_ready": blueprint.curve_count(contour) == 1,
                 }
                 for index, contour in enumerate(contours[:limit], start=1)
             ],
@@ -397,6 +455,21 @@ class BlueprintTools:
 
     # ── import ────────────────────────────────────────────────────────────
     def _import_drawing(self, arguments: dict[str, Any]) -> str:
+        # BEFORE the file is read and long before a session: a typo here decides
+        # what the sketch IS, and discovering it after 110 elements are drawn
+        # means deleting them one by one.
+        raw_mode = arguments.get("profile_mode")
+        # An empty string is a typo, not a request for the default: `or` would
+        # swallow it, and a caller who passed "" deserves to hear about it.
+        mode = "segments" if raw_mode is None else str(raw_mode).strip().lower()
+        if mode not in ("segments", "spline"):
+            raise ArgumentRejected(
+                f"profile_mode={arguments.get('profile_mode')!r} is not one of "
+                "'segments' or 'spline'. 'segments' draws each piece with its own "
+                "primitive (a pad accepts that outline; a loft section does not, "
+                "because it needs ONE curve); 'spline' draws each multi-element "
+                "contour as one closed spline. Nothing was read and nothing was "
+                "drawn.", code="BAD_ARGUMENT", stage="validate")
         drawing = self._parse(arguments)
         contours = drawing["contours"]
         if not contours:
@@ -467,9 +540,16 @@ class BlueprintTools:
         notes: list[str] = []
         closed = 0
         drawn = 0
+        # What the sketch actually holds, contour by contour - the number the
+        # caller needs before choosing pad vs loft, and the one this tool used to
+        # leave them to infer from an unrelated field.
+        profile: dict[str, Any] = {"mode": mode, "curves": 0, "splined": 0,
+                                   "points": 0, "kept_primitives": 0,
+                                   "sharp_corners": 0, "sharpest": None}
         for index, contour in enumerate(contours, start=1):
             try:
-                reply = self._draw_contour(sketcher, contour, arguments)
+                reply = self._draw_contour(sketcher, contour, arguments, mode,
+                                           profile)
             except Exception as error:  # noqa: BLE001 - reported with its contour
                 raise PreconditionRejected(
                     f"Contour {index} of {len(contours)} could not be drawn "
@@ -484,6 +564,11 @@ class BlueprintTools:
             if reply and "NOT CLOSED" not in reply:
                 closed += 1
 
+        sketch_name = str(getattr(sketcher._active_sketch, "Name", "") or "")
+        try:
+            drawn_elements = int(sketcher._active_sketch.GeometricElements.Count)
+        except Exception:  # noqa: BLE001 - the parsed count is still reported
+            drawn_elements = elements
         close_note = ""
         if arguments.get("close", True):
             close_note = " " + " ".join(str(sketcher._close_sketch()).split())
@@ -493,7 +578,9 @@ class BlueprintTools:
                          "editing is done.")
 
         return self._import_reply(drawing, drawn, closed, elements, created,
-                                  close_note, notes, open_ends)
+                                  close_note, notes, open_ends,
+                                  profile=profile, sketch_name=sketch_name,
+                                  drawn_elements=drawn_elements)
 
     def _parse(self, arguments: dict[str, Any]) -> dict[str, Any]:
         layer_values = arguments.get("layers")
@@ -517,28 +604,66 @@ class BlueprintTools:
         )
 
     def _draw_contour(self, sketcher: SketcherTools, contour: dict,
-                      arguments: dict[str, Any]) -> str:
-        """One contour, drawn with the primitive each piece deserves."""
+                      arguments: dict[str, Any], mode: str = "segments",
+                      profile: dict[str, Any] | None = None) -> str:
+        """One contour, drawn with the primitive each piece deserves.
+
+        ``mode="spline"`` makes each contour ONE curve, which is the difference
+        between a sketch a pad accepts and a sketch a loft accepts. The 2026-11-15
+        report found that `catia_gsd_spline(element=<imported sketch>)` could do
+        this after the fact; doing it while the points are already in hand costs
+        one call and no round trip through the session record.
+        """
         pieces = contour["pieces"]
         construction = bool(arguments.get("construction", False))
         tolerance = float(arguments.get("tolerance") or 0.05)
+        stats = profile if profile is not None else {}
+
+        # A circle or an ellipse IS one curve already. Converting it to a spline
+        # would replace an exact conic with an interpolation of 24 sampled points
+        # - all cost, no benefit.
         if len(pieces) == 1 and pieces[0]["t"] == "circle":
+            stats["kept_primitives"] = int(stats.get("kept_primitives", 0)) + 1
+            stats["curves"] = int(stats.get("curves", 0)) + 1
             centre, radius = pieces[0]["c"], pieces[0]["r"]
             return sketcher._draw_circle(centre[0], centre[1], radius)
         if len(pieces) == 1 and pieces[0]["t"] == "ellipse":
+            stats["kept_primitives"] = int(stats.get("kept_primitives", 0)) + 1
+            stats["curves"] = int(stats.get("curves", 0)) + 1
             piece = pieces[0]
             return sketcher._draw_ellipse(piece["c"][0], piece["c"][1],
                                           piece["rx"], piece["ry"],
                                           piece.get("angle") or 0.0,
                                           construction)
+        if mode == "spline":
+            points = blueprint.spline_points(contour)
+            if len(points) >= 3:
+                corners = blueprint.corner_report(points)
+                stats["splined"] = int(stats.get("splined", 0)) + 1
+                stats["points"] = int(stats.get("points", 0)) + len(points)
+                stats["curves"] = int(stats.get("curves", 0)) + 1
+                stats["sharp_corners"] = (int(stats.get("sharp_corners", 0))
+                                          + int(corners["corner_count"]))
+                if corners["sharpest_turn_deg"] is not None:
+                    stats["sharpest"] = max(float(stats.get("sharpest") or 0.0),
+                                            float(corners["sharpest_turn_deg"]))
+                return sketcher._draw_spline([list(p) for p in points],
+                                             closed=True)
+            # Two points cannot be a closed spline. Falling back to segments is
+            # the only honest option, and the reply says how many did.
+            stats["spline_fallback"] = int(stats.get("spline_fallback", 0)) + 1
         segments = _segments(contour)
         if not segments:
             return ""
+        stats["curves"] = int(stats.get("curves", 0)) + blueprint.curve_count(contour)
         return sketcher._draw_profile(segments, tolerance)
 
     def _import_reply(self, drawing: dict, drawn: int, closed: int,
                       elements: int, created: str, close_note: str,
-                      notes: list[str], open_ends: int = 0) -> str:
+                      notes: list[str], open_ends: int = 0,
+                      profile: dict[str, Any] | None = None,
+                      sketch_name: str = "",
+                      drawn_elements: int | None = None) -> str:
         counts = drawing["counts"]
         bounds = drawing["bounds_mm"]
         unit = drawing["units"] or "units"
@@ -553,6 +678,64 @@ class BlueprintTools:
              if bounds else ""),
             f" {closed} of {drawn} contour(s) came out closed.",
         ]
+        profile = profile or {}
+        curves = int(profile.get("curves") or 0)
+        mode = str(profile.get("mode") or "segments")
+        if curves:
+            # The field both 2026-11-15 reports had to infer: `closed` says a pad
+            # will take the outline, and NOTHING said a loft will not.
+            parts.append(
+                f" This sketch holds {curves} curve(s). pad / pocket accept that; "
+                "a loft, a sweep section and a multi-section surface need ONE "
+                "curve per section" + (" - this one qualifies."
+                                      if curves == 1 else
+                                      ", so this outline cannot be one as it is."))
+        if mode == "segments" and curves > 1:
+            hint = (f"catia_gsd_spline(element='{sketch_name}', closed=true)"
+                    if sketch_name else "catia_gsd_spline(element='<sketch>', "
+                                        "closed=true)")
+            parts.append(
+                " Two ways to make it one curve: re-run this import with "
+                "profile_mode='spline' (each multi-element contour becomes one "
+                f"closed spline), or convert this sketch afterwards with {hint}. "
+                "Both are interpolating - they pass through the points and round "
+                "the corners - so a profile with real corners is better cut with "
+                "one sketch per corner run.")
+        elif mode == "spline":
+            splined = int(profile.get("splined") or 0)
+            kept = int(profile.get("kept_primitives") or 0)
+            points = int(profile.get("points") or 0)
+            detail = []
+            if splined:
+                detail.append(f"{splined} contour(s) were drawn as ONE closed "
+                              f"spline through {points} point(s)")
+            if kept:
+                detail.append(f"{kept} contour(s) were already a single curve "
+                              "(a circle or an ellipse) and were left exact")
+            fallback = int(profile.get("spline_fallback") or 0)
+            if fallback:
+                detail.append(f"{fallback} contour(s) had fewer than 3 points "
+                              "and were drawn as segments")
+            if detail:
+                parts.append(" profile_mode='spline': " + "; ".join(detail) + ".")
+            if drawn_elements is not None and drawn_elements != elements:
+                parts.append(
+                    f" CATIA's own element count for this sketch is "
+                    f"{drawn_elements}, not {elements}: a 2D spline is DEFINED "
+                    "through point objects, so every control point is a sketch "
+                    "element too (measured 2026-11-15, and the collection has no "
+                    "Remove). They are not profile geometry - the sketch holds "
+                    f"{curves} curve(s) for pad and loft either way.")
+            sharpest = profile.get("sharpest")
+            sharp = int(profile.get("sharp_corners") or 0)
+            if sharpest:
+                parts.append(
+                    f" Sharpest turn in the point chain: {float(sharpest):.1f} deg, "
+                    f"{sharp} corner(s) sharper than 20 deg - an interpolating "
+                    "spline ROUNDS those (measured 2026-11-03: a 20x12 rectangle "
+                    "lofted to 24.04 x 21.46 mm). If this profile really has "
+                    "corners, import it with profile_mode='segments' and build the "
+                    "loft from a section that is one curve for another reason.")
         if open_ends:
             parts.append(
                 f" {open_ends} endpoint(s) are met by nothing, so a pad on this "
@@ -594,7 +777,8 @@ class BlueprintTools:
             if flattened:
                 detail.append(f"{flattened} curve(s) were not arcs and are drawn as "
                               "chords within the requested curve_tolerance")
-            parts.append(" Curves: " + "; ".join(detail) + ".")
+            parts.append(" Page-level curves (the whole sheet, not this "
+                         "profile): " + "; ".join(detail) + ".")
         pages = drawing.get("pages") or []
         if len(pages) > 1:
             parts.append(

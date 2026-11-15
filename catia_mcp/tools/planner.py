@@ -1344,6 +1344,19 @@ class PlannerTools:
             inertia = raw if isinstance(raw, dict) else json.loads(raw)
             measurements["volume_mm3"] = inertia.get("volume_mm3")
             measurements["area_mm2"] = inertia.get("area_mm2")
+            # Carried through, not recomputed: on a part with two bodies these
+            # numbers belong to the ACTIVE one (measured 2 000 vs 24 000 mm3 on
+            # B30 2026-11-15), and a plan that built two bodies used to report one
+            # body's volume under a key that looks like the part's (report C6).
+            for key in ("scope", "body"):
+                if inertia.get(key) is not None:
+                    measurements[key] = inertia[key]
+            if measurements.get("scope") == "active_body":
+                measurements["scope_note"] = (
+                    "volume / area / cog are the body that was IN WORK at the end "
+                    f"of the plan ('{measurements.get('body', '?')}'), not the whole "
+                    "part - catia_list_bodies reports every body's volume if you "
+                    "need the total.")
             center = inertia.get("center_of_gravity_mm")
             if not isinstance(center, dict):
                 # get_inertia reports an unavailable centroid as a string; treating

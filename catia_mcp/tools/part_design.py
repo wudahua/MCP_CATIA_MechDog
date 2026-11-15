@@ -6203,10 +6203,19 @@ class PartDesignTools:
                                f"{facts_dict[name]['elements']} drawing call(s))"
                                for name in multi)
                    + " - several curves, and an Extract of several is still "
-                   "several. Redraw that section as ONE closed "
-                   f"catia_sketch_spline (measured 2026-11-07 on B30: a 4-line "
-                   "rectangle section is refused, the same four points as a "
-                   "closed spline build)." if multi else
+                   "several. THE CHEAPEST WAY OUT IS ONE CALL: "
+                   + ", ".join(f"catia_gsd_spline(element='{name}', closed=true)"
+                               for name in multi)
+                   + " - it takes the corners of a sketch THIS SERVER drew in "
+                   "this session (which is how an imported drawing arrives) and "
+                   "returns ONE closed curve; pass that curve's name as the "
+                   "section instead of the sketch. It is interpolating, so it "
+                   "passes through every point and rounds every corner. If the "
+                   "section came from catia_import_drawing, profile_mode='spline' "
+                   "does the same thing during the import. Redrawing it by hand "
+                   "as one closed catia_sketch_spline also works (measured "
+                   "2026-11-07 on B30: a 4-line rectangle section is refused, the "
+                   "same four points as a closed spline build)." if multi else
                    ". The usual cause is a section that is not ONE curve - a "
                    "polygon of separate sketch lines is several curves, and an "
                    "Extract of it is still several; use a closed "
@@ -6452,10 +6461,42 @@ class PartDesignTools:
                     except Exception:  # noqa: BLE001
                         continue
                     return part.CreateReferenceFromObject(element)
+        # ASK THE PART WHAT IT HAS before refusing: a plan written before the run
+        # cannot know that `catia_create_sketch` renamed its sketch to 草图.1#2
+        # (2026-11-15 report, R3), and "go and query it yourself" turns a naming
+        # detail into a round trip. The list is capped - a 200-sketch part does
+        # not belong in an error message.
+        available: list[str] = []
+        for index in range(1, part.Bodies.Count + 1):
+            try:
+                sketches = part.Bodies.Item(index).Sketches
+                for item in range(1, int(sketches.Count) + 1):
+                    try:
+                        available.append(str(sketches.Item(item).Name))
+                    except Exception:  # noqa: BLE001 - one item, not the rest
+                        continue
+            except Exception:  # noqa: BLE001 - a body without a sketch list
+                continue
+        for index in range(1, part.HybridBodies.Count + 1):
+            holder = part.HybridBodies.Item(index)
+            for collection in ("HybridShapes", "HybridSketches"):
+                try:
+                    items = getattr(holder, collection)
+                    for item in range(1, int(items.Count) + 1):
+                        available.append(str(items.Item(item).Name))
+                except Exception:  # noqa: BLE001 - not this collection
+                    continue
+        listed = ", ".join(available[:40]) + (
+            f" ... and {len(available) - 40} more" if len(available) > 40 else "")
         raise ArgumentRejected(
             f"No sketch or geometrical element named '{name}' to use as a loft "
-            "section. catia_list_features (its 'sketches' array) and "
-            "catia_gsd_list_elements both report the names this accepts."
+            "section. What this part actually holds: "
+            + (listed if available else "nothing - no sketch and no element")
+            + ". catia_list_features (its 'sketches' array) and "
+              "catia_gsd_list_elements list the same names. Names are exact: "
+              "catia_create_sketch renames a colliding default name to 草图.N#2, "
+              "so a plan written before the run can name a sketch that does not "
+              "exist - pass catia_create_sketch(name=...) to pin it down."
             + (f" '{cleaned}' was re-created as '{alias}', which is not in the "
                "tree either." if alias and alias != cleaned else "")
         )

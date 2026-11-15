@@ -254,6 +254,95 @@ def contour_free_ends(contour: dict, tol: float = 1e-6) -> list[tuple[float, flo
     return free
 
 
+def curve_count(contour: dict) -> int:
+    """How many SEPARATE CURVES this contour becomes in a sketch.
+
+    The number that decides what the imported sketch can be used for, and the one
+    the 2026-11-15 reports had to infer from an unrelated field. A pad accepts a
+    closed outline made of many curves; `catia_solid_loft`, a sweep section and
+    `catia_gsd_multi_section_surface` need ONE curve per section - so a 110-line
+    outline pads and cannot be lofted, and nothing in the reply used to say so.
+
+    `elements` is not this number: it counts what the importer draws (a circle is
+    one element and one curve, a 4-arc circle is four of each).
+    """
+    total = 0
+    for piece in contour.get("pieces") or []:
+        kind = piece.get("t")
+        if kind in ("circle", "ellipse"):
+            total += 1
+        elif kind == "arc":
+            total += 1
+        elif kind == "line":
+            if _dist(piece["p1"], piece["p2"]) >= 1e-9:
+                total += 1
+        elif kind == "poly":
+            points = piece.get("pts") or []
+            total += sum(1 for first, second in zip(points, points[1:])
+                         if _dist(first, second) >= 1e-9)
+    return total
+
+
+def spline_points(contour: dict, steps: int = 24) -> list[tuple[float, float]]:
+    """The contour as ONE ordered point chain, ready for a closed spline.
+
+    Consecutive duplicates are dropped (``contour_points`` emits每条 line's start
+    and end, so a shared vertex arrives twice), and a closing point that repeats
+    the first is dropped as well: a closed spline joins back on its own, and
+    leaving the repeat in makes a zero-length final segment.
+
+    The chain is an APPROXIMATION wherever the contour holds an arc - the arc is
+    sampled at ``steps`` points here. That is the fidelity cost of turning a
+    precise outline into one interpolating curve, and the reply reports it rather
+    than hiding it: the polygon's own chords bound how far the spline can wander
+    between points.
+    """
+    points = contour_points(contour, steps)
+    chain: list[tuple[float, float]] = []
+    for point in points:
+        pair = (float(point[0]), float(point[1]))
+        if not chain or _dist(chain[-1], pair) > 1e-9:
+            chain.append(pair)
+    if len(chain) > 2 and _dist(chain[0], chain[-1]) <= 1e-9:
+        chain.pop()
+    return chain
+
+
+def corner_report(points: Sequence[Sequence[float]],
+                  threshold_deg: float = 20.0) -> dict[str, Any]:
+    """The sharpest turn in a closed point chain, and how many are sharp.
+
+    Why this is reported: a spline through the corners of a polygon is
+    INTERPOLATING - it passes through every point and ROUNDS every corner. The
+    2026-11-03 measurement is on record (a 20x12 rectangle as a closed spline
+    lofted to 24.04 x 21.46 mm), so a caller whose profile really has corners has
+    to be told before they get a bulge where they wanted an edge.
+    """
+    chain = [(float(p[0]), float(p[1])) for p in points]
+    if len(chain) < 3:
+        return {"corner_count": 0, "sharpest_turn_deg": None,
+                "threshold_deg": threshold_deg}
+    sharpest = 0.0
+    sharp = 0
+    count = len(chain)
+    for index in range(count):
+        previous = chain[index - 1]
+        current = chain[index]
+        following = chain[(index + 1) % count]
+        ax, ay = current[0] - previous[0], current[1] - previous[1]
+        bx, by = following[0] - current[0], following[1] - current[1]
+        na, nb = math.hypot(ax, ay), math.hypot(bx, by)
+        if na <= 1e-12 or nb <= 1e-12:
+            continue
+        cosine = max(-1.0, min(1.0, (ax * bx + ay * by) / (na * nb)))
+        turn = math.degrees(math.acos(cosine))
+        sharpest = max(sharpest, turn)
+        if turn >= threshold_deg:
+            sharp += 1
+    return {"corner_count": sharp, "sharpest_turn_deg": round(sharpest, 2),
+            "threshold_deg": threshold_deg}
+
+
 def _piece_start(piece: dict) -> tuple[float, float] | None:
     kind = piece.get("t")
     if kind == "line":

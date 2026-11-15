@@ -156,8 +156,7 @@ def test_the_readme_carries_the_measured_projection_grid() -> None:
 
 @pytest.mark.parametrize("entry", _CAPABILITY_CEILINGS)
 def test_every_ceiling_status_is_one_of_the_vocabulary(entry) -> None:
-    assert entry["status"] in {
-        "UNSUPPORTED_ON_B30", "NOT_IN_TYPELIB", "DECLARED_NOT_MEASURED",
-        "AVAILABLE_WITH_LIMIT", "MEASURED_UNEXPLAINED",
-        "SEEN_ONCE_NOT_REPRODUCED",
-    }
+    from catia_mcp.tools.diagnostics import CEILING_STATUSES
+
+    # The vocabulary itself is asserted once, in v0397, against an explicit list.
+    assert entry["status"] in CEILING_STATUSES

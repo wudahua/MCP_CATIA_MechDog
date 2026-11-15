@@ -267,10 +267,20 @@ def test_offset_surface_appends_the_note_and_keeps_the_message() -> None:
 
 
 def test_capability_ceilings_use_the_stated_vocabulary() -> None:
-    allowed = {"UNSUPPORTED_ON_B30", "NOT_IN_TYPELIB",
-               "DECLARED_NOT_MEASURED", "AVAILABLE_WITH_LIMIT",
-               "MEASURED_UNEXPLAINED",
-               "SEEN_ONCE_NOT_REPRODUCED"}
+    # The list is written here ON PURPOSE, once: `CEILING_STATUSES` is what the
+    # entries are checked against, and adding a word has to be a deliberate edit
+    # to this set - otherwise a typo in one entry would quietly become a status.
+    from catia_mcp.tools.diagnostics import CEILING_STATUSES
+
+    assert CEILING_STATUSES == frozenset({
+        "UNSUPPORTED_ON_B30", "NOT_IN_TYPELIB", "DECLARED_NOT_MEASURED",
+        "AVAILABLE_WITH_LIMIT", "MEASURED_UNEXPLAINED",
+        "SEEN_ONCE_NOT_REPRODUCED",
+        # 0.3.135: the data the capability would read does not exist on the file
+        # at all - a different answer from "not wrapped yet".
+        "UNAVAILABLE_ON_B30",
+    })
+    allowed = CEILING_STATUSES
     assert _CAPABILITY_CEILINGS
     for entry in _CAPABILITY_CEILINGS:
         assert set(entry) == {"member", "status", "detail"}

@@ -2,6 +2,80 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.135] — 2026-11-15 · one curve, and saying so
+
+Two reports on 0.3.134, the second correcting the first. The first said "MCP has
+no way to turn an imported 110-line outline into one curve, so a PDF can only
+become a plate". The second found that `catia_gsd_spline(element=<imported
+sketch>, closed=true)` had always done it and lofted to 4 838.70 mm³. Both were
+right about the defect: **the capability existed and nothing said so** - not the
+`LOFT_REJECTED` hint, not the import reply, not `read_drawing`, whose
+`closed: true, free_ends: 0` promised a pad and said nothing about a loft.
+
+**R1 / R5 — the question is asked at every step that answers it**
+
+* `read_drawing` gives each contour `curves` and `loft_ready`. 110 lines is
+  `curves: 110, loft_ready: false`; a circle is `1 / true`. The page-wide curve
+  statistics moved to `page_level_stats`, because "775 arcs fitted" beside "the
+  profile is 110 lines" read like a bug in two separate reports.
+* `import_drawing(profile_mode="segments"|"spline")`: `spline` draws each
+  multi-element contour as ONE closed spline through its points, at import time,
+  so no round trip through the session record is needed. Measured on B30
+  2026-11-15 on the report's own sheet: one spline through 111 control points,
+  two sections loft to **4 838.39 mm³** (`catia_solid_loft` accepted the sketch
+  directly). A circle or an ellipse is left EXACT - it is already one curve - and
+  the reply says how many of each. The reply also names the sharpest turn and how
+  many corners are sharper than 20°, because a spline is interpolating: 20x12
+  rectangle → 24.04 x 21.46 mm (measured 2026-11-03).
+* `import_drawing` now reports what the sketch holds: "1 curve(s)" or "N
+  curve(s) ... this outline cannot be [a loft section] as it is", plus the two
+  ways to make it one.
+* `LOFT_REJECTED` quotes the paste-able call, with the offending sketch's real
+  name in it: `catia_gsd_spline(element='草图.5', closed=true)`.
+
+**C2 — `import_drawing.plane` accepts the frame object `create_sketch` takes.**
+The description had promised "the same values catia_create_sketch takes" since
+0.3.128 while the schema answered "received object; expected string". A frame is
+how two orthographic views are placed on a shared datum, so this was the one
+value the multi-view workflow needed. Measured: `{"type": "frame", "origin":
+[0,0,33], "u": [0,1,0], "v": [0,0,1]}` creates the sketch on that datum.
+
+**R3 — a name a plan can rely on.** `catia_create_sketch(name=...)` pins the
+sketch name, and a name already in use is REFUSED (`SKETCH_NAME_TAKEN`, with the
+names in use) rather than silently suffixed to `草图.1#2` - which is invisible
+while writing a `catia_run_plan`, whose args are static strings. And a loft
+section that does not exist now lists what the part actually holds instead of
+pointing at a tool to query.
+
+**C4 — `catia_set_parameter` on a name that is not there** answers
+`PARAMETER_NOT_FOUND` with the closest matches, like the formula-driven branch
+has since 0.3.128.
+
+**C6 — `catia_get_inertia` says which body it measured.** Measured on B30: the
+same part gives 2 000 mm³ with `SideView` in work and 24 000 mm³ with
+零件几何体 in work, and the reply said only `volume_mm3`. It now carries
+`scope: active_body|main_body` and `body`, and `run_plan` passes both through
+with a note when the number is one body and not the part.
+
+**C3 / C7 — measured, not faked.** Dimension VALUES cannot be read off the
+report's drawing: `text_runs: 0`, because every callout was converted to curves
+before export - the numbers are geometry, not text. Recorded as
+`UNAVAILABLE_ON_B30` (a new status word: the data is missing, so no wrapper could
+help). And `clean` hides the sketches inside bodies but not geometrical sets, so
+a visible GSD element overlays the solid - the report's "black curve" is on a
+part whose own reply listed `GSD_Set` with one SHOWN element.
+
+**A measurement that corrected the report:** the spline import leaves its control
+points in the sketch (111 point elements beside the one spline). That is CATIA's
+2D spline, not a leak - a 4-point closed spline leaves 5 - and
+`GeometricElements` has no `Remove` (`<unknown>.Remove`, measured). So the import
+reply states both counts, and `catia_sketch_spline` now says it too, instead of
+letting a caller find 113 elements and conclude the import ran three times.
+
+Verified on B30: `scripts/b30_v0436_audit.py` 12/12.
+
+2 153 tests. 153 tools.
+
 ## [0.3.134] — 2026-11-15 · a test that could only pass on a slow machine
 
 CI on 0.3.133 went red on **3.12 and green on 3.10** at the same commit:

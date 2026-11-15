@@ -2895,7 +2895,8 @@ class MeasurementTools:
         t_read = time.perf_counter()
         spa = doc.GetWorkbench("SPAWorkbench")
         measurable = spa.GetMeasurable(part.CreateReferenceFromObject(body))
-        payload: dict[str, Any] = {"document": label}
+        payload: dict[str, Any] = {"document": label, "scope": "main_body",
+                                   "body": str(body.Name)}
         payload.update(self._measured_quantities(measurable))
         measure_ms = round((time.perf_counter() - t_read) * 1000, 1)
         volume_mm3 = payload.get("volume_mm3")
@@ -3226,7 +3227,12 @@ class MeasurementTools:
 
         measurable = spa.GetMeasurable(ref)
 
-        result: dict[str, Any] = {}
+        # WHICH BODY this number belongs to. Measured on B30 2026-11-15: the same
+        # part gave 2 000 mm3 with 'SideView' in work and 24 000 mm3 with
+        # 零件几何体 in work, and the reply said just "volume_mm3" both times - so
+        # a plan with two bodies recorded one body's volume and looked like the
+        # part's (2026-11-15 report, C6).
+        result: dict[str, Any] = {"scope": "active_body", "body": str(body.Name)}
         # Same reader as the `document=` route: one key table for the same
         # reading (reported 2026-10-27 - `area_cm2` existed on this route only).
         t_read = time.perf_counter()
@@ -6352,7 +6358,33 @@ class MeasurementTools:
         part = self.conn.get_active_part()
         params = part.Parameters
 
-        param = params.Item(name)
+        # `params.Item(name)` answers a bare COM error when the name is not
+        # there ("方法 Item 失败"), which reads as "CATIA failed" for what is a
+        # misspelt name - the same complaint the 2026-11-15 report made about the
+        # formula-locked branch, one entry earlier (its C4).
+        try:
+            param = params.Item(name)
+        except Exception as error:  # noqa: BLE001 - reported as a coded refusal
+            existing: list[str] = []
+            try:
+                for index in range(1, int(params.Count) + 1):
+                    existing.append(str(params.Item(index).Name))
+            except Exception:  # noqa: BLE001 - the list is a courtesy
+                existing = []
+            near = [item for item in existing
+                    if str(name).lower() in item.lower()]
+            raise CodedError(
+                f"No parameter named '{name}' in this part, so nothing was "
+                "changed (" + str(error).splitlines()[0][:100] + "). "
+                "catia_get_parameters lists them, and `filter=` narrows the "
+                "list - a 200-parameter part is not readable in one reply. "
+                + (f" Closest names: {', '.join(near[:8])}." if near
+                   else ("Parameters here: " + ", ".join(existing[:12])
+                         + (" ..." if len(existing) > 12 else "") + "." )
+                   if existing else "This part holds no parameters at all."),
+                code="PARAMETER_NOT_FOUND", stage="validate",
+                data={"name": str(name), "parameters": existing[:40],
+                      "closest": near[:8]})
         full = str(getattr(param, "Name", name))
         # CHECK THE RELATIONS FIRST, because CATIA's own refusal is a bare COM
         # exception: "方法 Value 失败", no code, and a recovery block that talks
