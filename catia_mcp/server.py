@@ -38,6 +38,7 @@ from catia_mcp.tools.part_design import PartDesignTools
 from catia_mcp.tools.knowledge import KnowledgeTools
 from catia_mcp.tools.drawing import DraftingTools
 from catia_mcp.tools.planner import PlannerTools
+from catia_mcp.tools.sheetmetal import SheetMetalTools
 from catia_mcp.tools.sketcher import SketcherTools
 
 logging.basicConfig(
@@ -122,6 +123,11 @@ class CATIAMCPServer:
         # drawn through a second instance would leave the server's copy believing
         # no sketch is open (and _ensure_sketch_open would refuse the next call).
         self.blueprint_tools = BlueprintTools(self.connection, self.sketcher_tools)
+        # The document tools, because catia_new_sheetmetal is catia_new_part plus
+        # the parameter set - the ASCII fallback and the overwrite refusal belong
+        # in one place, not two.
+        self.sheetmetal_tools = SheetMetalTools(self.connection,
+                                                self.document_tools)
         self.planner_tools = PlannerTools(self.connection)
         self._tool_modules = [
             self.document_tools,
@@ -136,6 +142,7 @@ class CATIAMCPServer:
             self.knowledge_tools,
             self.drafting_tools,
             self.blueprint_tools,
+            self.sheetmetal_tools,
             self.planner_tools,
         ]
         self._tool_router: dict[str, Any] = {}

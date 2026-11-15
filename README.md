@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.132** · [what changed](CHANGELOG.md) ·
+**0.3.133** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -12,7 +12,7 @@ defects that make that loop lie to you. Most of the work since 0.3.0 came from
 people rebuilding real assemblies with it: the changelog is a list of things that
 produced a plausible number, a wrong number, or no explanation at all.
 
-**151 tools** (upstream 98 + 53 added, and nothing dropped any more: knowledge
+**153 tools** (upstream 98 + 55 added, and nothing dropped any more: knowledge
 came back in 0.3.63 and drafting in 0.3.64, each after its tools were measured on
 B30 rather than trusted). Nothing in the COM layer was rewritten — the value of upstream is
 the field-verified knowledge in its comments, so this fork is strictly add /
@@ -61,7 +61,7 @@ but the claim that it worked.
 same reason they always did: domain-neutral and cheap. See `FORK.md` §8 if you
 want to cut further.
 
-### Added (36 tools over upstream)
+### Added (38 tools over upstream)
 
 Five of them came with the fork, twenty-one were added while building parts
 from a spec (0.3.1: three, 0.3.2: four, 0.3.4: one, 0.3.5: one, 0.3.8: two, 0.3.17:
@@ -72,7 +72,8 @@ two - `catia_delete_body`, `catia_solid_loft`; 0.3.19: one - `catia_copy_compone
 `catia_gsd_circ_pattern`, `catia_gsd_plane_normal_to_curve`; 0.3.84: one -
 `catia_gsd_plane_angle`).
 98 + 50 added = 148, plus `catia_server_info` (0.3.127) = 149, plus the two
-drawing readers (0.3.128) = 151: the 31 below, `catia_apply_design_table` under Knowledgeware,
+drawing readers (0.3.128) = 151, plus the two sheet-metal parameter tools
+(0.3.133) = 153: the 31 below, `catia_apply_design_table` under Knowledgeware,
 `catia_drawing_set_sheet` and `catia_drawing_add_frame` under Drafting (0.3.65),
 the three colour tools in their own table below (0.3.79), `catia_replace_component` (0.3.80), `catia_split_solid` (0.3.94), `catia_measure_deviation` (0.3.119), `catia_solid_tube` (0.3.121), `catia_gsd_splines` (0.3.122), and
 `catia_solid_sweep_variable` (0.3.124, elliptic sections since 0.3.126), and
@@ -98,6 +99,8 @@ several documents.
 | `catia_gsd_circ_pattern` | Repeats one surface/curve N times around an axis and joins the copies in one call. **Not a CATIA GSD pattern**: this build's `HybridShapeFactory` declares 160 members and none contains "Pattern" (measured 2026-11-08), so the tree gets N-1 rotations plus a join, and the reply says so |
 | `catia_gsd_plane_normal_to_curve` | Plane normal to a curve with its origin ON that curve at a fraction of its length - the tutorial's "Normal to Curve + Set Origin on Curve". A tree element, unlike the frame sketch that used to be the only way; the point's measured coordinates are reported back |
 | `catia_gsd_plane_angle` | A datum plane rotated a given angle about an axis - the tutorial's 36-degree construction and the general 1/N-sector plane. A named, editable, referenceable tree element, unlike a frame sketch. The axis must LIE IN the reference plane (rotating a plane about its own normal leaves it where it was and CATIA answers with a generic failure), and the angle is in degrees |
+| `catia_sheetmetal_parameters` | 0.3.133 | The sheet-metal setup, read AND written: thickness, default bend radius, K factor, corner relief. The 2026-11-03 report asked for this and got "the parameters can be read and nothing can be built from them" - which was half wrong, because it looked at `SheetMetalParameters` (read-only, one `GetThickness`) and never at `part.Parameters`, where the same values sit as ordinary parameters and `Value` IS writable. Measured on B30 2026-11-15: `线宽 2.0 -> 1.5` moved `GetThickness()` to 1.5, and the K factor needed `DIN 一般公式\Activity = False` first (it is computed by the standard's rule) - the reply names the rule it switched off. It still cannot make a wall: `SheetMetalFactory` has no `AddNew*` at all |
+| `catia_new_sheetmetal` | 0.3.133 | `catia_new_part` plus the parameter set - the report's `new_sheetmetal`. It gives you a document that carries thickness / bend radius / K factor, not a partition: the geometry still has to be extruded and cut |
 
 #### Added while building parts from a spec (26 tools)
 
@@ -1385,6 +1388,7 @@ asks, on that same file (297.011 x 210.016 mm per page, as a PDF reader reports)
 | Planner | **2** | `run_plan`, `measure_topology` |
 | Diagnostics | 2 | `catia_diagnose` (full probe: factories, type libraries, ceilings), `catia_server_info` (0.3.127 - name, version, tool count, CATIA release; no probes, never connects) |
 | Blueprint | 2 | `catia_read_drawing` (0.3.128 - DXF/SVG/vector-PDF to contours, counts, layers, bounds in mm; never connects), `catia_import_drawing` (0.3.128 - the same, drawn into a sketch at 1:1 and closed) |
+| Sheet Metal | 2 | `catia_sheetmetal_parameters` (0.3.133 - read and set thickness / bend radius / K factor / relief through `part.Parameters`, cross-checked against `GetThickness()`), `catia_new_sheetmetal` (0.3.133 - a part that carries the set). Geometry is NOT here: no wall, flange, bend, unfold or flat pattern, because `SheetMetalFactory` exposes no `AddNew*` |
 
 #### Knowledgeware (6 tools, 0.3.63)
 
@@ -2164,17 +2168,26 @@ Place the result with `catia_get_component_transform`.
   A seam that is already joined and has to be smooth needs the surfaces rebuilt
   tangent (`catia_gsd_blend`, `catia_gsd_connect`, or sections that meet
   properly); there is no smoothing operator in this automation.
-* **No sheet metal (Generative Sheetmetal Design).** This server covers Part
-  Design, GSD, Assembly, Sketcher, Measurement and export — there is no wall,
-  flange, bend, unfold or flat-pattern tool, and no K-factor/bend-radius
-  parameter. A sheet-metal part has to be modelled as extrude + cut with the
-  bend geometry worked out by hand, which is why a bracket that is 57 faces in
-  SolidWorks comes out 76 here (+19 faces, +0.49 % volume — measured
-  2026-11-03 on a 2 mm bracket with two bends): the extra faces are the prismatic
-  substitutes for the bends. `catia_diagnose` reports whether the workbench's
-  DLLs are installed beside the running CATIA, but no probe can read the
-  licence, and the automation objects this server drives expose no sheet-metal
-  feature either way.
+* **No sheet-metal GEOMETRY (Generative Sheetmetal Design).** There is no wall,
+  flange, bend, unfold or flat-pattern tool, and there cannot be one from here:
+  `Part.SheetMetalFactory` has 23 members, 22 of them the COM base, and the only
+  real method is `CreateSheetMetalParameters()` — **no `AddNew*` of any kind**
+  (measured on B30 2026-11-15). A sheet-metal part therefore has to be modelled
+  as extrude + cut with the bend geometry worked out by hand, which is why a
+  bracket that is 57 faces in SolidWorks comes out 76 here (+19 faces, +0.49 %
+  volume — measured 2026-11-03 on a 2 mm bracket with two bends): the extra
+  faces are the prismatic substitutes for the bends.
+  **The parameters, though, are reachable (0.3.133)** — read *and* written, which
+  this page denied until that release. They live in `part.Parameters` as ordinary
+  parameters (`钣金参数.1\线宽`, `弯曲半径`, `K 因子`, `拐角止裂槽半径长度/轴长度`,
+  `Minimum Bend Radius`) and `Parameter.Value` there is writable: thickness
+  2.0 → 1.5 moved `SheetMetalParameters.GetThickness()` to 1.5, and the K factor
+  takes a value once the standard's `DIN 一般公式\Activity` switch is off (it is a
+  computed value, and the reply says which rule it switched off).
+  `catia_sheetmetal_parameters` is that reader/writer and
+  `catia_new_sheetmetal` is a part that starts with the set. `catia_diagnose`
+  reports whether the workbench's DLLs are installed beside the running CATIA;
+  no probe can read the licence.
 * **A loft section cannot be a point or a vertex** — measured 2026-11-03: a datum
   point is accepted by `AddSectionToLoft` and then fails the update, and a solid
   `Vertex.N` is refused by the same call with "invalid number of arguments",

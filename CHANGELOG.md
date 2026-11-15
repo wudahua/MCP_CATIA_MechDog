@@ -2,6 +2,63 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.133] — 2026-11-15 · sheet metal: the parameters were reachable all along
+
+The 2026-11-03 report asked for eight sheet-metal tools after modelling a real
+bracket without any of them. What this project recorded in reply was a ceiling
+saying the parameters "can be read and nothing can be built from them". That was
+half wrong, and the half that was wrong is the useful half.
+
+**What was re-measured** (`scripts/b30_v0434_probe_sheetmetal.py`):
+
+* `Part.SheetMetalFactory` — 23 members, 22 of them the COM base, one real method:
+  `CreateSheetMetalParameters()`. Its result — 23 members, one method,
+  `GetThickness()`. **No `AddNew*` anywhere**, so no wall, flange, bend, unfold or
+  flat pattern can be wrapped. Loading a workbench cannot change that: an
+  interface does not grow methods.
+* `part.SheetMetalParameters` answers "方法 SheetMetalParameters 失败" until that
+  call has run — the object is **created**, not found.
+* **The values are also in `part.Parameters`**, as ordinary parameters, and
+  `Parameter.Value` there is writable:
+
+      钣金参数.1\线宽                2.0        -> 1.5    GetThickness() reads 1.5
+      钣金参数.1\弯曲半径            4.0        -> 1.905
+      钣金参数.1\K 因子              0.400515   refuses Value while DIN 一般公式
+                                                 \Activity is True; 0.5 after it is off
+      钣金参数.1\拐角止裂槽半径长度  1.0        -> 0.8
+      钣金参数.1\拐角止裂槽轴长度    2.0        -> 1.5
+      钣金参数.1\Minimum Bend Radius  0.0        -> 1.0
+
+So the report's items 1 and 2 are deliverables, not limits:
+
+* **`catia_sheetmetal_parameters`** reads thickness / bend radius / K factor /
+  corner relief, and SETS any of them. `create=true` adds the set to a part that
+  has none (once per document — a second call fails, measured). The reply quotes
+  every value read back, cross-checks the thickness against
+  `SheetMetalParameters.GetThickness()`, and when a value was locked by a rule it
+  names the rule it switched off instead of leaving the part with a silently
+  disabled formula it did not mention.
+* **`catia_new_sheetmetal`** is `catia_new_part` plus the set — the report's
+  `new_sheetmetal`. It hands back a document that carries the design intent; the
+  geometry still has to be extrude + cut, and that substitute's price stays on the
+  record (76 faces against the source's 57, +0.49 % volume, measured 2026-11-03).
+
+The leaves are localised ('线宽' on this build, 'Minimum Bend Radius' English on
+the same document), so the lookup is a NAME match over known spellings, and a
+property it cannot find is reported missing with its siblings listed — never
+silently skipped, because the next thing that happens to a wrong parameter is
+somebody cutting metal to it.
+
+**A defect this release found in itself:** the first version computed the
+`GetThickness()` cross-check BEFORE the write loop, so a call that set the
+thickness to 1.5 reported `"get_thickness_mm": 2.0` immediately beside
+`"after": 1.5`. The acceptance case caught it on its fifth cell; the reply now
+reads both sides at the same moment, and a test holds it.
+
+Verified on B30: `scripts/b30_v0435_audit.py` 10/10.
+
+2 136 tests. 153 tools.
+
 ## [0.3.132] — 2026-11-15 · 0 ms is a reading, not an absence
 
 CI on 0.3.131 went red on **Python 3.10 only**. The failing test was not one of

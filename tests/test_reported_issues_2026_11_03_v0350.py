@@ -337,7 +337,14 @@ def test_sheetmetal_probe_reports_the_dlls_beside_the_running_exe(tmp_path):
     probe = DiagnosticsTools(connection=None)._sheetmetal_probe(app)
     assert probe["installed"].startswith("yes")
     assert set(probe["files"].values()) == {"present"}
-    assert "none - the server has no wall" in probe["server_tools"]
+    # 0.3.133: the string said "none - the server has no wall ..." while the
+    # parameters were in fact readable AND writable through part.Parameters. Both
+    # halves are now stated, so neither "installed" reads as "reachable" nor
+    # "no geometry" reads as "no parameters".
+    assert probe["server_tools"].startswith("parameters only")
+    assert "catia_sheetmetal_parameters" in probe["server_tools"]
+    assert "NO wall" in probe["server_tools"]
+    assert "no AddNew*" in probe["server_tools"]
     assert "licence" in probe
 
 
