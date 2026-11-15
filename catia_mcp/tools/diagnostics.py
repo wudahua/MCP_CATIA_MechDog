@@ -448,7 +448,15 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
             "the 3D window's client area - 300x400 in the session measured, whatever "
             "was requested - tree and axis included. A clean render needs the CATIA "
             "window sized and the tree hidden by hand in the GUI. What CAN be done "
-            "from here is hiding construction geometry: catia_screenshot(clean=true) "
+            "from here is hiding construction geometry, and there is NO CROP: no "
+            "capture region exists, and cutting the written JPEG would need an image "
+            "decoder, which this server does not ship (its only dependencies are "
+            "mcp, pywin32 and jsonschema). catia_screenshot(zoom=) is the supported "
+            "way to make the part fill more of the frame - it writes "
+            "Viewpoint3D.Zoom, which IS writable and reads back exactly (measured "
+            "2026-11-15: the object covered 24 668 / 35 989 / 41 588 pixels at x0.6 "
+            "/ x1 / x1.6 of the same window), and puts the previous zoom back "
+            "afterwards. With that, hiding construction geometry: catia_screenshot(clean=true) "
             "does it for a part built from geometrical sets, and "
             "catia_screenshot(clean='solid_only') (0.3.126) does it for a part built "
             "from SKETCHES, which is the case that used to answer 'this part has no "
@@ -910,6 +918,30 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
             "the seven view names are in the DOCUMENT's axes, not the model's, and "
             "nothing reports the current screen right/up the way the UI's 'Normal "
             "to' does - use direction=[x,y,z] to look along an arbitrary normal."
+        ),
+    },
+    {
+        "member": "sampling a TOPOLOGICAL edge at N points",
+        "status": "AVAILABLE_WITH_LIMIT",
+        "detail": (
+            "catia_list_edges(samples=N) places N points along each edge and "
+            "reports them as samples_mm, so a curve can be rebuilt instead of only "
+            "located - what the 2026-11-13 report's P1-5 asked for after having to "
+            "recompute every contour from side files. Measured on B30 2026-11-15 "
+            "(scripts/b30_v0431_probe_edge_samples.py): 12/12 edges of a padded "
+            "plate accept a point, 18/18 once four corners were filleted so ARCS "
+            "are included, and five points at 0/25/50/75/100 % of a 40 mm edge "
+            "landed at (0,40,10) (0,30,10) (0,20,10) (0,10,10) (0,0,10) - exactly "
+            "10.000 mm apart. THE LIMIT IS A CLOSED RIM: the two rims of a padded "
+            "circle refused 0/2 with '方法 UpdateObject 失败', because a "
+            "point-on-curve parameter needs a curve with two ends - the same matrix "
+            "the engrave code measured. Such an edge carries samples_unavailable "
+            "with CATIA's own words; no point is invented. The route through the "
+            "edge's own curve does NOT exist on this build: "
+            "Edge.GetCurve/GetVertices/GetFaces all answer '<unknown>.GetCurve' on "
+            "the object the selection hands back (measured the same day), which is "
+            "why an earlier note in this project said 'a topological edge cannot be "
+            "sampled' - that note measured the wrapper, not the edge."
         ),
     },
     {

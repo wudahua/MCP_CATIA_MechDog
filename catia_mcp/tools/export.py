@@ -94,7 +94,12 @@ class ExportTools:
                     "未知命令 dialog on the automation thread, measured 2026-11-08), so "
                     "a guessed command is not a shortcut, it is a freeze. Hide the "
                     "tree in the UI (F3) before calling this if the picture is for a "
-                    "report."
+                    "report. "
+                    "THERE IS NO 'crop': CATIA exposes no capture region, and "
+                    "cutting the written file would need a JPEG decoder, which this "
+                    "server does not ship. 'zoom' is the supported way to make the "
+                    "part fill more of the frame - it writes Viewpoint3D.Zoom and "
+                    "puts it back afterwards."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -102,6 +107,22 @@ class ExportTools:
                         "file_path": {
                             "type": "string",
                             "description": "Output image path (e.g., 'C:/screenshots/part.png')",
+                        },
+                        "zoom": {
+                            "type": "number",
+                            "default": 1.0,
+                            "description": (
+                                "Multiplier on the camera's current zoom - 2.0 makes "
+                                "the part twice as close, 0.5 twice as far. 1.0 (the "
+                                "default) changes nothing. This is the closest thing "
+                                "to a 'crop' that exists on this build: there is no "
+                                "capture region, and cutting the image would need a "
+                                "JPEG decoder. Measured on B30 2026-11-15: setting "
+                                "Viewpoint3D.Zoom reads back the exact value asked "
+                                "for, the object covered 24 668 / 35 989 / 41 588 "
+                                "pixels at x0.6 / x1 / x1.6 of the same window, and "
+                                "the zoom is RESTORED after the capture."
+                            ),
                         },
                         "width": {
                             "type": "integer",
@@ -261,6 +282,7 @@ class ExportTools:
                     arguments.get("width", 1920),
                     arguments.get("height", 1080),
                     self._clean_mode(arguments.get("clean")),
+                    arguments.get("zoom", 1.0),
                 )
             case "catia_set_view":
                 return self._set_view(
@@ -501,7 +523,23 @@ class ExportTools:
             "off the screen).", code="BAD_CLEAN_MODE", stage="validate")
 
     def _screenshot(self, file_path: str, width: int = 1920, height: int = 1080,
-                    clean: str = "") -> str:
+                    clean: str = "", zoom: float = 1.0) -> str:
+        # A zoom that is not a usable number is a typo, and it is answerable
+        # without a session (0.3.127's rule: refuse before doing anything).
+        try:
+            zoom = float(zoom if zoom is not None else 1.0)
+        except (TypeError, ValueError):
+            raise ArgumentRejected(
+                f"zoom has to be a number (1.0 leaves the camera alone); got "
+                f"{zoom!r}. Nothing was captured.", code="BAD_ARGUMENT",
+                stage="validate")
+        if not 0.05 <= zoom <= 20:
+            raise ArgumentRejected(
+                f"zoom={zoom:g} is outside 0.05..20. It multiplies the camera's "
+                "current zoom, so 2 is twice as close and 0.5 twice as far; "
+                "anything beyond that either loses the part or puts the camera "
+                "inside it. Nothing was captured.", code="BAD_ARGUMENT",
+                stage="validate")
         self.conn.ensure_connected()
 
         # Ensure output directory exists
@@ -533,6 +571,34 @@ class ExportTools:
             pass
         hidden_note = ""
         records: list[Any] = []
+        zoom_note = ""
+        viewpoint = None
+        base_zoom = None
+        if zoom != 1.0:
+            try:
+                viewpoint = viewer.Viewpoint3D
+                base_zoom = float(viewpoint.Zoom)
+                viewpoint.Zoom = base_zoom * zoom
+                # REPAINT AFTER THE ZOOM, not before it: the Update() above runs
+                # while the camera is still where it was, and CaptureToFile does
+                # not always force a redraw - measured on B30 2026-11-15, where
+                # two captures at x1 and x1.6 came back byte-identical until this
+                # line existed.
+                try:
+                    viewer.Update()
+                except Exception:  # noqa: BLE001 - not every build exposes Update
+                    pass
+                got_zoom = float(viewpoint.Zoom)
+                if abs(got_zoom - base_zoom * zoom) > 1e-6:
+                    zoom_note = (f" [asked for zoom {base_zoom * zoom:.6f}, CATIA "
+                                 f"kept {got_zoom:.6f}]")
+                else:
+                    zoom_note = (f" [zoom {base_zoom:.6f} -> {got_zoom:.6f}, "
+                                 f"x{zoom:g}]")
+            except Exception as error:  # noqa: BLE001 - the capture still happens
+                zoom_note = (" [zoom could not be set ("
+                             + str(error).splitlines()[0][:60] + ")]")
+                viewpoint = None
         if clean:
             records, hidden_note = self._clean_view(clean)
         try:
@@ -540,6 +606,13 @@ class ExportTools:
         finally:
             if records:
                 self._restore_view(records)
+            if viewpoint is not None and base_zoom is not None:
+                # PUT IT BACK: the caller's next capture is of the window they
+                # were looking at, not of the magnification this call needed.
+                try:
+                    viewpoint.Zoom = base_zoom
+                except Exception:  # noqa: BLE001 - a left zoom is not a failure
+                    pass
 
         actual = self._image_size(file_path)
         note = ""
@@ -554,7 +627,8 @@ class ExportTools:
                          "client area and exposes no capture-resolution setting - "
                          "Window.Width/Height do not change it, measured on B30 "
                          "2026-11-03. Resize the CATIA window to change this.]")
-        return (f"Screenshot saved to {file_path} ({size_note}){note}{hidden_note}"
+        return (f"Screenshot saved to {file_path} ({size_note}){note}"
+                f"{zoom_note}{hidden_note}"
                 + (self._AXIS_TRIAD_NOTE if clean else ""))
 
     # The 0.3.120 report photographed a clean part and found "a small white mesh

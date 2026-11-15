@@ -136,6 +136,27 @@ class _ProbePoints:
         self._updated = False
         return point
 
+    def add_on_edge(self, edge: Any, ratio: float) -> Any:
+        """A point at ``ratio`` along a TOPOLOGICAL edge.
+
+        Measured on B30 2026-11-15 (`scripts/b30_v0431_probe_edge_samples.py`):
+        this works on every OPEN edge - 12/12 on a padded plate, 18/18 once four
+        corners were filleted, and five points at 0/25/50/75/100 % of a 40 mm edge
+        landed at exactly 10.000 mm apart - and is refused on a CLOSED rim (0/2
+        on a padded circle's two rims), the same matrix the engrave code found:
+        point-on-curve needs a curve with two ends.
+
+        The edge is passed as the OBJECT, not as ``cell.Reference``: both work,
+        but ``TriDimFeatEdge.GetCurve()`` does NOT exist on this build (measured
+        the same day: ``<unknown>.GetCurve``), which is why the route through the
+        edge's curve is closed and this one is not.
+        """
+        point = self.factory.AddNewPointOnCurveFromPercent(edge, float(ratio), 0)
+        self.set.AppendHybridShape(point)
+        self.shapes.append(point)
+        self._updated = False
+        return point
+
     def update(self) -> None:
         """One rebuild for every point added since the last one."""
         if self._updated or not self.shapes:
@@ -1493,7 +1514,10 @@ class PartDesignTools:
                     "at call time, which is what makes a multi-fillet script "
                     "survive its own edits. Filter by length or by bounding face "
                     "and page the result: a 67-edge part otherwise returns tens of "
-                    "thousands of characters of NLS text."
+                    "thousands of characters of NLS text. coords=true gives ONE "
+                    "point on each edge (to anchor a fillet); samples=N gives N "
+                    "points spread along it (to rebuild the curve), which works on "
+                    "open edges and is refused on a closed rim - see 'samples'."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1526,7 +1550,33 @@ class PartDesignTools:
                                 "edge, so it is off by default. This is the "
                                 "coordinate to feed back as edge_anchors, and the "
                                 "one to compare with a spec sheet that says "
-                                "'the edge at (0, 65, -20)'."
+                                "'the edge at (0, 65, -20)'. ONE point, though: to "
+                                "rebuild the curve itself ask for 'samples'."
+                            ),
+                        },
+                        "samples": {
+                            "type": "integer",
+                            "default": 0,
+                            "minimum": 0,
+                            "maximum": 50,
+                            "description": (
+                                "Points to place ALONG each edge (2..50; 0 = none), "
+                                "so its curve can be rebuilt instead of only "
+                                "located - the 2026-11-13 report's P1-5, which had "
+                                "to recompute every contour from side files. They "
+                                "come back as 'samples_mm' with the ratios that "
+                                "produced them. WORKS ON OPEN EDGES ONLY: measured "
+                                "on B30 2026-11-15, 12/12 edges of a padded plate "
+                                "and 18/18 of a filleted one (arcs included), with "
+                                "five points on a 40 mm edge landing exactly 10.000 "
+                                "mm apart; a CLOSED rim - a hole's rim - refuses "
+                                "(0/2 on a padded circle, because a point-on-curve "
+                                "parameter needs a curve with two ends), and that "
+                                "edge carries 'samples_unavailable' with CATIA's own "
+                                "words. Every point is a real object in a scratch "
+                                "set that is deleted again, and a rebuild of its "
+                                "own, so a call is capped at 400 points "
+                                "(edges x samples)."
                             ),
                         },
                     },
@@ -1645,7 +1695,11 @@ class PartDesignTools:
                     arguments.get("faces"), int(arguments.get("offset", 0) or 0),
                     int(arguments.get("limit", 0) or 0),
                     bool(arguments.get("include_nls", True)),
-                    bool(arguments.get("coords", False)))
+                    bool(arguments.get("coords", False)),
+                    # Passed RAW: a non-numeric value has to become an
+                    # ArgumentRejected that names 'samples', and int() here would
+                    # raise a bare ValueError before the tool could say so.
+                    arguments.get("samples", 0))
             case _:
                 raise ArgumentRejected(f"Unknown part design tool: {tool_name}")
 
@@ -8078,6 +8132,95 @@ class PartDesignTools:
                      "point_on_edge_unknown instead.")
         return note
 
+    def _attach_edge_samples(self, part: Any, rows: list[dict[str, Any]],
+                             edges: list[dict[str, Any]],
+                             samples: int) -> str | None:
+        """N points spread along each listed edge, so a curve can be rebuilt.
+
+        The 2026-11-13 report (13th round, P1-5) asked for this because ONE point
+        per edge cannot reconstruct anything: its author had to recompute every
+        contour from side files. The limit this was expected to hit is not the
+        limit it met - measured on B30 2026-11-15, a topological edge DOES accept
+        `AddNewPointOnCurveFromPercent`:
+        12/12 edges of a padded plate, 18/18 once four corners were filleted
+        (so arcs work too), and five points at 0/25/50/75/100 % of a 40 mm edge
+        came back exactly 10.000 mm apart. What refuses is a CLOSED rim - the two
+        rims of a padded circle went 0/2 - because a point-on-curve parameter
+        needs a curve with two ends, the same matrix the engrave code measured.
+
+        An edge that refuses is MARKED, not dropped: the listing still answers
+        every other edge, and `samples_unavailable` says which one could not and
+        why. Guessing a point that is not on the edge would be worse than saying
+        so - a rebuilt contour from invented points is a profile the part never
+        had.
+
+        `UpdateObject` per point, not one `part.Update()` for the batch: a single
+        closed rim would poison the rebuild for every other edge, and the whole
+        call would report nothing.
+        """
+        try:
+            from catia_mcp.tools.measurement import _BATCH_POINTS  # noqa: PLC0415
+        except Exception:  # noqa: BLE001 - the listing still stands without it
+            return "samples were not reported: the point reader is unavailable."
+        spa = self._topo_measure(part)
+        if spa is None:
+            return ("samples were not reported: SPAWorkbench is unavailable, so a "
+                    "coordinate cannot be read back.")
+        ratios = [index / (samples - 1) for index in range(samples)]
+        probe = self._edge_probe_points(part)
+        refused = 0
+        planned: list[tuple[dict[str, Any], list[Any]]] = []
+        try:
+            for entry, item in zip(rows, edges):
+                source = entry["cell"]
+                value = getattr(source, "Value", None) or source
+                placed: list[Any] = []
+                failure = ""
+                for ratio in ratios:
+                    try:
+                        point = probe.add_on_edge(value, ratio)
+                        part.UpdateObject(point)
+                    except Exception as error:  # noqa: BLE001 - one edge
+                        failure = str(error).splitlines()[0][:90]
+                        break
+                    placed.append(point)
+                if failure:
+                    refused += 1
+                    item["samples_unavailable"] = failure
+                    continue
+                planned.append((item, placed))
+            if planned:
+                refs = [part.CreateReferenceFromObject(point)
+                        for _item, placed in planned for point in placed]
+                raw = self.conn.app.SystemService.Evaluate(
+                    _BATCH_POINTS, 0, "catia_mcp_points", [spa, refs])
+                values = [float(v) for v in raw]
+                cursor = 0
+                for item, placed in planned:
+                    item["samples_mm"] = [
+                        [round(values[cursor + 3 * index + axis], 4)
+                         for axis in range(3)]
+                        for index in range(len(placed))]
+                    item["sample_ratios"] = [round(r, 4) for r in ratios]
+                    cursor += 3 * len(placed)
+        finally:
+            probe.close()
+        note = (
+            f"samples_mm holds {samples} points spread evenly along each edge "
+            "(ratios in sample_ratios), measured on the edge itself - enough to "
+            "rebuild the curve instead of only locating it. It works on OPEN "
+            "edges: straight AND arc, measured on B30 2026-11-15, 18/18 on a "
+            "filleted plate. It does NOT work on a CLOSED rim (a hole's rim: 0/2 "
+            "on a padded circle) - a point-on-curve parameter needs a curve with "
+            "two ends - and such an edge carries 'samples_unavailable' with "
+            "CATIA's own words instead of invented points."
+        )
+        if refused:
+            note += (f" {refused} of {len(rows)} edge(s) refused and carry "
+                     "samples_unavailable; their point_on_edge (if asked for) is "
+                     "still valid.")
+        return note
+
     @staticmethod
     def _bounded_by_flags(faces: list[str]) -> dict[str, Any]:
         """Mark an edge whose fingerprint names fewer than two bounding faces.
@@ -8097,7 +8240,8 @@ class PartDesignTools:
                     faces: list[str] | None = None,
                     offset: int = 0, limit: int = 0,
                     include_nls: bool = True,
-                    coords: bool = False) -> str:
+                    coords: bool = False,
+                    samples: int = 0) -> str:
         """List solid edges, filterable and pageable, with a stable fingerprint.
 
         The fingerprint is the point: ``Edge.N`` moves when the topology changes,
@@ -8109,6 +8253,26 @@ class PartDesignTools:
         (reported 2026-10-23), so ``include_nls=False`` and the paging arguments
         exist for exactly that case.
         """
+        # A typo here costs N points per edge to discover otherwise, and the
+        # number of points is the one thing this call cannot take back.
+        try:
+            samples = int(samples or 0)
+        except (TypeError, ValueError):
+            raise ArgumentRejected(
+                f"samples has to be a whole number of points per edge; got "
+                f"{samples!r}. 0 (the default) reports no samples. Nothing was "
+                "read.", code="BAD_ARGUMENT", stage="validate")
+        if samples and samples < 2:
+            raise ArgumentRejected(
+                f"samples={samples} cannot describe an edge: two points are the "
+                "minimum (its two ends). Pass 2 or more, or leave it out. Nothing "
+                "was read.", code="BAD_ARGUMENT", stage="validate")
+        if samples > 50:
+            raise ArgumentRejected(
+                f"samples={samples} is more than this will place per edge: every "
+                "point is a real object in a scratch set and a rebuild of its own, "
+                "so 50 is the ceiling. Nothing was read.",
+                code="BAD_ARGUMENT", stage="validate")
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
         body = self._prepare_body(part)
@@ -8135,6 +8299,15 @@ class PartDesignTools:
             rows = rows[offset:]
         if limit and limit > 0:
             rows = rows[:limit]
+
+        if samples and rows and len(rows) * samples > 400:
+            raise ArgumentRejected(
+                f"that is {len(rows)} edge(s) x {samples} point(s) = "
+                f"{len(rows) * samples} scratch points, above the 400 this will "
+                "place in one call. Narrow with min_length / faces, page with "
+                "offset+limit, or ask for fewer samples per edge. Nothing was "
+                "read.", code="TOO_MANY_SAMPLES", stage="validate",
+                data={"edges": len(rows), "samples": samples})
 
         edges = []
         points_on_edges: list[tuple[dict[str, Any], list[float]]] = []
@@ -8170,6 +8343,9 @@ class PartDesignTools:
         coordinates_note = None
         if coords and rows:
             coordinates_note = self._attach_edge_points(part, rows, edges)
+        samples_note = None
+        if samples and rows:
+            samples_note = self._attach_edge_samples(part, rows, edges, samples)
 
         if not edges:
             return json.dumps({
@@ -8192,6 +8368,8 @@ class PartDesignTools:
         }
         if coordinates_note:
             payload["coordinates"] = coordinates_note
+        if samples_note:
+            payload["samples"] = samples_note
         if raw_total is not None and raw_total != total:
             # Same sentence as catia_measure_topology: one definition of "edge of
             # the solid", so an acceptance script cannot get 109 from one tool and

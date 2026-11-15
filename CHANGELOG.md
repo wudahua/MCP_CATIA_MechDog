@@ -2,6 +2,61 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.131] — 2026-11-15 · the edges can be read, and the picture can be closer
+
+The 2026-11-13 report (13th round) was already answered by 0.3.123 - its two P0s,
+its P1-1 and its P2-1/P2-2 are in that entry. Two items were left, and both were
+answered this time with a measurement rather than a note.
+
+### P1-5: a topological edge CAN be sampled - the note said it could not
+
+The ask was `list_edges(coords=true, samples=N)`, because one point per edge
+cannot rebuild a curve: the reporter had to recompute every contour from side
+files. What stood in the way was a note in this project saying a topological edge
+cannot carry a point-on-curve parameter, and **the note was wrong** - it had
+measured the wrapper, not the edge:
+
+* `Edge.GetCurve()`, `GetVertices()` and `GetFaces()` do not exist on the object
+  the selection hands back (`<unknown>.GetCurve`, measured 2026-11-15). That is
+  where the note came from, and it is a real dead end - but not the only route.
+* `AddNewPointOnCurveFromPercent(edge, ratio, 0)` + `UpdateObject` **works**:
+  12/12 edges of a padded plate, 18/18 once four corners were filleted (so arcs
+  count), and five points at 0/25/50/75/100 % of a 40 mm edge landed at
+  (0,40,10) (0,30,10) (0,20,10) (0,10,10) (0,0,10) - exactly 10.000 mm apart.
+* The real limit is a CLOSED rim: the two rims of a padded circle refuse 0/2
+  ("方法 UpdateObject 失败"), because a point-on-curve parameter needs a curve
+  with two ends - the same matrix the engrave code measured.
+
+So `catia_list_edges(samples=N)` places the points in a scratch set, reads them
+all in one batch, and deletes the set. An edge that refuses carries
+`samples_unavailable` with CATIA's own words: an invented point would be a
+profile the part never had. Capped at 50 per edge and 400 per call, both refused
+with the numbers in the message.
+
+### P2-3: there is no crop, and there is now a zoom
+
+`crop=` was asked for so a report figure would not need an external image tool.
+It is not implementable here without lying about it: CATIA exposes no capture
+region, and cutting the written JPEG needs an image decoder, which this server
+does not ship (its dependencies are mcp, pywin32 and jsonschema).
+
+What exists instead is `catia_screenshot(zoom=)`, which multiplies the camera's
+own zoom - measured writable and exact on B30: the object covered 24 668 /
+35 989 / 41 588 pixels at x0.6 / x1 / x1.6 of the same window. The zoom is
+restored after the capture, so the next screenshot is of the window the caller
+was looking at.
+
+**A bug this found in itself:** the first version captured byte-identical images
+at x1 and x1.6. `viewer.Update()` was being called while the camera was still
+where it was, and `CaptureToFile` does not always force a redraw - the repaint
+now happens after the zoom is set. Without the acceptance case's byte comparison
+this would have shipped as "the zoom parameter exists and does nothing".
+
+Verified on B30: `scripts/b30_v0433_audit.py` 7/7, plus the probe that settled
+the sampling rule (`scripts/b30_v0431_probe_edge_samples.py`).
+
+2 118 tests. 151 tools.
+
 ## [0.3.130] — 2026-11-14 · the drawing path, end to end
 
 The 2026-11-14 (v0.3.128) report's eleven findings. Its headline was the one that

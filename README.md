@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.130** · [what changed](CHANGELOG.md) ·
+**0.3.131** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -166,6 +166,8 @@ through `AddNewShaftFromRef` + `SetProfileElement` + `RevoluteAxis` with
 | `catia_shaft` / `catia_groove` → `axis` (`horizontal`/`vertical`) | Which of the sketch's two absolute axes to revolve about. A construction line is accepted by the property setter and then rejected at update time, so it is not offered |
 | `catia_fillet` / `catia_chamfer` → `edge_anchors` (+ `anchor_tol`) | The other half of a spec: "fillet R2.5 on the edge at (0, 65, -20)". Each anchor is matched to the edge whose minimum distance to it is smallest, and the reply states the edge name and the distance — an anchor that matches nothing, or two edges equally well, is refused instead of filleting the wrong one |
 | `catia_list_edges` → `coords: true` | Adds `point_on_edge` — a coordinate that lies ON the edge (the midpoint for a straight edge, measured) — which is both the value to feed back as an anchor and the thing to compare with a spec sheet |
+| `catia_list_edges` → `samples: N` (0.3.131) | N points spread along each edge, so the curve can be REBUILT instead of only located: measured on B30, five points on a 40 mm edge land exactly 10.000 mm apart, and 18/18 edges of a filleted plate accept one (arcs included). A CLOSED rim refuses — a hole's rim, 0/2 on a padded circle — and that edge says so with `samples_unavailable` instead of inventing a point |
+| `catia_screenshot` → `zoom` (0.3.131) | 2.0 = twice as close. There is no `crop` on this build (no capture region, and no image decoder in this server); this writes `Viewpoint3D.Zoom`, which is writable and reads back exactly, and puts the camera's zoom back afterwards |
 
 Details, measurements and caveats: **[`FORK.md`](FORK.md)** (Chinese).
 
