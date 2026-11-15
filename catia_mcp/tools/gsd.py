@@ -20,7 +20,7 @@ import os
 import re
 from typing import Any
 
-from catia_mcp import dialogs
+from catia_mcp import dialogs, fidelity
 from catia_mcp.connection import CATIAConnection
 from catia_mcp.sketch_frames import ORIGIN_AXIS, plane_angle_frame, point_world
 from catia_mcp.results import (ArgumentOutOfRange, ArgumentRejected,
@@ -719,6 +719,27 @@ class GSDTools:
                             "default": False,
                         },
                         "name": {"type": "string", "description": "Optional name for the spline"},
+                        "deviation": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": (
+                                "With 'element' AND closed=true: measure how far "
+                                "the spline strayed from the outline's own sides "
+                                "and report deviation_mm. The probes are the "
+                                "midpoints of the outline's sides - where an "
+                                "interpolating curve bulges - plus three corners, "
+                                "which must read 0.0000 mm; when they do not, the "
+                                "reply says the reading is NOT calibrated instead "
+                                "of quoting it. Measured on B30 2026-11-15 on a "
+                                "100 x 40 rectangle: a corner reads 0.0000 mm and "
+                                "a side midpoint 25.6325 mm. Costs one point "
+                                "element per probe (24 by default) and they are "
+                                "deleted again. A 2D sketch spline through the "
+                                "same corners reads 33.1387 mm at that same "
+                                "midpoint - the two interpolants differ, so this "
+                                "number describes THIS curve only."
+                            ),
+                        },
                     },
                     "required": [],
                 },
@@ -4310,11 +4331,29 @@ class GSDTools:
             )
         else:
             points_note = ""
-        return self._finish(
+        text = self._finish(
             spline, args.get("name"),
             f"3D spline created through {count} points"
             f"{' (closed)' if closed else ''}.{note}{points_note}",
         )
+        # AFTER the build, because the measurement is taken against the finished
+        # curve: midpoints of the ORIGINAL sides, which is where an interpolating
+        # spline bulges, plus three corners it must pass through (the calibration
+        # reading). Only for 'element' - a caller who typed 'points' already knows
+        # what they typed.
+        if (element and closed and len(coords) >= 3
+                and args.get("deviation", True)):
+            midpoints, calibration = fidelity.outline_probes(coords)
+            try:
+                summary = fidelity.probe_points(self.conn, spline, midpoints,
+                                                calibration)
+            except Exception as error:  # noqa: BLE001 - reported, not raised
+                summary = {"error": str(error).splitlines()[0][:140],
+                           "samples": 0}
+            text += fidelity.deviation_sentence(
+                summary,
+                remedy="pass the corners as 'points' and measure them yourself")
+        return text
 
     # Matching tolerance when chaining a sketch's lines back into a loop.
     # The recorded numbers are the caller's own, so they agree exactly; the

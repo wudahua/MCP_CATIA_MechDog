@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.135** · [what changed](CHANGELOG.md) ·
+**0.3.136** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1375,6 +1375,40 @@ Two facts about real drawings that this had to accept:
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
 
+0.3.136 finished the two items both 2026-11-15 reports left open - C2, "multi-view
+has no datum", and R2, "the conversion's cost cannot be read back":
+
+* **Multi-view, one sheet frame.** `import_drawing(views=[...])` imports several
+  regions in one call, one sketch each, all shifted so ONE anchor sits at the
+  sketch origin. Per-view `origin='bbox'` - the only thing available before - put
+  every view's own corner at (0,0), which is exactly what loses the alignment.
+  The shared axis is the views' `u` direction, so a FRONT view is
+  `{"type":"frame","origin":[0,0,0],"u":[1,0,0],"v":[0,0,1]}` and a TOP view is
+  the same with `"v":[0,1,0]`; both put the sheet's x on world X. Measured on B30
+  2026-11-15: a 60 x 40 front view and a 60 x 25 top view padded to an X range of
+  **0.000..60.000 in both solids**, and the front view alone is already
+  0.000..60.000, so the agreement is not the two boxes covering for each other.
+  The reply compares the views' world boxes and names the axes they agree on -
+  or says **NO axis** agrees, which is what `xy` + `zx` answers (their u vectors
+  are +X and +Z).
+* **`deviation_mm`, measured rather than promised.** `import_drawing(
+  profile_mode='spline')` and `catia_gsd_spline(element=...)` now probe the
+  outline's side midpoints - where an interpolating curve bulges - and three
+  corners it must pass through. Measured on B30 2026-11-15, a 60 x 40 rectangle:
+  corners **0.0000 mm** (the calibration), side midpoints **18.3594 mm** for the
+  sketch spline and **13.8286 mm** for the 3D spline. The two numbers differ
+  because they are different curves: on a 100 x 40 rectangle the same midpoint
+  reads **33.1387** and **25.6325 mm**, and at the centre 41.1690 vs 45.6325. So
+  each side reports the deviation of the object it measured, and neither quotes
+  the other's.
+* **The probes are coordinate points, not curve samples.** A point-on-curve
+  cannot be put on a `Line2D` inside a sketch, nor on a closed spline - both
+  answer 「方法 UpdateObject 失败」 (measured 2026-11-15). Nor can a sketch report
+  where it is: `GetMeasurable(<sketch>).Length`, `.Area`, `.Volume`, `.GetPoint`,
+  `.GetCOG`, `.GetPlane` and `.GetBoundingBox` all fail, which is why the world
+  box in a multi-view reply is computed from the frame and the alignment is
+  proven by padding.
+
 0.3.130 made the drawing path answer the questions a two-page sheet actually
 asks, on that same file (297.011 x 210.016 mm per page, as a PDF reader reports):
 
@@ -1409,7 +1443,7 @@ asks, on that same file (297.011 x 210.016 mm per page, as a PDF reader reports)
 | Drawing | 13 | upstream's drafting module, measured, plus `catia_drawing_set_sheet` and `catia_drawing_add_frame`: new drawing, generative view (plane / face / body), projection, section, detail, text, table, generated and manual dimensions, paper size, border and title block |
 | Planner | **2** | `run_plan`, `measure_topology` |
 | Diagnostics | 2 | `catia_diagnose` (full probe: factories, type libraries, ceilings), `catia_server_info` (0.3.127 - name, version, tool count, CATIA release; no probes, never connects) |
-| Blueprint | 2 | `catia_read_drawing` (0.3.128 - DXF/SVG/vector-PDF to contours, counts, layers, bounds in mm, and since 0.3.135 `curves` / `loft_ready` per contour; never connects), `catia_import_drawing` (0.3.128 - the same, drawn into a sketch at 1:1 and closed; since 0.3.135 `profile_mode="spline"` for ONE curve per contour, and a frame `plane`) |
+| Blueprint | 2 | `catia_read_drawing` (0.3.128 - DXF/SVG/vector-PDF to contours, counts, layers, bounds in mm, and since 0.3.135 `curves` / `loft_ready` per contour; never connects), `catia_import_drawing` (0.3.128 - the same, drawn into a sketch at 1:1 and closed; since 0.3.135 `profile_mode="spline"` for ONE curve per contour and a frame `plane`; since 0.3.136 `views=[...]` for several views on ONE sheet frame, and `deviation_mm` on the spline conversion) |
 | Sheet Metal | 2 | `catia_sheetmetal_parameters` (0.3.133 - read and set thickness / bend radius / K factor / relief through `part.Parameters`, cross-checked against `GetThickness()`), `catia_new_sheetmetal` (0.3.133 - a part that carries the set). Geometry is NOT here: no wall, flange, bend, unfold or flat pattern, because `SheetMetalFactory` exposes no `AddNew*` |
 
 #### Knowledgeware (6 tools, 0.3.63)

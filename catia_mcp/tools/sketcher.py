@@ -2334,6 +2334,11 @@ class SketcherTools:
         placement = self._placement_of(plane, offset)
         if placement is None:
             placement = self._angled_placement(plane)
+        # Kept on the instance as well as in the outline record: a caller that
+        # draws a sketch and then wants to turn its 2D points into world XYZ
+        # (the deviation probes do) needs the frame of the sketch it just made,
+        # and reading it back out of the record means knowing the record's key.
+        self._last_placement = placement
         record = self._outline_record(key)
         if record is not None:
             record["placement"] = placement
@@ -4486,6 +4491,11 @@ class SketcherTools:
         # loft read the one curve. A 110-point import therefore shows 113
         # elements, which looked like a bug in the first 0.3.135 acceptance run.
         self._last_spline_points = len(control)
+        # The Spline2D itself, for callers that need to MEASURE the curve rather
+        # than read its description: a point's distance to a Spline2D inside a
+        # sketch is a real measurable (B30 2026-11-15), and it is the only way to
+        # say how far a converted outline strayed from the polyline it replaced.
+        self._last_drawn_spline = spline
         return (f"Spline created through {len(points)} points: {pts_str}"
                 + closed_note
                 + f" The sketch also holds {len(control)} point element(s) "

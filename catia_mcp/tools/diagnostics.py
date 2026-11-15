@@ -481,7 +481,37 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
             "says which of the two it is. catia_sketch_get_geometry says the same. "
             "Ask CATIA instead of the sketch: catia_measure_distance against the "
             "built geometry, catia_list_edges, or catia_get_bounding_box on the "
-            "solid - those are read from the model, not from the sketch."
+            "solid - those are read from the model, not from the sketch. "
+            "0.3.136 put the WHOLE SKETCH to the same workbench and it answers "
+            "nothing either: GetMeasurable(<sketch reference>) fails on Length, "
+            "Area, Volume, GetPoint, GetCOG, GetPlane AND GetBoundingBox "
+            "(measured on B30 2026-11-15, one closed rectangle, all seven "
+            "「方法 … 失败」). So a sketch's PLACE cannot be read back, and a "
+            "multi-view import has to prove its alignment otherwise: each view's "
+            "world box is computed from the frame it was drawn on, and the claim "
+            "is checked by padding both views and reading the solids' boxes "
+            "(X 0.000..60.000 in both). A point-on-curve cannot be placed on a "
+            "sketch's own Line2D either (AddNewPointOnCurveFromPercent + "
+            "UpdateObject answers 「方法 UpdateObject 失败」), which is why "
+            "catia_measure_deviation counts points, not sketch elements."
+        ),
+    },
+    {
+        "member": "A 2D sketch spline and a 3D gsd spline are different interpolants",
+        "status": "AVAILABLE_WITH_LIMIT",
+        "detail": (
+            "Both are called 'spline' and both interpolate their control points, "
+            "and they do NOT draw the same curve. Measured on B30 2026-11-15 on "
+            "the same four corners of a 100 x 40 rectangle: the distance from the "
+            "side midpoint (50, 0) is 33.1387 mm to the sketch's Spline2D and "
+            "25.6325 mm to the 3D HybridShapeSpline; at the centre (50, 20) it is "
+            "41.1690 mm and 45.6325 mm. Both pass through the corners (0.0000 mm "
+            "at (0, 0) and (100, 0)). Consequences: a deviation measured on one "
+            "may never be quoted for the other - catia_import_drawing("
+            "profile_mode='spline') reports the 2D one and catia_gsd_spline "
+            "reports the 3D one, and the two numbers differ by the amount above; "
+            "and 'the sketch spline is already one curve, so use that' (0.3.135) "
+            "is a statement about CURVE COUNT, not about shape."
         ),
     },
     {

@@ -37,7 +37,7 @@ import json
 import math
 from typing import Any
 
-from catia_mcp import blueprint
+from catia_mcp import blueprint, fidelity, sketch_frames
 from catia_mcp.results import ArgumentRejected, PreconditionRejected
 from catia_mcp.tools.sketcher import SketcherTools
 
@@ -241,7 +241,26 @@ class BlueprintTools:
                     "drawing is several views plus a frame; run "
                     "catia_read_drawing on the same file first to choose them "
                     "from the counts instead of guessing. REFUSES rather than "
-                    "truncates when the profile would exceed max_elements."
+                    "truncates when the profile would exceed max_elements. "
+                    "MULTI-VIEW: pass 'views' instead of page/region/plane and "
+                    "each view becomes its OWN sketch, all placed on ONE sheet "
+                    "coordinate system shifted so a single anchor sits at the "
+                    "sketch origin - which is what makes two orthographic views "
+                    "line up. The SHARED AXIS IS THE VIEW'S 'u' DIRECTION: two "
+                    "views line up when their u vectors point the same way, and "
+                    "a frame object is the only form that says so exactly. The "
+                    "two that matter can be pasted: a FRONT view (looking along "
+                    "-Y) is {'type':'frame','origin':[0,0,0],'u':[1,0,0],"
+                    "'v':[0,0,1]}, a TOP view (looking along +Z) is the same "
+                    "with 'v':[0,1,0]. Measured on B30 2026-11-15: a 60 x 40 "
+                    "view on the front frame and a 60 x 25 view on the top frame "
+                    "padded to an X range of 0..60 in BOTH solids. 'xy'/'yz'/'zx' "
+                    "also work as planes, but their u vectors differ (zx's u is "
+                    "+Z), so a front view on 'xy' and a top view on 'zx' share "
+                    "nothing - the reply says so instead of pretending. It "
+                    "reports each view's box in world XYZ and which axes the "
+                    "views agree on, because 'aligned' is the claim that decides "
+                    "whether the model is a part or two unrelated blocks."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -351,6 +370,101 @@ class BlueprintTools:
                                 "open, like catia_create_sketch leaves it)."
                             ),
                         },
+                        "views": {
+                            "type": "array",
+                            "description": (
+                                "Import SEVERAL views of one sheet in one call, "
+                                "one sketch each, all sharing one anchor so they "
+                                "line up. Each entry takes the same filters as the "
+                                "top level, PLUS 'plane', 'offset' and 'name' for "
+                                "that view alone. 'plane' decides where that "
+                                "view's sheet axes land in 3D, and the SHARED AXIS "
+                                "is the one both views' 'u' point along - see the "
+                                "front/top frame pair in this tool's own "
+                                "description. Mutually exclusive with the "
+                                "top-level page/region/layers/min_size/"
+                                "max_aspect/closed_only/plane/offset/name - those "
+                                "would be ambiguous, and this refuses rather than "
+                                "picks. `origin` is ignored here on purpose: "
+                                "'bbox' would put each view's own corner at (0,0) "
+                                "and destroy the shared coordinates, so a "
+                                "multi-view import always keeps the sheet's own."
+                            ),
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "page": {"type": "integer"},
+                                    "region": {
+                                        "type": "array",
+                                        "items": {"type": "number"},
+                                        "minItems": 4,
+                                        "maxItems": 4,
+                                        "description": "[x0, y0, x1, y1] in "
+                                                       "drawing mm.",
+                                    },
+                                    "layers": {
+                                        "anyOf": [
+                                            {"type": "string"},
+                                            {"type": "array",
+                                             "items": {"type": "string"}},
+                                        ]
+                                    },
+                                    "min_size": {"type": "number"},
+                                    "max_aspect": {"type": "number"},
+                                    "closed_only": {"type": "boolean"},
+                                    "plane": {
+                                        "anyOf": [{"type": "string"},
+                                                  {"type": "object"}],
+                                        "default": "xy",
+                                    },
+                                    "offset": {"type": "number"},
+                                    "name": {
+                                        "type": "string",
+                                        "description": (
+                                            "Sketch name for this view. A name "
+                                            "already in use is REFUSED, not "
+                                            "suffixed - a plan that reads the "
+                                            "name back needs it to be the one "
+                                            "it asked for."
+                                        ),
+                                    },
+                                },
+                            },
+                        },
+                        "anchor": {
+                            "type": "array",
+                            "items": {"type": "number"},
+                            "minItems": 2,
+                            "maxItems": 2,
+                            "description": (
+                                "The DRAWING point, in mm, that becomes the "
+                                "sketch origin for every view. Default: the "
+                                "lower-left corner of the union of all the views' "
+                                "boxes, which puts the whole sheet in positive "
+                                "coordinates and keeps the views' relative "
+                                "positions. Give it explicitly only to put a "
+                                "known feature - a centre line, a datum hole - at "
+                                "the origin."
+                            ),
+                        },
+                        "deviation": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": (
+                                "With profile_mode='spline', measure how far the "
+                                "spline strayed from the outline it replaced and "
+                                "report it as deviation_mm. The probes are the "
+                                "outline's own side midpoints - where an "
+                                "interpolating curve bulges - plus three corners, "
+                                "which must read 0.0000 mm; when they do not, the "
+                                "reply says the reading is NOT calibrated instead "
+                                "of quoting it. Measured on B30 2026-11-15 on a "
+                                "100 x 40 rectangle: a corner reads 0.0000, a side "
+                                "midpoint 33.1387 mm. Needs close=true (the "
+                                "measurement happens after the sketch closes), and "
+                                "costs one point element per probe."
+                            ),
+                        },
                     },
                     "required": ["file_path"],
                 },
@@ -454,10 +568,13 @@ class BlueprintTools:
         return json.dumps(report, ensure_ascii=False, indent=2)
 
     # ── import ────────────────────────────────────────────────────────────
-    def _import_drawing(self, arguments: dict[str, Any]) -> str:
-        # BEFORE the file is read and long before a session: a typo here decides
-        # what the sketch IS, and discovering it after 110 elements are drawn
-        # means deleting them one by one.
+    def _profile_mode(self, arguments: dict[str, Any]) -> str:
+        """'segments' or 'spline', decided before anything is read or drawn.
+
+        BEFORE the file is read and long before a session: a typo here decides
+        what the sketch IS, and discovering it after 110 elements are drawn
+        means deleting them one by one.
+        """
         raw_mode = arguments.get("profile_mode")
         # An empty string is a typo, not a request for the default: `or` would
         # swallow it, and a caller who passed "" deserves to hear about it.
@@ -470,6 +587,13 @@ class BlueprintTools:
                 "because it needs ONE curve); 'spline' draws each multi-element "
                 "contour as one closed spline. Nothing was read and nothing was "
                 "drawn.", code="BAD_ARGUMENT", stage="validate")
+        return mode
+
+    def _import_drawing(self, arguments: dict[str, Any]) -> str:
+        views = arguments.get("views")
+        if views is not None:
+            return self._import_views(arguments, views)
+        mode = self._profile_mode(arguments)
         drawing = self._parse(arguments)
         contours = drawing["contours"]
         if not contours:
@@ -577,10 +701,380 @@ class BlueprintTools:
                          "CATIA is quoted here - call catia_close_sketch when the "
                          "editing is done.")
 
+        # AFTER the close, because the measurement needs the sketch out of edit
+        # mode: GetMinimumDistance is asked of a real element, and an element
+        # inside an open sketch answers "方法 … 失败".
+        deviation = None
+        if mode == "spline" and profile.get("outlines"):
+            if not arguments.get("close", True):
+                notes.append(
+                    "deviation_mm was NOT measured: the probes need the sketch "
+                    "closed (close=true). The conversion is still interpolating - "
+                    "catia_gsd_spline on the same outline measures it.")
+            elif arguments.get("deviation", True):
+                deviation = self._measure_deviation(sketcher, profile)
+
         return self._import_reply(drawing, drawn, closed, elements, created,
                                   close_note, notes, open_ends,
                                   profile=profile, sketch_name=sketch_name,
-                                  drawn_elements=drawn_elements)
+                                  drawn_elements=drawn_elements,
+                                  deviation=deviation)
+
+    def _measure_deviation(self, sketcher: SketcherTools,
+                           profile: dict[str, Any]) -> dict[str, Any]:
+        """How far each converted spline strayed from the outline it replaced.
+
+        Probes are COORDINATE points (a point-on-curve cannot be put on a
+        Spline2D, measured 2026-11-15) and the target is the Spline2D itself
+        rather than the whole sketch: the sketch also holds one point element per
+        control point, and a minimum distance over the sketch could be answered
+        by a control point instead of by the curve.
+        """
+        placement = getattr(sketcher, "_last_placement", None)
+        if sketch_frames.frame_of(placement) is None:
+            return {"error": "the sketch's frame is unknown here, so its 2D "
+                             "points cannot be turned into world XYZ",
+                    "samples": 0}
+        rows = []
+        for outline in profile.get("outlines") or []:
+            probes = [sketch_frames.point_world(placement, p[0], p[1])
+                      for p in outline.get("probes") or []]
+            calibration = [sketch_frames.point_world(placement, p[0], p[1])
+                           for p in outline.get("calibration") or []]
+            probes = [p for p in probes if p]
+            calibration = [p for p in calibration if p]
+            if not probes:
+                continue
+            target = outline.get("curve")
+            if target is None:
+                return {"error": "the spline object of this contour was not "
+                                 "recorded, so there is nothing to measure "
+                                 "against", "samples": 0}
+            try:
+                rows.append(fidelity.probe_points(self.conn, target, probes,
+                                                  calibration))
+            except Exception as error:  # noqa: BLE001 - reported, not raised
+                return {"error": str(error).splitlines()[0][:140], "samples": 0}
+        if not rows:
+            return {"error": "no probe could be built", "samples": 0}
+        # Worst contour wins: the reply is about the sketch, and a clean contour
+        # must not average away the one that bulged.
+        worst = max((row for row in rows if row.get("max_mm") is not None),
+                    key=lambda row: float(row["max_mm"]), default=None)
+        summary = dict(worst or rows[0])
+        summary["contours"] = len(rows)
+        summary["left_behind"] = sum(int(row.get("left_behind") or 0)
+                                     for row in rows)
+        if len(rows) > 1:
+            summary["all_max_mm"] = [row.get("max_mm") for row in rows]
+        return summary
+
+    # ── multi-view import ─────────────────────────────────────────────────
+    #: Top-level keys that belong to ONE view once `views` is used. Passing them
+    #: beside `views` is ambiguous - "which view did that region mean" - so the
+    #: call is refused instead of guessed.
+    _VIEW_CONFLICTS = ("page", "region", "layers", "min_size", "max_aspect",
+                       "closed_only", "plane", "offset", "name")
+
+    def _import_views(self, arguments: dict[str, Any], views: Any) -> str:
+        """Several views of one sheet, one sketch each, sharing one anchor.
+
+        The 2026-11-15 report's C2 was "multi-view has no datum": each view could
+        be imported, but every import put its own lower-left corner at (0,0), so
+        two orthographic views ended up in unrelated places. The fix is not a
+        coordinate system per view but ONE for the sheet: every view is moved by
+        the same shift, and each still says which plane it lies in.
+        """
+        mode = self._profile_mode(arguments)
+        if isinstance(views, dict) or not isinstance(views, (list, tuple)):
+            raise ArgumentRejected(
+                f"'views' takes a list of views; got {type(views).__name__}. "
+                "One entry per view: {'page': 1, 'region': [...], 'plane': "
+                "'xy'}. Nothing was read.", code="BAD_ARGUMENT", stage="validate")
+        if not views:
+            raise ArgumentRejected(
+                "'views' was empty. Pass one entry per view, or leave it out and "
+                "use page/region/plane for a single view. Nothing was read.",
+                code="BAD_ARGUMENT", stage="validate")
+        clashing = [key for key in self._VIEW_CONFLICTS
+                    if arguments.get(key) not in (None, False, "", [])]
+        if clashing:
+            raise ArgumentRejected(
+                "These belong to one view each and cannot sit beside 'views': "
+                + ", ".join(clashing)
+                + ". Move them into the view that needs them - every entry takes "
+                "page/region/layers/min_size/max_aspect/closed_only/plane/"
+                "offset/name of its own. Nothing was read.",
+                code="BAD_ARGUMENT", stage="validate")
+        raw_origin = arguments.get("origin")
+        if raw_origin is not None and str(raw_origin).strip().lower() != "as_drawn":
+            raise ArgumentRejected(
+                f"origin={raw_origin!r} cannot be used with 'views': 'bbox' moves "
+                "each view's OWN lower-left corner to (0,0), which is exactly what "
+                "destroys the alignment between views. A multi-view import always "
+                "keeps the sheet's own coordinates and moves them all by one "
+                "anchor (see 'anchor'). Nothing was read.",
+                code="BAD_ARGUMENT", stage="validate")
+
+        anchor_arg = arguments.get("anchor")
+        anchor: tuple[float, float] | None = None
+        if anchor_arg is not None:
+            try:
+                values = [float(v) for v in anchor_arg]
+            except (TypeError, ValueError):
+                values = []
+            if len(values) != 2:
+                raise ArgumentRejected(
+                    f"anchor takes two numbers, [x, y] in drawing mm; got "
+                    f"{anchor_arg!r}. Nothing was read.",
+                    code="BAD_ARGUMENT", stage="validate")
+            anchor = (values[0], values[1])
+
+        path = str(arguments.get("file_path") or "")
+        # EVERY entry is checked before ANY file is read: a bad entry at the end
+        # of the list must not be discovered after three views have been parsed
+        # (and, without this loop, never - the first read fails first).
+        for index, view in enumerate(views, start=1):
+            if not isinstance(view, dict):
+                raise ArgumentRejected(
+                    f"views[{index}] is a {type(view).__name__}; each entry is an "
+                    "object like {'page': 1, 'region': [0, 0, 60, 40], "
+                    "'plane': 'xy'}. Nothing was read.",
+                    code="BAD_ARGUMENT", stage="validate")
+        scale = float(arguments.get("scale") or 1.0)
+        tolerance = float(arguments.get("tolerance") or 1e-6)
+        curve_tolerance = arguments.get("curve_tolerance")
+        parsed: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+        for index, view in enumerate(views, start=1):
+            layers = view.get("layers")
+            if isinstance(layers, str):
+                layers = [layers]
+            page = view.get("page")
+            if page in (None, ""):
+                page = None
+            drawing = blueprint.read_drawing(
+                path, layers=layers, region=view.get("region"),
+                min_size=view.get("min_size"), max_aspect=view.get("max_aspect"),
+                closed_only=bool(view.get("closed_only", False)),
+                tolerance=tolerance, page=page, scale=scale,
+                curve_tolerance=curve_tolerance, origin="as_drawn")
+            if not drawing["contours"]:
+                raise PreconditionRejected(
+                    f"View {index} of {len(views)} kept no contour: "
+                    f"{drawing['counts']['dropped']}. Nothing was drawn. Loosen "
+                    "that view's region / min_size / closed_only - "
+                    "catia_read_drawing on the same arguments reports what each "
+                    "filter would keep.",
+                    code="NOTHING_TO_IMPORT", stage="validate",
+                    data={"view": index, "dropped": drawing["counts"]["dropped"]})
+            parsed.append((index, view, drawing))
+
+        # ── the anchor: one sheet point that becomes (0,0) in every view ────
+        if anchor is None:
+            boxes = [blueprint.contour_bbox(contour)
+                     for _, _, drawing in parsed for contour in drawing["contours"]]
+            anchor = (min(box[0] for box in boxes), min(box[1] for box in boxes))
+        for _, _, drawing in parsed:
+            blueprint.move_to_anchor(drawing, anchor)
+
+        total_elements = sum(drawing["counts"]["elements"]
+                             for _, _, drawing in parsed)
+        limit = arguments.get("max_elements")
+        try:
+            limit = MAX_ELEMENTS if limit is None else int(limit)
+        except (TypeError, ValueError):
+            limit = MAX_ELEMENTS
+        if total_elements > limit:
+            raise ArgumentRejected(
+                f"These {len(parsed)} view(s) would create {total_elements} sketch "
+                f"elements in total, above the limit of {limit}. Nothing was "
+                "drawn. Narrow the views' region / min_size, or import fewer of "
+                "them.", code="TOO_MANY_ELEMENTS", stage="validate",
+                data={"elements": total_elements, "limit": limit,
+                      "views": [drawing["counts"]["elements"]
+                                for _, _, drawing in parsed]})
+
+        sketcher = self._sketcher_tools()
+        deviation_on = bool(arguments.get("deviation", True))
+        close = bool(arguments.get("close", True))
+        rows: list[dict[str, Any]] = []
+        for index, view, drawing in parsed:
+            if bool(view.get("closed_only", False)):
+                open_ends = sum(len(blueprint.contour_free_ends(c))
+                                for c in drawing["contours"])
+                if open_ends:
+                    raise PreconditionRejected(
+                        f"View {index} asked for closed contours only, but "
+                        f"{open_ends} endpoint(s) among its "
+                        f"{len(drawing['contours'])} contour(s) are met by "
+                        "nothing, so a pad on that sketch would be refused. "
+                        "Nothing was drawn. Widen that view's tolerance, or drop "
+                        "closed_only to import the open curves too.",
+                        code="PROFILE_NOT_CLOSED", stage="validate",
+                        data={"view": index, "free_ends": open_ends})
+            # The per-view arguments are the ones that place geometry: which
+            # plane, how far off it, and what the sketch is called. Everything
+            # else (mode, tolerance, construction) is one decision for the whole
+            # call, and it lives at the top level.
+            view_args = dict(arguments)
+            view_args.update({key: view[key] for key in ("plane", "offset")
+                              if key in view})
+            created = sketcher._create_sketch(view_args.get("plane") or "xy",
+                                              view_args.get("offset"),
+                                              name=view.get("name"))
+            profile: dict[str, Any] = {"mode": mode, "curves": 0, "splined": 0,
+                                       "points": 0, "kept_primitives": 0,
+                                       "sharp_corners": 0, "sharpest": None}
+            for contour in drawing["contours"]:
+                try:
+                    self._draw_contour(sketcher, contour, view_args, mode, profile)
+                except Exception as error:  # noqa: BLE001 - reported with its view
+                    raise PreconditionRejected(
+                        f"View {index} ('{view.get('name') or 'unnamed'}') could "
+                        "not be drawn "
+                        f"({str(error).splitlines()[0][:140]}). The views before "
+                        "it ARE in the part, and this one is half drawn - nothing "
+                        "was rolled back: a half-imported view is easier to "
+                        "delete than to rebuild.",
+                        code="CONTOUR_FAILED", stage="execute", modified=True
+                    ) from error
+            sketch_name = str(getattr(sketcher._active_sketch, "Name", "") or "")
+            try:
+                drawn_elements = int(sketcher._active_sketch.GeometricElements.Count)
+            except Exception:  # noqa: BLE001
+                drawn_elements = drawing["counts"]["elements"]
+            placement = getattr(sketcher, "_last_placement", None)
+            close_note = ""
+            if close:
+                close_note = " " + " ".join(str(sketcher._close_sketch()).split())
+            else:
+                close_note = (" This sketch is still OPEN: no element count from "
+                              "CATIA is quoted for it, and its deviation cannot be "
+                              "measured until it is closed.")
+            deviation = None
+            if mode == "spline" and profile.get("outlines") and close and deviation_on:
+                deviation = self._measure_deviation(sketcher, profile)
+            bounds = drawing["bounds_mm"]
+            rows.append({
+                "index": index,
+                "name": sketch_name,
+                "asked_name": view.get("name"),
+                "plane": view.get("plane") or "xy",
+                "mode": mode,
+                "offset": view.get("offset"),
+                "elements": drawing["counts"]["elements"],
+                "closed": drawing["counts"]["closed"],
+                "curves": int(profile.get("curves") or 0),
+                "drawn_elements": drawn_elements,
+                "bounds_mm": [round(v, 4) for v in bounds] if bounds else None,
+                "box_mm": _view_box(placement, bounds) if bounds else None,
+                "deviation": deviation,
+                "notes": [line for line in (close_note,) if line],
+            })
+        return self._views_reply(arguments, parsed, rows, anchor)
+
+    def _views_reply(self, arguments: dict[str, Any],
+                     parsed: list[tuple[int, dict[str, Any], dict[str, Any]]],
+                     rows: list[dict[str, Any]],
+                     anchor: tuple[float, float]) -> str:
+        drawing = parsed[0][2]
+        unit = drawing["units"] or "units"
+        total = sum(row["elements"] for row in rows)
+        parts = [
+            f"Imported {len(rows)} view(s) - {total} sketch element(s) in total - "
+            f"from '{_basename(drawing['file'])}' ({drawing['format'].upper()}, "
+            f"{unit} x {drawing['scale']:g} = {drawing['mm_per_file_unit']:g} mm "
+            "per file unit) onto ONE sheet frame.",
+            (f" The drawing point ({anchor[0]:.4f}, {anchor[1]:.4f}) sits at the "
+             "sketch origin in EVERY view, so the views keep the alignment they "
+             "have on the sheet. That is the whole point of importing them "
+             "together: `origin='bbox'` one at a time would put each view's own "
+             "corner at (0,0) and lose it."),
+        ]
+        for row in rows:
+            name = row["name"] or "(unnamed)"
+            where = row["plane"]
+            if isinstance(where, dict):
+                origin = where.get("origin")
+                where = (f"a frame at {origin}" if origin
+                         else f"a frame ({where.get('type')})")
+            parts.append(f"\n  [{row['index']}] sketch '{name}' on {where}")
+            if row.get("asked_name") and row["asked_name"] != row["name"]:
+                parts.append(f" (ASKED FOR '{row['asked_name']}' and CATIA called "
+                             f"it '{row['name']}' - a by-name tool written "
+                             "against the requested name will miss it)")
+            if row.get("offset") is not None:
+                parts.append(f" offset {float(row['offset']):g} mm")
+            parts.append(f": {row['elements']} element(s), {row['curves']} "
+                         f"curve(s), {row['closed']} contour(s) closed")
+            if row.get("bounds_mm"):
+                b = row["bounds_mm"]
+                parts.append(f"; sheet box {b[2] - b[0]:.3f} x {b[3] - b[1]:.3f} mm")
+            if row.get("box_mm"):
+                box = row["box_mm"]
+                parts.append("; world box X {:.3f}..{:.3f} Y {:.3f}..{:.3f} Z "
+                             "{:.3f}..{:.3f}".format(*box))
+            parts.append(".")
+            extra = (row["drawn_elements"] or 0) - row["elements"]
+            if extra:
+                # WHY the two counts differ, measured on B30 2026-11-15: a sketch
+                # holding four lines reports FIVE elements, because its own
+                # absolute axis (绝对轴) is one of them - and profile_mode='spline'
+                # adds a point element per control point on top of that. Saying
+                # "the control points" for a segments import was wrong the first
+                # time this reply was written.
+                why = ["the sketch's own absolute axis is an element"]
+                if row.get("mode") == "spline":
+                    why.append("and a 2D spline is defined through point "
+                               "elements, one per control point")
+                parts.append(f" CATIA counts {row['drawn_elements']} elements in "
+                             "this sketch, not "
+                             f"{row['elements']}: " + "; ".join(why) + ". "
+                             "They are not profile geometry - pad and loft read "
+                             "the curves.")
+            for note in row.get("notes") or []:
+                parts.append(" " + " ".join(str(note).split()))
+            parts.append(fidelity.deviation_sentence(row.get("deviation")))
+
+        # ── the claim the anchor exists to make, and where it can fail ─────
+        boxes = [(row["index"], row["box_mm"]) for row in rows if row.get("box_mm")]
+        if len(boxes) < 2:
+            parts.append("\n Alignment check: at least one view has no readable "
+                         "world box (its frame is not one this server can turn "
+                         "into XYZ), so no shared axis could be compared.")
+        else:
+            axes = ("X", "Y", "Z")
+            agreements: list[str] = []
+            for first in range(len(boxes)):
+                for second in range(first + 1, len(boxes)):
+                    left, right = boxes[first], boxes[second]
+                    same = [axes[axis] for axis in range(3)
+                            if fidelity.aligned(left[1], right[1], axis)]
+                    for axis in same:
+                        agreements.append(
+                            f"view {left[0]} and view {right[0]} agree on {axis} "
+                            f"({left[1][axes.index(axis)]:.3f}.."
+                            f"{left[1][3 + axes.index(axis)]:.3f} mm)")
+            if agreements:
+                parts.append("\n Alignment check: " + "; ".join(agreements)
+                             + ". Those are shared sheet axes - a model built on "
+                               "these sketches is one part, not two blocks that "
+                               "happen to sit near each other.")
+            else:
+                parts.append("\n Alignment check: NO axis agrees between the "
+                             "views, so they were placed on datums that do not "
+                             "share a sheet direction. Nothing is wrong with the "
+                             "geometry, but the views are NOT aligned: check that "
+                             "the view that looks along -Y is on 'xy' and the one "
+                             "that looks along -Z is on 'xz', or give both the "
+                             "same 'plane'.")
+        parts.append("\n Nothing has been built on these sketches: pad or loft "
+                     "each one on its own plane, in the order the drawing's "
+                     "dimensions want.")
+        notes = drawing.get("notes") or []
+        if notes:
+            parts.append(" " + " ".join(notes[:2]))
+        return "".join(parts)
 
     def _parse(self, arguments: dict[str, Any]) -> dict[str, Any]:
         layer_values = arguments.get("layers")
@@ -647,8 +1141,22 @@ class BlueprintTools:
                 if corners["sharpest_turn_deg"] is not None:
                     stats["sharpest"] = max(float(stats.get("sharpest") or 0.0),
                                             float(corners["sharpest_turn_deg"]))
-                return sketcher._draw_spline([list(p) for p in points],
-                                             closed=True)
+                flat = [[float(p[0]), float(p[1])] for p in points]
+                reply = sketcher._draw_spline([list(p) for p in points],
+                                              closed=True)
+                # What the deviation measurement will probe: the side midpoints
+                # (where an interpolating curve bulges) and three corners (which
+                # must read 0.0000, or the reading is not calibrated). Collected
+                # HERE because this is the only place the outline's own points
+                # exist - a CATIA sketch cannot give them back.
+                probes, calibration = fidelity.outline_probes(flat)
+                stats.setdefault("outlines", []).append({
+                    "probes": probes,
+                    "calibration": calibration,
+                    "curve": getattr(sketcher, "_last_drawn_spline", None),
+                    "corners": len(flat),
+                })
+                return reply
             # Two points cannot be a closed spline. Falling back to segments is
             # the only honest option, and the reply says how many did.
             stats["spline_fallback"] = int(stats.get("spline_fallback", 0)) + 1
@@ -663,7 +1171,8 @@ class BlueprintTools:
                       notes: list[str], open_ends: int = 0,
                       profile: dict[str, Any] | None = None,
                       sketch_name: str = "",
-                      drawn_elements: int | None = None) -> str:
+                      drawn_elements: int | None = None,
+                      deviation: dict[str, Any] | None = None) -> str:
         counts = drawing["counts"]
         bounds = drawing["bounds_mm"]
         unit = drawing["units"] or "units"
@@ -721,9 +1230,11 @@ class BlueprintTools:
             if drawn_elements is not None and drawn_elements != elements:
                 parts.append(
                     f" CATIA's own element count for this sketch is "
-                    f"{drawn_elements}, not {elements}: a 2D spline is DEFINED "
-                    "through point objects, so every control point is a sketch "
-                    "element too (measured 2026-11-15, and the collection has no "
+                    f"{drawn_elements}, not {elements}: every control point of a "
+                    "2D spline is a sketch element, and the sketch's own absolute "
+                    "axis is one too (measured 2026-11-15: a four-LINE rectangle "
+                    "reports 5 elements for 4, and a 4-point closed spline leaves "
+                    "5 point elements beside the spline; the collection has no "
                     "Remove). They are not profile geometry - the sketch holds "
                     f"{curves} curve(s) for pad and loft either way.")
             sharpest = profile.get("sharpest")
@@ -736,6 +1247,7 @@ class BlueprintTools:
                     "lofted to 24.04 x 21.46 mm). If this profile really has "
                     "corners, import it with profile_mode='segments' and build the "
                     "loft from a section that is one curve for another reason.")
+            parts.append(fidelity.deviation_sentence(deviation))
         if open_ends:
             parts.append(
                 f" {open_ends} endpoint(s) are met by nothing, so a pad on this "
@@ -789,6 +1301,27 @@ class BlueprintTools:
         if drawing["notes"]:
             parts.append(" " + " ".join(drawing["notes"][:3]))
         return "".join(parts)
+
+
+def _view_box(placement: Any, bounds: Any) -> list[float] | None:
+    """World XYZ box of a view's sheet box, through the frame it was drawn in.
+
+    A sketch exposes no measurable at all (measured on B30 2026-11-15: Length,
+    Area, Volume, GetPoint, GetCOG, GetBoundingBox and GetPlane all answer
+    「方法 … 失败」 on a sketch reference), so the box is computed from its four
+    corners and the frame - and it is None when the frame is one this server
+    cannot turn into XYZ, because an unknown frame is an unknown place.
+    """
+    if not bounds:
+        return None
+    corners = [(bounds[0], bounds[1]), (bounds[2], bounds[1]),
+               (bounds[2], bounds[3]), (bounds[0], bounds[3])]
+    points = [sketch_frames.point_world(placement, u, v) for u, v in corners]
+    if any(point is None for point in points):
+        return None
+    low = [min(point[i] for point in points) for i in range(3)]
+    high = [max(point[i] for point in points) for i in range(3)]
+    return ([round(v, 4) for v in low] + [round(v, 4) for v in high])
 
 
 def _aspect(box: Any) -> float | None:

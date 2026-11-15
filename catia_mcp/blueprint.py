@@ -720,6 +720,33 @@ def read_drawing(path: str, *, scale: float = 1.0,
     }
 
 
+def move_to_anchor(drawing: dict[str, Any],
+                   anchor: Sequence[float]) -> list[float]:
+    """Move a parsed drawing so ``anchor`` (drawing mm) sits at the sketch origin.
+
+    Exists for a MULTI-VIEW import. ``origin='bbox'`` puts each view's OWN
+    lower-left corner at (0, 0), which is convenient for one view and destroys
+    the very thing that lines two orthographic views up: their shared sheet
+    coordinates. One anchor for every view keeps the shared axis shared, and the
+    anchor itself is the union's lower-left corner unless the caller names one.
+
+    Returns the shift that was applied, in mm, and records it in
+    ``origin_shift_mm`` so the reply can state where the geometry came from.
+    """
+    before = drawing.get("origin_shift_mm") or [0.0, 0.0]
+    dx = -float(anchor[0])
+    dy = -float(anchor[1])
+    for contour in drawing["contours"]:
+        _translate_contour(contour, dx, dy)
+    boxes = [contour_bbox(c) for c in drawing["contours"]]
+    drawing["bounds_mm"] = (
+        [min(b[0] for b in boxes), min(b[1] for b in boxes),
+         max(b[2] for b in boxes), max(b[3] for b in boxes)] if boxes else None)
+    drawing["origin_shift_mm"] = [float(before[0]) + dx, float(before[1]) + dy]
+    drawing["origin"] = "anchor"
+    return [dx, dy]
+
+
 def _filter(contours, *, layers, region, min_size, max_aspect, closed_only,
             factor, tolerance) -> tuple[list[dict], dict[str, int]]:
     """The one place a contour is kept or dropped, counting every reason."""

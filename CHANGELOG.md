@@ -2,6 +2,80 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.136] — 2026-11-15 · the two gaps that were real
+
+The 2026-11-15 reports closed their correction with a list: the first two items
+were "already-exists-but-undiscoverable" and got 0.3.135. The two that were left
+are the two that were genuinely missing, and they are what this release does -
+**C2, multi-view has no datum**, and **R2, the conversion's cost cannot be read
+back**. Everything below was measured on B30 2026-11-15 by
+`scripts/b30_v0437_probe_deviation_views.py`, `scripts/b30_v0438_probe_targets.py`
+and `scripts/b30_v0437_acceptance.py` (17/17).
+
+**C2 — several views, one sheet frame**
+
+* `catia_import_drawing(views=[...])` imports several regions in ONE call, one
+  sketch each. Each entry takes the same filters as the top level plus its own
+  `plane`, `offset` and `name`.
+* Every view is shifted so ONE `anchor` (default: the lower-left corner of the
+  union of the views) sits at the sketch origin. This is the whole fix: a
+  per-view `origin='bbox'` - the only thing that existed before - put each view's
+  own corner at (0,0) and destroyed exactly the alignment the sheet had.
+* The shared axis is the views' `u` direction, and the reply says which axes the
+  views actually agree on: "view 1 and view 2 agree on X (0.000..60.000 mm)".
+  Measured: a 60 x 40 view on the front frame
+  `{'u':[1,0,0],'v':[0,0,1]}` and a 60 x 25 view on the top frame
+  `{'u':[1,0,0],'v':[0,1,0]}` padded to an **X range of 0.000..60.000 in both
+  solids**, and the front view alone is already 0.000..60.000 - so the agreement
+  is not two boxes covering for each other.
+* The negative case is reported, not hidden: `xy` and `zx` have u vectors of +X
+  and +Z, so the same sheet answers **NO axis agrees** rather than a green tick.
+* Top-level `page`/`region`/`layers`/`min_size`/`max_aspect`/`closed_only`/
+  `plane`/`offset`/`name` beside `views` are REFUSED (ambiguous), and so is
+  `origin='bbox'` (it would un-align what the call exists to align). Every entry
+  is checked before any file is read.
+
+**R2 — the conversion now says what it cost**
+
+* `import_drawing(profile_mode='spline')` and `catia_gsd_spline(element=...,
+  closed=true)` probe the outline's SIDE MIDPOINTS - where an interpolating curve
+  bulges - and three corners it must pass through. The corners are the
+  calibration: they read 0.0000 mm when the probe measures what it claims, and
+  when they do not the reply says the reading is NOT calibrated instead of
+  quoting a maximum.
+* Measured on a 60 x 40 rectangle: corners **0.0000 mm**, side midpoints
+  **18.3594 mm** for the sketch spline and **13.8286 mm** for the 3D spline.
+* **The two are different curves, and the tool now says so.** On a 100 x 40
+  rectangle the same midpoint reads 33.1387 mm (2D sketch spline) and 25.6325 mm
+  (3D gsd spline); at the centre, 41.1690 vs 45.6325. Neither side ever quotes
+  the other's number, and `catia_gsd_spline`'s description carries both.
+* `deviation=false` on either tool turns the measurement off (it costs one point
+  element per probe, deleted again after).
+
+**What was measured to make this possible, and what stayed impossible**
+
+* A point-on-curve cannot be placed on a `Line2D` inside a sketch, nor on a
+  CLOSED spline - both answer 「方法 UpdateObject 失败」 - so the probes are
+  COORDINATE points (`AddNewPointCoord`) and the target is the curve itself.
+* A SKETCH exposes nothing at all to SPAWorkbench: `Length`, `Area`, `Volume`,
+  `GetPoint`, `GetCOG`, `GetPlane` and `GetBoundingBox` all fail on a sketch
+  reference. That is why a view's world box is computed from its frame and why
+  the alignment is PROVEN by padding both views and reading the solids - there is
+  no way to ask a sketch where it is. Recorded in `catia_diagnose`'s ceilings
+  together with the 2D-vs-3D interpolant difference.
+* A `Spline2D` inside a sketch IS a valid target for `GetMinimumDistance`, and it
+  agrees with the whole-sketch reference to the last digit on the four probes
+  measured - the tool still targets the spline, because the sketch also holds one
+  point element per control point and a minimum over the sketch could be answered
+  by one of those instead of by the curve.
+* A cell-count correction: a four-LINE rectangle reports FIVE sketch elements,
+  because the sketch's own absolute axis (绝对轴) is one of them. The 0.3.135
+  reply credited the extra element to the spline's control points, which was
+  wrong for a segments import; both replies now say both reasons and the mode
+  they apply to.
+
+2 183 tests. 153 tools.
+
 ## [0.3.135] — 2026-11-15 · one curve, and saying so
 
 Two reports on 0.3.134, the second correcting the first. The first said "MCP has
