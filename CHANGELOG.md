@@ -2,6 +2,33 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.134] — 2026-11-15 · a test that could only pass on a slow machine
+
+CI on 0.3.133 went red on **3.12 and green on 3.10** at the same commit:
+
+    FAILED test_route_matrix.py::test_two_calls_of_one_scope_do_quote_a_delta
+    AssertionError: assert '%' in '... readings are equal to the clock, not to
+    each other. warm_up=true pays this cost ...'
+
+The test runs three real warm calls and demanded a percentage in the reply. The
+3.12 runner finished the second one faster than the clock could resolve, so the
+previous reading was `0 ms` - and 0.3.132 stopped quoting a ratio against zero on
+purpose, because it is a division by zero dressed as a measurement. The branch is
+right; the assertion was written when every machine was slow enough to measure.
+
+It now accepts either honest outcome - a delta, or the sentence naming the 0 ms
+reading - and forbids the one reply that would be wrong: claiming there was no
+earlier warm call. The 0 ms branch itself is still covered deterministically by
+`test_reported_issues_2026_11_13_v0433.py::test_a_zero_ms_warm_reading_is_still_a_previous_call`,
+which drives `describe(elapsed_ms=0.0)` directly and does not depend on speed.
+
+Nothing in the shipped tool behaviour changed: the difference between 0.3.133 and
+this release is one test, the version strings, and this entry. 0.3.133's zip is
+correct for a user of the tools and red for a user running the suite on a fast
+machine, which is reason enough to publish rather than sit on it.
+
+2 136 tests. 153 tools.
+
 ## [0.3.133] — 2026-11-15 · sheet metal: the parameters were reachable all along
 
 The 2026-11-03 report asked for eight sheet-metal tools after modelling a real

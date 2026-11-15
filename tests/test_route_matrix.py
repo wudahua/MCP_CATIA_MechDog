@@ -429,13 +429,25 @@ def test_a_narrowed_call_never_quotes_a_delta_against_a_full_one():
 
 
 def test_two_calls_of_one_scope_do_quote_a_delta():
+    """The first warm call is reported, and 0 ms is a READING of it.
+
+    This ran green on 3.10 and red on 3.12 in CI (2026-11-15, run 43691169133) on
+    the same commit: the second warm call took longer than the clock could resolve
+    on one runner and not on the other. The old assertion demanded a percentage,
+    which is exactly the number 0.3.132 stopped quoting when the previous reading
+    was 0 ms - a ratio against zero is a division by zero dressed as a
+    measurement. So both outcomes are asserted; what is NOT allowed is the reply
+    claiming there was no previous call.
+    """
     tools = _box_tools()
     doc = SimpleNamespace(Name="ASM39.CATProduct")
     tools._assembly_box(doc, "vertices")
     tools._assembly_box(doc, "vertices")
     third = json.loads(tools._assembly_box(doc, "vertices"))
-    assert "same scope" in third["elapsed_note"]
-    assert "%" in third["elapsed_note"]
+    note = third["elapsed_note"]
+    assert "same scope" in note
+    assert "%" in note or "below this timer's resolution" in note, note
+    assert "no earlier warm call" not in note
 
 
 # ─────────────────────────────── 5. a rejected plan is not a CATIA failure
