@@ -2258,12 +2258,69 @@ class DocumentTools:
         # that name. Say so - and say how many (reported 2026-10-28, P1).
         twins = self._twin_documents(target)
         self._activate_or_refuse(target)
+        # Activating a document also decides which BODY is in work, and the answer
+        # is not "the one you had": a part whose solid sits in a second body comes
+        # back with the empty main body in work, and the next measurement then
+        # says "no solid in '零件几何体'" (2026-11-15 report C4). That is a fact
+        # about this call, so it is said here rather than three steps later.
         return (f"Activated document: '{target.Name}'"
+                + self._work_body_note(target)
                 + (f" - but {len(twins) + 1} open documents carry that name, and "
                    "this activated the first match, which may not be the one you "
                    f"mean. Tell them apart with catia_list_documents (a saved copy "
                    "shows its path) and measure by full path, or close one."
                    if twins else ""))
+
+    def _work_body_note(self, target: Any) -> str:
+        """Which body the next feature will land in, when that is a surprise.
+
+        ``Part.InWorkObject`` is not the answer: it reads back the Pad that is
+        being edited (measured on B30 2026-11-15, '凸台.1', with a bare Item that
+        cannot even report ``Shapes``). The body a tool will use is the one
+        ``get_active_part_body`` resolves - this session's remembered body when it
+        belongs to this part, MainBody otherwise. Activating another document
+        invalidates that memory, so a multi-body part can come back with an EMPTY
+        main body in work and the next measurement then says "no solid" about a
+        part that has one (2026-11-15 report C4).
+        """
+        try:
+            part = self.conn.part_of(target)
+        except Exception:  # noqa: BLE001 - an unreadable answer says nothing
+            return ""
+        remembered = getattr(self.conn, "active_body", None)
+        try:
+            kept = (remembered is not None
+                    and self.conn.body_in_part(part, remembered))
+        except Exception:  # noqa: BLE001 - "could not ask" is not "kept"
+            kept = False
+        try:
+            chosen = self.conn.get_active_part_body()
+            name = str(chosen.Name)
+            empty = int(chosen.Shapes.Count) == 0
+        except Exception:  # noqa: BLE001 - the note is a courtesy
+            return ""
+        if not empty:
+            return ""
+        others: list[str] = []
+        try:
+            for index in range(1, int(part.Bodies.Count) + 1):
+                candidate = part.Bodies.Item(index)
+                if str(candidate.Name) != name and int(candidate.Shapes.Count):
+                    others.append(str(candidate.Name))
+        except Exception:  # noqa: BLE001 - the note is a courtesy
+            others = []
+        note = ""
+        if remembered is not None and not kept:
+            note = (" The body this session had in work belongs to another "
+                    f"document, so it fell back to '{name}' - which holds NO solid.")
+        else:
+            note = f" Its work body is '{name}', which holds NO solid."
+        if others:
+            note += (" This part's solids are in "
+                     + ", ".join(f"'{other}'" for other in others[:4])
+                     + f"; call catia_set_active_body(name='{others[0]}') before "
+                       "measuring.")
+        return note
 
     def _activate_or_refuse(self, target: Any) -> None:
         """``target.Activate()``, then read the state back and refuse if it did not.

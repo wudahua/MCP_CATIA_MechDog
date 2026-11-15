@@ -162,10 +162,14 @@ def probe_points(conn: Any, target: Any,
 
     left = sum(0 if _delete(conn, point) else 1 for point in made)
     if created:
-        try:
-            part.HybridBodies.Remove(holder)
-        except Exception:  # noqa: BLE001 - an empty set is clutter, not damage
-            pass
+        # The container goes too, and it goes through the SELECTION: measured on
+        # B30 2026-11-15, `HybridBodies.Remove` and `block.Parent.Remove` do not
+        # exist (`<unknown>.Remove`, both), while selection.Add(set) + Delete()
+        # removes an empty set (1 -> 0). 0.3.136 tried Remove, the exception was
+        # swallowed, and every part it measured was left holding an empty
+        # 'MCP_Probes' (report N5).
+        if not _delete(conn, holder):
+            left += 1
     summary = deviation_summary(readings, calibration_readings)
     summary["left_behind"] = left
     return summary
@@ -246,9 +250,9 @@ def deviation_sentence(deviation: dict[str, Any] | None, *,
                 "spline is supposed to pass through them: the reading is NOT "
                 "calibrated, so do not quote this maximum as the shape change.")
     if deviation.get("left_behind"):
-        tail += (f" {int(deviation['left_behind'])} probe point(s) could not be "
-                 "removed again and are still in the tree; they reference "
-                 "nothing.")
+        tail += (f" {int(deviation['left_behind'])} helper element(s) (probe "
+                 "points, or the set that held them) could not be removed again "
+                 "and are still in the tree; they reference nothing.")
     return head + tail
 
 

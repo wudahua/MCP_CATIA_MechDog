@@ -515,6 +515,32 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
         ),
     },
     {
+        "member": "HybridShapeLoft.SetSectionCoupling / Part.InWorkObject",
+        "status": "AVAILABLE_WITH_LIMIT",
+        "detail": (
+            "Two members that LOOK readable and are not, both measured on B30 "
+            "2026-11-15. "
+            "(1) `HybridShapeLoft` carries SetSectionCoupling (method), a "
+            "SectionCoupling property that reads back 1, and SetSpine - and every "
+            "call to SetSectionCoupling answers 「<unknown>.SetSectionCoupling」, "
+            "through the object AND through the dynamic dispatcher the connection "
+            "already uses, for values 1, 2, 3 and 4. The property is therefore "
+            "read-only in practice: four eccentric-ellipse lofts built with four "
+            "different requested couplings all measured 4523.6938 mm3. What DOES "
+            "work is the third argument of AddSectionToLoft (the closing point): "
+            "the same two sections with a point at their +Y extreme built "
+            "4523.8263 mm3, so coupling is steerable through closing points and "
+            "not through this method. "
+            "(2) `Part.InWorkObject` is not the active BODY: it reads back the "
+            "feature being edited ('凸台.1') and hands back a bare Item whose "
+            "`Shapes` answers 「<unknown>.Shapes」. The body a tool will use is "
+            "`get_active_part_body()` - this session's remembered body when it "
+            "belongs to this part, MainBody otherwise - which is why activating "
+            "another document can silently move a multi-body part back to an "
+            "empty main body (2026-11-15 report C4)."
+        ),
+    },
+    {
         "member": "Viewer3D capture size / tree visibility",
         "status": "NOT_IN_TYPELIB",
         "detail": (

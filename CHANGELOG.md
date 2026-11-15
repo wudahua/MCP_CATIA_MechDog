@@ -2,6 +2,118 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.137] — 2026-11-15 · what 0.3.136 got wrong, and the shape nobody could check
+
+Two reports on 0.3.136. The first found that the multi-view check this project
+had just added could say **"view 1 and view 2 agree on Z (0.000..0.000) … is one
+part"** about two views **70 mm apart**, and that the world boxes it printed had
+`min > max`. The second found a swept solid that had folded back on itself
+reporting `ok: true`, and two measuring tools disagreeing about whether a part
+had a solid at all. Both are answered here, and the first one is this project's
+own fault twice over: a wrong comparison, and a wrong `format()` call.
+
+**N2 — the world box was printed in the wrong order.** `_view_box` builds
+`[minx, miny, minz, maxx, maxy, maxz]` and the reply passed it to
+`format(*box)`, so min-x landed against min-y: a 15 x 24 mm sketch printed as
+`X 0.000..-0.000 Y 0.000..15.367 Z 23.876..0.000`. The alignment check read the
+same list correctly, so the numbers were right and the sentence was wrong -
+which is the worse of the two, because the sentence is what gets quoted back.
+
+**N1 — "co-planar" is not "aligned".** The check compared all three axes, so two
+sketches on `xy` "agreed on Z" at 0.000..0.000 simply because both were on that
+plane. It now:
+
+* compares only the axes a frame's **u/v** point along - the plane's normal is not
+  a direction the drawing has;
+* ignores a **zero-width** range, which is an edge, not a direction;
+* requires every shared axis to **overlap** (ratio >= 0.9), and reports the ones
+  that do not with both ranges. Two views 70 mm apart now read: "view 1 and view
+  2 share a sheet direction but do not line up: X 0.000..60.000 vs 70.000..130.000
+  mm", and the reply says NOT aligned instead of "is one part".
+
+**N3 — a shared anchor cannot close a gap the sheet put there.** A real drawing
+lays its views out side by side; one anchor moves the whole sheet and leaves the
+70 mm between them intact. Each view now takes `placement={'origin_2d': [x, y]}`
+("this sheet point is the sketch origin") or `align={'view': 1, 'axis': 'x',
+'anchor': 'center'}` ("line its centre line up with view 1"), both validated
+before the file is read. Measured on B30: two views 70 mm apart on the sheet,
+`align` moves view 2 by -70.0000 mm and two pads then share X 0.000..60.000.
+
+**N4 / N5 — what a failed call leaves behind.** `SKETCH_NAME_TAKEN` said
+"Nothing was kept" while the empty sketch stayed in the tree as
+`TopSection_new`; it is now DELETED again through the selection (measured: the
+sketch goes, 1 -> 1 in `list_features`), and the refusal reports `modified`
+truthfully. The deviation probes left an empty `MCP_Probes` set behind because
+`HybridBodies.Remove` does not exist on this build (`<unknown>.Remove`);
+`selection.Add(set) + Delete()` does remove it (1 -> 0), and that is what the
+cleanup uses now.
+
+**N6 — `stats` is an alias, and says so.** `read_drawing` returns
+`deprecated_fields: {"stats": …}` instead of letting a reader assume the two
+dicts describe different scopes.
+
+**C3 / C4 — which body a measurement means.** `catia_get_bounding_box` only ever
+looked at `Part.MainBody`, so a part whose solid sat in a second body answered
+"That part has no solid shape yet" while `catia_get_inertia` read 2 577 mm3 off
+it. The box tool now takes `body=`, falls back to the one body that holds a
+solid when the main body is empty (and says so in `scope`), and REFUSES with the
+list when two do. `catia_activate_document` now says when the body this session
+had in work belonged to another document and it fell back to an empty main body
+- the state report C4 could only discover three steps later.
+
+**C6 — a boolean has a type.** A boolean the caller named came out
+`"type": "unknown", "catia_type": null`, because the NLS prefix table cannot read
+a name the caller chose and a feature fetched from `body.Shapes` is a bare Item.
+The call that builds it now records what it built, per document.
+
+**C7 — a plan that only ACTIVATED a document builds nothing there.** A plan whose
+first step was `catia_activate_document` listed 36 pre-existing elements as "36
+element(s) this plan had already built" and offered `rollback: true`, which would
+have deleted somebody else's model. Nothing in a switched-to document is
+attributed to the plan any more (`created_features_status:
+"not_attributable"`), and rollback never touches it. A document the plan CREATED
+still counts whole - that is a different case and stays as it was.
+
+**C1 — the shape signal a sweep actually owns.** The 2026-11-15 report's
+collapsing sweep came out **1.4 %** from the ruled sum, so the volume agreement
+it printed was true and useless. Two changes:
+
+* the 2 % branch no longer says "the loft IS the chain of truncated cones" - it
+  says agreement means **every station was taken**, and that a surface can still
+  fold back (with that 1.4 % as the evidence);
+* the stations are checked for **growth rate** (mm of section radius per mm of
+  spine). The report's own case grows 2.53 mm/mm into the tip and 0.71 mm/mm
+  through the bulge; from 0.5 the reply carries a WARNING naming the segment and
+  pointing at `catia_shape_audit`'s `narrowest_bins`.
+
+A NEGATIVE gap against the ruled sum is still called a verdict rather than
+"curved spine, do not read this": oblique sections can only ADD material.
+
+**C2 — the loft's closing point.** `AddSectionToLoft(section, orientation,
+closing_point)` has had that third argument since 0.3.77, always `None`.
+`catia_solid_loft(closing_points=[...])` now passes it, and it is honoured:
+measured on B30 2026-11-15 on two eccentric ellipses, 4 523.6938 mm3 automatic
+against 4 523.8263 mm3 with the point at their +Y extreme. This is the control
+that stops one side of a moving-section surface twisting against the other.
+What is NOT available, measured and recorded in the ceilings:
+`HybridShapeLoft.SetSectionCoupling` exists on the object and every call to it
+answers `<unknown>.SetSectionCoupling` - direct and dynamic dispatch, all four
+values - so `SectionCoupling` only reads back (always 1).
+
+**Not in this release, and why:** per-FACE colour (C5) needs a colour route that
+does not go through the tree; `clean="solid_only"` still leaves datum planes
+visible (C8) because hiding GSD sets also hides the solids built on them; the
+imported outline still has no driving dimensions (N7), which needs a fitting and
+constraint design of its own rather than a parameter.
+
+Verified on B30: `scripts/b30_v0438_acceptance.py` 26/26.
+Probes: `scripts/b30_v0437_probe_deviation_views.py`,
+`b30_v0438_probe_targets.py`, `b30_v0439_probe_loft_coupling.py`,
+`b30_v0440_probe_coupling2.py`, `b30_v0441_probe_coupling3.py`,
+`b30_v0442_probe_coupling4.py`.
+
+2 211 tests. 153 tools.
+
 ## [0.3.136] — 2026-11-15 · the two gaps that were real
 
 The 2026-11-15 reports closed their correction with a list: the first two items

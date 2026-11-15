@@ -141,7 +141,9 @@ def test_mesh_export_checks_the_file_and_falls_back_to_a_copy():
 def test_the_mesh_note_admits_reading_the_saved_file():
     from catia_mcp.tools.measurement import MeasurementTools as MT
 
-    source = inspect.getsource(MT._part_bbox) + inspect.getsource(MT._get_bounding_box)
+    source = (inspect.getsource(MT._part_bbox)
+              + inspect.getsource(MT._part_bbox_of_body)
+              + inspect.getsource(MT._get_bounding_box))
     assert "temporary copy" in source or "copy_note" in source
 
 

@@ -7066,8 +7066,13 @@ class GSDTools:
                 verdict = (f" The solid added {gained:.1f} mm3 to "
                            f"'{getattr(body, 'Name', '?')}' (now {volume:.1f}); the "
                            f"ruled sum of these stations is {expected:.1f} mm3, "
-                           f"{off:+.2f} % off. Agreement here means the loft IS the "
-                           f"{shape_words}."
+                           f"{off:+.2f} % off. Agreement here means every station "
+                           f"was TAKEN and the loft IS the {shape_words} - it does "
+                           "NOT mean the surface cannot intersect itself: the "
+                           "2026-11-15 report's collapsing sweep came out 1.4 % "
+                           "from this sum while a whole side of the surface had "
+                           "folded back. Volume is a check on the stations, not a "
+                           "check on the shape."
                            + (f" Each station is a closed spline through "
                               f"{self._ELLIPSE_POINTS} points on the ellipse, "
                               "measured on B30 2026-11-14 at -0.001 % of the exact "
@@ -7094,10 +7099,44 @@ class GSDTools:
                            "r 6 -> 9 -> 3, came out +20.60 %). So if the spine is "
                            "straight, this gap means a station did not take; if it "
                            "is curved, do not read this as a verdict.")
+                # A NEGATIVE gap is not the same evidence as a positive one, and
+                # 0.3.136 answered both with "do not read this as a verdict". On a
+                # curved spine the sections are oblique and can only ADD material,
+                # so falling BELOW the ruled sum has no legitimate explanation -
+                # the sections overlap, fold back or collapse. The 2026-11-15
+                # report's own collapsing sweep came out at -18 % and the reply
+                # said nothing about the shape (report C1).
+                if off < -5.0:
+                    verdict += (
+                        f" A NEGATIVE gap of {off:+.2f} % IS a verdict: oblique "
+                        "sections between stations can only make this solid BIGGER "
+                        "than the sum, so material is missing where the stations say "
+                        "it should be. The sections overlap, fold back, or one of "
+                        "them collapsed - the solid can be perfectly valid to CATIA "
+                        "and still not be the shape the stations describe. Check it "
+                        "with catia_shape_audit (its circumference amplitude and "
+                        "narrowest_bins show a collapse) or a screenshot before "
+                        "building anything on it.")
         else:
             verdict = (f" Volume {volume:.1f} mm3; the spine's length could not be "
                        "measured, so there is no ruled sum to compare it with.")
 
+        # THE GROWTH RATE, because it is the one shape signal the stations
+        # themselves carry: a section that grows faster than it travels is what a
+        # sweep folds back on (2026-11-15 report C1 - the collapsing case grew
+        # 0.57 mm of radius per mm of spine, and nothing in the reply said so).
+        growth = self._station_growth(stations, length)
+        growth_note = ""
+        if growth is not None:
+            rate, at0, at1 = growth
+            if rate >= 0.5:
+                growth_note = (
+                    f" WARNING: STEEP GROWTH between t={at0:.2f} and t={at1:.2f} - "
+                    f"{rate:.2f} mm of section radius per mm along the spine. That "
+                    "is the shape a sweep folds back on itself, and CATIA accepts "
+                    "it without complaint. Look at the solid before building on it: "
+                    "catia_shape_audit (the narrowest_bins list shows a folded "
+                    "region) or catia_screenshot.")
         helper_note = self._engrave_helpers(
             helpers, str(args.get("helpers") or "hide"), owner="the loft")
         elliptic_count = sum(1 for _t, rx, ry in stations if abs(rx - ry) > 1e-12)
@@ -7109,8 +7148,32 @@ class GSDTools:
                "ellipse)" if elliptic_count else "")
             + ": " + ", ".join(rows) + ". "
             + " ".join(str(loft_reply).split())[:260]
-            + " " + verdict + f" Body '{getattr(body, 'Name', '?')}'."
+            + " " + verdict + growth_note
+            + f" Body '{getattr(body, 'Name', '?')}'."
             + helper_note)
+
+    @classmethod
+    def _station_growth(cls, stations: list[tuple[float, float, float]],
+                        length: float | None) -> tuple[float, float, float] | None:
+        """Biggest ``(mm of radius per mm of spine, t0, t1)`` between two stations.
+
+        The stations are the only shape signal this call owns. A section that
+        grows faster than it travels is where a swept surface folds back on
+        itself, and CATIA builds that without an error - the 2026-11-15 report's
+        collapsing sweep reached 0.57 mm/mm while the volume stayed within 1.4 %
+        of the ruled sum, so this is the check the volume could not make.
+        """
+        if not length or len(stations) < 2:
+            return None
+        worst: tuple[float, float, float] | None = None
+        for (t0, x0, y0), (t1, x1, y1) in zip(stations, stations[1:]):
+            span = (t1 - t0) * length
+            if span <= 1e-9:
+                continue
+            rate = max(abs(x1 - x0), abs(y1 - y0)) / span
+            if worst is None or rate > worst[0]:
+                worst = (rate, t0, t1)
+        return worst
 
     def _solid_tube(self, args: dict[str, Any]) -> str:
         """A solid round tube along a curve - the six-step chain, once.

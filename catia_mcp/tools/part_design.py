@@ -1268,6 +1268,35 @@ class PartDesignTools:
                             "type": "string",
                             "description": "Optional tangency support at the last section.",
                         },
+                        "closing_points": {
+                            "type": "array",
+                            "items": {
+                                "anyOf": [{"type": "string"},
+                                          {"type": "null"}],
+                            },
+                            "description": (
+                                "ONE PER SECTION, in order: the tree name of the "
+                                "point each section's parameter 0 is taken from, or "
+                                "null to leave that section automatic. Where the "
+                                "sections move sideways, CATIA's automatic choice "
+                                "can put parameter 0 on a different side of one "
+                                "section than of the next, and the surface then "
+                                "twists on that side while the other side stays "
+                                "smooth - which is what makes a 24-section head "
+                                "look faceted on one half only (2026-11-15 report "
+                                "C2). The point must lie ON its section; build it "
+                                "with catia_gsd_point. MEASURED on B30 2026-11-15 "
+                                "on two eccentric ellipses: a closing point at "
+                                "their +Y extreme changed the solid from "
+                                "4523.6938 to 4523.8263 mm3, so the argument is "
+                                "honoured rather than ignored. What is NOT "
+                                "available: SetSectionCoupling exists on the "
+                                "object but every call for it answers "
+                                "'<unknown>.SetSectionCoupling' on this build "
+                                "(direct and dynamic dispatch, all four values), "
+                                "and SectionCoupling only reads back."
+                            ),
+                        },
                         "name": {"type": "string", "description": "Optional feature name"},
                     },
                     "required": ["sections"],
@@ -5872,7 +5901,40 @@ class PartDesignTools:
         kind = self._feature_kind(name)
         if kind != "unknown":
             return kind
+        # A boolean named by the caller has no NLS prefix to read: AddNewAdd
+        # produces a feature whose only name is the one the caller gave it, so
+        # 'AirPods1_Unified' came out "unknown" while the pad above it said "pad"
+        # (2026-11-15 report C6). The session that built it knows.
+        remembered = self._remembered_boolean(name)
+        if remembered:
+            return remembered
         return self._kind_from_members(part, name) or "unknown"
+
+    def _remembered_boolean(self, name: str) -> str | None:
+        """The boolean operation this session built under ``name``, if any."""
+        book = getattr(self.conn, "boolean_features", None)
+        if not isinstance(book, dict):
+            return None
+        try:
+            return book.get((str(self.conn.active_document.Name), str(name)))
+        except Exception:  # noqa: BLE001 - no document, no record
+            return None
+
+    def _remember_boolean(self, feature: Any, operation: str) -> None:
+        """Record what this call built, under the name the caller asked for.
+
+        Document-keyed, like the sketch outline record: the same name in another
+        part is a different feature.
+        """
+        try:
+            key = (str(self.conn.active_document.Name), str(feature.Name))
+        except Exception:  # noqa: BLE001 - a record is a courtesy
+            return
+        book = getattr(self.conn, "boolean_features", None)
+        if not isinstance(book, dict):
+            book = {}
+            self.conn.boolean_features = book
+        book[key] = "boolean"
 
     def _kind_from_members(self, part: Any, name: str) -> str | None:
         try:
@@ -6103,6 +6165,59 @@ class PartDesignTools:
         "assemble": "AddNewAssemble",
     }
 
+    def _closing_points(self, part: Any, spec: Any,
+                        sections: list[str]) -> list[Any]:
+        """Resolve ``closing_points`` into one reference (or None) per section.
+
+        CATIA couples one section to the next from each section's parameter 0,
+        and that point is chosen automatically unless it is given. Where the
+        sections move sideways - an AirPods head whose ellipse centres travel
+        5 mm - an automatic choice can put parameter 0 on a different side of one
+        section than of the next, and the surface then twists on that side while
+        the other side stays smooth. That is the 2026-11-15 report's C2, and the
+        argument to change it has been in this call since 0.3.77, always None.
+        """
+        if not spec:
+            return []
+        if isinstance(spec, (str, dict)):
+            raise ArgumentRejected(
+                "'closing_points' takes a LIST, one entry per section, in the same "
+                "order as 'sections' - a point name, or null to leave that section "
+                "automatic. Nothing was created.",
+                code="BAD_ARGUMENT", stage="validate")
+        values = list(spec)
+        if len(values) > len(sections):
+            raise ArgumentRejected(
+                f"'closing_points' has {len(values)} entries for "
+                f"{len(sections)} section(s). One entry per section, in order; "
+                "use null where a section should keep the automatic point. "
+                "Nothing was created.", code="BAD_ARGUMENT", stage="validate")
+        out: list[Any] = []
+        for index, value in enumerate(values):
+            if value in (None, ""):
+                out.append(None)
+                continue
+            if not isinstance(value, str):
+                raise ArgumentRejected(
+                    f"closing_points[{index}] must be a point's tree name or null; "
+                    f"got {value!r}. Nothing was created.",
+                    code="BAD_ARGUMENT", stage="validate")
+            element = None
+            try:
+                element = part.FindObjectByName(str(value))
+            except Exception:  # noqa: BLE001 - reported as not found
+                element = None
+            if element is None:
+                raise ArgumentRejected(
+                    f"No element named '{value}' to use as the closing point of "
+                    f"section '{sections[index] if index < len(sections) else '?'}'. "
+                    "Build it first with catia_gsd_point - the point has to lie ON "
+                    "that section. Nothing was created.",
+                    code="CLOSING_POINT_NOT_FOUND", stage="validate",
+                    data={"name": str(value), "index": index})
+            out.append((part.CreateReferenceFromObject(element), str(value)))
+        return out
+
     def _solid_loft(self, args: dict[str, Any]) -> str:
         """A Part Design solid loft: sections in, closed solid out.
 
@@ -6156,11 +6271,21 @@ class PartDesignTools:
         part.InWorkObject = body
         feature = sf.AddNewLoft()
         inner = feature.HybridShape
-        for ref in refs:
-            # (section, orientation, closing point) - three arguments; the
-            # closing point may be None, which is what "automatic" means here.
+        closing = self._closing_points(part, args.get("closing_points"), sections)
+        used: list[str] = []
+        for index, ref in enumerate(refs):
+            entry = closing[index] if index < len(closing) else None
+            point = entry[0] if entry else None
+            if entry:
+                used.append(f"'{entry[1]}' for '{sections[index]}'")
+            # (section, orientation, closing point) - the closing point decides
+            # where each section's parameter 0 sits, which is what couples one
+            # section to the next. It was always None ("automatic") until 0.3.137;
+            # measured on B30 2026-11-15, two eccentric ellipses coupled from a
+            # point at their +Y extreme instead of CATIA's own choice change the
+            # solid (4523.8263 mm3 against 4523.6938).
             try:
-                inner.AddSectionToLoft(ref, 1, None)
+                inner.AddSectionToLoft(ref, 1, point)
             except Exception:
                 inner.AddSectionToLoft(ref, 1)
 
@@ -6268,6 +6393,12 @@ class PartDesignTools:
                 "at the FIRST and LAST section's plane, and those planes are the "
                 "end faces - the result is always a solid. For an open shell, sweep "
                 "a surface instead (catia_gsd_sweep, or catia_solid_tube for a pipe).")
+        closing_note = ""
+        if used:
+            closing_note = (" Closing points: " + "; ".join(used)
+                            + " - where the sections move sideways this is what "
+                              "stops one side of the surface twisting against the "
+                              "other.")
         return (
             f"Solid loft created through {count} section(s)"
             + (f" ({'; '.join(tangency)})" if tangency else "")
@@ -6279,6 +6410,7 @@ class PartDesignTools:
             + kept_note
             + section_note
             + twist
+            + closing_note
         )
 
     @staticmethod
@@ -7523,6 +7655,9 @@ class PartDesignTools:
         if args.get("name"):
             feature.Name = args["name"]
         self._safe_update(part, feature)
+        # BEFORE the no-material judgement below, and independently of it: the
+        # type is a fact about the feature, not about whether it moved volume.
+        self._remember_boolean(feature, operation)
         volume_after = self._body_volume_mm3(part, target)
 
         # A 'remove' THAT REMOVED NOTHING IS NOT A SUCCESS (0.3.93).

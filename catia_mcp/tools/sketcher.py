@@ -2293,21 +2293,31 @@ class SketcherTools:
             # A hit means somebody else already holds it: this sketch has just
             # arrived under CATIA's own number.
             if any(existing == wanted for existing in taken):
-                try:
-                    sketch.Name = wanted + "_new"
-                except Exception:  # noqa: BLE001 - the refusal below still stands
-                    pass
+                # The empty sketch goes. 0.3.135 left it and said "Nothing was
+                # kept" - and the next list_features showed 'TopSection_new' in
+                # the tree (2026-11-15 report N4), which is a rollback contract
+                # regressing on the one path that exists to keep the model clean.
+                removed = self._discard_sketch(sketch)
+                leftover = "" if removed else (
+                    " The sketch just created could NOT be deleted and is still "
+                    f"in the tree as '{getattr(sketch, 'Name', '?')}' - remove it "
+                    "with catia_delete_feature.")
                 raise ArgumentRejected(
                     f"This part already holds a sketch named '{wanted}' - every "
                     "by-name tool (loft sections, pad, delete_feature, "
                     "sketch_edit) would reach one of the two at random, which is "
-                    "the bug that made new sketches rename themselves. Nothing "
-                    "was kept: the sketch just created was relabelled '"
-                    + str(getattr(sketch, "Name", "?")) + "' and an empty sketch "
-                    "is not worth a name. Pick another `name`, or read the ones "
-                    "in use with catia_list_features (its 'sketches' array).",
+                    "the bug that made new sketches rename themselves. "
+                    + ("The empty sketch this call had just created was DELETED "
+                       "again, so the part is unchanged."
+                       if removed else "Nothing was drawn, but the model is NOT "
+                                       "unchanged:")
+                    + leftover
+                    + " Pick another `name`, or read the ones in use with "
+                      "catia_list_features (its 'sketches' array).",
                     code="SKETCH_NAME_TAKEN", stage="execute",
-                    data={"name": wanted, "sketches": taken[:40]})
+                    modified=not removed,
+                    data={"name": wanted, "sketches": taken[:40],
+                          "removed": removed})
             try:
                 sketch.Name = wanted
                 part.UpdateObject(sketch)
@@ -2364,6 +2374,26 @@ class SketcherTools:
         return (f"Sketch '{sketch.Name}' created on {where}. "
                 f"{self._axis_note(plane, placement)}. Ready for geometry."
                 + request_note + rename_note)
+
+    def _discard_sketch(self, sketch: Any) -> bool:
+        """Delete a sketch this call just created, and say whether it went.
+
+        Used by the name refusal, which must leave the part exactly as it found
+        it. Measured on B30 2026-11-15: the selection route deletes an
+        unreferenced sketch (and an empty geometrical set), while
+        ``Sketches.Remove`` / ``HybridBodies.Remove`` do not exist on this build
+        - both answer ``<unknown>.Remove``. So the delete goes through the
+        selection, the same route catia_delete_feature takes.
+        """
+        try:
+            selection = self.conn.active_document.Selection
+            selection.Clear()
+            selection.Add(sketch)
+            selection.Delete()
+            selection.Clear()
+            return True
+        except Exception:  # noqa: BLE001 - the caller reports what happened
+            return False
 
     @classmethod
     def _all_sketch_names(cls, part: Any) -> list[str]:

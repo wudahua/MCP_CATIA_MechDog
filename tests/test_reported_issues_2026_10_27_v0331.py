@@ -390,8 +390,9 @@ def test_both_single_part_routes_publish_the_same_fields():
     active = inspect.getsource(MeasurementTools._get_bounding_box)
     # The active-part path had its own copy of the block and published only
     # points_route / vertices_used / cells_scanned - no regime, no nls note.
-    assert "_part_bbox(part, method)" in active
-    named = inspect.getsource(MeasurementTools._part_bbox)
+    assert "_part_bbox(part, method, body_name)" in active
+    named = (inspect.getsource(MeasurementTools._part_bbox)
+             + inspect.getsource(MeasurementTools._part_bbox_of_body))
     for field in ("sweep_route", "cells_scanned", '"points_route"'):
         assert field in named
     # 0.3.39: `first_measure` and `elapsed_note` are no longer spelled out here -

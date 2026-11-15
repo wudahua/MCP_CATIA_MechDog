@@ -428,6 +428,59 @@ class BlueprintTools:
                                             "it asked for."
                                         ),
                                     },
+                                    "placement": {
+                                        "type": "object",
+                                        "description": (
+                                            "Move THIS view so a chosen sheet "
+                                            "point becomes its sketch origin: "
+                                            "{'origin_2d': [x, y]} in drawing mm. "
+                                            "The shared anchor moves the whole "
+                                            "sheet and cannot close the gap "
+                                            "between views a real drawing lays "
+                                            "out side by side; this is the "
+                                            "explicit fix. Mutually exclusive "
+                                            "with 'align'."
+                                        ),
+                                        "properties": {
+                                            "origin_2d": {
+                                                "type": "array",
+                                                "items": {"type": "number"},
+                                                "minItems": 2,
+                                                "maxItems": 2,
+                                            },
+                                        },
+                                    },
+                                    "align": {
+                                        "type": "object",
+                                        "description": (
+                                            "Line THIS view up with an EARLIER "
+                                            "one, by name: {'view': 1, 'axis': "
+                                            "'x', 'anchor': 'center', "
+                                            "'offset': 0}. The view is moved "
+                                            "along the drawing axis by the "
+                                            "difference between the two anchor "
+                                            "points, so 'its centre line lands "
+                                            "on view 1's centre line' is one "
+                                            "call instead of arithmetic. Only "
+                                            "earlier views: a later one may "
+                                            "itself be moved afterwards."
+                                        ),
+                                        "properties": {
+                                            "view": {"type": "integer"},
+                                            "axis": {
+                                                "type": "string",
+                                                "enum": ["x", "y"],
+                                                "default": "x",
+                                            },
+                                            "anchor": {
+                                                "type": "string",
+                                                "enum": ["min", "center", "max"],
+                                                "default": "center",
+                                            },
+                                            "offset": {"type": "number"},
+                                        },
+                                        "required": ["view"],
+                                    },
                                 },
                             },
                         },
@@ -528,6 +581,13 @@ class BlueprintTools:
             # Profile: 110 line(s)" read like a bug in two reports.
             "page_level_stats": drawing["stats"],
             "stats": drawing["stats"],
+            # Two names for one dict, kept because 0.3.135's callers read 'stats'.
+            # Saying so beats removing it silently, and beats letting a reader
+            # assume the two describe different scopes - which is exactly what
+            # the 2026-11-15 report (N6) assumed when it saw them identical.
+            "deprecated_fields": {
+                "stats": "identical to page_level_stats; read that instead. This "
+                         "alias is removed in the next release."},
             "notes": drawing["notes"],
             "contours": [
                 {
@@ -776,6 +836,82 @@ class BlueprintTools:
     _VIEW_CONFLICTS = ("page", "region", "layers", "min_size", "max_aspect",
                        "closed_only", "plane", "offset", "name")
 
+    def _check_view_moves(self, views: Any) -> None:
+        """Validate every view's ``placement`` / ``align`` before the file is read.
+
+        A move that is malformed is a typo, and a typo must not cost a PDF parse:
+        the same ordering rule ``catia_open_document`` learned in 0.3.127 when it
+        connected to CATIA before refusing a non-ASCII name.
+        """
+        total = len(views)
+        for index, view in enumerate(views, start=1):
+            placement_arg = view.get("placement")
+            align_arg = view.get("align")
+            if placement_arg is not None and align_arg is not None:
+                raise ArgumentRejected(
+                    f"views[{index}] has both 'placement' and 'align'. Both move "
+                    "the view, and applying two moves makes the result depend on "
+                    "their order. Give one. Nothing was read.",
+                    code="BAD_ARGUMENT", stage="validate")
+            if placement_arg is not None:
+                point = (placement_arg.get("origin_2d")
+                         if isinstance(placement_arg, dict) else None)
+                try:
+                    values = [float(v) for v in (point or [])]
+                except (TypeError, ValueError):
+                    values = []
+                if len(values) != 2:
+                    raise ArgumentRejected(
+                        f"views[{index}].placement takes {{'origin_2d': [x, y]}} "
+                        "in DRAWING mm - the sheet point that should become this "
+                        f"view's sketch origin; got {placement_arg!r}. Nothing "
+                        "was read.", code="BAD_ARGUMENT", stage="validate")
+                continue
+            if align_arg is None:
+                continue
+            if not isinstance(align_arg, dict):
+                raise ArgumentRejected(
+                    f"views[{index}].align takes an object like {{'view': 1, "
+                    f"'axis': 'x', 'anchor': 'center'}}; got {align_arg!r}. "
+                    "Nothing was read.", code="BAD_ARGUMENT", stage="validate")
+            target = align_arg.get("view")
+            if isinstance(target, bool) or not isinstance(target, int):
+                raise ArgumentRejected(
+                    f"views[{index}].align needs an integer 'view' (the view this "
+                    f"one should line up with); got {align_arg.get('view')!r}. "
+                    "Nothing was read.", code="BAD_ARGUMENT", stage="validate")
+            if not 1 <= target <= total or target == index:
+                raise ArgumentRejected(
+                    f"views[{index}].align names view {target}; it has to be "
+                    f"another view of this call (1..{total}, not this one). "
+                    "Nothing was read.", code="BAD_ARGUMENT", stage="validate")
+            if target > index:
+                raise ArgumentRejected(
+                    f"views[{index}] aligns to view {target}, which comes LATER in "
+                    "the list. Align to an EARLIER view: a later one may itself be "
+                    "moved afterwards, and the result would depend on the order of "
+                    "the list. Nothing was read.",
+                    code="BAD_ARGUMENT", stage="validate")
+            axis_text = str(align_arg.get("axis") or "x").strip().lower()
+            if axis_text not in ("x", "y", "u", "v"):
+                raise ArgumentRejected(
+                    f"views[{index}].align axis is 'x' or 'y' (the drawing's own "
+                    f"axes); got {align_arg.get('axis')!r}. Nothing was read.",
+                    code="BAD_ARGUMENT", stage="validate")
+            which = str(align_arg.get("anchor") or "center").strip().lower()
+            if which not in ("min", "center", "max"):
+                raise ArgumentRejected(
+                    f"views[{index}].align anchor is 'min', 'center' or 'max'; got "
+                    f"{align_arg.get('anchor')!r}. Nothing was read.",
+                    code="BAD_ARGUMENT", stage="validate")
+            try:
+                float(align_arg.get("offset") or 0.0)
+            except (TypeError, ValueError):
+                raise ArgumentRejected(
+                    f"views[{index}].align offset is a distance in mm; got "
+                    f"{align_arg.get('offset')!r}. Nothing was read.",
+                    code="BAD_ARGUMENT", stage="validate") from None
+
     def _import_views(self, arguments: dict[str, Any], views: Any) -> str:
         """Several views of one sheet, one sketch each, sharing one anchor.
 
@@ -841,6 +977,9 @@ class BlueprintTools:
                     "object like {'page': 1, 'region': [0, 0, 60, 40], "
                     "'plane': 'xy'}. Nothing was read.",
                     code="BAD_ARGUMENT", stage="validate")
+        # Before any file is read: a malformed move is a typo the caller can fix
+        # without the drawing being there (the ordering rule 0.3.127 learned).
+        self._check_view_moves(views)
         scale = float(arguments.get("scale") or 1.0)
         tolerance = float(arguments.get("tolerance") or 1e-6)
         curve_tolerance = arguments.get("curve_tolerance")
@@ -876,6 +1015,45 @@ class BlueprintTools:
             anchor = (min(box[0] for box in boxes), min(box[1] for box in boxes))
         for _, _, drawing in parsed:
             blueprint.move_to_anchor(drawing, anchor)
+
+        # ── per-view placement, because a real sheet puts views SIDE BY SIDE ──
+        # The anchor moves the whole sheet, so two orthographic views stay 70 mm
+        # apart on it - which is correct for the sheet and useless for a model.
+        # A drawing shares DIMENSIONS, not page coordinates, so each view can be
+        # moved onto a common datum by name (2026-11-15 report N3). Every argument
+        # was checked before the file was read; what is left here is arithmetic.
+        shift_notes: dict[int, str] = {}
+        for index, view, drawing in parsed:
+            placement_arg = view.get("placement")
+            align_arg = view.get("align")
+            if placement_arg is not None:
+                values = [float(v) for v in placement_arg["origin_2d"]]
+                blueprint.shift_drawing(drawing, -(values[0] - anchor[0]),
+                                        -(values[1] - anchor[1]))
+                shift_notes[index] = (
+                    f" moved so the sheet point ({values[0]:.4f}, "
+                    f"{values[1]:.4f}) is the sketch origin")
+            elif align_arg is not None:
+                target = int(align_arg["view"])
+                axis_text = str(align_arg.get("axis") or "x").strip().lower()
+                axis = 0 if axis_text in ("x", "u") else 1
+                which = str(align_arg.get("anchor") or "center").strip().lower()
+                offset = float(align_arg.get("offset") or 0.0)
+                mine = drawing["bounds_mm"]
+                theirs = parsed[target - 1][2]["bounds_mm"]
+                if not mine or not theirs:
+                    raise PreconditionRejected(
+                        f"views[{index}] asks to align to view {target}, but one "
+                        "of the two kept no geometry to line up. Nothing was "
+                        "drawn.", code="NOTHING_TO_IMPORT", stage="validate")
+                delta = (_anchor_value(theirs, axis, which) + offset
+                         - _anchor_value(mine, axis, which))
+                blueprint.shift_drawing(drawing, delta if axis == 0 else 0.0,
+                                        delta if axis == 1 else 0.0)
+                shift_notes[index] = (
+                    f" moved {delta:+.4f} mm along {axis_text.upper()} so its "
+                    f"{which} lands on view {target}'s {which}")
+
 
         total_elements = sum(drawing["counts"]["elements"]
                              for _, _, drawing in parsed)
@@ -968,6 +1146,8 @@ class BlueprintTools:
                 "drawn_elements": drawn_elements,
                 "bounds_mm": [round(v, 4) for v in bounds] if bounds else None,
                 "box_mm": _view_box(placement, bounds) if bounds else None,
+                "frame": sketch_frames.frame_of(placement),
+                "shift_note": shift_notes.get(index, ""),
                 "deviation": deviation,
                 "notes": [line for line in (close_note,) if line],
             })
@@ -1011,9 +1191,7 @@ class BlueprintTools:
                 b = row["bounds_mm"]
                 parts.append(f"; sheet box {b[2] - b[0]:.3f} x {b[3] - b[1]:.3f} mm")
             if row.get("box_mm"):
-                box = row["box_mm"]
-                parts.append("; world box X {:.3f}..{:.3f} Y {:.3f}..{:.3f} Z "
-                             "{:.3f}..{:.3f}".format(*box))
+                parts.append("; world box " + _box_text(row["box_mm"]))
             parts.append(".")
             extra = (row["drawn_elements"] or 0) - row["elements"]
             if extra:
@@ -1034,40 +1212,71 @@ class BlueprintTools:
                              "the curves.")
             for note in row.get("notes") or []:
                 parts.append(" " + " ".join(str(note).split()))
+            if row.get("shift_note"):
+                parts.append(row["shift_note"] + ".")
             parts.append(fidelity.deviation_sentence(row.get("deviation")))
 
         # ── the claim the anchor exists to make, and where it can fail ─────
-        boxes = [(row["index"], row["box_mm"]) for row in rows if row.get("box_mm")]
-        if len(boxes) < 2:
+        readable = [row for row in rows if row.get("box_mm")]
+        if len(readable) < 2:
             parts.append("\n Alignment check: at least one view has no readable "
                          "world box (its frame is not one this server can turn "
                          "into XYZ), so no shared axis could be compared.")
         else:
-            axes = ("X", "Y", "Z")
-            agreements: list[str] = []
-            for first in range(len(boxes)):
-                for second in range(first + 1, len(boxes)):
-                    left, right = boxes[first], boxes[second]
-                    same = [axes[axis] for axis in range(3)
-                            if fidelity.aligned(left[1], right[1], axis)]
-                    for axis in same:
-                        agreements.append(
-                            f"view {left[0]} and view {right[0]} agree on {axis} "
-                            f"({left[1][axes.index(axis)]:.3f}.."
-                            f"{left[1][3 + axes.index(axis)]:.3f} mm)")
-            if agreements:
-                parts.append("\n Alignment check: " + "; ".join(agreements)
-                             + ". Those are shared sheet axes - a model built on "
-                               "these sketches is one part, not two blocks that "
-                               "happen to sit near each other.")
+            verdicts = view_alignment(readable)
+            agreed: list[str] = []
+            offset: list[str] = []
+            for pair in verdicts:
+                left, right = pair["views"]
+                if pair["aligned"]:
+                    for item in pair["shared"]:
+                        agreed.append(
+                            f"view {left} and view {right} agree on "
+                            f"{AXIS_NAMES[item['axis']]} "
+                            f"({item['left_range'][0]:.3f}.."
+                            f"{item['left_range'][1]:.3f} mm, overlap "
+                            f"{item['ratio'] * 100:.0f} %"
+                            + ("" if item["same_direction"] else
+                               ", mirrored") + ")")
+                elif pair["shared"]:
+                    detail = "; ".join(
+                        f"{AXIS_NAMES[item['axis']]} "
+                        f"{item['left_range'][0]:.3f}..{item['left_range'][1]:.3f} "
+                        f"vs {item['right_range'][0]:.3f}.."
+                        f"{item['right_range'][1]:.3f} mm" for item in pair["shared"])
+                    offset.append(f"view {left} and view {right} share a sheet "
+                                  f"direction but do not line up: {detail}")
+                else:
+                    offset.append(f"view {left} and view {right} share NO sheet "
+                                  "direction")
+            if agreed and not offset:
+                parts.append("\n Alignment check: " + "; ".join(agreed)
+                             + ". Every shared sheet axis overlaps, so these "
+                               "sketches sit in one coordinate system - a model "
+                               "built on them is one part.")
+            elif agreed:
+                parts.append("\n Alignment check: " + "; ".join(agreed)
+                             + ". BUT " + "; ".join(offset) + ".")
             else:
-                parts.append("\n Alignment check: NO axis agrees between the "
-                             "views, so they were placed on datums that do not "
-                             "share a sheet direction. Nothing is wrong with the "
-                             "geometry, but the views are NOT aligned: check that "
-                             "the view that looks along -Y is on 'xy' and the one "
-                             "that looks along -Z is on 'xz', or give both the "
-                             "same 'plane'.")
+                parts.append("\n Alignment check: NOT aligned - "
+                             + "; ".join(offset) + ". Nothing is wrong with the "
+                               "geometry, but these views do not share a frame: "
+                               "give each view the frame it looks along (a FRONT "
+                               "view is {'type':'frame','origin':[0,0,0],"
+                               "'u':[1,0,0],'v':[0,0,1]}, a TOP view the same "
+                               "with 'v':[0,1,0]'), and where the sheet puts the "
+                               "views side by side, give one of them 'align' or "
+                               "'placement' to move it onto the shared datum.")
+            # The shapes have to be comparable before their ranges can be: a
+            # corner of a sketch is its own (x, y) and an upside-down range in
+            # this sentence would be quoted back as evidence (report N2).
+            for row in readable:
+                box = row["box_mm"]
+                if any(box[index] > box[3 + index] + 1e-9 for index in range(3)):
+                    parts.append(f" WARNING: view {row['index']}'s world box has "
+                                 "min > max, so its frame is not one this server "
+                                 "read correctly - treat the ranges above as "
+                                 "unreliable.")
         parts.append("\n Nothing has been built on these sketches: pad or loft "
                      "each one on its own plane, in the order the drawing's "
                      "dimensions want.")
@@ -1301,6 +1510,123 @@ class BlueprintTools:
         if drawing["notes"]:
             parts.append(" " + " ".join(drawing["notes"][:3]))
         return "".join(parts)
+
+
+def _anchor_value(bounds: Any, axis: int, which: str) -> float:
+    """One number off a 2D bounds list: its low end, its middle, or its high end."""
+    low, high = float(bounds[axis]), float(bounds[axis + 2])
+    if which == "min":
+        return low
+    if which == "max":
+        return high
+    return (low + high) / 2.0
+
+
+def _box_text(box: Any) -> str:
+    """``X a..b Y c..d Z e..f`` from the six numbers ``_view_box`` builds.
+
+    The first version of this call passed the whole list to ``format(*box)``,
+    which put min-x against min-y: the reply said ``X 0.000..-0.000 Y
+    0.000..15.367 Z 23.876..0.000`` for a 15 x 24 mm sketch, and two of the three
+    ranges came out inverted (2026-11-15 report N2). The alignment check below
+    read the same list correctly, so the bug was in the words, not the numbers -
+    which is exactly the kind that gets quoted back as evidence.
+    """
+    return ("X {:.3f}..{:.3f} Y {:.3f}..{:.3f} Z {:.3f}..{:.3f}"
+            .format(box[0], box[3], box[1], box[4], box[2], box[5]))
+
+
+AXIS_NAMES = ("X", "Y", "Z")
+
+
+def view_axes(frame: Any) -> dict[str, tuple[int, float]]:
+    """Which world axis each of a view's own sheet axes points along.
+
+    ``frame`` is ``(origin, u, v)`` as ``sketch_frames.frame_of`` returns it -
+    already resolved, because the caller has one per view by the time a reply is
+    written. Only an AXIS-ALIGNED frame can share a sheet direction with another
+    view; a frame rotated by 30 degrees shares nothing a range comparison could
+    judge. Returns ``{'u': (axis, sign), 'v': (axis, sign)}``, missing the axes
+    that are not axis-aligned.
+    """
+    if not isinstance(frame, (tuple, list)) or len(frame) != 3:
+        return {}
+    _origin, u, v = frame
+    out: dict[str, tuple[int, float]] = {}
+    for role, vector in (("u", u), ("v", v)):
+        axis = max(range(3), key=lambda index: abs(float(vector[index])))
+        if abs(float(vector[axis])) < 0.999:
+            continue
+        out[role] = (axis, 1.0 if float(vector[axis]) > 0 else -1.0)
+    return out
+
+
+def view_alignment(rows: list[dict]) -> list[dict]:
+    """Every pair of views: the sheet axes they share, and whether they line up.
+
+    Three things had to change from the first version of this check, all three
+    from the 2026-11-15 report (N1):
+
+    * **A zero-width range is a PLANE, not a direction.** Two views both on 'xy'
+      both have Z = 0, so "they agree on Z (0.000..0.000)" was true of every pair
+      of co-planar views ever imported, including two that sat 70 mm apart.
+    * **Only a frame's u/v can be a shared SHEET axis.** The normal is not a
+      direction the drawing has.
+    * **Agreement means the ranges overlap**, and every shared axis has to.
+      Sharing one axis and missing the other is an offset view, not an aligned
+      one.
+
+    ``ratio`` is the overlap divided by the narrower of the two ranges, so 1.0 is
+    co-located and 0.0 is "70 mm apart on the sheet".
+    """
+    pairs: list[dict] = []
+    for left_index in range(len(rows)):
+        for right_index in range(left_index + 1, len(rows)):
+            left, right = rows[left_index], rows[right_index]
+            left_box = left.get("box") or left.get("box_mm")
+            right_box = right.get("box") or right.get("box_mm")
+            if not left_box or not right_box:
+                continue
+            left_axes = view_axes(left.get("frame"))
+            right_axes = view_axes(right.get("frame"))
+            shared: list[dict] = []
+            for left_role, (left_axis, left_sign) in left_axes.items():
+                for right_role, (right_axis, right_sign) in right_axes.items():
+                    if left_axis != right_axis:
+                        continue
+                    low_left, high_left = (left_box[left_axis],
+                                           left_box[3 + left_axis])
+                    low_right, high_right = (right_box[right_axis],
+                                             right_box[3 + right_axis])
+                    width_left = high_left - low_left
+                    width_right = high_right - low_right
+                    if width_left <= 1e-6 or width_right <= 1e-6:
+                        continue
+                    overlap = max(0.0, min(high_left, high_right)
+                                  - max(low_left, low_right))
+                    shared.append({
+                        "axis": left_axis,
+                        "left_role": left_role,
+                        "right_role": right_role,
+                        "same_direction": left_sign == right_sign,
+                        "left_range": (low_left, high_left),
+                        "right_range": (low_right, high_right),
+                        "overlap_mm": overlap,
+                        "ratio": overlap / min(width_left, width_right),
+                    })
+            if not shared:
+                pairs.append({"views": (left.get("index"), right.get("index")),
+                              "shared": [], "aligned": False,
+                              "reason": "no shared sheet direction"})
+                continue
+            aligned = all(item["ratio"] >= 0.9 for item in shared)
+            reason = ("aligned" if aligned else
+                      "shared direction but the ranges do not line up"
+                      if any(item["ratio"] < 0.05 for item in shared)
+                      else "shared direction, partly overlapping")
+            pairs.append({"views": (left.get("index"), right.get("index")),
+                          "shared": shared, "aligned": aligned, "reason": reason})
+    return pairs
 
 
 def _view_box(placement: Any, bounds: Any) -> list[float] | None:

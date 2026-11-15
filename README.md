@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.136** · [what changed](CHANGELOG.md) ·
+**0.3.137** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1375,6 +1375,44 @@ Two facts about real drawings that this had to accept:
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
 
+0.3.137 is what two reports found wrong with 0.3.136, including two of this
+project's own mistakes:
+
+* **The multi-view check could say "aligned" about two views 70 mm apart.** It
+  compared a plane's NORMAL (Z, which is 0 for every sketch on `xy`) and treated
+  a zero-width range as agreement. It now compares only the axes a frame's u/v
+  point along, ignores zero-width ranges, and requires every shared axis to
+  overlap: "view 1 and view 2 share a sheet direction but do not line up: X
+  0.000..60.000 vs 70.000..130.000 mm" - NOT aligned, instead of "is one part".
+* **The world boxes printed `min > max`** because the six numbers were unpacked
+  in the wrong order. Both numbers and sentence are now checked against each
+  other (`X 0.000..15.367 Y 0.000..23.876 Z 0.000..0.000`).
+* **A real sheet lays its views side by side, and one anchor cannot close that
+  gap.** Each view now takes `placement={'origin_2d': [x, y]}` or
+  `align={'view': 1, 'axis': 'x', 'anchor': 'center'}`. Measured: `align` moves
+  the second view -70.0000 mm and two pads then share X 0.000..60.000.
+* **A refused sketch name deleted nothing** (it said "Nothing was kept" while
+  `TopSection_new` stayed in the tree), and **the deviation probes left an empty
+  `MCP_Probes`** - `HybridBodies.Remove` does not exist on this build, while
+  `selection.Add(set) + Delete()` does (1 -> 0).
+* **`catia_get_bounding_box` only looked at `Part.MainBody`**, so a solid in a
+  second body answered "no solid shape yet" while `catia_get_inertia` read
+  2 577 mm3 from it. It now takes `body=`, falls back to the one body that holds
+  a solid and says so in `scope`, and refuses with the list when two do.
+* **A plan that only ACTIVATED a document listed 36 pre-existing elements as its
+  own** and offered a rollback that would have deleted them. Nothing in a
+  switched-to document is attributed to the plan now.
+* **A swept solid that folded back on itself reported `ok: true` at 1.4 % from
+  the ruled sum.** The reply no longer claims that agreement proves the shape,
+  and it now checks the **growth rate** between stations (the report's case
+  reaches 2.53 mm of radius per mm of spine) - the one shape signal a sweep owns.
+* **`catia_solid_loft(closing_points=[...])`** passes the closing point that
+  `AddSectionToLoft` has always taken as a third argument and always got `None`.
+  Measured: 4 523.6938 mm3 automatic, 4 523.8263 mm3 with the point at each
+  section's +Y extreme. `SetSectionCoupling` exists but every call answers
+  `<unknown>.SetSectionCoupling`, which is recorded as a ceiling rather than
+  papered over.
+
 0.3.136 finished the two items both 2026-11-15 reports left open - C2, "multi-view
 has no datum", and R2, "the conversion's cost cannot be read back":
 
@@ -1443,7 +1481,7 @@ asks, on that same file (297.011 x 210.016 mm per page, as a PDF reader reports)
 | Drawing | 13 | upstream's drafting module, measured, plus `catia_drawing_set_sheet` and `catia_drawing_add_frame`: new drawing, generative view (plane / face / body), projection, section, detail, text, table, generated and manual dimensions, paper size, border and title block |
 | Planner | **2** | `run_plan`, `measure_topology` |
 | Diagnostics | 2 | `catia_diagnose` (full probe: factories, type libraries, ceilings), `catia_server_info` (0.3.127 - name, version, tool count, CATIA release; no probes, never connects) |
-| Blueprint | 2 | `catia_read_drawing` (0.3.128 - DXF/SVG/vector-PDF to contours, counts, layers, bounds in mm, and since 0.3.135 `curves` / `loft_ready` per contour; never connects), `catia_import_drawing` (0.3.128 - the same, drawn into a sketch at 1:1 and closed; since 0.3.135 `profile_mode="spline"` for ONE curve per contour and a frame `plane`; since 0.3.136 `views=[...]` for several views on ONE sheet frame, and `deviation_mm` on the spline conversion) |
+| Blueprint | 2 | `catia_read_drawing` (0.3.128 - DXF/SVG/vector-PDF to contours, counts, layers, bounds in mm, and since 0.3.135 `curves` / `loft_ready` per contour; never connects), `catia_import_drawing` (0.3.128 - the same, drawn into a sketch at 1:1 and closed; since 0.3.135 `profile_mode="spline"` for ONE curve per contour and a frame `plane`; since 0.3.136 `views=[...]` for several views on ONE sheet frame with `deviation_mm`; since 0.3.137 each view takes `placement`/`align`, and the alignment check only reports axes that really overlap) |
 | Sheet Metal | 2 | `catia_sheetmetal_parameters` (0.3.133 - read and set thickness / bend radius / K factor / relief through `part.Parameters`, cross-checked against `GetThickness()`), `catia_new_sheetmetal` (0.3.133 - a part that carries the set). Geometry is NOT here: no wall, flange, bend, unfold or flat pattern, because `SheetMetalFactory` exposes no `AddNew*` |
 
 #### Knowledgeware (6 tools, 0.3.63)

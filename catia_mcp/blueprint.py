@@ -720,6 +720,25 @@ def read_drawing(path: str, *, scale: float = 1.0,
     }
 
 
+def shift_drawing(drawing: dict[str, Any], dx: float, dy: float) -> None:
+    """Move a parsed drawing by (dx, dy) in drawing mm, and keep the record straight.
+
+    Separate from ``move_to_anchor`` because the two questions are different: an
+    anchor says "this sheet point is the origin", a shift says "and now move it
+    again", which is what aligning one view onto another's centre line is.
+    """
+    if not dx and not dy:
+        return
+    for contour in drawing["contours"]:
+        _translate_contour(contour, dx, dy)
+    boxes = [contour_bbox(c) for c in drawing["contours"]]
+    drawing["bounds_mm"] = (
+        [min(b[0] for b in boxes), min(b[1] for b in boxes),
+         max(b[2] for b in boxes), max(b[3] for b in boxes)] if boxes else None)
+    before = drawing.get("origin_shift_mm") or [0.0, 0.0]
+    drawing["origin_shift_mm"] = [float(before[0]) + dx, float(before[1]) + dy]
+
+
 def move_to_anchor(drawing: dict[str, Any],
                    anchor: Sequence[float]) -> list[float]:
     """Move a parsed drawing so ``anchor`` (drawing mm) sits at the sketch origin.
@@ -736,19 +755,13 @@ def move_to_anchor(drawing: dict[str, Any],
     before = drawing.get("origin_shift_mm") or [0.0, 0.0]
     dx = -float(anchor[0])
     dy = -float(anchor[1])
-    for contour in drawing["contours"]:
-        _translate_contour(contour, dx, dy)
-    boxes = [contour_bbox(c) for c in drawing["contours"]]
-    drawing["bounds_mm"] = (
-        [min(b[0] for b in boxes), min(b[1] for b in boxes),
-         max(b[2] for b in boxes), max(b[3] for b in boxes)] if boxes else None)
+    shift_drawing(drawing, dx, dy)
     drawing["origin_shift_mm"] = [float(before[0]) + dx, float(before[1]) + dy]
     drawing["origin"] = "anchor"
     return [dx, dy]
 
 
-def _filter(contours, *, layers, region, min_size, max_aspect, closed_only,
-            factor, tolerance) -> tuple[list[dict], dict[str, int]]:
+def _filter(contours, *, layers, region, min_size, max_aspect, closed_only,            factor, tolerance) -> tuple[list[dict], dict[str, int]]:
     """The one place a contour is kept or dropped, counting every reason."""
     wanted = None
     if layers:

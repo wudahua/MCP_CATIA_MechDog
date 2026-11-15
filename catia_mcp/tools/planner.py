@@ -541,19 +541,27 @@ class PlannerTools:
             pass
         return {"document": key, "names": names}
 
-    def _created_since(self, before: dict[str, Any]) -> tuple[list[str], bool]:
+    def _created_since(self, before: dict[str, Any],
+                       made_document: bool = False) -> tuple[list[str], bool]:
         """``(names this plan created, whether the plan switched documents)``.
 
-        A DIFFERENT DOCUMENT MEANS EVERYTHING IN IT IS NEW. The plan opened or
-        created a part, so nothing in it predates the plan - and comparing names
-        against the part that happened to be active first is how ``草图.1``
-        disappeared from the answer while standing in the tree.
+        A DOCUMENT THIS PLAN CREATED means everything in it is new: nothing
+        predates the plan, and comparing names against the part that happened to
+        be active first is how ``草图.1`` disappeared from the answer while
+        standing in the tree.
+
+        A document the plan merely ACTIVATED is the opposite case, and 0.3.136 got
+        it wrong: a plan whose first step was ``catia_activate_document`` listed
+        36 pre-existing elements as "36 element(s) this plan had already built"
+        and offered ``rollback: true`` - which would have deleted somebody else's
+        model (2026-11-15 report C7). Nothing in a switched-to document can be
+        attributed to the plan, so nothing is listed.
         """
         after = self._snapshot_names()
         if after is None:
             return [], False
         if str(after.get("document")) != str(before.get("document")):
-            return list(after["names"]), True
+            return (list(after["names"]) if made_document else []), True
         return [name for name in after["names"] if name not in before["names"]], False
 
     def _rollback(self, names: list[str]) -> dict[str, Any]:
@@ -821,8 +829,15 @@ class PlannerTools:
         created: list[str] = []
         document_changed = False
         rollback_report: dict[str, Any] | None = None
+        # Did the plan itself bring a document into being? A step that opened an
+        # existing file, or activated one, did not.
+        made_document = any(
+            str(step.get("tool")) in ("catia_new_part", "catia_new_product",
+                                      "catia_new_drawing")
+            and step.get("ok") for step in report)
         if failed_at is not None and before_tree is not None:
-            created, document_changed = self._created_since(before_tree)
+            created, document_changed = self._created_since(before_tree,
+                                                            made_document)
             if created and rollback_wanted:
                 rollback_report = self._rollback(created)
         measurements: dict[str, Any] = {}
@@ -949,10 +964,19 @@ class PlannerTools:
                 # not "elements added to the part you were working on", they are
                 # "the contents of the part this plan opened".
                 data["created_features_document"] = "the plan switched document"
-                switched = (
-                    " One of the steps opened or created a document, so every "
-                    "element in the part that is active now is listed - the plan "
-                    "started in a different one.")
+                if made_document:
+                    switched = (
+                        " One of the steps opened or created a document, so every "
+                        "element in the part that is active now is listed - the plan "
+                        "started in a different one.")
+                else:
+                    switched = (
+                        " A step ACTIVATED another document and the plan created no "
+                        "document, so nothing in it can be attributed to this plan: "
+                        "what was already there is NOT listed (listing it read as "
+                        "'the plan built these' and a rollback would have deleted "
+                        "it), and rollback never touches a document it did not "
+                        "create. Read catia_list_features on that document yourself.")
             if before_tree is None:
                 data["created_features_status"] = "unknown"
                 data["created_features_note"] = (
@@ -975,10 +999,15 @@ class PlannerTools:
                     "built them and nothing removed them. Add 'rollback': true to "
                     "the same call to have a failed plan take its own work back, or "
                     "delete them with catia_delete_feature(names=[...])." + switched)
+            elif document_changed and not made_document:
+                data["created_features_status"] = "not_attributable"
+                data["created_features_note"] = (
+                    "Nothing is attributed to this plan.")
             else:
                 data["created_features_status"] = "nothing_created"
             if switched and data["created_features_status"] in (
-                    "rolled_back", "partly_rolled_back", "nothing_created"):
+                    "rolled_back", "partly_rolled_back", "nothing_created",
+                    "not_attributable"):
                 data["created_features_note"] = (
                     str(data.get("created_features_note") or "").strip()
                     + switched).strip()

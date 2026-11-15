@@ -221,9 +221,28 @@ def test_created_since_counts_a_new_document_whole():
         active_document=SimpleNamespace(FullName=r"C:/new/New.CATPart"))
 
     before = PlannerTools(old)._snapshot_names()
-    created, switched = PlannerTools(new)._created_since(before)
+    created, switched = PlannerTools(new)._created_since(before, made_document=True)
 
     assert created == ["草图.1"]
+    assert switched is True
+
+
+def test_created_since_attributes_nothing_to_a_document_it_only_activated():
+    """0.3.136 report C7: a plan whose first step was catia_activate_document
+    listed 36 pre-existing elements as its own work and offered a rollback that
+    would have deleted them."""
+    old = SimpleNamespace(get_active_part=lambda: _part(
+        bodies=[_body(shapes=["Pad.1"], sketches=["草图.1"])]),
+        active_document=SimpleNamespace(FullName=r"C:/old/Old.CATPart"))
+    other = SimpleNamespace(get_active_part=lambda: _part(
+        bodies=[_body(shapes=["Pad.9"], sketches=["草图.9"])]),
+        active_document=SimpleNamespace(FullName=r"C:/new/Other.CATPart"))
+
+    before = PlannerTools(old)._snapshot_names()
+    created, switched = PlannerTools(other)._created_since(before,
+                                                          made_document=False)
+
+    assert created == []
     assert switched is True
 
 

@@ -125,7 +125,8 @@ def test_mesh_never_exports_a_part_in_context():
 def test_a_box_measured_from_the_copy_carries_a_warning():
     from catia_mcp.tools.measurement import MeasurementTools as MT
 
-    source = inspect.getsource(MT._part_bbox)
+    source = (inspect.getsource(MT._part_bbox)
+              + inspect.getsource(MT._part_bbox_of_body))
     assert '"warnings"' in source
     assert "edits made since the last save are NOT in " in source
 

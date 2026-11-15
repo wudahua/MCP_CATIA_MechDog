@@ -2217,6 +2217,23 @@ class MeasurementTools:
                                 "(see catia_list_components). Omit for all of them."
                             ),
                         },
+                        "body": {
+                            "type": "string",
+                            "description": (
+                                "PART mode: which body to measure, by name (see "
+                                "catia_list_bodies). Omit and the MAIN body is "
+                                "measured - and if the main body is empty while "
+                                "exactly one other body holds a solid, that body "
+                                "is measured instead and the reply's 'scope' says "
+                                "so. Two or more other bodies is a REFUSAL that "
+                                "lists them, because picking one would be a guess. "
+                                "Before 0.3.137 this tool only ever looked at "
+                                "Part.MainBody, so a part whose solid sat in "
+                                "another body answered 'That part has no solid "
+                                "shape yet' while catia_get_inertia read its volume "
+                                "(2026-11-15 report C3)."
+                            ),
+                        },
                         "include_curved": {
                             "type": "boolean",
                             "default": True,
@@ -2589,7 +2606,8 @@ class MeasurementTools:
                     arguments.get("method", "auto"),
                     arguments.get("component"),
                     arguments.get("document") or arguments.get("document_name"),
-                    bool(arguments.get("include_curved", True)))
+                    bool(arguments.get("include_curved", True)),
+                    arguments.get("body"))
                 # warm_up runs the same measurement and throws the geometry away:
                 # the point is to make CATIA pay its first-read cost now rather
                 # than inside the call that needs the answer (reported 2026-10-27).
@@ -3165,11 +3183,32 @@ class MeasurementTools:
             )
         counted = ("no surface geometry either" if surfaces < 0
                    else f"{surfaces} surface element(s) and no solid")
+        # The solids may be somewhere else in the same part, which is what
+        # 2026-11-15 report C4 hit after catia_activate_document reset the active
+        # body: the refusal advised closing surfaces that were already closed,
+        # while the answer was "the solid is in another body".
+        hint = ""
+        others = []
+        try:
+            for index in range(1, int(part.Bodies.Count) + 1):
+                candidate = part.Bodies.Item(index)
+                if str(candidate.Name) == str(getattr(body, "Name", "")):
+                    continue
+                if int(candidate.Shapes.Count):
+                    others.append(str(candidate.Name))
+        except Exception:  # noqa: BLE001 - a hint, not the measurement
+            others = []
+        if others:
+            hint = (" This part DOES hold solid(s), in "
+                    + ", ".join(f"'{name}'" for name in others[:5])
+                    + " - measure one with body='<name>' on catia_get_bounding_box, "
+                      "or make it active with catia_set_active_body before calling "
+                      "catia_get_inertia (which follows the ACTIVE body).")
         return (
             f"'{label}' has no solid in '{getattr(body, 'Name', 'the main body')}' "
             f"({counted}), so volume / area / centroid are undefined. Close the "
             "surfaces into a solid first (catia_gsd_close_surface) or measure the "
-            "surfaces another way."
+            "surfaces another way." + hint
         )
 
     def _get_inertia(self, density: float | None = None,
@@ -4992,12 +5031,109 @@ class MeasurementTools:
                 return True
         return False
 
-    def _part_bbox(self, part: Any, method: str) -> str:
-        """Bounding box of a named Part document (no reliance on ActiveDocument)."""
+    @staticmethod
+    def _sibling_solids(part: Any, skip: Any = None) -> list[dict[str, Any]]:
+        """Bodies of this part that hold at least one feature, other than ``skip``."""
+        out: list[dict[str, Any]] = []
+        try:
+            bodies = part.Bodies
+            count = int(bodies.Count)
+        except Exception:  # noqa: BLE001 - no bodies is not an error here
+            return out
+        for index in range(1, count + 1):
+            try:
+                body = bodies.Item(index)
+                if skip is not None and str(body.Name) == str(skip.Name):
+                    continue
+                shapes = int(body.Shapes.Count)
+            except Exception:  # noqa: BLE001 - one unreadable body, not the rest
+                continue
+            if shapes:
+                out.append({"body": body, "name": str(body.Name), "shapes": shapes})
+        return out
+
+    def _measurable_body(self, part: Any, name: str | None = None
+                         ) -> tuple[Any, str]:
+        """Which body a measurement means, and how that was decided.
+
+        One rule for both measuring tools. The 2026-11-15 report found them
+        disagreeing on the same part at the same moment (C3): ``get_inertia`` read
+        2 577.2938 mm3 off the body the caller had activated, while
+        ``get_bounding_box`` answered "That part has no solid shape yet" for the
+        same part, because it only ever looked at ``Part.MainBody``. C4 is the
+        same fault after ``catia_activate_document`` reset the active body: the
+        refusal then advised closing surfaces that were already closed.
+
+        Rules, in order: an explicit ``name``; the main body when it has a shape
+        (unchanged behaviour for single-body parts); otherwise the one other body
+        that has a shape; otherwise a refusal that LISTS the bodies that do.
+        """
+        if name:
+            try:
+                body = part.FindObjectByName(str(name))
+            except Exception:  # noqa: BLE001 - reported as not found
+                body = None
+            if body is None:
+                known = [str(item["name"]) for item in self._sibling_solids(part)]
+                try:
+                    known = [str(part.MainBody.Name)] + known
+                except Exception:  # noqa: BLE001
+                    pass
+                raise ArgumentRejected(
+                    f"No body named '{name}' in this part. Bodies here: "
+                    f"{known or 'none'}. catia_list_bodies lists them with their "
+                    "volumes. Nothing was measured.",
+                    code="BODY_NOT_FOUND", stage="validate",
+                    data={"name": str(name), "bodies": known})
+            return body, f"the body named '{name}'"
+        try:
+            main = part.MainBody
+            if int(main.Shapes.Count):
+                return main, "main_body"
+        except Exception:  # noqa: BLE001 - fall through to the other bodies
+            main = None
+        others = self._sibling_solids(part, skip=main)
+        if len(others) == 1:
+            only = others[0]
+            return (only["body"],
+                    f"body '{only['name']}' - the main body is empty, and this is "
+                    "the only body that holds a solid")
+        if len(others) > 1:
+            listed = ", ".join(f"'{item['name']}' ({item['shapes']} feature(s))"
+                               for item in others)
+            raise PreconditionRejected(
+                f"The main body is empty and {len(others)} other bodies hold "
+                f"solids: {listed}. Which one is a question only the caller can "
+                "answer, so nothing was measured. Pass body='<name>', or make one "
+                "active with catia_set_active_body and call again.",
+                code="AMBIGUOUS_BODY", stage="validate",
+                data={"bodies": [{"name": item["name"],
+                                  "features": item["shapes"]} for item in others]})
+        return main, "main_body"
+
+    def _part_bbox(self, part: Any, method: str,
+                   body_name: str | None = None) -> str:
+        """Bounding box of a Part, on the body a measurement means."""
+        body, scope = self._measurable_body(part, body_name)
+        reply = self._part_bbox_of_body(part, method, body)
+        try:
+            payload = json.loads(reply)
+        except Exception:  # noqa: BLE001 - then it is already the answer
+            return reply
+        payload["body"] = str(getattr(body, "Name", "") or "?")
+        payload["scope"] = scope
+        return json.dumps(payload, indent=2)
+
+    def _part_bbox_of_body(self, part: Any, method: str, body: Any) -> str:
+        """Bounding box of one body, reported as the part's box.
+
+        Split from ``_part_bbox`` so the body decision is made in ONE place for
+        both measuring tools; everything below is the measurement itself.
+        """
         started = time.perf_counter()
-        body = part.MainBody
-        if body.Shapes.Count == 0:
-            raise PreconditionRejected("That part has no solid shape yet.")
+        if int(body.Shapes.Count) == 0:
+            raise PreconditionRejected(self._no_solid_reason(
+                part, body, str(part.Name)))
         # Which regime this is. Peek now, RECORD at the return, because the reason
         # depends on the route this part ends up taking: a vertex sweep paid for a
         # topology read, an STL export paid for the export, and calling both "the
@@ -5716,7 +5852,8 @@ class MeasurementTools:
     def _get_bounding_box(self, method: str = "auto",
                           component: str | None = None,
                           document: str | None = None,
-                          include_curved: bool = True) -> str:
+                          include_curved: bool = True,
+                          body_name: str | None = None) -> str:
         # Measurable has no bounding-box method in any V5 release. Two sources
         # are available instead: the final shape's vertices (exact for
         # planar-faced solids) and an exported STL mesh (the only thing that
@@ -5742,7 +5879,7 @@ class MeasurementTools:
                 raise RuntimeError(
                     f"'{document}' is neither a Part nor a Product document ({exc})."
                 ) from exc
-            reply = self._part_bbox(part, method)
+            reply = self._part_bbox(part, method, body_name)
             if self.opened_for_measurement:
                 payload = json.loads(reply)
                 payload["opened"] = (
@@ -5815,7 +5952,7 @@ class MeasurementTools:
         # without them when it measured the active one - two field sets for one
         # question, and the cost regime was invisible on the path most callers take
         # (reported 2026-10-27, §3.2 and §P3-3).
-        return self._stamp_elapsed(self._part_bbox(part, method), started)
+        return self._stamp_elapsed(self._part_bbox(part, method, body_name), started)
 
     # A wireframe element's "infinite" end point is stored as 1e7 mm. Sweeping
     # the body's vertices therefore picks up coordinates that belong to an axis
