@@ -2,6 +2,94 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.130] — 2026-11-14 · the drawing path, end to end
+
+The 2026-11-14 (v0.3.128) report's eleven findings. Its headline was the one that
+mattered: the import said "closed", `catia_pad` then refused the same sketch with
+six free endpoints, and the model stopped there.
+
+**N1 — closure was measured at the one seam that could not fail.** `closed` was
+"does the first piece's start meet the last piece's end" - true by construction
+after stitching, while a joint in the middle was 3.97, 5.36 and 5.68 µm apart.
+Every joint is now checked, the stitcher snaps the endpoints it joins, and the
+reply carries `free_ends` per contour and in the counts - the same number `pad`
+acts on. Measured on B30: the report's own region pads to 1 395.06 mm³, exactly
+the contour's area x 4.8 mm, and `catia_pad` accepts it.
+
+**N2 — a plan's rollback did not see a document it had created.** The "what is
+new" snapshot was a set of NAMES, so `new_part`'s first sketch (also called
+草图.1) was invisible in a part that already had one, and the reply said
+"nothing was created" while 草图.1 stood in the tree. The snapshot now carries the
+document identity, and a plan that switched document reports everything as
+created. Measured: `created_features = ['凸台.1', '草图.1']`, rollback ⇒ tree empty.
+
+**N3 — pages were numbered by object id.** `source` said "page 3" and "page 12" on
+a two-page file, and both pages landed in one coordinate system: the imported
+sheet measured 372 x 271 mm against an A4 page of 297 x 210. There is now a
+`page` argument (1..N in write order), `pages` in the reply with each page's size,
+and `page_bounds_mm` beside `bounds_mm`. Measured on the report's file: pages
+297.011 x 210.016 mm each (a PDF reader says 841.92 x 595.32 pt), page 1 = 1 417
+contours, page 2 = 878.
+
+**N4 — clipping paths were counted, not applied.** 86 of 86 rectangular clips on
+page 1 are now applied, 989 painted paths that fall outside the visible area are
+dropped, and the reply says how many. While building this the acceptance case
+found a bug in the new code itself: Liang–Barsky's `p` and `q` were swapped, so a
+segment STARTING exactly on the clip boundary was read as "parallel and outside"
+and thrown away - a square with an edge on the page box lost both boundary edges.
+Fixed, with the boundary case as a test.
+
+**N5 — the ASCII fallback mapped every Chinese name onto one file.** Keeping only
+what was already ASCII turned '苹果AirPods参数化版' and '苹果AirPods一二代' into
+the same `AirPods.CATPart`, so the second part could not be created at all. There
+is now an explicit `ascii_name`, and a collision is resolved only when the file is
+held by an OPEN document whose part number proves it is a different part - the
+suffix is derived from the original name, not a counter, so a retry lands on the
+same file. Measured on B30: both parts created, `AirPods.CATPart` and
+`AirPods_d74a53.CATPart`, and a retry of the same call still reports
+"already open" instead of inventing a third.
+
+**N6 — "arcs stay arcs" was true of DXF and SVG only.** A PDF stores Beziers, and
+the 15 x 24 mm profile arrived as 110 chords. Cubics that ARE a circle (the four
+every drawing program uses) are now fitted back to a real arc; the rest are
+sampled to `curve_tolerance`, and the reply says how many of each. Measured on
+page 1: 632 arcs fitted, 69 genuine free-form curves sampled. Proved by a volume:
+a 40 x 20 plate with a D10 hole made of four Beziers pads to 7 214.61 mm³ against
+the analytic 7 214.60 - a 16-sided hole would have been 7 234.63.
+
+**N7 — `min_size` had to be found by bisection.** 4 196 contours, and the report's
+only way through was "试到 min_size=10 才降到 14". `catia_read_drawing` now returns
+a size histogram, so the cliff is read instead of guessed (page 1: 191 contours
+under 10 mm across, 195 between 10 and 20).
+
+**N8 — `region` and `bbox_mm` were two frames.** `region` compares against the
+DRAWING's coordinates while `bbox_mm` reports the shifted result, so "read the
+bbox, set region from it" - the workflow the tool recommends - selected the wrong
+part of the sheet. Both frames are in the reply now (`drawing_bounds_mm` is the
+one `region` uses), and a test holds it.
+
+**N9 — a drawing frame's edge line is closed, 346 mm long and 0.17 mm thick.**
+`closed_only` and `min_size` both pass it. `max_aspect` drops it: measured on the
+report's page 1, 8 closed contours → 7, with 37 thin ones removed and nothing
+wider than 16.8:1 kept. Each contour now also reports its own `aspect`.
+
+**N10 — the two semi-axes were both called 半径.** A formula bound to the wrong
+one moves the short axis where the long one was meant. The constraints are renamed
+at creation to `MajorRadius.N` / `MinorRadius.N` - measured: V5 does accept a
+written `Constraint.Name`, and one ellipse came back as `MajorRadius.1` and
+`MinorRadius.2`. The rename is read back and only the read-back name is quoted,
+and `catia_sketch_get_geometry` carries `drives` on every constraint so the answer
+survives a build that refuses the rename.
+
+**N11 — `catia_list_features` read a different document from every other tool.**
+It now resolves the body from the active document's `Bodies` collection, checks
+identity before name, and puts the document it actually read into the reply.
+
+Verified on B30: 13/13 in `scripts/b30_v0432_audit.py`, plus the closure probe
+(6/6) and the rollback probe (6/6).
+
+2 105 tests. 151 tools.
+
 ## [0.3.129] — 2026-11-14 · two promises about not connecting
 
 Found from CI, not from a report: of 141 workflow runs, every single one had

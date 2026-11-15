@@ -447,8 +447,8 @@ class PlannerTools:
 
     # ── what a plan built, and how to take it back ───────────────────────────
 
-    def _snapshot_names(self) -> dict[str, int] | None:
-        """Every element name in the active part, with the order it was walked in.
+    def _snapshot_names(self) -> dict[str, Any] | None:
+        """Every element name in the active part, plus WHICH document that was.
 
         A plan's report says which STEP failed, and never what the steps before it
         left behind. The 2026-11-14 report hit that at step 10 of 21: three
@@ -460,11 +460,28 @@ class PlannerTools:
         moments and a COM handle cannot be compared reliably across calls. A name
         CATIA duplicated would collapse into one key - which is exactly why the
         delete this feeds into documents its own duplicate-name refusal.
+
+        THE DOCUMENT IS PART OF THE SNAPSHOT. Comparing two name sets across two
+        documents answers "which names are new to me", not "what did this plan
+        build": a plan whose first step creates a part, and whose second step
+        imports a drawing, produces ``草图.1`` in the NEW part while the OLD part
+        already had a ``草图.1`` - so the diff said "nothing was created" and a
+        sketch stood in the tree (2026-11-14 report, N2). The count of that defect
+        is that the answer is not merely wrong, it is confidently empty.
         """
         try:
             part = self.conn.get_active_part()
         except Exception:  # noqa: BLE001 - no part, no snapshot
             return None
+        document = getattr(self.conn, "active_document", None)
+        key = ""
+        for attribute in ("FullName", "Name"):
+            try:
+                key = str(getattr(document, attribute, "") or "")
+            except Exception:  # noqa: BLE001 - a document being closed
+                key = ""
+            if key:
+                break
         names: dict[str, int] = {}
 
         def note(label: Any) -> None:
@@ -522,14 +539,22 @@ class PlannerTools:
                 walk(holder)
         except Exception:  # noqa: BLE001 - a half-readable part still helps
             pass
-        return names
+        return {"document": key, "names": names}
 
-    def _created_since(self, before: dict[str, int]) -> list[str]:
-        """Names that were not in the part before the plan ran, in tree order."""
+    def _created_since(self, before: dict[str, Any]) -> tuple[list[str], bool]:
+        """``(names this plan created, whether the plan switched documents)``.
+
+        A DIFFERENT DOCUMENT MEANS EVERYTHING IN IT IS NEW. The plan opened or
+        created a part, so nothing in it predates the plan - and comparing names
+        against the part that happened to be active first is how ``草图.1``
+        disappeared from the answer while standing in the tree.
+        """
         after = self._snapshot_names()
         if after is None:
-            return []
-        return [name for name in after if name not in before]
+            return [], False
+        if str(after.get("document")) != str(before.get("document")):
+            return list(after["names"]), True
+        return [name for name in after["names"] if name not in before["names"]], False
 
     def _rollback(self, names: list[str]) -> dict[str, Any]:
         """Delete what a failed plan created, newest first, and say what happened.
@@ -564,8 +589,9 @@ class PlannerTools:
         after = self._snapshot_names()
         if after is None:
             return report
-        report["deleted"] = [name for name in ordered if name not in after]
-        report["left"] = [name for name in ordered if name in after]
+        left_names = after["names"]
+        report["deleted"] = [name for name in ordered if name not in left_names]
+        report["left"] = [name for name in ordered if name in left_names]
         report["verified"] = True
         return report
 
@@ -793,9 +819,10 @@ class PlannerTools:
         # answered ok:true can still be the one that created the element, and a
         # step that failed may have created half of its output before giving up.
         created: list[str] = []
+        document_changed = False
         rollback_report: dict[str, Any] | None = None
         if failed_at is not None and before_tree is not None:
-            created = self._created_since(before_tree)
+            created, document_changed = self._created_since(before_tree)
             if created and rollback_wanted:
                 rollback_report = self._rollback(created)
         measurements: dict[str, Any] = {}
@@ -916,6 +943,16 @@ class PlannerTools:
             # whether the key exists. "Nothing was created" and "I could not tell"
             # are different answers and get different statuses.
             data["created_features"] = created
+            switched = ""
+            if document_changed:
+                # Said out loud because it changes what the list MEANS: these are
+                # not "elements added to the part you were working on", they are
+                # "the contents of the part this plan opened".
+                data["created_features_document"] = "the plan switched document"
+                switched = (
+                    " One of the steps opened or created a document, so every "
+                    "element in the part that is active now is listed - the plan "
+                    "started in a different one.")
             if before_tree is None:
                 data["created_features_status"] = "unknown"
                 data["created_features_note"] = (
@@ -937,9 +974,14 @@ class PlannerTools:
                     "these are IN THE MODEL NOW: the steps before the failure "
                     "built them and nothing removed them. Add 'rollback': true to "
                     "the same call to have a failed plan take its own work back, or "
-                    "delete them with catia_delete_feature(names=[...]).")
+                    "delete them with catia_delete_feature(names=[...])." + switched)
             else:
                 data["created_features_status"] = "nothing_created"
+            if switched and data["created_features_status"] in (
+                    "rolled_back", "partly_rolled_back", "nothing_created"):
+                data["created_features_note"] = (
+                    str(data.get("created_features_note") or "").strip()
+                    + switched).strip()
         if assertions_skipped_because:
             data["assertions_status"] = "skipped"
             data["assertions_skipped_because"] = assertions_skipped_because

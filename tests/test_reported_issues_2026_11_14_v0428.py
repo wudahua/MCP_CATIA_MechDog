@@ -179,9 +179,14 @@ def test_the_snapshot_names_everything_a_plan_could_have_built():
                               HybridShapes=_Collection([_Node("Spine")]),
                               HybridSketches=_Collection([]),
                               HybridBodies=_Collection([]))])
-    names = PlannerTools(_conn(part))._snapshot_names()
+    snapshot = PlannerTools(_conn(part))._snapshot_names()
 
-    assert set(names) == {"Pad.1", "草图.1", "Datum_xy_20", "GSD_Set", "Spine"}
+    # The shape carries WHICH document, not just the names: comparing name sets
+    # across two documents is what made a plan report "nothing was created" while
+    # a sketch stood in the tree (2026-11-14 report, N2).
+    assert set(snapshot) == {"document", "names"}
+    assert set(snapshot["names"]) == {"Pad.1", "草图.1", "Datum_xy_20",
+                                      "GSD_Set", "Spine"}
 
 
 def test_the_snapshot_is_none_when_there_is_no_part():
@@ -194,9 +199,42 @@ def test_created_since_lists_only_the_new_names_in_tree_order():
     before = _part(bodies=[_body(shapes=["Pad.1"])])
     after = _part(bodies=[_body(shapes=["Pad.1", "Pad.2", "Pocket.3"])])
     planner = PlannerTools(_conn(after))
-    assert planner._created_since(
-        PlannerTools._snapshot_names(PlannerTools(_conn(before)))) == [
-        "Pad.2", "Pocket.3"]
+    created, switched = planner._created_since(
+        PlannerTools._snapshot_names(PlannerTools(_conn(before))))
+    assert created == ["Pad.2", "Pocket.3"]
+    assert switched is False
+
+
+def test_created_since_counts_a_new_document_whole():
+    """The report's N2, exactly: new_part -> import_drawing -> pad.
+
+    The plan starts in a part that already holds 草图.1, its first step creates
+    ANOTHER part, and the import draws 草图.1 there. Diffing names answered
+    "nothing was created" and the sketch stayed; a different document has nothing
+    in it that predates the plan, so everything in it is the plan's work.
+    """
+    old = SimpleNamespace(get_active_part=lambda: _part(
+        bodies=[_body(shapes=["Pad.1"], sketches=["草图.1"])]),
+        active_document=SimpleNamespace(FullName=r"C:/old/Old.CATPart"))
+    new = SimpleNamespace(get_active_part=lambda: _part(
+        bodies=[_body(shapes=[], sketches=["草图.1"])]),
+        active_document=SimpleNamespace(FullName=r"C:/new/New.CATPart"))
+
+    before = PlannerTools(old)._snapshot_names()
+    created, switched = PlannerTools(new)._created_since(before)
+
+    assert created == ["草图.1"]
+    assert switched is True
+
+
+def test_same_document_still_diffs_by_name():
+    """The other half: switching documents must not make every plan look empty."""
+    part = _part(bodies=[_body(shapes=["Pad.1"], sketches=["草图.1"])])
+    conn = SimpleNamespace(get_active_part=lambda: part,
+                           active_document=SimpleNamespace(FullName="P.CATPart"))
+    planner = PlannerTools(conn)
+    created, switched = planner._created_since(planner._snapshot_names())
+    assert created == [] and switched is False
 
 
 def test_rollback_deletes_newest_first_and_verifies_from_the_tree():
@@ -222,8 +260,9 @@ def test_rollback_deletes_newest_first_and_verifies_from_the_tree():
     planner = PlannerTools(connection=None)
     planner.bind({"catia_delete_feature": _Deleter()})
     planner._snapshot_names = lambda: {
-        name: index for index, name in enumerate(["Pad.1", "Sketch.1", "Pad.2"])
-        if name in tree}
+        "document": "P.CATPart",
+        "names": {name: index for index, name in
+                  enumerate(["Pad.1", "Sketch.1", "Pad.2"]) if name in tree}}
 
     report = planner._rollback(["Sketch.1", "Pad.2"])
     assert deleted == [["Pad.2", "Sketch.1"]]

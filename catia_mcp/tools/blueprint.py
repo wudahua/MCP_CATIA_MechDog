@@ -101,10 +101,37 @@ class BlueprintTools:
                 "minItems": 4,
                 "maxItems": 4,
                 "description": (
-                    "[xmin, ymin, xmax, ymax] in MILLIMETRES of the scaled "
-                    "result. A contour is kept when its bounding-box CENTRE is "
-                    "inside - not when it is fully inside - so a view that "
-                    "crosses the window edge is not dropped silently."
+                    "[xmin, ymin, xmax, ymax] in MILLIMETRES, in the DRAWING's "
+                    "own coordinates - the frame `drawing_bounds_mm` reports, NOT "
+                    "the shifted one `bounds_mm` reports. A contour is kept when "
+                    "its bounding-box CENTRE is inside - not when it is fully "
+                    "inside - so a view that crosses the window edge is not "
+                    "dropped silently. The two frames differ whenever "
+                    "origin='bbox' moves the result, which is why both are in the "
+                    "reply: they were one frame in the reply and two in this "
+                    "filter until 0.3.130 (2026-11-14 report, N8)."
+                ),
+            },
+            "page": {
+                "type": "integer",
+                "description": (
+                    "Which page of a multi-page PDF to read, counted from 1 in "
+                    "the order the pages are written. Omit for all pages - and "
+                    "for a multi-page drawing you almost certainly want one: the "
+                    "pages sit in the same coordinate system, so two views land "
+                    "on top of each other and the bounds describe neither. "
+                    "`pages` in the reply says how many there are and how big "
+                    "each one is."
+                ),
+            },
+            "curve_tolerance": {
+                "type": "number",
+                "description": (
+                    "PDF only: how far, in mm, a sampled curve may wander from "
+                    "the real one. Default 0.05. Curves that ARE circular arcs - "
+                    "the four Beziers drawing software uses for a circle - are "
+                    "fitted back to real arcs regardless, so a hole stays round; "
+                    "this decides the density only for the ones that are not."
                 ),
             },
             "min_size": {
@@ -125,7 +152,20 @@ class BlueprintTools:
                 "description": (
                     "Keep only contours whose ends meet. A pad needs a closed "
                     "profile, and construction lines, centrelines and dimension "
-                    "leaders are open by nature."
+                    "leaders are open by nature. With closed_only, "
+                    "catia_import_drawing refuses BEFORE drawing anything if a "
+                    "kept contour still has a free end - rather than letting "
+                    "catia_pad say so three steps later."
+                ),
+            },
+            "max_aspect": {
+                "type": "number",
+                "description": (
+                    "Drop contours whose bounding box is longer than this many "
+                    "times its shorter side. A drawing frame's edge line is 346 "
+                    "mm long and 0.17 mm thick: closed, far above any min_size, "
+                    "and never a part. 50 keeps a 20:1 slot and removes the "
+                    "frame; 20 starts removing long thin real features."
                 ),
             },
         }
@@ -185,14 +225,19 @@ class BlueprintTools:
                 "name": "catia_import_drawing",
                 "description": (
                     "Read a 2D drawing (DXF, SVG or vector PDF) and DRAW it into a "
-                    "new sketch at 1:1, one call. Lines stay lines, arcs stay "
-                    "arcs (DXF bulges included) and circles stay circles, so the "
-                    "pad built on the import is not faceted. The sketch is "
+                    "new sketch at 1:1, one call. In DXF and SVG lines stay lines, "
+                    "arcs stay arcs (bulges included) and circles stay circles, so "
+                    "the pad built on the import is not faceted. A PDF stores only "
+                    "Beziers: the four that draw a circle are recognised and drawn "
+                    "as a real arc, and the rest are sampled to within "
+                    "curve_tolerance - so a PDF hole is round too, and the reply "
+                    "says how many of each ('Curves: ...'). The sketch is "
                     "created on the plane you name and closed at the end, and the "
                     "reply reports what CATIA itself then sees - element count "
                     "and outline length - plus the bounds in mm, which is the "
                     "number to check against a dimension you know. Filters "
-                    "(layers / region / min_size / closed_only) exist because a "
+                    "(layers / region / min_size / closed_only / max_aspect / page) exist "
+                    "because a "
                     "drawing is several views plus a frame; run "
                     "catia_read_drawing on the same file first to choose them "
                     "from the counts instead of guessing. REFUSES rather than "
@@ -303,7 +348,19 @@ class BlueprintTools:
             },
             "bounds_mm": ([round(v, 4) for v in drawing["bounds_mm"]]
                           if drawing["bounds_mm"] else None),
+            # The frame `region` is compared in: the drawing's own coordinates,
+            # before origin='bbox' moved anything. Both are reported because they
+            # differ whenever origin='bbox' and only one of them was in the reply
+            # while the other was in the filter (N8).
+            "drawing_bounds_mm": ([round(v, 4) for v in drawing["drawing_bounds_mm"]]
+                                  if drawing.get("drawing_bounds_mm") else None),
+            "page_bounds_mm": ([round(v, 4) for v in drawing["page_bounds_mm"]]
+                               if drawing.get("page_bounds_mm") else None),
+            "pages": drawing.get("pages"),
             "origin_shift_mm": [round(v, 4) for v in drawing["origin_shift_mm"]],
+            # Where the size cliff is. 4196 contours and a `min_size` guessed by
+            # bisection is what this replaces (N7).
+            "size_histogram_mm": blueprint.size_histogram(diagonals),
             "layers": _layer_table(contours),
             "stitching": drawing.get("stitch"),
             "stats": drawing["stats"],
@@ -314,13 +371,28 @@ class BlueprintTools:
                     "source": contour.get("source"),
                     "layer": contour.get("layer"),
                     "closed": contour["closed"],
+                    # The pad's own count, per contour: `closed` can be true while
+                    # a joint in the middle is open, and this is the number that
+                    # decides whether catia_pad will accept the profile.
+                    "free_ends": len(blueprint.contour_free_ends(contour)),
                     "elements": blueprint.segment_count(contour),
                     "bbox_mm": [round(v, 4) for v in blueprint.contour_bbox(contour)],
+                    # Long side / short side. A frame's edge line is closed, above
+                    # any min_size, and 2000:1 - the number that says so is here so
+                    # `max_aspect` can be chosen from data (N9).
+                    "aspect": _aspect(blueprint.contour_bbox(contour)),
                 }
                 for index, contour in enumerate(contours[:limit], start=1)
             ],
             "described": min(limit, len(contours)),
         }
+        pages = drawing.get("pages") or []
+        if len(pages) > 1:
+            report["notes"] = list(report["notes"]) + [
+                f"This file has {len(pages)} page(s) and NONE was selected, so "
+                "every page was read into one coordinate system: two views land on "
+                "top of each other and `bounds_mm` describes neither. Pass "
+                "page=N to read one."]
         return json.dumps(report, ensure_ascii=False, indent=2)
 
     # ── import ────────────────────────────────────────────────────────────
@@ -362,6 +434,32 @@ class BlueprintTools:
                       "counts": drawing["counts"],
                       "layers": _layer_table(contours)})
 
+        # THE VERDICT IS TAKEN BEFORE ANYTHING IS DRAWN, with the rule catia_pad
+        # itself applies (an endpoint no other segment meets). The 2026-11-14
+        # report built 1 273 sketch elements and then had pad answer "six free
+        # endpoints" - two verdicts on one sketch, the second one three steps
+        # later. If `closed_only` was asked for, an open contour in the result
+        # means the filter did not do what its name says, and saying so here
+        # costs nothing because nothing has been created yet.
+        open_ends = sum(len(blueprint.contour_free_ends(c)) for c in contours)
+        if open_ends and arguments.get("closed_only"):
+            listed = ", ".join(
+                f"({x:.4f}, {y:.4f})"
+                for contour in contours
+                for x, y in blueprint.contour_free_ends(contour)[:2])[:300]
+            raise PreconditionRejected(
+                f"'closed_only' kept {len(contours)} contour(s), but {open_ends} "
+                f"endpoint(s) among them are met by nothing - {listed} - so a pad "
+                "on this sketch would be refused. Nothing was drawn. A gap of a "
+                "few microns still counts: the joint was accepted by the stitcher "
+                "and closed here, and what is left is geometry that really does "
+                "not meet. Widen `tolerance` (it only decides what counts as "
+                "joined, it does not move anything), drop `closed_only` to import "
+                "the open curves too, or narrow with `region` / `min_size`.",
+                code="PROFILE_NOT_CLOSED", stage="validate",
+                data={"contours": len(contours), "free_ends": open_ends,
+                      "counts": drawing["counts"]})
+
         sketcher = self._sketcher_tools()
         plane = arguments.get("plane") or "xy"
         offset = arguments.get("offset")
@@ -395,21 +493,27 @@ class BlueprintTools:
                          "editing is done.")
 
         return self._import_reply(drawing, drawn, closed, elements, created,
-                                  close_note, notes)
+                                  close_note, notes, open_ends)
 
     def _parse(self, arguments: dict[str, Any]) -> dict[str, Any]:
         layer_values = arguments.get("layers")
         if isinstance(layer_values, str):
             layer_values = [layer_values]
+        page = arguments.get("page")
+        if page in (None, ""):
+            page = None
         return blueprint.read_drawing(
             str(arguments.get("file_path") or ""),
             scale=float(arguments.get("scale") or 1.0),
             layers=layer_values,
             region=arguments.get("region"),
             min_size=arguments.get("min_size"),
+            max_aspect=arguments.get("max_aspect"),
             closed_only=bool(arguments.get("closed_only", False)),
             origin=str(arguments.get("origin") or "bbox"),
             tolerance=float(arguments.get("tolerance") or 1e-6),
+            page=page,
+            curve_tolerance=arguments.get("curve_tolerance"),
         )
 
     def _draw_contour(self, sketcher: SketcherTools, contour: dict,
@@ -434,7 +538,7 @@ class BlueprintTools:
 
     def _import_reply(self, drawing: dict, drawn: int, closed: int,
                       elements: int, created: str, close_note: str,
-                      notes: list[str]) -> str:
+                      notes: list[str], open_ends: int = 0) -> str:
         counts = drawing["counts"]
         bounds = drawing["bounds_mm"]
         unit = drawing["units"] or "units"
@@ -448,9 +552,16 @@ class BlueprintTools:
              "know against this before building anything on it."
              if bounds else ""),
             f" {closed} of {drawn} contour(s) came out closed.",
-            " " + " ".join(str(created).split()),
-            close_note,
         ]
+        if open_ends:
+            parts.append(
+                f" {open_ends} endpoint(s) are met by nothing, so a pad on this "
+                "sketch is refused - that is the same count catia_pad reports, "
+                "taken here before you build on it. Pass closed_only=true to keep "
+                "the closed contours only, or widen `tolerance` if the gap is "
+                "rounding.")
+        parts.append(" " + " ".join(str(created).split()))
+        parts.append(close_note)
         stitch = drawing.get("stitch") or {}
         if stitch.get("stitched"):
             parts.append(
@@ -469,11 +580,40 @@ class BlueprintTools:
             parts.append(" Dropped: " + ", ".join(
                 f"{value} by {reason}" for reason, value in dropped.items()
                 if value) + ".")
+        stats = drawing.get("stats") or {}
+        fitted = int(stats.get("arcs_fitted") or 0)
+        flattened = int(stats.get("curves_flattened") or 0)
+        if fitted or flattened:
+            # N6: the description promised "arcs stay arcs" while a PDF's Beziers
+            # were silently sampled into 110 chords. Saying which is which, per
+            # import, is the only way the promise can be checked.
+            detail = []
+            if fitted:
+                detail.append(f"{fitted} curve(s) were recognised as circular and "
+                              "drawn as real arcs, so those holes are round")
+            if flattened:
+                detail.append(f"{flattened} curve(s) were not arcs and are drawn as "
+                              "chords within the requested curve_tolerance")
+            parts.append(" Curves: " + "; ".join(detail) + ".")
+        pages = drawing.get("pages") or []
+        if len(pages) > 1:
+            parts.append(
+                f" This file has {len(pages)} page(s) and all of them were read, "
+                "into ONE coordinate system - pass page=N to import a single view.")
         if notes:
             parts.append(" " + " ".join(notes))
         if drawing["notes"]:
             parts.append(" " + " ".join(drawing["notes"][:3]))
         return "".join(parts)
+
+
+def _aspect(box: Any) -> float | None:
+    """Long side / short side of a bounding box; None when it has no area."""
+    long_side = max(box[2] - box[0], box[3] - box[1])
+    short_side = min(box[2] - box[0], box[3] - box[1])
+    if short_side <= 1e-9:
+        return None
+    return round(long_side / short_side, 2)
 
 
 def _basename(path: Any) -> str:

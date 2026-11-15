@@ -5,6 +5,7 @@ Create, open, save, close, and list documents (Part, Product, Drawing).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from typing import Any
@@ -149,6 +150,19 @@ class DocumentTools:
                                 "The reply always states the real path it used."
                             ),
                         },
+                        "ascii_name": {
+                            "type": "string",
+                            "description": (
+                                "With ascii_fallback: the file name to use, without "
+                                "the extension - your choice instead of the "
+                                "derivation. The projection keeps only the ASCII "
+                                "characters already in the name, so '苹果AirPods一号' "
+                                "and '苹果AirPods二代' both become 'AirPods', and the "
+                                "second one could not be created at all "
+                                "(2026-11-14 report, N5). ASCII only: a non-ASCII "
+                                "value here is refused before anything is created."
+                            ),
+                        },
                     },
                 },
             },
@@ -250,6 +264,17 @@ class DocumentTools:
                                 "names the catia_set_part_number call to make if "
                                 "you want the wording in the tree. Deterministic: "
                                 "the same request produces the same file name."
+                            ),
+                        },
+                        "ascii_name": {
+                            "type": "string",
+                            "description": (
+                                "With ascii_fallback: the file name to save under, "
+                                "without the extension, instead of the derived one. "
+                                "The derivation keeps only what was already ASCII, so "
+                                "two different Chinese names can land on one file "
+                                "(N5). Refused if it is this document's own path - "
+                                "that would be a re-save, not a second file."
                             ),
                         },
                     },
@@ -434,7 +459,8 @@ class DocumentTools:
                 return self._new_part(arguments.get("name"),
                                       arguments.get("file_path"),
                                       bool(arguments.get("overwrite", False)),
-                                      bool(arguments.get("ascii_fallback", False)))
+                                      bool(arguments.get("ascii_fallback", False)),
+                                      arguments.get("ascii_name"))
             case "catia_new_product":
                 return self._new_product(arguments.get("name"),
                                          arguments.get("file_path"))
@@ -443,7 +469,8 @@ class DocumentTools:
             case "catia_save_document":
                 return self._save_document(arguments.get("file_path"),
                                            bool(arguments.get("overwrite", False)),
-                                           bool(arguments.get("ascii_fallback", False)))
+                                           bool(arguments.get("ascii_fallback", False)),
+                                           arguments.get("ascii_name"))
             case "catia_save_as_copy":
                 return self._save_as_copy(
                     arguments["file_path"], bool(arguments.get("overwrite", True)))
@@ -538,7 +565,9 @@ class DocumentTools:
     def _new_part(self, name: str | None = None,
                   file_path: str | None = None,
                   overwrite: bool = False,
-                  ascii_fallback: bool = False) -> str:
+                  ascii_fallback: bool = False,
+                  ascii_name: str | None = None) -> str:
+        self._check_ascii_name(ascii_name)
         self.conn.ensure_connected()
         docs = self.conn.documents
         # THE ONE-STEP WORKAROUND the 2026-11-14 report asked for (P1-5): the
@@ -549,7 +578,14 @@ class DocumentTools:
         if file_path and ascii_fallback and not os.path.basename(
                 str(file_path)).isascii():
             original = os.path.basename(str(file_path))
-            converted, title = self._ascii_name_for(str(file_path))
+            converted, title = self._ascii_name_for(str(file_path), ascii_name)
+            # Two Chinese names can project onto one ASCII name; only a document
+            # that is open AND a different part proves it (see the method).
+            plain = converted
+            alternate = self._disambiguate_ascii(converted, title)
+            disambiguated = alternate is not None
+            if alternate is not None:
+                converted = alternate
             file_path = converted
             if not name:
                 # The Chinese wording goes where CATIA stores text properly. The
@@ -560,6 +596,10 @@ class DocumentTools:
                 f"this build, so the file is '{os.path.basename(converted)}'"
                 + (f" and the wording was kept as the part number" if name == title
                    else "")
+                + (". A DIFFERENT part was already open at the plain name "
+                   f"'{os.path.basename(plain)}', so the suffix was added - it is "
+                   "derived from this name, not a counter, so repeating this call "
+                   "produces it again" if disambiguated else "")
                 + ". Repeating this call produces the same name - the conversion is "
                   "not randomised.]")
         # Refuse BEFORE adding a document, because the failure is unrecoverable
@@ -1026,7 +1066,8 @@ class DocumentTools:
     _ASCII_NAME_SAFE = "-_"
 
     @classmethod
-    def _ascii_name_for(cls, file_path: str) -> tuple[str, str]:
+    def _ascii_name_for(cls, file_path: str,
+                        explicit: str | None = None) -> tuple[str, str]:
         """``(path with an ASCII file name, the wording to keep as the title)``.
 
         The 2026-11-14 report's P1-5 asked for a one-step workaround, because the
@@ -1046,12 +1087,24 @@ class DocumentTools:
             '零件.CATPart'             -> 'Part.CATPart',    title '零件'
             '2号件.CATPart'            -> 'Part_2.CATPart',  title '2号件'
 
-        Only ever called for a basename that is NOT ASCII: an ASCII name that
-        happens to contain dots or spaces would be rewritten by this, and there is
-        nothing to fix there.
+        `explicit` replaces the whole stem with what the caller named, which is the
+        other half of that fix: the projection above maps EVERY "苹果AirPods..."
+        name to the same file, so the second Chinese part could not be created at
+        all (N5). Note that the projection is lossy in exactly one direction - two
+        different Chinese names can land on one ASCII name - which is why the
+        collision is resolved at the call site, where it can be checked against a
+        document that is really there, rather than guessed at here.
         """
         folder, base = os.path.split(str(file_path))
         stem, ext = os.path.splitext(base)
+        if explicit:
+            return os.path.join(folder, cls._ascii_stem(explicit) +
+                                (ext or ".CATPart")), stem
+        return os.path.join(folder, cls._ascii_stem(stem) + (ext or ".CATPart")), stem
+
+    @classmethod
+    def _ascii_stem(cls, stem: str) -> str:
+        """The deterministic projection of one name, and nothing else."""
         kept = "".join(character for character in stem
                        if character.isascii()
                        and (character.isalnum() or character in cls._ASCII_NAME_SAFE))
@@ -1062,7 +1115,68 @@ class DocumentTools:
             # A file name starting with a digit is legal on Windows but is a poor
             # thing to hand CATIA, and "Part_2号件" reads better than "2".
             kept = "Part_" + kept
-        return os.path.join(folder, kept + (ext or ".CATPart")), stem
+        return kept
+
+    def _disambiguate_ascii(self, path: str, title: str) -> str | None:
+        """A second file name for `path`, or None when the plain one is fine.
+
+        ONLY A DOCUMENT THAT IS OPEN AND PROVABLY A DIFFERENT PART COUNTS. The
+        check reads the part number of the document sitting on that path: equal
+        means this IS the part the caller is naming again (a retry), and the
+        ordinary DOCUMENT_ALREADY_OPEN / overwrite answer is the right one. A
+        different part number means the projection collapsed two names onto one
+        file, which is the failure the report hit - and then the suffix is derived
+        from the ORIGINAL Chinese name, so a retry of that call lands on the same
+        file again. A `_2` counter would depend on which part was created first,
+        and a retry after a restart would write a third file.
+
+        A file on disk with nothing open is NOT disambiguated: whether it is this
+        part cannot be read without opening it, and inventing a second name there
+        would silently write beside a file the caller may have meant to replace.
+        That case keeps its existing, explicit answer.
+        """
+        holder = self._document_at_path(str(path))
+        if holder is None:
+            return None
+        try:
+            other = str(holder.Product.PartNumber or "")
+        except Exception:  # noqa: BLE001 - unreadable is not "different"
+            return None
+        if not other or other == title:
+            return None
+        folder, base = os.path.split(str(path))
+        stem, ext = os.path.splitext(base)
+        digest = hashlib.sha1(title.encode("utf-8")).hexdigest()[:6]
+        candidate = os.path.join(folder, f"{stem}_{digest}{ext}")
+        index = 2
+        while self._document_at_path(candidate) is not None and index < 10:
+            candidate = os.path.join(folder, f"{stem}_{digest}_{index}{ext}")
+            index += 1
+        return candidate
+
+    @staticmethod
+    def _check_ascii_name(ascii_name: str | None) -> None:
+        """Refuse a non-ASCII `ascii_name` BEFORE anything is created.
+
+        The projection would drop those characters silently and hand back a file
+        name the caller never asked for - the same class of bug as connecting to
+        CATIA before refusing a bad argument (0.3.127).
+        """
+        if ascii_name is None:
+            return
+        text = str(ascii_name)
+        if not text:
+            raise ArgumentRejected(
+                "ascii_name was given but is empty. Pass a name without the "
+                "extension, or omit it to let the conversion derive one. Nothing "
+                "was created.", code="BAD_ARGUMENT", stage="validate")
+        if not text.isascii():
+            raise ArgumentRejected(
+                f"ascii_name {text!r} is not ASCII - that is the one thing it "
+                "cannot be. Nothing was created. Pass the ASCII file name you "
+                "want (letters, digits, '-' and '_'), and keep the Chinese "
+                "wording for the part number.",
+                code="BAD_ARGUMENT", stage="validate")
 
     @staticmethod
     def _same_file(first: Any, second: Any) -> bool:
@@ -1299,7 +1413,9 @@ class DocumentTools:
 
     def _save_document(self, file_path: str | None = None,
                        overwrite: bool = False,
-                       ascii_fallback: bool = False) -> str:
+                       ascii_fallback: bool = False,
+                       ascii_name: str | None = None) -> str:
+        self._check_ascii_name(ascii_name)
         doc = self.conn.active_document
         # The save-side half of P1-5's one-step workaround. It converts the FILE
         # NAME and nothing else: this document already has a part number, and
@@ -1310,7 +1426,7 @@ class DocumentTools:
         if file_path and ascii_fallback and not os.path.basename(
                 str(file_path)).isascii():
             original = os.path.basename(str(file_path))
-            converted, title = self._ascii_name_for(str(file_path))
+            converted, title = self._ascii_name_for(str(file_path), ascii_name)
             # TWO DIFFERENT CHINESE NAMES CAN CONVERT TO ONE ASCII NAME, because
             # the conversion keeps only what was already ASCII: '苹果AirPods一二代'
             # and '苹果AirPods一二代_另存' both land on 'AirPods'. Saving the second
@@ -1333,11 +1449,24 @@ class DocumentTools:
                     "conversion keeps only the ASCII characters of the name, so "
                     "two Chinese names can land on one ASCII name.",
                     code="ASCII_NAME_COLLIDES", stage="validate")
+            # The OTHER collision: the converted name belongs to an open document
+            # that is a different part. Before 0.3.130 this walked into the locked
+            # file and came back as SAVE_FAILED, which reads like a permission
+            # problem (N5's second half). Same rule as catia_new_part: only a
+            # document that is open and provably different earns a suffix.
+            disambiguated = False
+            alternate = self._disambiguate_ascii(converted, title)
+            if alternate is not None:
+                converted = alternate
+                disambiguated = True
             file_path = converted
             fallback_note = (
                 f" [ascii_fallback: '{original}' cannot be a CATIA file name on "
-                f"this build, so the file is '{os.path.basename(converted)}' - the "
-                f"part number was NOT changed; set it with "
+                f"this build, so the file is '{os.path.basename(converted)}'"
+                + (" (a different part already held the plain name, so the suffix "
+                   "was added - it comes from this name, not a counter)"
+                   if disambiguated else "")
+                + f" - the part number was NOT changed; set it with "
                 f"catia_set_part_number('{title}') if that is the wording you want "
                 "the tree and the BOM to show.]")
         # Whether THIS call reached the ASCII staging route. The caller's failure

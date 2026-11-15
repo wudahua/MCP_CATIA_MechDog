@@ -38,10 +38,24 @@ class _Dimension:
 
 
 class _Constraint:
-    def __init__(self, name: str, value: float | None) -> None:
-        self.Name = name
+    def __init__(self, name: str, value: float | None,
+                 frozen: bool = False) -> None:
+        self._name = name
+        self.frozen = frozen
         if value is not None:
             self.Dimension = _Dimension(value)
+
+    @property
+    def Name(self) -> str:
+        return self._name
+
+    @Name.setter
+    def Name(self, value: str) -> None:
+        # Whether V5 allows this is exactly what 0.3.130 could not assume, so the
+        # fake can be either way and the code must report what it READ back.
+        if self.frozen:
+            raise AttributeError("property is read-only")
+        self._name = value
 
 
 class _Constraints:
@@ -52,6 +66,7 @@ class _Constraints:
                       for name, value in (values or [])]
         self.added: list[int] = []
         self.refuse: Exception | None = None
+        self.frozen_names = False
 
     @property
     def Count(self) -> int:
@@ -64,7 +79,8 @@ class _Constraints:
         if self.refuse is not None:
             raise self.refuse
         self.added.append(kind)
-        constraint = _Constraint(f"半径.{len(self.items) + 1}", 6.0)
+        constraint = _Constraint(f"半径.{len(self.items) + 1}", 6.0,
+                                 frozen=self.frozen_names)
         self.items.append(constraint)
         return constraint
 
@@ -163,12 +179,29 @@ def test_the_constraint_path_is_read_from_the_parameters_list():
 
 def test_a_circle_gets_one_radius_constraint_and_names_its_parameter():
     tools = _tools()
-    tools._sketch_part = _Part(["Demo\\零件几何体\\草图.1\\半径.1\\半径"])
+    tools._sketch_part = _Part(["Demo\\零件几何体\\草图.1\\Radius.1\\半径"])
     note = tools._drive_curve(object(), [(SketcherTools._CST_DIM_RADIUS, "radius")])
     assert tools._active_sketch.Constraints.added == [SketcherTools._CST_DIM_RADIUS]
     assert "DRIVEN" in note
-    assert "半径.1" in note and "半径.1\\半径" in note
+    # 0.3.130 renames it, so what the reply quotes is the name it READ BACK.
+    assert "Radius.1" in note and "Radius.1\\半径" in note
     assert "catia_set_constraint_value" in note
+
+
+def test_a_read_only_constraint_name_keeps_catias_own_and_still_finds_its_path():
+    """N10's other branch: if the rename is refused, the meaning travels as `drives`.
+
+    Both results are honest - the name is whatever CATIA left, and the parameter
+    path is READ from part.Parameters, not built from the name we hoped for.
+    """
+    tools = _tools()
+    tools._active_sketch.Constraints.frozen_names = True
+    tools._sketch_part = _Part(["Demo\\零件几何体\\草图.1\\半径.1\\半径"])
+    note = tools._drive_curve(object(), [(SketcherTools._CST_DIM_RADIUS, "radius")])
+    assert "半径.1" in note and "半径.1\\半径" in note
+    assert "Radius.1" not in note
+    drives = tools._constraint_drives[tools._sketch_key("草图.1")]
+    assert drives == {"半径.1": "radius"}
 
 
 def test_an_ellipse_gets_two_semi_axes():

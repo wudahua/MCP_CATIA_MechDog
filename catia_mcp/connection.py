@@ -639,6 +639,40 @@ class CATIAConnection:
         self._interface(doc, "Sheets")
         return doc
 
+    def body_in_part(self, part: Any, body: Any) -> bool | None:
+        """Is ``body`` one of ``part``'s own bodies?
+
+        ASKED OF THE CONTAINER, because a body has no reliable owner: ``.Parent``
+        answers the collection on V5 for many elements, and ``Name`` is not an
+        identity - two documents' main bodies are both called 零件几何体, which is
+        exactly the case that produced the 2026-11-14 report's N11: a session that
+        had built a part named StemElliptic left ``active_body`` pointing at that
+        part's body, the caller then activated another document, and
+        ``catia_list_features`` reported the OTHER document's body (features: [],
+        while the active part held AirPods_Body).
+
+        COM identity first and its own name nowhere: measured on B30 2026-11-14,
+        ``part.Bodies.Item(1) == part.MainBody`` is True for the same body and
+        False for another document's body even when both are called 零件几何体,
+        so equality is the test that can tell them apart. ``None`` means the
+        question could not be asked.
+        """
+        try:
+            count = int(part.Bodies.Count)
+        except Exception:  # noqa: BLE001 - not a part, or not readable
+            return None
+        for position in range(1, count + 1):
+            try:
+                candidate = part.Bodies.Item(position)
+            except Exception:  # noqa: BLE001 - one unreadable member
+                continue
+            try:
+                if candidate is body or candidate == body:
+                    return True
+            except Exception:  # noqa: BLE001 - equality not supported
+                continue
+        return False
+
     def get_active_part_body(self) -> Any:
         """Get the solid body new features should go into.
 
@@ -646,15 +680,22 @@ class CATIAConnection:
         several solid bodies, and each pad/pocket/hole belongs to exactly one.
         The handle is remembered on the connection because part.Bodies is a
         collection with no "current" notion of its own.
+
+        THE REMEMBERED HANDLE IS CHECKED AGAINST THE ACTIVE PART, not merely
+        asked whether it still answers to ``.Name``. A body from a document that
+        is still open stays alive and keeps its name, so "it is alive" was true
+        for a body belonging to a different part - and every tool that read the
+        in-work body then worked in the wrong document (2026-11-14 report, N11).
         """
         part = self.get_active_part()
         remembered = getattr(self, "active_body", None)
         if remembered is not None:
-            try:
-                _ = remembered.Name          # still alive?
+            if self.body_in_part(part, remembered):
                 return remembered
-            except Exception:
-                self.active_body = None
+            # Not this part's - including "could not ask". MainBody is the honest
+            # answer then; catia_set_active_body re-points it when the caller
+            # really did mean another body.
+            self.active_body = None
         return part.MainBody
 
     def get_origin_elements(self) -> dict[str, Any]:

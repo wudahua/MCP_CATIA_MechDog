@@ -5883,6 +5883,13 @@ class PartDesignTools:
         # IndexError instead of its own sketch (reported 2026-10-28, P1).
         notes: list[str] = []
         payload: dict[str, Any] = {
+            # WHICH DOCUMENT this was read from. The 2026-11-14 report's N11 was
+            # this tool answering with another part's body while
+            # catia_get_active_document_info answered with the active one - two
+            # tools, same moment, different documents, and nothing in either
+            # reply said so. The name costs nothing and settles it.
+            "document": str(getattr(getattr(self.conn, "active_document", None),
+                                    "Name", "") or ""),
             "body": str(body.Name),
             "count": len(features),
             "bodies": part.Bodies.Count,

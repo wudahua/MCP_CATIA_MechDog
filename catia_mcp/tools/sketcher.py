@@ -3927,6 +3927,16 @@ class SketcherTools:
                 failed.append(f"{label}: {str(error).splitlines()[0][:70]}")
                 continue
             name = str(getattr(constraint, "Name", "") or "?")
+            # GIVE IT A NAME THAT SAYS WHAT IT DRIVES. CATIA's own name is
+            # '半径.5' for the semi-major and '半径.6' for the semi-minor, so on a
+            # 7-section loft the numbers say nothing and the report's author had to
+            # read the VALUES back to tell which was which - "从名字看不出哪个是
+            # major / minor，只能靠数值大小反推" (2026-11-14 report, N10). A
+            # formula bound to the wrong one is silent.
+            renamed = self._rename_constraint(constraint, label)
+            if renamed:
+                name = renamed
+            self._remember_drive(name, label)
             try:
                 value = float(constraint.Dimension.Value)
                 made.append(f"'{name}' = {value:g} mm ({label})")
@@ -3955,6 +3965,60 @@ class SketcherTools:
         if failed:
             text += " Not added: " + "; ".join(failed) + "."
         return text
+
+    #: The name each drive gets, and the key `drives` carries in the reply. ASCII
+    #: on purpose: CATIA's own names are localised ('半径'), and a name that
+    #: depends on the installed language cannot be written into a formula portably.
+    _DRIVE_NAMES = {"radius": ("Radius", "radius"),
+                    "semi-major": ("MajorRadius", "major_radius"),
+                    "semi-minor": ("MinorRadius", "minor_radius")}
+
+    def _rename_constraint(self, constraint: Any, label: str) -> str | None:
+        """Try to rename it; return the name it ACTUALLY has afterwards.
+
+        Whether a Constraint's Name is writable on V5 is not assumed here - it is
+        written, read back, and the read-back value is what the reply quotes. If
+        the assignment is refused or ignored, CATIA's localised name stays and the
+        `drives` field in catia_sketch_get_geometry is what carries the meaning
+        instead (it is recorded either way).
+        """
+        wanted = self._DRIVE_NAMES.get(label, (None, None))[0]
+        if not wanted:
+            return None
+        try:
+            index = int(constraint.Name.rsplit(".", 1)[-1])
+        except Exception:  # noqa: BLE001 - no numeric suffix: let CATIA number it
+            index = 1
+        target = f"{wanted}.{index}"
+        try:
+            constraint.Name = target
+        except Exception:  # noqa: BLE001 - read-only name: kept, reported by drives
+            return None
+        try:
+            actual = str(constraint.Name or "")
+        except Exception:  # noqa: BLE001
+            return None
+        return actual if actual.isascii() and actual else None
+
+    @classmethod
+    def _drive_from_name(cls, name: str) -> str | None:
+        """Read the meaning out of a name this tool wrote (survives a reopen)."""
+        for _label, (written, drive) in cls._DRIVE_NAMES.items():
+            if name.startswith(written + "."):
+                return drive
+        return None
+
+    def _remember_drive(self, constraint_name: str, label: str) -> None:
+        """Record which meaning this constraint's name has, for this session."""
+        drive = self._DRIVE_NAMES.get(label, (None, None))[1]
+        if not drive or not constraint_name or constraint_name == "?":
+            return
+        sketch = self._active_sketch
+        key = self._sketch_key(str(getattr(sketch, "Name", ""))) if sketch else "?"
+        table = getattr(self, "_constraint_drives", None)
+        if table is None:
+            table = self._constraint_drives = {}
+        table.setdefault(key, {})[constraint_name] = drive
 
     @staticmethod
     def _constraint_parameter_path(part: Any, constraint_name: str) -> str | None:
@@ -4770,6 +4834,8 @@ class SketcherTools:
         # own MajorRadius says what it IS, a semi-axis constraint says whether a
         # parameter can CHANGE it.
         constraint_list: list[dict[str, Any]] = []
+        drives = getattr(self, "_constraint_drives", {}).get(
+            self._sketch_key(str(sketch.Name)), {})
         try:
             constraints = sketch.Constraints
             for index in range(1, int(constraints.Count) + 1):
@@ -4782,6 +4848,15 @@ class SketcherTools:
                     entry["value_mm"] = round(float(constraint.Dimension.Value), 6)
                 except Exception:  # noqa: BLE001 - Fix/Parallel carry no value
                     entry["non_dimensional"] = True
+                # WHICH semi-axis is this? A name alone cannot answer it: CATIA
+                # calls both '半径.N', so a formula attached to the wrong one moves
+                # the short axis where the long one was meant (2026-11-14 report,
+                # N10). Recorded when the constraint was created in this session;
+                # after a reopen the rename (if V5 allowed it) is what says it.
+                drive = drives.get(entry["name"]) or self._drive_from_name(
+                    entry["name"])
+                if drive:
+                    entry["drives"] = drive
                 constraint_list.append(entry)
         except Exception:  # noqa: BLE001 - not being able to list them is not fatal
             constraint_list = []
@@ -4802,6 +4877,10 @@ class SketcherTools:
                 "so a line is known by its index and its neighbours, not by its "
                 "coordinates. Use catia_sketch_edit to reopen it and append, or "
                 "catia_sketch_delete_element to remove one element. "
+                "drives names what a dimensional constraint moves - 'radius', "
+                "'major_radius' or 'minor_radius' - because CATIA calls both "
+                "semi-axes '\u534a\u5f84.N' and a formula attached to the wrong one "
+                "moves the short axis where the long one was meant. "
                 "absolute_axis: true marks the sketch's own reference frame at "
                 "index 1 - it is not geometry you drew, and the first element you "
                 "draw is index 2; constraints and deletes refuse that index."

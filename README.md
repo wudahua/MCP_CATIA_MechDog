@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.129** · [what changed](CHANGELOG.md) ·
+**0.3.130** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1315,7 +1315,7 @@ the reason `catia_circ_pattern` now says which mode produced its copies: a reply
 that states its own assumptions can be contradicted by the next measurement,
 while a reply that only reports success cannot.
 
-## From a drawing to a sketch (0.3.128)
+## From a drawing to a sketch (0.3.128, extended in 0.3.130)
 
 `catia_read_drawing` answers "what is in this file" without touching CATIA:
 format, the file's own units and the resulting millimetres per unit, contour and
@@ -1347,6 +1347,24 @@ Two facts about real drawings that this had to accept:
   whole; one with live text imports the geometry and says how many runs it
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
+
+0.3.130 made the drawing path answer the questions a two-page sheet actually
+asks, on that same file (297.011 x 210.016 mm per page, as a PDF reader reports):
+
+* **`page`** picks one page (1..N in write order). Both pages used to land in one
+  coordinate system and `source` reported the page's OBJECT id, so a two-page file
+  said "page 12". Page 1 is 1 417 contours, page 2 is 878.
+* **Geometry outside the page and outside a clip is dropped.** 86 of 86
+  rectangular clipping paths applied, 989 painted paths removed on page 1 - the
+  imported bounds are 277.75 x 201.45 mm against the page's 297.01 x 210.02, where
+  the reply used to say 372 x 271.
+* **A PDF's circle is a circle.** The four Beziers every drawing program uses are
+  fitted back to a real arc (632 on page 1, 69 genuine free-form curves sampled);
+  a 40 x 20 plate with a Bezier D10 hole pads to **7 214.61 mm³** against the
+  analytic 7 214.60, where a 16-sided hole would have been 7 234.63.
+* **`max_aspect` and a size histogram** because a frame's edge line is closed,
+  346 mm long and 0.17 mm thick: 8 closed contours became 7, and the histogram
+  puts the size cliff on paper instead of making `min_size` a bisection.
 
 ## Tool reference
 

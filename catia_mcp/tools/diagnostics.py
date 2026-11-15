@@ -1025,7 +1025,39 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
             "edges that share an endpoint, and where more than one unused edge "
             "meets a joint they leave it open and report the count instead of "
             "guessing - a wrong guess is a profile the drawing never had, and it "
-            "pads to a plausible-looking solid."
+            "pads to a plausible-looking solid. 0.3.130 closes the four things "
+            "the NEXT report measured on that same two-page sheet. Pages are "
+            "selectable (`page`, counted 1..N in write order) - `source` used to "
+            "carry the page OBJECT number, so a two-page file answered \"page "
+            "12\" - and every page's MediaBox is reported, with geometry outside "
+            "it clipped away (989 painted paths dropped on page 1, and the "
+            "imported bounds 277.75 x 201.45 mm against an A4 page of 297.01 x "
+            "210.02; the old reply said 372 x 271 because both pages and the "
+            "off-page paint landed in one frame). Clipping paths are APPLIED, not "
+            "counted (86 of 86 rectangular ones on page 1). And a PDF's Beziers "
+            "that ARE a circle are fitted back to a real arc: 632 arcs against 69 "
+            "genuine free-form curves on page 1, proved by a volume - a 40 x 20 "
+            "plate with a D10 hole made of four Beziers pads to 7 214.61 mm3 "
+            "against the analytic 7 214.60, where a 16-sided hole would have been "
+            "7 234.63."
+        ),
+    },
+    {
+        "member": "telling an ellipse's two semi-axis constraints apart",
+        "status": "AVAILABLE_WITH_LIMIT",
+        "detail": (
+            "catia_sketch_ellipse drives both semi-axes, and CATIA calls the two "
+            "constraints '半径.5' and '半径.6' - the same word twice, so a formula "
+            "attached to the wrong one silently moves the short axis where the "
+            "long one was meant (2026-11-14 report, N10). 0.3.130 renames them at "
+            "creation to 'MajorRadius.N' and 'MinorRadius.N'; measured on B30 "
+            "2026-11-14, V5 does accept a written Constraint.Name, and the two "
+            "constraints on one ellipse came back as MajorRadius.1 and "
+            "MinorRadius.2. The rename is attempted, READ BACK, and only the "
+            "read-back name is quoted - so on a build that refuses it the reply "
+            "still tells the truth. catia_sketch_get_geometry carries "
+            "drives='major_radius' | 'minor_radius' | 'radius' on each constraint "
+            "either way, which is the field to bind a formula from."
         ),
     },
 ]

@@ -151,14 +151,107 @@ def contour_bbox(contour: dict) -> tuple[float, float, float, float]:
             max(p[0] for p in pts), max(p[1] for p in pts))
 
 
+def size_histogram(diagonals: Sequence[float],
+                   edges: Sequence[float] = (0.5, 1, 2, 3, 5, 10, 20, 50)
+                   ) -> list[dict[str, Any]]:
+    """How many contours fall in each size band, so `min_size` is read off data.
+
+    The 2026-11-14 report's sheet had 4196 contours and the only way to find the
+    part among them was to raise `min_size` and re-run: 10 still left 14, and the
+    report's own words are "试到 min_size=10 才把 4196 降到 14 个轮廓" (N7). A
+    caller should not have to guess a threshold by bisection - the distribution
+    makes the cliff visible: text and arrowheads pile up under 3 mm, the part sits
+    alone above 10, and where the gap is decides the number.
+
+    Bands are [edge[i-1], edge[i]) in millimetres, plus a first band below
+    `edges[0]` (labelled "0") and a last one for everything above `edges[-1]`.
+    Counts are exact; nothing is sampled.
+    """
+    bounds = [float(edge) for edge in edges]
+    buckets = [0] * (len(bounds) + 1)
+    for value in diagonals:
+        placed = len(bounds)
+        for index, edge in enumerate(bounds):
+            if value < edge:
+                placed = index
+                break
+        buckets[placed] += 1
+    table: list[dict[str, Any]] = []
+    for index, count in enumerate(buckets):
+        if index == 0:
+            low, high = 0.0, bounds[0]
+            label = f"<{bounds[0]:g}"
+        elif index == len(bounds):
+            low, high = bounds[-1], None
+            label = f">={bounds[-1]:g}"
+        else:
+            low, high = bounds[index - 1], bounds[index]
+            label = f"{low:g}-{high:g}"
+        table.append({"mm": label, "from_mm": low, "to_mm": high,
+                      "contours": count})
+    return table
+
+
 def contour_is_closed(contour: dict, tol: float = 1e-6) -> bool:
+    """Closed means NO GAP ANYWHERE, not "the two outer ends happen to meet".
+
+    This used to compare only the first piece's start with the last piece's end.
+    On the 2026-11-14 report's Apple sheet that answered True for a contour whose
+    three stitched joints were still 3.97, 5.36 and 5.68 um apart while its outer
+    ends coincided to 0.000000: ``catia_import_drawing`` replied "closed", and
+    ``catia_pad`` then refused the same sketch with six free endpoints. One
+    measurement was taken at the seam that could not fail, the report was built
+    on it, and the failure landed three steps later where it looked like CATIA's
+    opinion rather than ours.
+
+    Every joint is checked now, not only the one at the ends. A piece whose ends
+    cannot be read (a circle drawn on its own inside a longer chain) makes the
+    answer False: "I could not tell" is not "closed".
+    """
     pieces = contour.get("pieces") or []
     if not pieces:
         return False
     if len(pieces) == 1 and pieces[0].get("t") in ("circle", "ellipse"):
         return True
-    first, last = _piece_start(pieces[0]), _piece_end(pieces[-1])
-    return first is not None and last is not None and _dist(first, last) <= tol
+    previous: tuple[float, float] | None = None
+    for piece in pieces:
+        start, end = _piece_start(piece), _piece_end(piece)
+        if start is None or end is None:
+            return False
+        if previous is not None and _dist(previous, start) > tol:
+            return False
+        previous = end
+    first = _piece_start(pieces[0])
+    return first is not None and previous is not None and _dist(previous, first) <= tol
+
+
+def contour_free_ends(contour: dict, tol: float = 1e-6) -> list[tuple[float, float]]:
+    """Endpoints of one contour that nothing else in it meets.
+
+    THE SAME TEST the pad applies to a drawn sketch (``geometry2d.open_ends``),
+    asked of the contour BEFORE it is drawn. The 2026-11-14 report's P0 was that the
+    import said "closed" and the pad said "six free endpoints"; two verdicts on
+    one sketch is one too many, so the import now asks this question itself and
+    answers with the pad's own rule.
+    """
+    pieces = contour.get("pieces") or []
+    if len(pieces) == 1 and pieces[0].get("t") in ("circle", "ellipse"):
+        return []
+    points: list[tuple[tuple[float, float], int]] = []
+    for piece in pieces:
+        start, end = _piece_start(piece), _piece_end(piece)
+        if start is None or end is None:
+            continue
+        if _dist(start, end) <= tol:
+            continue          # a closed piece on its own (a full arc)
+        points.append((start, len(points)))
+        points.append((end, len(points)))
+    free: list[tuple[float, float]] = []
+    for point, index in points:
+        others = [(other, j) for other, j in points if j != index]
+        if not any(_dist(point, other) <= tol for other, _ in others):
+            free.append(point)
+    return free
 
 
 def _piece_start(piece: dict) -> tuple[float, float] | None:
@@ -217,6 +310,38 @@ def _reverse_contour(contour: dict) -> dict:
             "pieces": [_reverse_piece(p) for p in reversed(contour["pieces"])]}
 
 
+def _snap_piece(piece: dict, point: tuple[float, float],
+                at_end: bool, tol: float) -> bool:
+    """Move one end of ``piece`` onto ``point``. False when it cannot be moved.
+
+    A line and a sampled polyline can have an endpoint written anywhere. An arc
+    cannot: its ends are angles on the circle it already has, so the only honest
+    move is to the angle of ``point`` - and only when ``point`` is actually on
+    that circle. A circle is closed by itself and is never snapped.
+    """
+    kind = piece.get("t")
+    if kind == "line":
+        piece["p1" if not at_end else "p2"] = (float(point[0]), float(point[1]))
+        return True
+    if kind == "poly":
+        if not piece["pts"]:
+            return False
+        if at_end:
+            piece["pts"][-1] = (float(point[0]), float(point[1]))
+        else:
+            piece["pts"][0] = (float(point[0]), float(point[1]))
+        return True
+    if kind == "arc":
+        centre = (float(piece["c"][0]), float(piece["c"][1]))
+        if abs(_dist(centre, point) - float(piece["r"])) > tol:
+            return False
+        angle = math.degrees(math.atan2(point[1] - centre[1],
+                                        point[0] - centre[0]))
+        piece["a0" if not at_end else "a1"] = angle
+        return True
+    return False
+
+
 def stitch_contours(contours: list[dict], tolerance: float = 1e-3) -> tuple[list[dict], dict]:
     """Join open contours whose ends meet, so a profile becomes one contour.
 
@@ -242,7 +367,8 @@ def stitch_contours(contours: list[dict], tolerance: float = 1e-3) -> tuple[list
     open_ones: list[dict] = [c for c in contours if not c.get("closed")]
     if len(open_ones) < 2:
         return list(contours), {"stitched": 0, "loops": len(closed),
-                                "branches": 0, "open": len(open_ones)}
+                                "branches": 0, "open": len(open_ones),
+                                "unsnapped": 0}
 
     def cell(point: tuple[float, float]) -> tuple[int, int]:
         return (int(round(point[0] / tolerance)),
@@ -273,6 +399,10 @@ def stitch_contours(contours: list[dict], tolerance: float = 1e-3) -> tuple[list
     used: set[int] = set()
     out: list[dict] = list(closed)
     branches = 0
+    #: joints accepted within `tolerance` that could NOT be closed - an arc whose
+    #: end does not sit on its own circle. Counted, because a residual gap is the
+    #: difference between "closed" and "closed enough to look closed".
+    unsnapped = 0
     for number, contour in enumerate(open_ones):
         if number in used:
             continue
@@ -299,8 +429,22 @@ def stitch_contours(contours: list[dict], tolerance: float = 1e-3) -> tuple[list
                 piece_set = (open_ones[other] if which == "start"
                              else _reverse_contour(open_ones[other]))
                 if direction == "forward":
+                    # CLOSE THE SEAM, do not just declare it. Accepting a join
+                    # within `tolerance` and leaving the two ends where they were
+                    # put a gap of up to `tolerance` in the middle of a contour
+                    # that then reported itself closed - measured on the
+                    # 2026-11-14 Apple sheet at 3.97/5.36/5.68 um, which is
+                    # invisible at four decimals and fatal to a pad.
+                    joint = _piece_end(chain["pieces"][-1])
+                    if joint is not None and not _snap_piece(
+                            piece_set["pieces"][0], joint, False, tolerance):
+                        unsnapped += 1
                     chain["pieces"].extend(piece_set["pieces"])
                 else:
+                    joint = _piece_start(chain["pieces"][0])
+                    if joint is not None and not _snap_piece(
+                            piece_set["pieces"][-1], joint, True, tolerance):
+                        unsnapped += 1
                     chain["pieces"] = (list(piece_set["pieces"])
                                        + list(chain["pieces"]))
                 if (direction == "forward" and which == "start"
@@ -315,6 +459,7 @@ def stitch_contours(contours: list[dict], tolerance: float = 1e-3) -> tuple[list
         "loops": sum(1 for c in out if c.get("closed")),
         "branches": branches,
         "open": sum(1 for c in out if not c.get("closed")),
+        "unsnapped": unsnapped,
     }
     return out, info
 
@@ -354,16 +499,26 @@ def read_drawing(path: str, *, scale: float = 1.0,
                  layers: Iterable[str] | None = None,
                  region: Sequence[float] | None = None,
                  min_size: float | None = None,
+                 max_aspect: float | None = None,
                  closed_only: bool = False,
                  origin: str = "bbox",
                  tolerance: float = 1e-6,
-                 stitch: bool = True) -> dict[str, Any]:
+                 stitch: bool = True,
+                 page: int | None = None,
+                 curve_tolerance: float | None = None) -> dict[str, Any]:
     """Parse to contours, filter, convert to millimetres, place.
 
     `scale` multiplies the file's OWN units, after they have been honoured: a
     drawing saved in inches arrives at true size with scale=1, and a 1:100 sheet
     becomes a 1:1 part with scale=100. Both numbers are in the reply, because
     that decision is the one that silently ruins a model.
+
+    TWO COORDINATE FRAMES ARE IN PLAY and both are reported: `region` is compared
+    against the DRAWING's coordinates (what `drawing_bounds_mm` describes), while
+    `bounds_mm` describes what ends up in the sketch after `origin='bbox'` has
+    moved it. They were one frame in the reply and two in the filter, so "read the
+    bbox, set region from it" - the workflow this tool itself recommends -
+    selected the wrong part of the sheet (2026-11-14 report, N8).
     """
     path = str(path)
     if not scale or float(scale) <= 0:
@@ -378,6 +533,13 @@ def read_drawing(path: str, *, scale: float = 1.0,
             "kept geometry so its lower-left corner sits at (0,0); 'as_drawn' "
             "keeps the sheet coordinates. Nothing was read.",
             code="BAD_ARGUMENT", stage="validate")
+    if max_aspect is not None and (not max_aspect or float(max_aspect) < 1.0):
+        raise ArgumentOutOfRange(
+            f"max_aspect has to be at least 1 (long side / short side); got "
+            f"{max_aspect!r}. It drops a drawing frame's edge lines, which are "
+            "300 mm long and 0.2 mm thick and closed - a closed contour that no "
+            "pad should ever be built on. Nothing was read.",
+            code="ASPECT_OUT_OF_RANGE", stage="validate")
     # AFTER the argument checks, deliberately: a bad number or a bad enum is a
     # typo the caller can fix without the file being there, and it is the same
     # ordering rule catia_open_document learned the expensive way in 0.3.127
@@ -398,7 +560,7 @@ def read_drawing(path: str, *, scale: float = 1.0,
     elif fmt == "svg":
         parsed = parse_svg(data)
     else:
-        parsed = parse_pdf(data)
+        parsed = parse_pdf(data, page=page, curve_tolerance=curve_tolerance)
 
     contours: list[dict] = parsed["contours"]
     stitch_info = None
@@ -410,10 +572,16 @@ def read_drawing(path: str, *, scale: float = 1.0,
         contours, stitch_info = stitch_contours(contours, STITCH_TOLERANCE)
     factor = parsed["mm_per_unit"] * float(scale)
     kept, dropped = _filter(contours, layers=layers, region=region,
-                            min_size=min_size, closed_only=closed_only,
+                            min_size=min_size, max_aspect=max_aspect,
+                            closed_only=closed_only,
                             factor=factor, tolerance=tolerance)
     for contour in kept:
         _scale_contour(contour, factor)
+    drawing_bounds = None
+    if kept:
+        boxes = [contour_bbox(c) for c in kept]
+        drawing_bounds = [min(b[0] for b in boxes), min(b[1] for b in boxes),
+                          max(b[2] for b in boxes), max(b[3] for b in boxes)]
     dx = dy = 0.0
     if origin == "bbox" and kept:
         boxes = [contour_bbox(c) for c in kept]
@@ -437,6 +605,12 @@ def read_drawing(path: str, *, scale: float = 1.0,
         "origin_shift_mm": [dx, dy],
         "contours": kept,
         "bounds_mm": bounds,
+        # The frame `region` is compared in, BEFORE any shifting. Reported beside
+        # `bounds_mm` because the two differ whenever origin='bbox', and using
+        # one for the other selected the wrong part of the sheet (N8).
+        "drawing_bounds_mm": drawing_bounds,
+        "page_bounds_mm": parsed.get("page_bounds_mm"),
+        "pages": parsed.get("pages"),
         "counts": {
             "contours": len(kept),
             "closed": sum(1 for c in kept if c["closed"]),
@@ -444,6 +618,12 @@ def read_drawing(path: str, *, scale: float = 1.0,
             "dropped": dropped,
             "stitched": (stitch_info or {}).get("stitched", 0),
             "branches": (stitch_info or {}).get("branches", 0),
+            # A joint that was accepted but could not be closed, and the free ends
+            # the pad's own rule would find. `closed` is a claim about geometry;
+            # `free_ends` is the number `catia_pad` acts on, and the two are
+            # reported together so they cannot drift apart again.
+            "unsnapped": (stitch_info or {}).get("unsnapped", 0),
+            "free_ends": sum(len(contour_free_ends(c)) for c in kept),
         },
         "stats": parsed["stats"],
         "stitch": stitch_info,
@@ -451,14 +631,14 @@ def read_drawing(path: str, *, scale: float = 1.0,
     }
 
 
-def _filter(contours, *, layers, region, min_size, closed_only, factor,
-            tolerance) -> tuple[list[dict], dict[str, int]]:
+def _filter(contours, *, layers, region, min_size, max_aspect, closed_only,
+            factor, tolerance) -> tuple[list[dict], dict[str, int]]:
     """The one place a contour is kept or dropped, counting every reason."""
     wanted = None
     if layers:
         wanted = {str(name).strip().upper() for name in layers} or None
     dropped = {"layer": 0, "region": 0, "size": 0, "open": 0,
-               "degenerate": 0}
+               "degenerate": 0, "thin": 0}
     kept: list[dict] = []
     for contour in contours:
         if wanted is not None:
@@ -484,6 +664,14 @@ def _filter(contours, *, layers, region, min_size, closed_only, factor,
         if min_size:
             if math.hypot(box[2] - box[0], box[3] - box[1]) < float(min_size):
                 dropped["size"] += 1
+                continue
+        if max_aspect is not None:
+            # A frame's edge line is 346 mm long and 0.17 mm thick: closed, and
+            # far above any min_size, so nothing else here removes it (N9).
+            long_side = max(box[2] - box[0], box[3] - box[1])
+            short_side = min(box[2] - box[0], box[3] - box[1])
+            if short_side <= 0.0 or long_side / short_side > float(max_aspect):
+                dropped["thin"] += 1
                 continue
         if closed_only and not contour["closed"]:
             dropped["open"] += 1
@@ -1538,7 +1726,9 @@ def _flip_contour_y(contour: dict) -> None:
 # PDF
 # --------------------------------------------------------------------------
 
-def parse_pdf(data: bytes) -> dict[str, Any]:
+def parse_pdf(data: bytes, *, page: int | None = None,
+              curve_tolerance: float | None = None,
+              clip: bool = True) -> dict[str, Any]:
     """Vector PDF: walk each page's content stream and keep the painted paths.
 
     Nothing here reads glyphs. Text drawn as text stays text - its outlines live
@@ -1547,6 +1737,19 @@ def parse_pdf(data: bytes) -> dict[str, Any]:
     - which is what "文字已转曲" means - arrives as ordinary paths and is read
     like the rest, which is why the report's Apple sheet would work here and a
     plain Word export would not.
+
+    PAGES ARE SELECTABLE AND NUMBERED AS PAGES. `source` used to carry the page
+    OBJECT number - "page 3" and "page 12" on a two-page sheet - because that was
+    the number the dictionary happened to have; a caller asking for page 2 of
+    that file could not, and the two pages' views landed in one coordinate
+    system, which is why the imported sheet measured 372 x 271 mm against a real
+    297 x 210 page (2026-11-14 report, N3).
+
+    CLIPPING IS APPLIED, not counted. `W n` with a rectangular path is the usual
+    way a drawing hides a construction box; ignoring it imported geometry that
+    was never on the page - measured on the same sheet, paths at y = 724 pt on a
+    595 pt page (N4). Geometry outside the page box is dropped as well, because
+    no reader ever saw it.
     """
     if data[:5] != b"%PDF-":
         raise ArgumentRejected(
@@ -1558,21 +1761,56 @@ def parse_pdf(data: bytes) -> dict[str, Any]:
             "No PDF objects could be found: the file is either damaged or "
             "encrypted. Nothing was read.",
             code="PDF_UNREADABLE", stage="validate")
-    pages = _pdf_pages(objects)
-    if not pages:
+    numbered = list(enumerate(_pdf_pages(objects), start=1))
+    if not numbered:
         raise ArgumentRejected(
             f"The PDF has {len(objects)} objects but no page dictionary. "
             "Nothing was read.", code="PDF_NO_PAGES", stage="validate")
+    total = len(numbered)
+    if page is not None:
+        try:
+            wanted = int(page)
+        except (TypeError, ValueError) as error:
+            raise ArgumentRejected(
+                f"page has to be a page number; got {page!r}. This file has "
+                f"{total} page(s). Nothing was read.",
+                code="BAD_ARGUMENT", stage="validate") from error
+        if not 1 <= wanted <= total:
+            raise ArgumentOutOfRange(
+                f"page {wanted} does not exist: this file has {total} page(s), "
+                "numbered from 1 in the order they are written. Nothing was "
+                "read.", code="PAGE_OUT_OF_RANGE", stage="validate")
+        numbered = [numbered[wanted - 1]]
 
+    tolerance = 0.05 if curve_tolerance is None else float(curve_tolerance)
+    if tolerance <= 0:
+        raise ArgumentOutOfRange(
+            f"curve_tolerance has to be a positive distance in mm; got "
+            f"{curve_tolerance!r}. It is how far a sampled curve may wander from "
+            "the real one. Nothing was read.",
+            code="TOLERANCE_OUT_OF_RANGE", stage="validate")
     stats: dict[str, Any] = {"entities": {}, "skipped": {}, "text_runs": 0,
-                             "elements": 0, "pages": len(pages),
-                             "content_streams": 0, "curves": 0,
-                             "form_xobjects": 0, "clip_ops": 0}
+                             "elements": 0, "pages": total,
+                             "pages_read": len(numbered), "content_streams": 0,
+                             "curves": 0, "curves_flattened": 0,
+                             "arcs_fitted": 0, "form_xobjects": 0,
+                             "clip_ops": 0, "clip_applied": 0,
+                             "clip_ignored": 0, "clipped_out": 0,
+                             "clip_trimmed": 0, "clip_straddling": 0}
     notes: list[str] = []
     contours: list[dict] = []
-    for number, page in pages:
-        matrix = _pdf_page_matrix(page)
-        for ref in _pdf_contents(page):
+    boxes: list[list[float]] = []
+    page_table: list[dict[str, Any]] = []
+    for index, (_object, page_dict) in numbered:
+        matrix = _pdf_page_matrix(page_dict)
+        box = _pdf_page_box(page_dict, matrix)
+        if box is not None:
+            boxes.append(box)
+        page_table.append({"page": index,
+                           "size_mm": [round((box[2] - box[0]) * _PT_MM, 3),
+                                       round((box[3] - box[1]) * _PT_MM, 3)]
+                           if box else None})
+        for ref in _pdf_contents(page_dict):
             stream = objects.get(ref)
             if stream is None:
                 continue
@@ -1581,8 +1819,9 @@ def parse_pdf(data: bytes) -> dict[str, Any]:
                 continue
             stats["content_streams"] += 1
             _pdf_run(content, objects, contours, stats, matrix,
-                     resources=_pdf_resources(objects, page), depth=0,
-                     source=f"page {number}")
+                     resources=_pdf_resources(objects, page_dict), depth=0,
+                     source=f"page {index}", clip_box=box if clip else None,
+                     tolerance=tolerance / _PT_MM)
     if stats["text_runs"]:
         notes.append(
             f"{stats['text_runs']} text run(s) were drawn as TEXT, not as "
@@ -1590,15 +1829,44 @@ def parse_pdf(data: bytes) -> dict[str, Any]:
             "font program, which this does not parse. Dimensions and notes in "
             "such a drawing are missing from the import. A drawing exported "
             "with its text converted to curves (\"convert text to outlines\") "
-            "has no text runs at all and imports completely.")
-    if stats["clip_ops"]:
+            "has no text runs at all and imports completely - but then nothing "
+            "here can tell a dimension's numerals from the part, so use "
+            "min_size / region deliberately.")
+    if stats["clip_ignored"]:
         notes.append(
-            f"{stats['clip_ops']} clipping path(s) were ignored: geometry "
-            "outside the visible area is still imported. That is usually the "
-            "whole model - what a clip removes is a construction box - but if "
-            "the import has lines that were not on screen, this is why.")
+            f"{stats['clip_ignored']} clipping path(s) were not rectangular and "
+            "were not applied, so geometry inside them may be missing or may be "
+            "visible geometry that was clipped away. The page box IS applied.")
+    if stats["clipped_out"]:
+        notes.append(
+            f"{stats['clipped_out']} painted path(s) fell entirely outside the "
+            "visible area (a clip path or the page box) and were not imported.")
+    bounds = None
+    if boxes:
+        bounds = [round(min(b[0] for b in boxes), 4),
+                  round(min(b[1] for b in boxes), 4),
+                  round(max(b[2] for b in boxes), 4),
+                  round(max(b[3] for b in boxes), 4)]
     return {"contours": contours, "stats": stats, "mm_per_unit": _PT_MM,
-            "unit_code": None, "units": "pt", "notes": notes}
+            "unit_code": None, "units": "pt", "notes": notes,
+            "pages": page_table,
+            "page_bounds_mm": ([round(v * _PT_MM, 3) for v in bounds]
+                               if bounds else None)}
+
+
+def _pdf_page_box(page: dict, matrix) -> list[float] | None:
+    """The visible page, in the same device coordinates the paths are in."""
+    raw = page.get("MediaBox")
+    numbers: list[float] = []
+    if isinstance(raw, tuple) and raw[0] == "array":
+        numbers = [float(item[1]) for item in raw[1] if item[0] == "num"]
+    if len(numbers) < 4:
+        return None
+    x0, y0, x1, y1 = numbers[:4]
+    apply = _Matrix(matrix)
+    corners = [apply(x0, y0), apply(x1, y0), apply(x1, y1), apply(x0, y1)]
+    return [min(p[0] for p in corners), min(p[1] for p in corners),
+            max(p[0] for p in corners), max(p[1] for p in corners)]
 
 
 # --- PDF object layer -----------------------------------------------------
@@ -1915,10 +2183,20 @@ def _pdf_page_matrix(page: dict) -> tuple[float, ...]:
 
 def _pdf_run(content: bytes, objects: dict[int, dict], contours: list[dict],
              stats: dict, matrix, *, resources: dict, depth: int,
-             source: str) -> None:
-    """One content stream. Painted subpaths become contours."""
+             source: str, clip_box: list[float] | None = None,
+             tolerance: float = 0.142) -> None:
+    """One content stream. Painted subpaths become contours.
+
+    `clip_box` is the page box in device coordinates; `tolerance` is the curve
+    error in DEVICE units (points), because that is the space the paths are
+    converted into before anything is measured.
+    """
     lexer = _PdfLexer(content)
     state = [tuple(matrix)]
+    # The clip travels with the graphics state: q/Q push and pop it, exactly as
+    # they do the matrix. Ignoring `W` is why a clipped-away construction box
+    # arrived in the sketch (2026-11-14 report, N4).
+    clips: list[list[float] | None] = [list(clip_box) if clip_box else None]
     operands: list[tuple] = []
     pieces: list[dict] = []
     current: tuple[float, float] | None = None
@@ -1930,6 +2208,32 @@ def _pdf_run(content: bytes, objects: dict[int, dict], contours: list[dict],
     def flush() -> None:
         nonlocal pieces, current, start_point
         if pieces:
+            clip = clips[-1]
+            if clip is not None:
+                box = _pieces_box(pieces)
+                if box is not None and not _boxes_overlap(box, clip):
+                    stats["clipped_out"] += 1
+                    pieces = []
+                    current = None
+                    start_point = None
+                    return
+                if box is not None and not _box_inside(box, clip):
+                    # STRADDLING IS NOT THE SAME AS SURVIVING. Keeping a contour
+                    # whole because part of it is on the page is how a 297 x 210
+                    # mm sheet came out 25 % oversized: the visible part is what
+                    # a reader sees, so the visible part is what is imported
+                    # (2026-11-14 report, N3/N4). Arcs and circles are kept whole
+                    # and counted instead - trimming them is a different piece of
+                    # geometry, not a shorter version of this one.
+                    trimmed, changed, whole = _clip_pieces(pieces, clip)
+                    stats["clip_trimmed"] += 1 if changed else 0
+                    stats["clip_straddling"] += whole
+                    pieces = trimmed
+                    if not pieces:
+                        stats["clipped_out"] += 1
+                        current = None
+                        start_point = None
+                        return
             contours.append({"pieces": pieces, "closed": False, "layer": "pdf",
                              "source": source})
         pieces = []
@@ -1956,9 +2260,12 @@ def _pdf_run(content: bytes, objects: dict[int, dict], contours: list[dict],
         numbers = [item[1] for item in operands if item[0] == "num"]
         if op == b"q":
             state.append(state[-1])
+            clips.append(clips[-1])
         elif op == b"Q":
             if len(state) > 1:
                 state.pop()
+            if len(clips) > 1:
+                clips.pop()
         elif op == b"cm" and len(numbers) >= 6:
             state[-1] = _mat_mul(tuple(numbers[-6:]), state[-1])
         elif op == b"m" and len(numbers) >= 2:
@@ -1987,9 +2294,22 @@ def _pdf_run(content: bytes, objects: dict[int, dict], contours: list[dict],
                 end = matrix_now(*numbers[-2:])
                 c2 = end
             p0 = current or c1
-            points = _cubic_points(p0, c1, c2, end)
-            pieces.append({"t": "poly", "pts": points})
             stats["curves"] += 1
+            # A CIRCLE IS A CIRCLE. Drawing software emits circles and fillets as
+            # four cubic Beziers, and flattening them turned a D6 hole into a
+            # 24-sided one - "not faceted" was true of DXF and SVG and a promise
+            # the PDF path did not keep (2026-11-14 report, N6). Fitting a circle
+            # through the sampled points is exact for these and declines politely
+            # for a genuine free-form curve.
+            arc = _cubic_as_arc(p0, c1, c2, end, min(tolerance, 0.02))
+            if arc is not None:
+                pieces.append(arc)
+                stats["arcs_fitted"] += 1
+            else:
+                pieces.append({"t": "poly", "pts": _cubic_points(
+                    p0, c1, c2, end, steps=_cubic_steps(
+                        p0, c1, c2, end, tolerance))})
+                stats["curves_flattened"] += 1
             current = end
         elif op == b"re" and len(numbers) >= 4:
             flush()
@@ -2017,6 +2337,12 @@ def _pdf_run(content: bytes, objects: dict[int, dict], contours: list[dict],
             stats["text_runs"] += 1
         elif op in (b"W", b"W*"):
             stats["clip_ops"] += 1
+            rect = _path_rect(pieces)
+            if rect is None:
+                stats["clip_ignored"] += 1
+            else:
+                stats["clip_applied"] += 1
+                clips[-1] = _rect_intersect(clips[-1], rect)
         elif op == b"Do" and depth < 3:
             name = None
             for item in reversed(operands):
@@ -2026,8 +2352,227 @@ def _pdf_run(content: bytes, objects: dict[int, dict], contours: list[dict],
             if name is not None:
                 _pdf_xobject(name, objects, contours, stats, state[-1],
                              resources=resources, depth=depth + 1,
-                             source=source)
+                             source=source, clip_box=clips[-1],
+                             tolerance=tolerance)
         operands = []
+
+
+def _pieces_box(pieces: list[dict]) -> list[float] | None:
+    points: list[tuple[float, float]] = []
+    for piece in pieces:
+        for which in (False, True):
+            point = _piece_start(piece) if not which else _piece_end(piece)
+            if point is not None:
+                points.append(point)
+        if piece.get("t") == "poly":
+            points.extend(piece["pts"])
+    if not points:
+        return None
+    return [min(p[0] for p in points), min(p[1] for p in points),
+            max(p[0] for p in points), max(p[1] for p in points)]
+
+
+def _boxes_overlap(first: list[float], second: list[float]) -> bool:
+    """Touching counts as overlapping - a contour on the clip edge is kept."""
+    return not (first[2] < second[0] or first[0] > second[2]
+                or first[3] < second[1] or first[1] > second[3])
+
+
+def _box_inside(box: list[float], rect: list[float]) -> bool:
+    return (box[0] >= rect[0] - 1e-9 and box[1] >= rect[1] - 1e-9
+            and box[2] <= rect[2] + 1e-9 and box[3] <= rect[3] + 1e-9)
+
+
+def _clip_segment(p1, p2, rect) -> tuple[tuple[float, float],
+                                          tuple[float, float]] | None:
+    """Liang-Barsky: the part of one segment inside ``rect``, or None.
+
+    `p` is the direction component for one boundary (0 means the segment runs
+    PARALLEL to it) and `q` is how far the start point is inside it (negative
+    means outside). The two were swapped here until 0.3.130, so `q == 0` - a start
+    point exactly ON the boundary - read as "parallel" and, with `p < 0`, the
+    whole segment was thrown away. Measured on a plate whose edge lies on the page
+    box: both boundary edges vanished and the clip left nothing to import, while
+    the reply counted it as "clipped out" rather than as a mistake.
+    """
+    x0, y0, x1, y1 = rect
+    dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+    start, end = 0.0, 1.0
+    for p, q in ((-dx, p1[0] - x0), (dx, x1 - p1[0]),
+                 (-dy, p1[1] - y0), (dy, y1 - p1[1])):
+        if abs(p) < 1e-15:
+            if q < 0:
+                return None      # parallel to this edge and outside it
+            continue
+        ratio = q / p
+        if p < 0:
+            if ratio > end:
+                return None
+            start = max(start, ratio)
+        else:
+            if ratio < start:
+                return None
+            end = min(end, ratio)
+    if end - start <= 1e-12:
+        return None
+    return ((p1[0] + start * dx, p1[1] + start * dy),
+            (p1[0] + end * dx, p1[1] + end * dy))
+
+
+def _clip_pieces(pieces: list[dict], rect: list[float]
+                 ) -> tuple[list[dict], bool, int]:
+    """Trim line geometry to ``rect``; keep arcs whole and say how many.
+
+    Returns ``(pieces, changed, straddling_arcs)``. Segment clipping is exact and
+    cheap; an arc's visible part is a different arc, so it is left alone and
+    counted - a caller who sees ``clip_straddling`` knows the bounds may exceed
+    the page by that much and why.
+    """
+    out: list[dict] = []
+    changed = False
+    whole = 0
+    for piece in pieces:
+        kind = piece.get("t")
+        if kind == "line":
+            clipped = _clip_segment(piece["p1"], piece["p2"], rect)
+            if clipped is None:
+                changed = True
+                continue
+            if clipped != (tuple(piece["p1"]), tuple(piece["p2"])):
+                changed = True
+            out.append({"t": "line", "p1": clipped[0], "p2": clipped[1]})
+        elif kind == "poly":
+            runs: list[list[tuple[float, float]]] = []
+            current: list[tuple[float, float]] = []
+            for first, second in zip(piece["pts"], piece["pts"][1:]):
+                clipped = _clip_segment(first, second, rect)
+                if clipped is None:
+                    if len(current) >= 2:
+                        runs.append(current)
+                    current = []
+                    changed = True
+                    continue
+                start, end = clipped
+                if tuple(first) != start:
+                    changed = True
+                if not current or _dist(current[-1], start) > 1e-9:
+                    if len(current) >= 2:
+                        runs.append(current)
+                    current = [start]
+                current.append(end)
+                if end != tuple(second):
+                    changed = True
+                    if len(current) >= 2:
+                        runs.append(current)
+                    current = []
+            if len(current) >= 2:
+                runs.append(current)
+            for run in runs:
+                out.append({"t": "poly", "pts": run})
+        else:
+            # arc / circle: inside stays, outside was dropped by the caller's
+            # bbox test, a straddling one is kept whole and counted.
+            whole += 1
+            out.append(piece)
+    return out, changed, whole
+
+
+def _rect_intersect(first: list[float] | None,
+                    second: list[float]) -> list[float]:
+    if first is None:
+        return list(second)
+    return [max(first[0], second[0]), max(first[1], second[1]),
+            min(first[2], second[2]), min(first[3], second[3])]
+
+
+def _path_rect(pieces: list[dict]) -> list[float] | None:
+    """The path as an axis-aligned rectangle, or None if it is anything else.
+
+    Only rectangles are applied as clips. A general path would need a polygon
+    clipper, and a half-implemented one is worse than an honest "not applied":
+    the count is reported either way.
+    """
+    if not pieces:
+        return None
+    for piece in pieces:
+        if piece.get("t") != "line":
+            return None
+        (x1, y1), (x2, y2) = piece["p1"], piece["p2"]
+        if abs(x1 - x2) > 1e-9 and abs(y1 - y2) > 1e-9:
+            return None
+    box = _pieces_box(pieces)
+    if box is None or box[2] - box[0] <= 1e-9 or box[3] - box[1] <= 1e-9:
+        return None
+    return box
+
+
+def _cubic_steps(p0, c1, c2, end, tolerance: float) -> int:
+    """How many chords a cubic needs to stay within `tolerance` of itself.
+
+    The standard bound: the curve is at most 3/4 * max(|P0-2P1+P2|,
+    |P1-2P2+P3|) away from its chord, and subdividing into N pieces divides that
+    by N squared. Fixed at 16 before, which is 24 segments for a circle drawn as
+    four Beziers - a hole that is visibly not round at 6 mm.
+    """
+    first = math.hypot(p0[0] - 2 * c1[0] + c2[0], p0[1] - 2 * c1[1] + c2[1])
+    second = math.hypot(c1[0] - 2 * c2[0] + end[0], c1[1] - 2 * c2[1] + end[1])
+    deviation = 0.75 * max(first, second)
+    if tolerance <= 0 or deviation <= tolerance:
+        return 4
+    steps = int(math.ceil(math.sqrt(deviation / (4.0 * tolerance))))
+    return max(4, min(128, steps))
+
+
+def _cubic_as_arc(p0, c1, c2, end, tolerance: float) -> dict | None:
+    """This Bezier as a circular arc, when it is one to within `tolerance`.
+
+    Fitted through the two ends and the middle, then every sampled point is
+    checked against the circle: a curve that only happens to look round nearby is
+    rejected, so the answer is either an arc that IS the curve or a polyline that
+    follows it. Refused for more than half a turn, where one arc would need a
+    sweep angle the sketch cannot express in one element.
+    """
+    if _dist(p0, end) <= 1e-12:
+        return None
+    middle = _cubic_points(p0, c1, c2, end, steps=2)[1]
+    centre = _circumcentre(p0, middle, end)
+    if centre is None:
+        return None
+    radius = _dist(centre, p0)
+    if radius <= 1e-9:
+        return None
+    samples = _cubic_points(p0, c1, c2, end, steps=16)
+    if any(abs(_dist(centre, point) - radius) > tolerance for point in samples):
+        return None
+    a0 = math.degrees(math.atan2(p0[1] - centre[1], p0[0] - centre[0]))
+    a1 = math.degrees(math.atan2(end[1] - centre[1], end[0] - centre[0]))
+    sweep = 0.0
+    previous = a0
+    for index in range(1, 17):
+        angle = math.degrees(math.atan2(samples[index][1] - centre[1],
+                                        samples[index][0] - centre[0]))
+        step = (angle - previous + 180.0) % 360.0 - 180.0
+        sweep += step
+        previous = angle
+    if abs(sweep) > 180.0 or abs(sweep) < 1e-9:
+        return None
+    return {"t": "arc", "c": (centre[0], centre[1]), "r": radius,
+            "a0": a0, "a1": a1, "ccw": sweep > 0}
+
+
+def _circumcentre(a, b, c) -> tuple[float, float] | None:
+    """Centre of the circle through three points; None when they are collinear."""
+    ax, ay = a
+    bx, by = b
+    cx, cy = c
+    d = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if abs(d) < 1e-12:
+        return None
+    ux = ((ax * ax + ay * ay) * (by - cy) + (bx * bx + by * by) * (cy - ay)
+          + (cx * cx + cy * cy) * (ay - by)) / d
+    uy = ((ax * ax + ay * ay) * (cx - bx) + (bx * bx + by * by) * (ax - cx)
+          + (cx * cx + cy * cy) * (bx - ax)) / d
+    return (ux, uy)
 
 
 def _pdf_resources(objects: dict[int, dict], page: dict) -> dict:
@@ -2041,7 +2586,8 @@ def _pdf_resources(objects: dict[int, dict], page: dict) -> dict:
 
 def _pdf_xobject(name: bytes, objects: dict[int, dict], contours: list[dict],
                  stats: dict, matrix, *, resources: dict, depth: int,
-                 source: str) -> None:
+                 source: str, clip_box: list[float] | None = None,
+                 tolerance: float = 0.142) -> None:
     """A Form XObject: a nested content stream with its own /Matrix.
 
     Resolved through the page's /Resources, which is how a PDF names it. The
@@ -2076,7 +2622,8 @@ def _pdf_xobject(name: bytes, objects: dict[int, dict], contours: list[dict],
         return
     inner_resources = _pdf_resources(objects, info) or resources
     _pdf_run(content, objects, contours, stats, _mat_mul(form_matrix, matrix),
-             resources=inner_resources, depth=depth + 1, source=source)
+             resources=inner_resources, depth=depth + 1, source=source,
+             clip_box=clip_box, tolerance=tolerance)
 
 
 def _pdf_matrix(value) -> tuple[float, ...]:
