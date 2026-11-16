@@ -110,12 +110,26 @@ def test_the_visibility_ceiling_carries_both_numbers():
     assert "does not do this" in detail and "clean=true" in detail
 
 
-def test_the_paired_chamfer_ceiling_says_not_reproduced_and_what_is_unknown():
-    entry = _ceiling("two mirrored chamfers")
+def test_the_paired_chamfer_ceiling_now_records_the_reproduction():
+    """0.3.139 measured it on a plain box.
 
-    assert entry["status"] == "SEEN_ONCE_NOT_REPRODUCED"
+    The 2026-11-13 experiment behind the old "not reproduced" entry varied the
+    order and the angle but always used a pair of OPPOSITE edges - and opposite
+    edges do not share a vertex, which is the trigger. Renaming the entry is the
+    point: a reader who searched for "mirrored chamfers" would have concluded the
+    report was wrong.
+    """
+    entry = _ceiling("two chamfers that share a VERTEX")
+
+    assert entry["status"] == "MEASURED_UNEXPLAINED"
     detail = entry["detail"]
-    assert "six cells" in detail
-    assert "UNKNOWN" in detail
-    # The numbers a re-run would have to hit.
-    assert "12 000 -> 11 980 -> 11 960" in detail
+    assert "REPRODUCED" in detail
+    assert "share a corner" in detail
+    # All three cells of the 2026-11-16 run, including the ones that did NOT fail.
+    assert "1/2" in detail          # two adjacent top edges
+    assert "2/4" in detail          # all four
+    assert "2/2" in detail          # opposite edges - the 2026-11-13 shape
+    assert "share a corner" in detail
+    # The mechanism is still unknown, and the entry has to say so rather than
+    # invent one.
+    assert "unexplained" in detail

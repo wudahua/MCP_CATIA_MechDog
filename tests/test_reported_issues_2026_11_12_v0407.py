@@ -68,7 +68,7 @@ def _tool_with_edges(count: int, length: float = 9.6047) -> PartDesignTools:
 def _capture(tools: PartDesignTools) -> list[dict]:
     seen: list[dict] = []
 
-    def fake(radius, specs, propagation=0, sequential_retry=True):
+    def fake(radius, specs, propagation=0, sequential_retry=True, strict=True):
         seen.append({"radius": radius, "specs": specs,
                      "propagation": propagation,
                      "sequential_retry": sequential_retry})
@@ -157,7 +157,13 @@ def test_a_long_rejection_list_is_counted_not_printed():
     def refuse(ref):
         raise RuntimeError("(-2147352567, '发生意外。', (0, 'CATIAShapeFactory', ...)")
 
-    report = tools._apply_fillets(1.5, names, [object()] * 20, add=refuse)
+    from catia_mcp.results import CodedError
+
+    with pytest.raises(CodedError) as caught:
+        tools._apply_fillets(1.5, names, [object()] * 20, add=refuse)
+    report = str(caught.value)
+    assert caught.value.code == "EDGES_REJECTED"
+    assert len(caught.value.data["rejected"]) == 20
 
     assert "0/20" in report
     assert "and 12 more edge(s) refused" in report
@@ -191,7 +197,7 @@ def test_chamfer_had_the_same_dead_end_and_gets_the_same_treatment():
     tools = _tool_with_edges(3)
     seen: list[dict] = []
 
-    def fake(length, angle, specs, sequential_retry=True):
+    def fake(length, angle, specs, sequential_retry=True, strict=True):
         seen.append({"length": length, "angle": angle, "specs": specs,
                      "sequential_retry": sequential_retry})
         return "Chamfer 2: stub"

@@ -226,24 +226,33 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
         ),
     },
     {
-        "member": "two mirrored chamfers on one face (report: the second always fails)",
-        "status": "SEEN_ONCE_NOT_REPRODUCED",
+        "member": "two chamfers that share a VERTEX: the second answers UpdateObject failed",
+        "status": "MEASURED_UNEXPLAINED",
         "detail": (
-            "The 2026-11-13 report measured 3 of 3: on a four-lobe column top, two "
-            "symmetric edges 8 mm apart at 70 degrees, the first chamfer builds and "
-            "the second always answers 'UpdateObject failed' - whichever one is "
-            "built first, and also as one call with both anchors (1 of 2 done). "
-            "NOT REPRODUCED on B30 2026-11-13 (scripts/b30_v0417_paired_chamfer.py): "
-            "a 40x10x30 block with two mirrored 10 mm top edges, chamfer 2 mm, "
-            "A-then-B and B-then-A, at 45 degrees AND at the report's 70 degrees, "
-            "plus both anchors in one call - six cells, all of them succeeded "
-            "(12 000 -> 11 980 -> 11 960 mm3 at 45 deg, each chamfer removing the "
-            "analytic 20 mm3). So 'a pair of chamfers' is not the trigger by "
-            "itself, and guessing a cause here would be worth less than the "
-            "measurement. What is left as UNKNOWN is which part of that geometry "
-            "does it - two bevels whose faces meet across a narrow top, or a "
-            "document that had a chamfer deleted and rebuilt first. Ask for the "
-            "part file rather than trusting a generic 'topology' hint."
+            "REPRODUCED on B30 2026-11-16, and the trigger is narrower than the "
+            "reports said. A plain 55 x 55 x 55.8 block, chamfer 8 mm at 70 "
+            "degrees: two ADJACENT top edges (they share a corner) give "
+            "'1/2 edge(s) done after a one-at-a-time retry' with the rejected one "
+            "answering 'UpdateObject failed', and all FOUR top edges give 2/4. Two "
+            "OPPOSITE top edges are 2/2, which is why the six cells of "
+            "scripts/b30_v0417_paired_chamfer.py all passed on 2026-11-13 - that "
+            "experiment varied the order and the angle but always used a pair that "
+            "does not share a corner. So the trigger is the SHARED VERTEX, not "
+            "'a pair of chamfers' and not a four-lobe column in particular - a box "
+            "is enough (scripts/b30_v0440_chamfer_repro.py). Two things did NOT "
+            "reproduce it on the same run and are recorded so nobody re-derives "
+            "them as the cause: a cylinder with ONE slot and its two facing 27 mm "
+            "top edges, chamfered 8 mm at 70 degrees, answered 2/2; and the "
+            "crossed-slot four-lobe column could not be tested at the report's "
+            "anchors because (+-19, 0, 55.8) falls inside the slot, where there is "
+            "no edge to sit on. WHY the second update fails "
+            "is still unexplained - the second bevel is created and then its "
+            "UpdateObject refuses - so nothing here claims a repair. What 0.3.139 "
+            "does is stop calling it a success: done < requested now raises "
+            "PARTIAL_EDGES_FAILED (or EDGES_REJECTED when none built) with the "
+            "applied and rejected lists in data, and modified=true when anything "
+            "did build. catia_list_edges shows which of the two edges is the one "
+            "that survived, since the reply names it."
         ),
     },
     {

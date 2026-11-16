@@ -77,8 +77,21 @@ def test_fillet_batch_survives_a_rejected_edge_and_names_it():
         if ref == "bad":
             raise RuntimeError("(-2147352567, '发生意外。', (0, 'CATIAShapeFactory', '方法失败', ...)")
 
-    report = tools._apply_fillets(3.81, ["Edge.4", "Edge.9"], ["good", "bad"], add=flaky)
+    # 1 of 2 is a FAILURE a caller can branch on, not a sentence (2026-11-16
+    # report: `1/2 edge(s) done` came back as ordinary prose and every
+    # status-driven caller read it as success).
+    from catia_mcp.results import CodedError
 
+    with pytest.raises(CodedError) as caught:
+        tools._apply_fillets(3.81, ["Edge.4", "Edge.9"], ["good", "bad"],
+                            add=flaky)
+    report = str(caught.value)
+
+    assert caught.value.code == "PARTIAL_EDGES_FAILED"
+    assert caught.value.modified is True, "one bevel WAS applied"
+    assert caught.value.data["applied"] == ["Edge.4"]
+    assert caught.value.data["rejected"] == ["Edge.9"]
+    assert caught.value.data["done"] == 1 and caught.value.data["requested"] == 2
     assert "1/2" in report
     assert "Edge.9" in report
     # The message has to point at the real cause, not just record the failure.
@@ -410,9 +423,16 @@ def test_a_failed_batch_rebuild_rolls_every_feature_back():
         def Update(self):
             raise RuntimeError("(0, 'CATIPrtPart', '更新失败', None, 0, ...)")
 
-    report = tools._apply_fillets(5.08, ["Edge.1", "Edge.2"], [1, 2],
-                                  add=lambda ref: object(), part=FakePart())
+    from catia_mcp.results import CodedError
 
+    with pytest.raises(CodedError) as caught:
+        tools._apply_fillets(5.08, ["Edge.1", "Edge.2"], [1, 2],
+                             add=lambda ref: object(), part=FakePart())
+    report = str(caught.value)
+
+    assert caught.value.code == "EDGES_REJECTED"
+    assert caught.value.modified is False, (
+        "nothing was applied, so 'this failed' must not read as 'I changed it'")
     assert "0/2" in report
     assert "one-at-a-time retry" in report   # the batch is only an optimisation
     # 2 batch features rolled back + the 2 the retry built and rejected

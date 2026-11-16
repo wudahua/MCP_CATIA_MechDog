@@ -555,7 +555,17 @@ class PartDesignTools:
                     "to the nearest edge, and the reply states the edge name and the "
                     "measured distance for every anchor. An anchor that matches "
                     "nothing within anchor_tol, or matches two edges equally well, "
-                    "is refused rather than guessed."
+                    "is refused rather than guessed.\n"
+                    "A NAMED EDGE THAT DOES NOT TAKE THE ROUND MAKES THE CALL FAIL: "
+                    "if any requested edge is left out the reply is ok:false with "
+                    "code=PARTIAL_EDGES_FAILED (EDGES_REJECTED when none built), the "
+                    "applied and rejected edges in data, and modified=true when "
+                    "something did build. Measured on B30 2026-11-16: two ADJACENT "
+                    "top edges of a box give 1 of 2 - the second one's update "
+                    "refuses - while two OPPOSITE edges give 2 of 2. Omit every edge "
+                    "argument to round all of them: that path still answers in "
+                    "prose, because a short edge refusing a large radius is "
+                    "arithmetic rather than a failed request."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -625,7 +635,19 @@ class PartDesignTools:
                     "edge and stops retrying above max_edges, because CATIA's "
                     "whole-feature chamfer call does not build on B30 (measured: "
                     "a feature reference and a body reference both fail at "
-                    "construction on a 2-edge cylinder and a 12-edge rectangle)."
+                    "construction on a 2-edge cylinder and a 12-edge rectangle).\n"
+                    "A NAMED EDGE THAT DOES NOT TAKE THE BEVEL MAKES THE CALL FAIL: "
+                    "if any requested edge is left out the reply is ok:false with "
+                    "code=PARTIAL_EDGES_FAILED (EDGES_REJECTED when none built), the "
+                    "applied and rejected edges in data, and modified=true when "
+                    "something did build. Measured on B30 2026-11-16: two ADJACENT "
+                    "top edges of a box give 1 of 2 with 'UpdateObject failed' on "
+                    "the second, all four give 2 of 4, and two OPPOSITE edges give "
+                    "2 of 2 - so check whether the edges share a vertex before "
+                    "reading a partial result as a bad argument. Omit every edge "
+                    "argument to bevel all of them: that path still answers in "
+                    "prose, because a short edge refusing a large bevel is "
+                    "arithmetic rather than a failed request."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -3410,7 +3432,7 @@ class PartDesignTools:
 
         started = time.perf_counter()
         reply = self._fillet_many(radius, specs, propagation,
-                                  sequential_retry=sequential)
+                                  sequential_retry=sequential, strict=False)
         elapsed = time.perf_counter() - started
         head = (f"Every edge of '{body.Name}' ({total} edge(s)): enumerated "
                 "rather than taken from the feature, because CATIA's "
@@ -3521,7 +3543,8 @@ class PartDesignTools:
         try:
             out = self._apply_fillets(value, labels, refs, add, part=part,
                                       label=label,
-                                      resolve=lambda: (labels, refs))
+                                      resolve=lambda: (labels, refs),
+                                      context=report)
         finally:
             self._clear_selection()
             self.conn.refresh_display()
@@ -3541,7 +3564,8 @@ class PartDesignTools:
 
     def _fillet_many(self, radius: float, specs: list[Any],
                      propagation: int = 0,
-                     sequential_retry: bool = True) -> str:
+                     sequential_retry: bool = True,
+                     strict: bool = True) -> str:
         """One feature per edge, built as a batch and rebuilt once.
 
         Two measured facts drive the shape of this method.
@@ -3580,7 +3604,7 @@ class PartDesignTools:
             return self._apply_fillets(
                 radius, names, refs, add, part=part,
                 resolve=lambda: self._resolve_edge_specs(body, specs),
-                sequential_retry=sequential_retry)
+                sequential_retry=sequential_retry, strict=strict)
         finally:
             self._clear_selection()
             self.conn.refresh_display()
@@ -3589,7 +3613,9 @@ class PartDesignTools:
                        add: Any = None, part: Any = None,
                        label: str = "Fillet R",
                        resolve: Any = None,
-                       sequential_retry: bool = True) -> str:
+                       sequential_retry: bool = True,
+                       strict: bool = True,
+                       context: str = "") -> str:
         """Create one fillet per (name, ref), then rebuild once.
 
         ``add`` is injectable for tests; it may return the new feature (in which
@@ -3696,7 +3722,62 @@ class PartDesignTools:
             segmented = self._segmented_outline_hint([n for n, _ in failed])
             if segmented:
                 head += segmented
+        if strict and len(done) < len(names):
+            self._raise_batch_failure(label, radius, names, done, failed, head,
+                                      context=context)
         return head
+
+    def _raise_batch_failure(self, label: str, value: float,
+                             names: list[str], done: list[str],
+                             failed: list[tuple[str, str]], head: str,
+                             context: str = "") -> None:
+        """A batch that did not do what it was asked is a FAILURE, not a sentence.
+
+        Reported on 2026-11-14 (0.3.126) and again on 2026-11-16 (0.3.138): a
+        chamfer asked for two edges answered ``1/2 edge(s) done`` as ordinary
+        prose - no ``ok:false``, no ``code``, no ``isError`` - and left an
+        asymmetric solid. Every caller that branches on status was told the call
+        succeeded, ``catia_run_plan`` counted the step as passed, and the report's
+        own volume reading (98007.6155 -> 94081.0753 mm3) is what caught it.
+
+        The sentence was never the problem: it is accurate and detailed. What was
+        missing is that ``done < requested`` is a failure state a machine can see.
+        So the same text now travels as the message of a ``CodedError``, with the
+        applied and rejected lists in ``data``. ``modified`` is true when anything
+        did build - "this failed" and "nothing happened" are different facts, and
+        the caller of a half-applied bevel needs both.
+
+        ``strict=False`` is for the paths where the CALLER did not ask for a
+        specific set: catia_fillet/chamfer with no edge named enumerate every edge
+        themselves, and some of those are too short by arithmetic (a bevel of L on
+        an edge shorter than 2L cannot meet its neighbour). Counting that as a
+        failed call would make the honest use of the tool unusable.
+        """
+        requested = len(names)
+        code = "PARTIAL_EDGES_FAILED" if done else "EDGES_REJECTED"
+        kind = "chamfer" if label == "Chamfer" else "fillet"
+        raise CodedError(
+            context + head,
+            code=code,
+            modified=bool(done),
+            next_actions=[
+                "catia_list_edges shows each edge's length and bounding faces - a "
+                "Fillet.N or Chamfer.N among them is the usual reason the next "
+                "one refuses",
+                "if the batch is what failed rather than the edge, send the same "
+                f"edges one per call (catia_{kind}, one edge each): separate "
+                "rebuilds are what works for edges that share a vertex",
+            ],
+            data={
+                "kind": kind,
+                "value": value,
+                "requested": requested,
+                "done": len(done),
+                "applied": list(done),
+                "rejected": [name for name, _ in failed],
+                "rejected_reasons": {name: why for name, why in failed},
+            },
+            stage="execute")
 
     @staticmethod
     def _rejection_reason(labels: list[str]) -> str:
@@ -3971,7 +4052,7 @@ class PartDesignTools:
 
         started = time.perf_counter()
         reply = self._chamfer_many(length, angle, specs,
-                                   sequential_retry=sequential)
+                                   sequential_retry=sequential, strict=False)
         elapsed = time.perf_counter() - started
         head = (f"Every edge of '{body.Name}' ({total} edge(s)): enumerated "
                 "rather than taken from the feature, because CATIA's "
@@ -4001,7 +4082,8 @@ class PartDesignTools:
         return head + reply + f" Took {elapsed:.1f} s."
 
     def _chamfer_many(self, length: float, angle: float, specs: list[Any],
-                      sequential_retry: bool = True) -> str:
+                      sequential_retry: bool = True,
+                      strict: bool = True) -> str:
         """Same batching rule as ``_fillet_many``: resolve all, build all, rebuild once."""
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
@@ -4024,7 +4106,8 @@ class PartDesignTools:
             return self._apply_fillets(length, names, refs, add, part=part,
                                        label="Chamfer",
                                        resolve=lambda: self._resolve_edge_specs(body, specs),
-                                       sequential_retry=sequential_retry)
+                                       sequential_retry=sequential_retry,
+                                       strict=strict)
         finally:
             self._clear_selection()
             self.conn.refresh_display()

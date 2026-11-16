@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.138** · [what changed](CHANGELOG.md) ·
+**0.3.139** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1375,6 +1375,24 @@ Two facts about real drawings that this had to accept:
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
 
+0.3.139 fixes the one P0 the 2026-11-16 report still found, reported twice before
+it was fixed - and the reproduction narrows the cause:
+
+* **`1/2 edge(s) done` is a failure now.** It used to be prose, so a caller that
+  branches on status read a half-applied bevel as success and `catia_run_plan`
+  counted the step as passed. `done < requested` raises `PARTIAL_EDGES_FAILED`
+  (or `EDGES_REJECTED` when none built) with `applied` / `rejected` /
+  `rejected_reasons` in `data`, and `modified` tells "this failed" apart from
+  "nothing happened". Both fillet and chamfer, because they share the code path.
+* **The trigger is a shared VERTEX, not 'a pair of chamfers'.** Measured on a
+  plain box: two OPPOSITE top edges 2/2, two ADJACENT top edges 1/2, all four
+  2/4. The 2026-11-13 experiment that made this a `NOT_REPRODUCED` ceiling entry
+  always used opposite edges - which is why six cells passed while the report kept
+  coming back. The ceiling now names the trigger and still says the mechanism is
+  unexplained.
+* **The all-edges path still answers in prose**: there the caller named no set,
+  and an 8 mm bevel on a 15 mm edge refusing is arithmetic.
+
 0.3.138 went back to the three items 0.3.137 had written off in one sentence each,
 and found that two of those sentences were wrong - one in the tool's favour and
 one against it:
@@ -1501,7 +1519,7 @@ asks, on that same file (297.011 x 210.016 mm per page, as a PDF reader reports)
 |---|---|---|
 | Document | 12 | new/open/save/close/list + `catia_save_as_copy`; `catia_save_document` retries around dialogs |
 | Sketcher | 19 | lines, rectangles, circles, constraints; reopen a closed sketch and delete one element; `catia_sketch_copy` replays a profile onto another plane; `catia_sketch_strokes` draws a whole letter outline in one call, and `catia_text_strokes` supplies those outlines from a built-in single-line font (it can hand the points back, and always reports the box the text occupies; its baseline runs along the sketch's own +H); `catia_sketch_ellipse` draws a slanted ellipse in one curve AND makes both semi-axes dimensional constraints (so a user parameter drives them - `set_parameter` on 7 undriven ellipses changed nothing, measured 2026-11-14); `catia_set_constraint_value` changes one sketch dimension and reports what moved; `catia_sketch_profile` draws a MIXED outline - straight runs and arcs, each with its own primitive - in one call, and checks the junctions on the endpoints that will be DRAWN (it rebuilds each arc's circle through them) |
-| Part Design | 26 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, solid loft, bodies (create / list / delete)… |
+| Part Design | 26 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, solid loft, bodies (create / list / delete)… since 0.3.139 a fillet/chamfer that leaves a NAMED edge out is `PARTIAL_EDGES_FAILED` with the applied and rejected lists, instead of a `1/2 edge(s) done` sentence |
 | Generative Shape Design | 40 | wireframe and surfaces, extract, `boundary`, `heal`, `fillet_surface`, `spine`, `rotate`, `translate`, `circ_pattern` (rotate+join), `plane_normal_to_curve`, `plane_angle`, revolve + close surface, and `catia_surface_engrave` (a constant-depth groove along a curve on a curved face, with `curves=[...]` for a whole word in one boolean); `catia_solid_tube` sweeps one circle along a curve into a closed solid (the six-step bend in one call); `catia_gsd_splines` builds a whole section chain in one call (17 calls become 1, a mid-chain refusal reports what exists instead of rolling back, and `source_file=` reads those sections from a JSON or CSV file); `catia_solid_sweep_variable` sweeps a RADIUS TABLE along a spine - one profile per station, one loft through them, judged against the ruled-cone sum (8 168.2 mm³ against 8 168.1 on a 50 mm cone); since 0.3.126 a station may be an ELLIPSE (`[[t, rx, ry], ...]`, semi-axes), built as a closed spline through 64 points that lie on it because GSD has no ellipse primitive - measured at -0.001 % of the exact perimeter, and 1 099.56 mm³ against the analytic 1 099.56 for a 10x6 -> 5x3 loft; `catia_measure_deviation` samples a curve along its length and reports how far each sample sits from a body or a face; a GSD element or set is removed with `catia_delete_feature` |
 | Assembly | **14** | upstream 9 + get/set component transform, rename, list constraints, copy component, replace component |
 | Appearance | **3** | `catia_colorize_assembly`, `catia_set_color`, `catia_get_color` - per-instance colour in an assembly, per-node in a part; since 0.3.138 the write flushes the part (a colour is not on screen until `part.Update()`) and `Face.N` is refused with the measurement, because on this build it colours the whole solid |

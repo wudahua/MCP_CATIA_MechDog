@@ -47,7 +47,7 @@ def _tools(monkeypatch, lengths):
     monkeypatch.setattr(tools, "_edge_table", lambda body: table)
     seen = {}
 
-    def fake_many(radius, specs, propagation, sequential_retry=True):
+    def fake_many(radius, specs, propagation, sequential_retry=True, strict=True):
         seen["sequential"] = sequential_retry
         seen["count"] = len(specs)
         return f"0/{len(specs)} edge(s) done."
@@ -104,7 +104,8 @@ def test_the_chamfer_path_warns_about_corners_without_claiming_certainty(monkeyp
              for index in range(1, 21)]
     monkeypatch.setattr(tools, "_edge_table", lambda body: table)
     monkeypatch.setattr(tools, "_chamfer_many",
-                        lambda length, angle, specs, sequential_retry=True:
+                        lambda length, angle, specs, sequential_retry=True,
+                        strict=True:
                         f"0/{len(specs)} edge(s) done.")
     reply = tools._chamfer_all_edges(1.0, 45.0, 200)
     assert "shorter than 2*L = 2" in reply

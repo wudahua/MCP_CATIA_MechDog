@@ -228,7 +228,8 @@ def test_the_all_edges_fillet_reports_how_long_it_took(monkeypatch):
                         lambda body: [{"index": 1, "bounded_by": ["A", "B"],
                                        "length": 10.0}])
     monkeypatch.setattr(tools, "_fillet_many",
-                        lambda radius, specs, propagation, sequential_retry=True:
+                        lambda radius, specs, propagation, sequential_retry=True,
+                        strict=True:
                         "Fillet R1.5: 1/1 edge(s) done")
     reply = tools._fillet_all_edges(1.5, 0, 200)
     assert reply.rstrip().endswith("s."), reply[-40:]
@@ -243,7 +244,7 @@ def test_the_all_edges_chamfer_reports_how_long_it_took(monkeypatch):
                         lambda body: [{"index": 1, "bounded_by": ["A", "B"],
                                        "length": 10.0}])
     monkeypatch.setattr(tools, "_chamfer_many",
-                        lambda length, angle, specs, sequential_retry=True:
-                        "Chamfer: 1/1 edge(s) done")
+                        lambda length, angle, specs, sequential_retry=True,
+                        strict=True: "Chamfer: 1/1 edge(s) done")
     reply = tools._chamfer_all_edges(1.0, 45.0, 200)
     assert " Took " in reply

@@ -2,6 +2,64 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.139] — 2026-11-16 · a half-done bevel finally says so
+
+Reported on 2026-11-14 and again on 2026-11-16, so this one is a fix that took two
+reports: `catia_chamfer` asked for two edges answered **`1/2 edge(s) done`** as
+ordinary prose. No `ok:false`, no `code`, no `isError` - every caller that
+branches on status was told the call succeeded, `catia_run_plan` counted the step
+as passed, and the only thing that caught it was the report's volume reading
+(98007.6155 -> 94081.0753 mm3, one bevel's worth).
+
+**`done < requested` is now a failure a machine can see.** The sentence was never
+the problem - it is accurate and detailed, and it now travels as the message of a
+`CodedError`:
+
+```
+PARTIAL_EDGES_FAILED  modified=true
+  data.applied  = ["Edge.6 (by anchor)"]
+  data.rejected = ["Edge.3 (by anchor)"]
+  data.rejected_reasons = {"Edge.3 (by anchor)": "rebuild failed: ... UpdateObject 失败"}
+  data.done = 1, data.requested = 2, data.kind = "chamfer", data.value = 8.0
+```
+
+`EDGES_REJECTED` when nothing built, with `modified=false` - "this failed" and
+"nothing happened" are different facts and the caller of a half-applied bevel
+needs both. `catia_fillet` shares the same code path, so it is fixed too.
+
+**The geometry that reproduces it is a plain box, and the trigger is the shared
+vertex.** This is a correction to both reports and to this project's own ceiling:
+
+```
+box, two OPPOSITE top edges, chamfer 8 x 70  ->  2/2   (no error)
+box, two ADJACENT top edges                 ->  1/2   UpdateObject failed
+box, all FOUR top edges                     ->  2/4
+cylinder with one slot, two facing edges    ->  2/2   (no error)
+```
+
+The 2026-11-13 experiment that produced the old `SEEN_ONCE_NOT_REPRODUCED` entry
+(`scripts/b30_v0417_paired_chamfer.py`) varied the order and the angle but always
+used a pair of OPPOSITE edges, which do not share a vertex - which is why six
+cells passed and the report kept coming back. The ceiling now names the trigger,
+records the three cells above, and says the mechanism is *still unexplained*
+rather than inventing one.
+
+**The all-edges path keeps answering in prose.** With no edge named the tool
+enumerates every edge itself, and a bevel of 8 mm on an edge shorter than 16 mm
+cannot meet its neighbour - that is arithmetic, not a failed request. `strict`
+is false on exactly those two paths, and a test pins that it is.
+
+Measured on B30 (`scripts/b30_v0440_chamfer_acceptance.py`, 14/14): the coded
+failure with both lists, the volume moving one bevel's worth (4835.6 mm3 against
+9671.1 for two), 2 of 4, `run_plan` answering `ok:false` / `STEP_FAILED` and
+naming the feature it left behind, and the all-edges path still replying in prose.
+
+Nothing else in the 2026-11-16 report needed a change. Its section 4 (colour
+refresh, face-colour refusal, `clean="solid_only"`, `get_bounding_box(body=)`)
+re-tested as passing, and its section 3 asks for the sheet-metal wording to stay
+"parameters only" - it does, and `catia_diagnose` still says there is no wall /
+flange / bend / unfold / flat-pattern tool.
+
 ## [0.3.138] — 2026-11-16 · three items that were written off, and one of them twice
 
 0.3.137 closed C5, C8 and N7 in one sentence each: "needs a colour path that does
