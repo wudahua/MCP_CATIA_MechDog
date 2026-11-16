@@ -2090,7 +2090,19 @@ class GSDTools:
                     "in EVERY direction, not just along the axis: a step that "
                     "stopped moving because the remaining gap is tangential is "
                     "NOT a hit, which is the fake hit the 2026-11-16 round-15 "
-                    "report found. THAT RULE COSTS, and the cost is paid in the "
+                    "report found. A VANISHED STEP IS NOT A MISSED SURFACE: the "
+                    "walk can only move by the gap's axial component, so a nearest "
+                    "point at right angles to the axis stops it while the line "
+                    "still crosses the surface further along - measured on B30 "
+                    "2026-11-16 on a r=15 cylinder whose answers are analytic, both "
+                    "stalled stations were answered converged once the walk "
+                    "RESTARTED at the distance it had already measured: start "
+                    "(0,0,25) -> 15.000 with gap 0.0000, start (5,0,25) -> "
+                    "14.142016 against 14.142136. That restart runs once per "
+                    "station, forward first, and 'stalled' / 'restart_mm' on the "
+                    "row say it happened; a restart that does not converge is "
+                    "reported as a miss. THAT RULE COSTS, and the cost is paid in "
+                    "the "
                     "payload, not in a footnote: a row that did not reach the "
                     "surface answers offset_mm, surface_point and along_point as "
                     "null, usable as false, and keeps what it did reach under "
@@ -9179,16 +9191,31 @@ class GSDTools:
                 "('Face.3') or a body. A datum plane or a sketch is not one.")
         elif direction:
             converged = sum(1 for row in filled if row.get("converged"))
+            stalled = sum(1 for row in filled if row.get("stalled"))
+            restarted = sum(1 for row in filled
+                            if row.get("restart_mm") is not None)
             if converged < len(filled):
                 tips.append(
                     f"{len(filled) - converged} of {len(filled)} probe(s) did NOT "
-                    f"converge: the line does not come within {tolerance:g} mm of "
-                    "the surface. Those rows answer offset_mm and surface_point as "
+                    'converge. That is NOT the same as "the line misses the '
+                    'surface": the walk moves along the axis by the axial part of '
+                    'the gap, and '
+                    "component, so when the nearest point sits at RIGHT ANGLES to "
+                    f"the axis there is no step to take ({stalled} of them stopped "
+                    "that way). Those rows answer offset_mm and surface_point as "
                     "null and usable as false, because a number there would look "
                     "like a hit and is not one; what they did reach is under "
-                    f"last_iterate_mm with gap_mm saying how far off it is. Raise "
-                    "max_iterations, check that the axis really meets that surface, "
-                    "or move the start point outside the solid.")
+                    "last_iterate_mm with gap_mm saying how far off it is. Start "
+                    "outside the solid, name a surface the line really crosses, or "
+                    "raise max_iterations.")
+            if restarted:
+                tips.append(
+                    f"{restarted} probe(s) stalled and were RESTARTED at the "
+                    "distance already measured along the axis (forward first, the "
+                    "opposite end only when that is no better) - restart_mm on the "
+                    "row is where, and stalled marks it. A restart that converged "
+                    "is a real hit; one that did not is reported as a miss like any "
+                    "other.")
             worst = max(float(row.get("gap_mm") or 0.0) for row in filled)
             tips.append(
                 f"The offsets are distances along {report['direction']}; the worst "

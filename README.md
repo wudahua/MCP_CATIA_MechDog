@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.143** · [what changed](CHANGELOG.md) ·
+**0.3.144** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1374,6 +1374,30 @@ Two facts about real drawings that this had to accept:
   whole; one with live text imports the geometry and says how many runs it
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
+
+0.3.144 answers a stall that round 17's all-green data exposed: four inside
+stations came back with `gap_mm == start_distance_mm` - the walk never moved,
+because the nearest point sat at right angles to the axis - while the tip said the
+line "does not come within 0.001 mm of the surface". On a r=15 cylinder that is
+measurably false:
+
+```
+start (0, 0, 25) along -Y   before: not converged, gap 15.0   now: 15.000, gap 0
+start (5, 0, 25) along -Y   before: not converged, gap 10.0   now: 14.142016
+                            exact answer 14.142136, hit 0.000000 mm from the skin
+```
+
+The walk now **restarts at the distance it has already measured** (that number is
+how far away the surface was found to be) and keeps going, once per station, with
+`stalled` / `restart_mm` on the row. **The direction decides, not the size** - both
+ends of a line through a closed shell are crossings, symmetric to within a
+millionth on that cylinder, and "smallest gap wins" answered -14.142 for a station
+whose requested crossing was +14.142. The tip now says what was measured instead of
+claiming the line misses the surface, and a restart that cannot converge is still a
+miss with `offset_mm` null. Calibration on a two-crossing station answers
+`ok: null` with the hit drift, because "the offset should grow by 0.5 mm" does not
+hold when the two calls meet different walls - one-crossing stations are unchanged
+(read 0.5000, drift 0.0000).
 
 0.3.143 is one sentence, and it is a CI finding rather than a report one. The
 warm-time note in `catia_mcp/regime.py` named the previous call as "**The**

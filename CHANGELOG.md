@@ -2,6 +2,53 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.144] — 2026-11-16 · a stalled walk is not a missed line
+
+Round 17's report is all-green - five fixes verified on a real 18-section loft, no
+new defects. The next defect was in its own data: four inside stations answering
+`gap_mm == start_distance_mm`, i.e. the walk never took a step, while the tip said
+the line "does not come within 0.001 mm of the surface". A gap equal to the start
+distance means the nearest point sat at right angles to the axis, so there was no
+axial component to walk on - and the line can still cross the surface elsewhere.
+
+**It does, and the answer was analytic.** B30 2026-11-16, a r=15 cylinder probed
+along -Y from inside:
+
+```
+start (0, 0, 25)   before: not converged, gap 15.0   now: 15.000, gap 0.0000
+start (5, 0, 25)   before: not converged, gap 10.0   now: 14.142016 (exact 14.142136)
+```
+
+Both hits sit on the skin (re-measured: 0.000000 mm). So the walk now RESTARTS at
+the distance it has already measured - that number IS how far away the surface was
+found to be, which makes it the right size of jump - and keeps walking. Once per
+station, and `stalled` / `restart_mm` on the row say it happened.
+
+**The direction decides, not the size.** Both ends of a line through a closed
+shell can be crossings, and on that cylinder they are symmetric to within a
+millionth - so a "smallest gap wins" rule picked a side by floating-point noise
+and answered **-14.142** for a station whose requested crossing was +14.142. The
+forward candidate is used whenever it improves at all; the opposite end only when
+it is not a crossing.
+
+**And the reply stops making a claim it cannot support.** The old tip said the
+line "does not come within X mm of the surface" whenever a row missed; that is a
+statement about geometry, and it was false in exactly the case above. It now says
+what was measured: this walk could not step, N of them stalled at right angles,
+R were restarted - and a restart that does not converge is still reported as a
+miss, with `offset_mm` null and `usable: false`.
+
+**Calibration on a two-crossing station is declined, not condemned.** Moving the
+origin 0.5 mm back on the (0,0,25) station put the walk on the opposite wall: base
+hit y=-15.000, moved hit y=+15.000, the offset "grew" by -29.5. That is not a bad
+reading, and `calibration.ok: false` would have been a false diagnosis; it now
+answers `ok: null` with the drift and the reason ("the line crosses this surface
+more than once and the two calls are on different walls"). Stations with one
+crossing are unaffected - the plane still calibrates at read 0.5000, drift 0.0000.
+
+B30: `scripts/b30_v0449_acceptance.py` 13/13; round-16 acceptance still 17/17,
+round-15 13/13, round-14 15/15; 2299 tests.
+
 ## [0.3.143] — 2026-11-16 · the same words whether the clock could resolve it or not
 
 The CI run for 0.3.142 (commit 732a0c6) came back **3.12 green, 3.10 red** on

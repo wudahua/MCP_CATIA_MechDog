@@ -391,11 +391,29 @@ def _solve_axis(where: Sequence[float], unit: Sequence[float], nearest: Any,
     bottle produced ``offset 0, converged true`` next to a 2.4 mm gap (report
     round 15). A step that stops changing is not a hit.
 
+    A VANISHED STEP IS NOT A MISSED SURFACE. The walk moves along the axis by the
+    gap's axial component; when the nearest point sits at right angles to the
+    axis there is no component at all, so the walk stops on the first read - very
+    common when the query point is INSIDE a closed surface, where the nearest
+    point is on a wall beside it while the line leaves through another. Measured
+    on B30 2026-11-16, a r=15 cylinder probed along -Y:
+
+        start (0,0,25), inside   stalled, gap 15.0   answer is 15.0 at (0,-15,25)
+        start (5,0,25), inside   stalled, gap 10.0   answer is 14.142 at y=-14.142
+
+    Both analytic answers sit 0.000000 mm from the face. So when the step
+    vanishes and the gap is large, the iteration RESTARTS at the distance it has
+    already measured, in the axis's own direction first - ``start_gap`` is exactly
+    how far away the surface was found to be, which makes it the right size of
+    jump - and then keeps walking. It does this at most once per station: a
+    restart that also stalls is answered as a miss, because two failures are
+    enough to say this method cannot get there.
+
     Returns the iterate, the last surface point, the gap, and whether it met the
     tolerance. ``start_gap`` is the distance from the QUERY POINT to the surface,
     captured for free on the first iteration (where the probe is the query point
     itself) - it is what tells "this station sits on the target" from "this
-    station merely failed to reach it", which the caller cannot recover later.
+    station merely failed to reach it", and it is the length of the restart.
     """
     t = 0.0
     step = 0.0
@@ -404,6 +422,9 @@ def _solve_axis(where: Sequence[float], unit: Sequence[float], nearest: Any,
     closest: list[float] | None = None
     iterations = 0
     converged = False
+    stalled = False
+    restarted = False
+    restart_mm = 0.0
     error = ""
     for iterations in range(1, max_iterations + 1):
         probe = [float(where[i]) + t * float(unit[i]) for i in range(3)]
@@ -430,23 +451,73 @@ def _solve_axis(where: Sequence[float], unit: Sequence[float], nearest: Any,
             break
         step = sum(gap[i] * float(unit[i]) for i in range(3))
         if abs(step) <= tolerance and gap_size > 100 * tolerance:
+            stalled = True
+            if not restarted and start_gap > tolerance:
+                jumped = _restart_along(where, unit, nearest, start_gap,
+                                        tolerance, gap_size)
+                if jumped is not None:
+                    t, gap_size, closest, converged = jumped
+                    restarted = True
+                    restart_mm = t
+                    step = 0.0
+                    if converged:
+                        break
+                    continue
             # The axial component vanished while the surface point is still far
             # away: this axis cannot remove the remainder, so the line does not
             # meet the surface. Stopping is right; calling it converged is what
             # produced round 15's fake hits.
-            #
-            # BUT ONLY WHEN THE REMAINDER IS STILL LARGE. A shallow-angle station
-            # on a curved face steps a few tenths of a micron per iteration with
-            # the gap already at the reading's own floor - measured 2026-11-16 on
-            # a r=15 cylinder probed along +X at y=10: step 0.0008 mm, gap 0.0011
-            # mm. The first rule stopped there and called it a miss, which is how
-            # a station 1.1 um from the surface got no number at all; the axis was
-            # still making progress. Keep going while the gap is near tolerance.
             break
         t += step
     return {"t": t, "step": step, "gap": gap_size, "start_gap": start_gap,
             "closest": closest, "iterations": iterations,
-            "converged": converged, "error": error}
+            "converged": converged, "stalled": stalled,
+            "restarted": restarted, "restart_mm": restart_mm, "error": error}
+
+
+def _restart_along(where: Sequence[float], unit: Sequence[float], nearest: Any,
+                   start_gap: float, tolerance: float,
+                   current_gap: float) -> tuple[float, float, list[float], bool] | None:
+    """Jump ``start_gap`` along the axis and re-read - the caller's way first.
+
+    The distance to the surface is already known (the first read measured it), so
+    the place to look for a crossing is about that far along the line, not a
+    fraction of a micron from the start. Two candidates, and the order matters:
+    +start_gap is the direction the caller asked for, -start_gap is the other end
+    of the same line. On a line through a closed shell BOTH can be crossings, and
+    they are often symmetric - measured on the r=15 cylinder, (5,0,25) along -Y
+    has the skin at +10 and at -10 to within a millionth of a millimetre, so a
+    "smallest gap wins" rule picks a side by floating-point noise and answered the
+    station behind the start point (-14.142) when the requested crossing was
+    14.142 in front of it. Ties therefore go to the axis's own direction, and the
+    opposite end is only used when the forward one is not a crossing at all.
+
+    Returns (t, gap, foot, converged), or None when neither candidate improves on
+    where the walk is stuck.
+    """
+    tries: dict[float, tuple[float, float, list[float]]] = {}
+    for sign in (1.0, -1.0):
+        candidate = sign * start_gap
+        probe = [float(where[i]) + candidate * float(unit[i]) for i in range(3)]
+        try:
+            foot, _reported = nearest(probe)
+        except Exception:  # noqa: BLE001 - a failed candidate is just a candidate
+            continue
+        size = _norm([probe[i] - float(foot[i]) for i in range(3)])
+        if size <= tolerance:
+            return candidate, size, foot, True
+        tries[sign] = (candidate, size, foot)
+    # THE DIRECTION DECIDES, NOT THE SIZE. Comparing the two candidates by gap
+    # made the answer depend on the last digit of a tessellated foot: on the r=15
+    # cylinder the forward and backward candidates are 3.819... apart to within a
+    # millionth, and "smallest wins" answered -14.142 for a station whose
+    # requested crossing was +14.142. The forward candidate is used whenever it
+    # improves at all; the opposite end of the line only when it does not.
+    for sign in (1.0, -1.0):
+        item = tries.get(sign)
+        if item is not None and item[1] < current_gap:
+            return item[0], item[1], item[2], False
+    return None
 
 
 def along_rows(points: Sequence[Sequence[float]],
@@ -501,6 +572,13 @@ def along_rows(points: Sequence[Sequence[float]],
             "residual_mm": round(abs(float(solved["step"])), 6),
             "start_distance_mm": round(float(solved["start_gap"]), 6),
         }
+        if solved["stalled"]:
+            # The walk stopped because the nearest point was at right angles to
+            # the axis, NOT because the surface is unreachable - the reply must
+            # not turn one into the other.
+            row["stalled"] = True
+        if solved["restarted"]:
+            row["restart_mm"] = round(float(solved["restart_mm"]), 6)
         closest = solved["closest"]
         if closest is not None:
             hit = [at[i] + t * unit[i] for i in range(3)]
@@ -597,6 +675,24 @@ def calibration_along(row: dict[str, Any], direction: Sequence[float], nearest: 
                 "stepped_mm": stencil_mm}
     drift = _norm([float(solved["closest"][i]) - base_hit[i] for i in range(3)])
     grown = float(solved["t"]) - base_offset
+    if drift > max(10 * tolerance, 1.0):
+        # THE TWO ORIGINS MET DIFFERENT CROSSINGS. On a closed shell a line meets
+        # the surface twice, and moving the origin half a millimetre can put the
+        # walk on the opposite wall - measured on B30 2026-11-16 on a r=15
+        # cylinder: base hit y=-15.000, moved origin's hit y=+15.000, drift 30 mm,
+        # "grown" -29.5. That is not a bad reading and saying so would be a false
+        # diagnosis; the exact expectation of this check simply does not apply to
+        # a station whose line is ambiguous. Nothing above is contradicted.
+        return {"ok": None, "mode": "along",
+                "reason": "this station cannot be checked this way: moving the "
+                          f"origin {stencil_mm} mm back met the surface "
+                          f"{drift:.3f} mm from where the un-moved origin did, so "
+                          "the line crosses this surface more than once and the "
+                          "two calls are on different walls. The numbers above are "
+                          "not contradicted by that - they are simply unverified.",
+                "stepped_mm": stencil_mm,
+                "read_mm": round(grown, 6),
+                "foot_drift_mm": round(drift, 6)}
     return {"ok": abs(grown - stencil_mm) <= 1e-3 and drift <= 1e-3,
             "mode": "along",
             "stepped_mm": stencil_mm,
