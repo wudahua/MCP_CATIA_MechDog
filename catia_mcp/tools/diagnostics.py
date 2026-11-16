@@ -515,6 +515,37 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
         ),
     },
     {
+        "member": "Driving a sketch spline: no dimension of its own, but its control points take one",
+        "status": "AVAILABLE_WITH_LIMIT",
+        "detail": (
+            "A closed 2D spline accepts NO dimension of its own. Measured on B30 "
+            "2026-11-15 in ONE sketch, so the control case sits beside the failing "
+            "one: Constraints.AddMonoEltCst(LENGTH) returned '长度.1' for a LINE at "
+            "index 2 and failed for the spline at index 8 - for LENGTH and for "
+            "RADIUS, with the argument passed three ways (the raw element, a "
+            "reference from CreateReferenceFromObject, and geom item 2). The call "
+            "shape was therefore right and the CURVE is what refuses. "
+            "WHAT DOES WORK: a distance between two of the spline's CONTROL "
+            "POINTS, which are separate sketch elements ('点.1' ... '点.5' around "
+            "'样条线.1'). AddBiEltCst(DISTANCE, 点.1, 点.3) took '偏移.1' = "
+            "107.703 mm on a 100 x 40 outline, and driving it moved the padded "
+            "volume from 165856.7071 (unconstrained baseline) to 199723.1725 at "
+            "140 mm and 64547.8081 at 60 mm. Two things to know before relying on "
+            "it: the same constraint between a control point and an UNFIXED "
+            "construction line reads back every value and moves nothing (the "
+            "solver slides the line, which the pad never sees - measured the same "
+            "day, volume unchanged at 165856.7071 through 0 / 20 / -20 mm), and "
+            "the geometry follows only after a real update (part.Update() or the "
+            "pad), not on the Dimension.Value write alone. So an imported outline "
+            "CAN be parametric: put a named dimension on a chosen pair of control "
+            "points with catia_sketch_constraint(type='distance', "
+            "geometry_index_1/2 = the two '点.N' indices from "
+            "catia_sketch_get_geometry) and drive it with "
+            "catia_set_constraint_value - a design decision, not a missing "
+            "capability."
+        ),
+    },
+    {
         "member": "HybridShapeLoft.SetSectionCoupling / Part.InWorkObject",
         "status": "AVAILABLE_WITH_LIMIT",
         "detail": (

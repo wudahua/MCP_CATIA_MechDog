@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.137** · [what changed](CHANGELOG.md) ·
+**0.3.138** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1375,6 +1375,36 @@ Two facts about real drawings that this had to accept:
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
 
+0.3.138 went back to the three items 0.3.137 had written off in one sentence each,
+and found that two of those sentences were wrong - one in the tool's favour and
+one against it:
+
+* **A colour was never on screen until the part updated.** Counting red pixels
+  after each step of a body colour: set red, capture -> 0; `refresh_display()`
+  -> 0; `part.Update()` -> 122 516. Every reply before this version read the value
+  back and called it done. `catia_set_color` now flushes both paths and says so
+  when the flush fails.
+* **`Face.N` is refused, with numbers.** Setting one face red turns the WHOLE
+  solid red (122 516 px), setting a second one green turns it green, and the body
+  never moves off `#D2D2FF` - the colour is on the solid's display properties, so
+  every face answers with whatever was written last. A local finish needs its own
+  BODY: measured red 48 121 / green 49 088 in one capture.
+* **The clean-screenshot leftover was a BODY datum, not `Part.OriginElements`.**
+  `body.HybridShapes` is `['Datum_xy_30', '多截面实体.1']` - the solid is a member,
+  which is why 0.3.126 emptied it and lost the model. It is now walked by name
+  against `body.Shapes`, so the datum goes and the solid stays (centre light 0.591
+  before and after). The three absolute planes really are not drawn: hiding them
+  leaves the capture byte-identical, on a pad part and on a loft part - 0.3.126
+  was right, and this version's first probe said otherwise by comparing a 400x300
+  frame with a 768x744 one.
+* **A spline has no dimension of its own, but its control points take one.**
+  `AddMonoEltCst(LENGTH)` works on a LINE and fails on the spline (three argument
+  forms, two kinds). `catia_sketch_constraint(type='distance',
+  geometry_index_1=2, geometry_index_2=4)` then
+  `catia_set_constraint_value(value=140)` moves the pad 165 856.31 -> 199 723.17
+  mm3 - so an imported outline can be parametric; it needs a named dimension on a
+  chosen pair of control points, not a missing capability.
+
 0.3.137 is what two reports found wrong with 0.3.136, including two of this
 project's own mistakes:
 
@@ -1474,7 +1504,7 @@ asks, on that same file (297.011 x 210.016 mm per page, as a PDF reader reports)
 | Part Design | 26 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, solid loft, bodies (create / list / delete)… |
 | Generative Shape Design | 40 | wireframe and surfaces, extract, `boundary`, `heal`, `fillet_surface`, `spine`, `rotate`, `translate`, `circ_pattern` (rotate+join), `plane_normal_to_curve`, `plane_angle`, revolve + close surface, and `catia_surface_engrave` (a constant-depth groove along a curve on a curved face, with `curves=[...]` for a whole word in one boolean); `catia_solid_tube` sweeps one circle along a curve into a closed solid (the six-step bend in one call); `catia_gsd_splines` builds a whole section chain in one call (17 calls become 1, a mid-chain refusal reports what exists instead of rolling back, and `source_file=` reads those sections from a JSON or CSV file); `catia_solid_sweep_variable` sweeps a RADIUS TABLE along a spine - one profile per station, one loft through them, judged against the ruled-cone sum (8 168.2 mm³ against 8 168.1 on a 50 mm cone); since 0.3.126 a station may be an ELLIPSE (`[[t, rx, ry], ...]`, semi-axes), built as a closed spline through 64 points that lie on it because GSD has no ellipse primitive - measured at -0.001 % of the exact perimeter, and 1 099.56 mm³ against the analytic 1 099.56 for a 10x6 -> 5x3 loft; `catia_measure_deviation` samples a curve along its length and reports how far each sample sits from a body or a face; a GSD element or set is removed with `catia_delete_feature` |
 | Assembly | **14** | upstream 9 + get/set component transform, rename, list constraints, copy component, replace component |
-| Appearance | **3** | `catia_colorize_assembly`, `catia_set_color`, `catia_get_color` - per-instance colour in an assembly, per-node in a part |
+| Appearance | **3** | `catia_colorize_assembly`, `catia_set_color`, `catia_get_color` - per-instance colour in an assembly, per-node in a part; since 0.3.138 the write flushes the part (a colour is not on screen until `part.Update()`) and `Face.N` is refused with the measurement, because on this build it colours the whole solid |
 | Measurement | 8 | inertia, distance, bounding box\*, parameters, `catia_check_surface`, `catia_shape_audit` |
 | Export | 4 | STEP / STL / IGES hand-off |
 | Knowledge | 6 | parameters, formulas, relations, design tables - upstream's five, measured and corrected, plus `catia_apply_design_table` |

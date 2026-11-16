@@ -339,6 +339,74 @@ def _hide_body_sketches(part: Any, selection: Any
     return records, info
 
 
+def _hide_body_datums(part: Any, selection: Any
+                      ) -> tuple[list[tuple[Any, int]], dict[str, Any]]:
+    """Hide the DATUM entries inside each body - and nothing that carries the solid.
+
+    ``body.HybridShapes`` is a mixed bag: on a Part Design loft it reads
+    ``['Datum_xy_30', '多截面实体.1']``, so the SOLID IS A MEMBER. That is why
+    0.3.126 emptied the collection, lost the model, and thereafter left the whole
+    collection alone. What that decision left on screen is the 2026-11-15 report's
+    C8: 28 sketches reported hidden and the datum plane of every section still
+    drawn over the solid.
+
+    The rule that makes it safe is a NAME COMPARISON, not a type test: an entry
+    whose name also appears in ``body.Shapes`` IS the solid. Measured on B30
+    2026-11-15, on a two-section solid loft, with the same state captured twice
+    first (byte-identical, so a difference can be believed):
+
+      hide 'Datum_xy_30', keep the loft ..... picture CHANGED, centre light 0.591
+                                              before and after - the solid stays
+      hide every member ..................... same picture as the line above
+      hide the 3 origin planes .............. picture IDENTICAL (SHA match, on a
+                                              pad part and on this loft part)
+
+    The last line is the correction this function owes 0.3.138's first probe,
+    which read 0.303 -> 0.926 because it compared a 400x300 capture against a
+    768x744 one. The absolute planes really are not drawn; the leftover is a BODY
+    datum, and finding it needed a name table rather than a collection.
+    """
+    info: dict[str, Any] = {"datums": 0, "hidden": 0, "failed": 0, "kept": [],
+                            "bodies": 0}
+    records: list[tuple[Any, int]] = []
+    if selection is None:
+        return records, info
+    try:
+        bodies = int(part.Bodies.Count)
+    except Exception:  # noqa: BLE001 - a document with no part
+        return records, info
+    info["bodies"] = bodies
+    for index in range(1, bodies + 1):
+        try:
+            body = part.Bodies.Item(index)
+            solid = {str(body.Shapes.Item(position).Name)
+                     for position in range(1, int(body.Shapes.Count) + 1)}
+            count = int(body.HybridShapes.Count)
+        except Exception:  # noqa: BLE001 - one body without a mixed collection
+            continue
+        for position in range(1, count + 1):
+            try:
+                entry = body.HybridShapes.Item(position)
+                name = str(entry.Name)
+            except Exception:  # noqa: BLE001 - one entry
+                info["failed"] += 1
+                continue
+            if name in solid:
+                # THE SOLID. Hiding it is how 0.3.126 emptied a window, and no
+                # amount of flag-restoring brought it back inside that session.
+                info["kept"].append(name)
+                continue
+            info["datums"] += 1
+            before = _read_show(selection, entry)
+            if before is None:
+                info["failed"] += 1
+                continue
+            records.append((entry, before))
+            if before == 0 and _write_show(selection, entry, 1):
+                info["hidden"] += 1
+    return records, info
+
+
 def _fold_stats(path: str, crease_deg: float, cap: int,
                 region: dict[str, tuple[float, float]] | None = None,
                 top: int = 8) -> dict[str, Any]:

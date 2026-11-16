@@ -2,6 +2,86 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.138] — 2026-11-16 · three items that were written off, and one of them twice
+
+0.3.137 closed C5, C8 and N7 in one sentence each: "needs a colour path that does
+not go through the tree", "hiding the GSD set takes the solid with it", "needs an
+independent fit + constraint design". Each sentence was a claim, and measuring
+them changed two of the three verdicts - one in the tool's favour, one against
+it, and one against the sentence the previous version printed.
+
+**C5 - a face colour is refused, and the refusal is a measurement.**
+A first implementation here honoured `Face.N`: it resolved the face, called
+`VisProperties.SetRealColor`, read the value back and reported "this face keeps
+its own colour". A B30 session on 2026-11-16 took that apart on one 20x20x10 box:
+
+```
+set Face.1 red    -> the capture turns red   122516 px - THE WHOLE SOLID
+set Face.2 green  -> the capture turns green, red back to 0
+set Face.3 blue   -> the capture does not change at all
+set the BODY white-> Face.1 reads (32,32,200), the body still reads #D2D2FF
+```
+
+The colour lives on the solid's display properties, not on the face, so every
+face answers with whatever was written last. `catia_set_color(target='Face.N')`
+and `catia_get_color(target='Face.N')` now refuse with `FACE_COLOUR_UNAVAILABLE`,
+quote those numbers, and point at the route that does work - give the region its
+own BODY and colour the body (measured: red 48121 / green 49088 in one capture),
+or its own part in an assembly.
+
+**Colours never appeared until the part updated - a real bug, not a limit.**
+Counting red pixels after each step of a body colour:
+
+```
+set the body red, capture straight away ....... red = 0
+then refresh_display() and capture ............ red = 0
+then part.Update() and capture ................ red = 122516
+```
+
+Every `catia_set_color` reply before this version read the value back and called
+it done while the picture stayed grey - and the 2026-11-15 report's "整件上色可
+用，实测生效" came from a session that had built features after colouring. Both
+the part and the assembly path now flush the display, and say so when the flush
+fails.
+
+**C8 - the leftover was a BODY datum, and `clean` never touched it.** The report
+photographed datum-plane frames after 28 sketches had been reported hidden.
+`body.HybridShapes` on a Part Design loft reads
+`['Datum_xy_30', '多截面实体.1']`: the solid is a MEMBER, which is why 0.3.126
+emptied that collection, lost the model and thereafter skipped it wholesale.
+`_hide_body_datums` walks it by NAME instead - every entry `body.Shapes` also
+lists is the solid and is left alone - and the rest is hidden. Measured: the
+capture changes, and the solid's centre-light share is 0.591 before and after.
+
+The three absolute planes are a different answer, and this version's own first
+probe got it wrong: it read centre-light 0.303 -> 0.926 and would have shipped
+"hiding them works". It was comparing a 400x300 capture with a 768x744 one. With
+a calibration first (same state twice, byte-identical) hiding `PlaneXY/YZ/ZX`
+leaves the capture IDENTICAL on a pad part and on a loft part - 0.3.126 was
+right, and the code now says so with the evidence.
+
+The screenshot also repaints AFTER the hiding, for the same reason 0.3.131's zoom
+does: `CaptureToFile` does not force a redraw.
+
+**N7 - a spline has no dimension, but its control points take one.** Measured in
+one sketch, so the control case sits beside the failing one: `AddMonoEltCst(
+LENGTH)` returned `长度.1` for a LINE and failed for the closed spline, for LENGTH
+and RADIUS, with the argument as the raw element, as a reference and as geom item
+2. What does work is a distance between two CONTROL points, which are separate
+elements (`点.1` ... `点.5`):
+
+```
+catia_sketch_constraint(type='distance', geometry_index_1=2, geometry_index_2=4)
+  -> '偏移.1' added: 107.703 mm
+catia_set_constraint_value(constraint='偏移.1', value=140)
+  -> the pad goes 165856.3115 -> 199723.1725 mm3
+```
+
+Two traps are written into `catia_diagnose`: the same constraint between a control
+point and an UNFIXED construction line reads back every value and moves nothing
+(the solver slides the line, which the pad never sees), and the geometry follows
+only after a real update, not on the `Dimension.Value` write.
+
 ## [0.3.137] — 2026-11-15 · what 0.3.136 got wrong, and the shape nobody could check
 
 Two reports on 0.3.136. The first found that the multi-view check this project

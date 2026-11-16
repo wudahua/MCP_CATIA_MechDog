@@ -601,6 +601,16 @@ class ExportTools:
                 viewpoint = None
         if clean:
             records, hidden_note = self._clean_view(clean)
+            # REPAINT AFTER the hiding, exactly as the zoom path repaints after
+            # the zoom. CaptureToFile does not always force a redraw (0.3.131
+            # measured two byte-identical frames at x1 and x1.6 for this reason),
+            # so a capture taken straight after a visibility change is a picture
+            # of the previous frame - which is what made "hide the construction"
+            # look ineffective on a part whose datum is a body member.
+            try:
+                viewer.Update()
+            except Exception:  # noqa: BLE001 - not every build exposes Update
+                pass
         try:
             viewer.CaptureToFile(capture_format, os.path.normpath(file_path))
         finally:
@@ -661,17 +671,24 @@ class ExportTools:
                        got "this part has no geometrical sets, so nothing was
                        hidden" while 7 ellipse profiles sat on top of the solid.
 
-        Neither mode touches body.HybridShapes, and that is a measurement, not a
-        preference: that collection holds the solid itself on a Part Design loft
-        (measured on B30 2026-11-14: body.HybridShapes = ['Datum_xy_20', 'Body'])
-        and hiding it empties the window. See _hide_body_sketches.
+        Neither mode touches a body.HybridShapes entry that CARRIES the solid, and
+        that is a measurement, not a preference: that collection holds the solid
+        itself on a Part Design loft (measured on B30 2026-11-14:
+        body.HybridShapes = ['Datum_xy_20', 'Body']) and emptying it loses the
+        window. Since 0.3.138 it is walked by NAME instead of skipped wholesale:
+        every entry body.Shapes also lists is the solid and is left alone, and the
+        rest - 'Datum_xy_30' and friends, one per section plane - is hidden. That
+        is the leftover the 2026-11-15 report (C8) photographed after 28 sketches
+        had already been reported hidden, and hiding it is safe: the solid's
+        centre-light share was 0.591 before and after on B30 2026-11-15.
         """
         try:
             part = self.conn.get_active_part()
         except Exception:  # noqa: BLE001 - an assembly or no document
             return [], (" [clean was asked for but the active document has no part "
                         "to clean: no visibility was changed]")
-        from catia_mcp.tools.measurement import (_hide_body_sketches,
+        from catia_mcp.tools.measurement import (_hide_body_datums,
+                                                _hide_body_sketches,
                                                 _hide_construct_geometry)
         selection = getattr(self.conn, "hso", None)
         records, info = _hide_construct_geometry(part, selection)
@@ -679,6 +696,10 @@ class ExportTools:
         if mode == "solid_only":
             sketch_records, sketch_info = _hide_body_sketches(part, selection)
             records = records + sketch_records
+        # The body datums are not part of either previous category and are never
+        # the solid, so both modes hide them.
+        datum_records, datum_info = _hide_body_datums(part, selection)
+        records = records + datum_records
 
         parts: list[str] = []
         if info.get("sets"):
@@ -687,6 +708,9 @@ class ExportTools:
         if sketch_info.get("sketch_hidden"):
             parts.append(f"{sketch_info['sketch_hidden']} sketch(es) inside "
                          f"{sketch_info.get('bodies', 0)} body/bodies")
+        if datum_info.get("hidden"):
+            parts.append(f"{datum_info['hidden']} datum(s) inside "
+                         f"{datum_info.get('bodies', 0) or 1} body/bodies")
         if not records:
             return [], (" [clean was asked for but there was nothing this mode can "
                         "hide without taking the solid with it: this part has no "
@@ -701,12 +725,11 @@ class ExportTools:
             f" [clean ({mode}): " + " and ".join(parts) + " hidden for the capture"
             + (f", keeping {', '.join(repr(k) for k in kept[:3])} visible because "
                f"it carries the solid" if kept else "")
-            + "; all flags restored afterwards. NOT HIDDEN, on purpose: the datum "
-              "planes and the elements inside the bodies - measured on B30 "
-              "2026-11-14, hiding the body's own HybridShapes switches the SOLID "
-              "off (the loft is a member of that collection) and setting its flag "
-              "back does not help; hiding only the sketches leaves the solid fully "
-              "visible. The specification tree is still in the picture - no "
+            + "; all flags restored afterwards. NOT HIDDEN, on purpose: the three "
+              "absolute datum planes, which this build does not draw anyway "
+              "(measured 2026-11-15: hiding them leaves the capture byte-identical "
+              "on a pad part AND on a loft part, so there is nothing there to "
+              "clean). The specification tree is still in the picture - no "
               "automation member hides it (measured 2026-11-10)]")
 
     def _restore_view(self, records: list[Any]) -> None:

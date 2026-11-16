@@ -29,6 +29,7 @@ What this module decides, and what it does not:
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from catia_mcp.colours import (
@@ -138,11 +139,14 @@ class AppearanceTools:
                     "the other instances and the .CATPart are unchanged; "
                     "'all_instances=true' colours every instance of the same part.\n"
                     "In a PART: 'target' is a tree node name (body, feature, sketch, "
-                    "geometrical set - the same names catia_set_visibility takes); "
-                    "omitted means the solid itself. Stored in the CATPart, and every "
+                    "geometrical set - the same names catia_set_visibility takes), or "
+                    "omitted to mean the solid itself. Stored in the CATPart, and every "
                     "feature inside the body inherits it. A geometrical set colours "
                     "its contents too, because a set's colour does not reach them "
-                    "(each element carries its own).\n"
+                    "(each element carries its own). 'Face.N' is refused on purpose: "
+                    "measured on B30 2026-11-16, colouring a face turns the whole "
+                    "solid, so a local finish needs its own body (or its own part in "
+                    "an assembly), not a face target.\n"
                     "The colour is read back and the reply reports the measured value. "
                     "Nothing is saved: call catia_save_document."
                 ),
@@ -154,8 +158,13 @@ class AppearanceTools:
                             "description": (
                                 "Product: a component name, its 1-based index as a "
                                 "string, or {\"part_number\": ..., \"occurrence\": n}. "
-                                "Part: a tree node name. Omit in a part to colour the "
-                                "whole solid (every body)."
+                                "Part: a tree node name. 'Face.N' (the names "
+                                "catia_list_faces reports) is RECOGNISED AND "
+                                "REFUSED: measured on B30 2026-11-16, colouring one "
+                                "face turns the WHOLE solid that colour, so a face "
+                                "colour cannot express a local finish - give the "
+                                "region its own body or its own part instead. Omit "
+                                "in a part to colour the whole solid (every body)."
                             ),
                         },
                         "color": {
@@ -288,22 +297,32 @@ class AppearanceTools:
 
     # ── catia_set_color ───────────────────────────────────────────────────
     def _set_color(self, args: dict[str, Any]) -> str:
+        # BEFORE the connection: whether a face can carry its own colour is a
+        # fact about this build, not about this document, so a caller who typed
+        # 'Face.1' should hear it without a CATIA session being opened (the
+        # ordering rule 0.3.127 learned from _open_document).
+        target = args.get("target")
+        if isinstance(target, str):
+            face = self._face_index(target)
+            if face is not None:
+                self._refuse_face_colour(face)
         self.conn.ensure_connected()
         rgb = parse_colour(args.get("color"))
-        target = args.get("target")
         all_instances = bool(args.get("all_instances", False))
         kind, tree = self._tree()
         doc = self.conn.active_document
         doc_name = str(getattr(doc, "Name", "?"))
 
         if kind == "product":
-            return self._set_component_colour(tree, doc, doc_name, target, rgb,
-                                              all_instances)
+            return (self._set_component_colour(tree, doc, doc_name, target, rgb,
+                                               all_instances)
+                    + self._flush_display(doc))
         note = ""
         if all_instances:
             note = (" 'all_instances' means nothing in a part document and was "
                     "ignored.")
-        return self._set_part_colour(tree, doc, doc_name, target, rgb) + note
+        return (self._set_part_colour(tree, doc, doc_name, target, rgb) + note
+                + self._flush_display(doc))
 
     def _set_component_colour(self, product: Any, doc: Any, doc_name: str,
                               target: Any, rgb: tuple[int, int, int],
@@ -414,6 +433,101 @@ class AppearanceTools:
         return (f"Colour {hex_of(rgb)} = {rgb} set on '{name}' ({where_text}) in "
                 f"'{doc_name}'{extra}.\n  " + "\n  ".join(lines)
                 + "\nNot saved yet: call catia_save_document.")
+
+    # ── one face ──────────────────────────────────────────────────────────
+    _FACE_PATTERN = re.compile(r"^face[._ ]?(\d+)$", re.IGNORECASE)
+
+    @classmethod
+    def _face_index(cls, name: str) -> int | None:
+        """``1`` for 'Face.1' / 'face 1' / 'FACE_1', else None.
+
+        Deliberately narrow: a tree node that merely starts with 'Face' is not a
+        face, and guessing would colour something nobody asked for.
+        """
+        match = cls._FACE_PATTERN.match(str(name).strip())
+        return int(match.group(1)) if match else None
+
+    @staticmethod
+    def _refuse_face_colour(index: int, document: str = "") -> None:
+        """REFUSE a face colour, with the measurement that makes it a refusal.
+
+        The 2026-11-15 report (C5) asked for the silver charging ring and the
+        black speaker mesh. A first implementation here honoured ``Face.N``: it
+        resolved the face, called ``VisProperties.SetRealColor`` and read the
+        value straight back. Everything about that was wrong, and one B30 session
+        on 2026-11-16 says so in four steps on a single 20x20x10 box:
+
+          set 'Face.1' red ....... the capture turns red - 122516 red pixels,
+                                   i.e. THE WHOLE SOLID, not one 400 mm2 face
+          set 'Face.2' green ..... the capture turns green and red goes back to 0
+                                   - the first face did not keep its own colour
+          set 'Face.3' blue ...... the capture does not change at all
+          set the BODY white ..... 'Face.1' reads (32, 32, 200), the value of the
+                                   last FACE write, while catia_get_color on the
+                                   body still says #D2D2FF
+
+        So the colour is stored on the solid's display properties and not on the
+        face: writing a face reference writes the body, reading any face returns
+        whatever was written last, and the read-back that looked like proof was
+        reading the body. A tool that accepted ``Face.N`` would tell a caller his
+        ring is silver while the whole part changed colour - worse than the
+        refusal he reported, because he would not look again.
+
+        What DOES express a local finish: build the region that needs its own
+        colour as its own body (or its own part in an assembly) and colour THAT -
+        by body in a part, by instance in a product, both measured.
+        """
+        where = f" in '{document}'" if document else ""
+        raise ArgumentRejected(
+            f"Face.{index}{where} is not a colour target that works on this build, "
+            "so nothing was coloured. Measured on B30 2026-11-16 on a 20x20x10 pad: "
+            "setting Face.1 red turned the WHOLE solid red (122516 pixels of the "
+            "capture), setting Face.2 green turned the whole solid green, setting "
+            "Face.3 blue changed nothing, and the body's own colour stayed #D2D2FF "
+            "throughout - so the value is stored on the solid's display properties, "
+            "not on the face, and reading any face back returns whatever was written "
+            "last. A face colour would report a local finish that does not exist. "
+            "What does work: give the region its own BODY and colour the body "
+            "(catia_set_color(target='<body name>')), or split it into its own part "
+            "in an assembly and colour that INSTANCE. To colour this solid as a "
+            "whole, call catia_set_color(color=...) with no target.",
+            code="FACE_COLOUR_UNAVAILABLE", stage="validate",
+            data={"face": index, "document": document,
+                  "measured": "the whole solid changes colour, not the face",
+                  "alternative": "own body, or own part in an assembly"})
+
+    def _flush_display(self, doc: Any) -> str:
+        """Make a colour that was written actually appear, and say if it did not.
+
+        A colour is a DISPLAY property, and this build does not repaint on write.
+        Measured on B30 2026-11-16, one 20x20x10 pad, counting red pixels in the
+        viewer's own capture after each step:
+
+          set the body red, capture straight away ....... red = 0
+          then refresh_display() and capture ............ red = 0
+          then part.Update() and capture ................ red = 122516
+
+        So every ``catia_set_color`` reply before 0.3.138 read the value back and
+        reported it, while the picture stayed grey until some other operation
+        happened to update the part - and the 2026-11-15 report's "整件上色可用"
+        came from a session that had built features after colouring. The read-back
+        was never the evidence; the pixels were.
+        """
+        try:
+            part = self.conn.part_of(doc)
+        except Exception:  # noqa: BLE001 - an assembly has no part to update
+            try:
+                self.conn.refresh_display()
+                return ""
+            except Exception:  # noqa: BLE001 - the colour is stored either way
+                return ""
+        try:
+            part.Update()
+            return ""
+        except Exception as error:  # noqa: BLE001 - report it, do not hide it
+            return (" [the colour is stored, but the part would not update, so the "
+                    "window may still show the old colour: "
+                    + str(error).splitlines()[0][:80] + "]")
 
     # ── catia_colorize_assembly ───────────────────────────────────────────
     def _colorize_assembly(self, args: dict[str, Any]) -> str | dict[str, Any]:
@@ -591,8 +705,14 @@ class AppearanceTools:
 
     # ── catia_get_color ───────────────────────────────────────────────────
     def _get_color(self, args: dict[str, Any]) -> str:
-        self.conn.ensure_connected()
         target = args.get("target")
+        # Same ordering as _set_color: a face has no colour of its own on this
+        # build, which is answerable without opening a session.
+        if isinstance(target, str):
+            face = self._face_index(target)
+            if face is not None:
+                self._refuse_face_colour(face)
+        self.conn.ensure_connected()
         kind, tree = self._tree()
         doc = self.conn.active_document
         doc_name = str(getattr(doc, "Name", "?"))
@@ -620,6 +740,10 @@ class AppearanceTools:
 
         if target is not None:
             name = str(target)
+            # The read-back has to accept what the writer accepts, or a face
+            # colour can be set and never checked (2026-11-15 report C5 asked for
+            # the colour; a reply that cannot read it back would be the same
+            # defect one step later).
             node, where, parent_set = PartDesignTools._find_tree_node(tree, name)
             if node is None:
                 raise ArgumentRejected(
