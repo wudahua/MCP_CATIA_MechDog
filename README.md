@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.140** · [what changed](CHANGELOG.md) ·
+**0.3.141** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1374,6 +1374,27 @@ Two facts about real drawings that this had to accept:
   whole; one with live text imports the geometry and says how many runs it
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
+
+0.3.141 fixes the two credibility defects round 15 found in the tool 0.3.140 had
+just added, and a third one it exposed:
+
+* **Calibration now runs in both modes.** `calibration.ok` was null on every
+  `direction` call - the along-mode rows carry no normal, and the nearest-mode
+  calibration needs one - while the description promised "every call calibrates
+  itself". Along mode now starts the same ray 0.5 mm earlier, where the answer is
+  exact: the hit cannot move and the offset must grow by the stencil (measured
+  10.999958 -> 11.499958, drift 0.000006 mm).
+* **Convergence is the whole gap, not its axial component.** A foot displaced
+  tangentially used to stop the iteration and read `converged: true` next to a
+  2.4 mm gap - round 15's "fake hit". And rows whose query point is inside the
+  part's solid now carry `inside_solid`, on a FACE target too, which is where the
+  report needed it.
+* **A named face is now that face.** `Face.N` used to go through the generic
+  resolver's Extract, which on a 40x30x20 box answers **Area 5200.000 mm2 - the
+  whole shell** - against 1200.000 for the face. "Distance to Face.1" was
+  therefore the distance to whichever face was nearest. Taken straight from the
+  topology search, Face.1 and Face.2 answer 10.5 and 9.5 mm from the same inside
+  point, and nothing is added to the tree.
 
 0.3.140 answers the round-14 P0 with a tool, and fixes the two P1s that were
 answers the tool list already had and did not say:

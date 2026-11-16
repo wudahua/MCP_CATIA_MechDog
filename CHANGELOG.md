@@ -2,6 +2,52 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.141] — 2026-11-16 · the calibration answers in both modes, and a face is a face
+
+Round 15 reported two credibility defects in the tool 0.3.140 had just added. Both
+were real, and chasing the second one turned up a third that neither report could
+see from outside.
+
+**P1-A: `calibration.ok` was null on every `direction` call.** `along_rows` rows
+carry no `normal`; `calibration_row` needs one; and the handler called it anyway,
+so the promise "EVERY CALL CALIBRATES ITSELF" was never kept in the mode the
+report was using - and the reason it printed ("no surface point") named the wrong
+missing thing. Along mode now has its own calibration, and it is exact rather than
+approximate: start the SAME ray 0.5 mm earlier, where the hit point cannot move
+and the offset must grow by exactly the stencil (measured B30 2026-11-16:
+10.999958 -> 11.499958, drift 0.000006 mm).
+
+**P1-B: a start point inside the solid produced a fake hit.** Reproduced, and the
+mechanism is narrower than the report's arithmetic: convergence was tested on the
+AXIAL COMPONENT of the gap, so a foot displaced tangentially stopped the iteration
+and was reported as `converged: true` beside a 2.4 mm gap. Convergence is now the
+WHOLE gap, and rows whose query point is inside the part's solid carry
+`inside_solid` (on a face target too - the report was right that the flag only
+existed for bodies).
+
+**The third one: a named face was not that face.** `Face.N` went through the
+generic resolver, which builds an Extract with `PropagationType = 1`. Measured on
+a 40x30x20 box:
+
+```
+Face.1 measurable through the resolver    Area 5200.000 mm2   (the whole shell)
+Face.1 measurable directly from the search Area 1200.000 mm2  (the face)
+Face.3, a 30x20 side face                  Area  600.000 mm2
+```
+
+So "the distance to Face.1" was the distance to whichever face of the shell was
+nearest - which is why a station inside the solid came back 9.5 mm from a face
+10.5 mm away. `catia_surface_probe` now takes `Face.N` straight from the topology
+search: Face.1 and Face.2 answer 10.5 and 9.5 mm from the same inside point, the
+measurable's area is the face's, and no element is created in the tree. The
+`catia_measure_deviation` property text now says that ITS face argument still goes
+through the Extract, with the same numbers, instead of implying per-face precision.
+
+Verified on B30: `scripts/b30_v0445_acceptance.py` 13/13 (cone feet 0.000000 mm,
+heights 10.999958/15.499941, both calibrations, face-vs-face 10.5 vs 9.5, the
+1200 mm2 area, the inside flag on a face and the on-or-inside hedge on a body, no
+helper element left), and the round-14 acceptance still 15/15.
+
 ## [0.3.140] — 2026-11-16 · the surface answers where it is, and two descriptions stop disagreeing
 
 Round 14 reported one P0 and two P1. The P0 was a shallow dome on a bottle handle

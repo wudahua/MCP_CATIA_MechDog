@@ -1995,10 +1995,17 @@ class GSDTools:
                             "description": (
                                 "What to measure against: an element name (a face "
                                 "'Face.3', a set, a surface) or omitted for the "
-                                "active body. Naming a FACE is the stricter "
-                                "question - a curve 2 mm inside the body reads "
-                                "0.0000 mm against the body and 2.0000 mm against "
-                                "the face it was meant to lie on."
+                                "active body. Naming a face measures the EXTRACT "
+                                "this server makes of it, which is not one face: "
+                                "measured on B30 2026-11-16, the extract of "
+                                "Face.1 on a 40x30x20 box answers Area 5200.000 "
+                                "mm2 - the whole shell - while the face is "
+                                "1200.000. The numbers are still distances to a "
+                                "real surface (a curve 2 mm inside the body reads "
+                                "2.0000 mm against it, 0.0000 against the body), "
+                                "but do not read them as \"distance to THIS face\". "
+                                "catia_surface_probe takes Face.N directly and "
+                                "does report per-face distances."
                             ),
                         },
                         "samples": {
@@ -2055,19 +2062,33 @@ class GSDTools:
                     "same zero. The NORMAL is not estimated: the vector from the "
                     "foot to the query point IS the surface normal at the foot - "
                     "that is what a foot point is - so no stencil is involved. "
-                    "EVERY CALL CALIBRATES ITSELF: the first foot point is stepped "
-                    "0.5 mm along its normal and re-read; a calibrated reading "
-                    "returns the same foot and 0.5000 mm, and 'calibration' in the "
-                    "reply says whether that happened before any number is quoted. "
+                    "EVERY CALL CALIBRATES ITSELF, in the mode it is in: a "
+                    "nearest call steps the first foot 0.5 mm along its normal and "
+                    "re-reads it (the same foot and 0.5000 mm is the pass mark); an "
+                    "along call starts the SAME ray 0.5 mm earlier, where the "
+                    "expectation is exact on any surface - the hit point cannot "
+                    "move and the offset must grow by exactly 0.5000 mm. "
+                    "'calibration.ok' is true or false accordingly, and null only "
+                    "when the first probe gave nothing to check against - the "
+                    "reason then says which of the two it was. "
                     "DISTANCE vs HEIGHT: a nearest point is NOT the height on your "
                     "axis, and on a sloped face the difference is real - on that "
                     "cone a query at (0,-25,30) looking along -y had its nearest "
                     "point 1.10 mm away in z. Pass 'direction' (e.g. [0,-1,0]) and "
                     "each probe is instead solved by projection iteration until the "
                     "line through your point along that direction meets the surface "
-                    "('offset_mm' is then the signed distance along it, 'converged' "
-                    "says whether tolerance_mm was met). Without 'direction' the "
-                    "call is ONE read per point; with it, up to max_iterations. "
+                    "('offset_mm' is then the signed distance along it, and it is "
+                    "NEGATIVE when the surface is met BEHIND the start point - "
+                    "the axis is a line, not a ray). 'converged' is true only "
+                    "when the solved point is within tolerance_mm of the surface "
+                    "in EVERY direction, not just along the axis: a step that "
+                    "stopped moving because the remaining gap is tangential is "
+                    "NOT a hit, which is the fake hit the 2026-11-16 round-15 "
+                    "report found. Without 'direction' the call is ONE read per "
+                    "point; with it, up to max_iterations. START OUTSIDE: a probe "
+                    "point inside the solid still gives real numbers against a "
+                    "face, and those rows carry 'inside_solid': true - not an "
+                    "error, but not a skin offset either. "
                     "WHAT DOES NOT WORK, measured the same day so nobody rebuilds "
                     "it: AddNewProject(point, surface) is a projection along the "
                     "support's normal and landed 0.4128 mm off the true foot; "
@@ -2076,11 +2097,19 @@ class GSDTools:
                     "NOT writable, so each probe is its own point (they are deleted "
                     "again, 'left_behind' counts any CATIA kept). "
                     "TARGETS: a GSD surface, a topological face ('Face.3'), or a "
-                    "solid body. A BODY CANNOT TELL INSIDE FROM ON: an inside point "
+                    "solid body. 'Face.N' IS TAKEN STRAIGHT FROM THE TOPOLOGY "
+                    "SEARCH, not through the generic resolver - measured on B30 "
+                    "2026-11-16, that resolver's Extract answers an AREA of "
+                    "5200.000 mm2 on a 40x30x20 box, which is the whole shell, "
+                    "while Face.1 is 1200.000; probing through it reports the "
+                    "nearest point of a DIFFERENT face than the one you named. "
+                    "The measurable here reports 1200/1200/600/800/600/800 for "
+                    "that box's six faces, and creates no element in the tree. "
+                    "A BODY CANNOT TELL INSIDE FROM ON: an inside point "
                     "reads 0.0000 mm and hands back the query point as the 'closest "
                     "point' (measured on a 40x30x20 box), so those rows carry "
                     "'on_surface_or_inside' - use a face or a surface when the side "
-                    "matters. "
+                    "matters, and there 'inside_solid' answers it. "
                     "RELATED TOOL: catia_curve_on_surface snaps a whole outline "
                     "onto a body and threads it into a spline, and reports how far "
                     "each point travelled; it cannot report WHERE each point landed "
@@ -9053,10 +9082,22 @@ class GSDTools:
                     break
         except Exception:  # noqa: BLE001 - no body list, fall through to _ref
             target_ref = None
+        target_is_body = target_ref is not None
         if target_ref is None:
-            target_ref = self._ref(str(surface))
+            target_ref = self._probe_surface_ref(part, str(surface))
+        # The inside check needs the SOLID, and it is only meaningful when the
+        # target is something else: against the body itself "inside" and "on the
+        # surface" both read 0.0000 (measured on a 40x30x20 box), so passing it
+        # would dress a shrug up as an answer.
+        solid_ref = None
+        if not target_is_body:
+            try:
+                solid_ref = part.CreateReferenceFromObject(part.MainBody)
+            except Exception:  # noqa: BLE001 - a part with no body: not known
+                solid_ref = None
         result = fidelity.surface_probe(
-            self.conn, target_ref, points, direction, tolerance, iterations)
+            self.conn, target_ref, points, direction, tolerance, iterations,
+            solid=solid_ref)
         rows = result["rows"]
         filled = [row for row in rows if "distance_mm" in row or "offset_mm" in row]
         failed = [row for row in rows if row.get("error")]
@@ -9085,14 +9126,21 @@ class GSDTools:
             if converged < len(filled):
                 tips.append(
                     f"{len(filled) - converged} of {len(filled)} probe(s) did NOT "
-                    f"converge within {iterations} iteration(s) at {tolerance:g} mm; "
-                    "their offset_mm is the last iterate, not a hit - raise "
-                    "max_iterations, or check that the line really meets the "
-                    "surface at all.")
+                    f"converge: the line does not come within {tolerance:g} mm of "
+                    "the surface. Their offset_mm is the last iterate, NOT a hit - "
+                    "raise max_iterations, check that the axis really meets that "
+                    "surface, or move the start point outside the solid.")
             worst = max(float(row.get("gap_mm") or 0.0) for row in filled)
             tips.append(
                 f"The offsets are distances along {report['direction']}; the worst "
-                f"gap between the solved point and the surface is {worst:.4f} mm.")
+                f"gap between the solved point and the surface is {worst:.4f} mm. "
+                "A NEGATIVE offset means the surface was met BEHIND the start "
+                "point, which is legal: the axis is a line, not a ray.")
+            behind = sum(1 for row in filled if float(row.get("offset_mm") or 0.0) < 0)
+            if behind:
+                tips.append(
+                    f"{behind} probe(s) met the surface behind the start point "
+                    "(negative offset).")
         else:
             rows_with_distance = [row for row in filled if "distance_mm" in row]
             if rows_with_distance:
@@ -9115,17 +9163,37 @@ class GSDTools:
                     f"{len(disagree)} probe(s) report a distance that does not match "
                     "the length of the returned offset vector; do not quote those "
                     "rows - they are listed with both numbers.")
-        if calibration.get("ok") is True:
+        inside = [row for row in filled if row.get("inside_solid") is True]
+        if inside:
+            # The 2026-11-16 round reported a "fake hit" from a start point inside
+            # the bottle. Measured back on B30: an inside start that the axis DOES
+            # reach gives a real hit, and an inside start whose axis does not gives
+            # a non-converged row - but neither says "you started inside the
+            # material", which is the fact that makes the row worth re-reading.
             tips.append(
-                f"Calibrated: the first foot point was stepped "
-                f"{calibration.get('stepped_mm')} mm along its normal and read back "
-                f"{calibration.get('read_mm')} mm, foot drift "
-                f"{calibration.get('foot_drift_mm')} mm.")
+                f"{len(inside)} probe(s) START INSIDE the part's solid "
+                "(inside_solid=true). Against a face this is still a real distance "
+                "- to that face - but a modelling station inside the material is "
+                "not what a skin offset is built from, so check the start points.")
+        if calibration.get("ok") is True:
+            if calibration.get("mode") == "along":
+                tips.append(
+                    "Calibrated: the same ray started "
+                    f"{calibration.get('stepped_mm')} mm earlier along the axis "
+                    f"returned an offset larger by {calibration.get('read_mm')} mm, "
+                    f"and the hit point moved {calibration.get('foot_drift_mm')} mm.")
+            else:
+                tips.append(
+                    f"Calibrated: the first foot point was stepped "
+                    f"{calibration.get('stepped_mm')} mm along its normal and read "
+                    f"back {calibration.get('read_mm')} mm, foot drift "
+                    f"{calibration.get('foot_drift_mm')} mm.")
         elif calibration.get("ok") is False:
             tips.append(
-                "NOT CALIBRATED: stepping 0.5 mm off the first foot point read back "
-                f"{calibration.get('read_mm')} mm instead, foot drift "
-                f"{calibration.get('foot_drift_mm')} mm. The numbers above are "
+                "NOT CALIBRATED: the known-answer step did not read back "
+                f"({calibration.get('read_mm')} mm instead of "
+                f"{calibration.get('stepped_mm')} mm, point drift "
+                f"{calibration.get('foot_drift_mm')} mm). The numbers above are "
                 "then not surface distances - report this rather than using them.")
         elif calibration.get("reason"):
             tips.append("Calibration unavailable: " + str(calibration["reason"]))
@@ -9136,6 +9204,46 @@ class GSDTools:
                 f"{int(result['left_behind'])} helper element(s) could not be "
                 "removed and are still in the tree; they reference nothing.")
         return json.dumps(report, ensure_ascii=False, indent=2)
+
+    def _probe_surface_ref(self, part: Any, name: str) -> Any:
+        """A reference to the thing the caller NAMED, not to a propagated copy.
+
+        MEASURED, and it changes what the answer means (B30 2026-11-16): the
+        generic resolver turns 'Face.N' into an Extract with
+        ``PropagationType = 1``, and on a solid that extract propagates across the
+        tangent edges - ``GetMeasurable(that extract).Area`` reads 5200.000 mm2 on
+        a 40x30x20 box, which is the whole shell, while the face itself is
+        1200.000. Probing through it answered "the nearest point of the SHELL",
+        so a station inside the solid came back 9.5 mm from a face that is 10.5 mm
+        away - a number about a different face than the one that was named, which
+        is exactly the credibility defect round 15 reported.
+
+        So 'Face.N' / 'Vertex.N' are taken straight from the topology search, with
+        no Extract: the raw face measurable reports its own area (1200/1200/600/
+        800/600/800 on that box) and its own distances. No element is created in
+        the tree either, which the Extract would have been.
+        """
+        match = self._TOPO_NAME.fullmatch(name.strip())
+        if match and match.group(1).capitalize() in ("Face", "Vertex"):
+            index = int(match.group(2))
+            sel = self.conn.hso
+            try:
+                sel.Clear()
+                sel.Add(self.conn.get_active_part_body())
+                search_topology(sel, match.group(1).capitalize())
+                total = int(sel.Count)
+                if not 1 <= index <= total:
+                    raise ArgumentOutOfRange(
+                        f"'{name}' is out of range: the active body has {total} "
+                        f"{match.group(1).capitalize().lower()}s. Use "
+                        "catia_list_faces to see them.")
+                return sel.Item(index).Reference
+            finally:
+                try:
+                    sel.Clear()
+                except Exception:  # noqa: BLE001
+                    pass
+        return self._ref(name)
 
     def _plane_normal_to_curve(self, args: dict[str, Any]) -> str:
         """A datum plane normal to a curve, with its origin ON that curve.
