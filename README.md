@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.142** · [what changed](CHANGELOG.md) ·
+**0.3.143** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1374,6 +1374,16 @@ Two facts about real drawings that this had to accept:
   whole; one with live text imports the geometry and says how many runs it
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
+
+0.3.143 is one sentence, and it is a CI finding rather than a report one. The
+warm-time note in `catia_mcp/regime.py` named the previous call as "**The**
+previous warm call … came back as 0 ms" when the clock could not resolve it, and
+as "… **for the** previous warm call on this document" when it could - so which
+sentence a caller saw was decided by how fast the machine was, and the 3.10 CI
+runner went red on a three-week-old test while 3.12 stayed green. Both branches
+now use the same words; the zero case still refuses to quote a percentage, and a
+new pair of tests pins all three shapes (resolved, zero, no previous call).
+Nothing else differs from 0.3.142.
 
 0.3.142 makes a miss in `catia_surface_probe` unable to look like a height, and
 stops `inside_solid` meaning two things:

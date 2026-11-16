@@ -2,6 +2,41 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.143] — 2026-11-16 · the same words whether the clock could resolve it or not
+
+The CI run for 0.3.142 (commit 732a0c6) came back **3.12 green, 3.10 red** on
+`test_reported_issues_2026_10_28_v0336.py::test_a_repeat_warm_call_quotes_this_sessions_difference`,
+a test that predates this work by three weeks. Nothing in 0.3.142 caused it; the
+runner's speed did, which is why this repository has met the shape before.
+
+`SessionBooks.describe` writes two warm sentences. When the previous warm reading
+was resolvable it says "… against N ms **for the previous warm call on this
+document** with the same scope (…)"; when that reading was 0 ms - below the
+timer's resolution, which a fast machine produces and a slow one does not - it
+said "**The previous warm call** on this document … came back as 0 ms". The
+refusal to quote a percentage there is right (a ratio against a zero reading is a
+division by zero dressed as a measurement), but the sentence dropped the phrase
+both a caller and that test look for, so which sentence appeared was decided by
+the machine:
+
+```
+3.10 runner, second warm call below the clock   phrase absent   -> test red
+3.12 runner, second warm call above it          phrase present  -> test green
+```
+
+The zero branch now names the previous call in the same words and keeps its
+refusal ("no delta or percentage is quoted: the two readings are equal to the
+clock, not to each other"), and `if previous:` became
+`previous is not None and previous > 0` so the intent is on the page rather than
+in Python's truthiness. Three tests pin all three shapes: a resolved difference
+(+2.0 ms, +25.0 %), a zero reading (phrase, no percentage), and no previous call
+at all ("no earlier warm call on this document" - a different fact from a zero).
+
+Nothing else differs from 0.3.142: its zip carries this wording defect and no
+other.
+
+2291 tests.
+
 ## [0.3.142] — 2026-11-16 · a miss is not a coordinate, and the flag stops meaning two things
 
 Round 16 reported three defects in `catia_surface_probe`, all in the along path -

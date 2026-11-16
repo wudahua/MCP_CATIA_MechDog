@@ -290,15 +290,23 @@ class SessionBooks:
                    f"previous warm call on this document with the same scope "
                    f"({round(elapsed_ms - previous, 1):+.1f} ms, "
                    f"{(elapsed_ms / previous - 1) * 100:+.1f} %)."
-                   if previous else "")
+                   if previous is not None and previous > 0 and not is_cold else "")
                 # 0 ms is a READING, not an absence: the timer's resolution is
                 # coarser than the call. A percentage against it would be a
                 # division by zero dressed as a measurement, so it is not quoted -
-                # but the previous call is still named, because it happened.
-                + (" The previous warm call on this document with the same scope "
-                   "came back as 0 ms, below this timer's resolution, so no delta "
-                   "or percentage is quoted: the two readings are equal to the "
-                   "clock, not to each other."
+                # but the previous call is still named, because it happened, and
+                # it is named in the SAME WORDS as the resolved case. The first
+                # version of this branch said "The previous warm call ...", which
+                # dropped the phrase "for the previous warm call on this document"
+                # - so on a fast runner, where the second call falls below the
+                # clock, the sentence a caller (and this repository's own test)
+                # looked for was simply not there (CI 3.10 red on 732a0c6, 3.12
+                # green: the same call took longer there).
+                + (f" This call took {elapsed_ms} ms against 0 ms for the previous "
+                   "warm call on this document with the same scope, and 0 ms is "
+                   "below this timer's resolution, so no delta or percentage is "
+                   "quoted: the two readings are equal to the clock, not to each "
+                   "other."
                    if previous == 0 and not is_cold else "")
                 + ((self._scope_refusal(book, doc_key, scope)
                     or " There is no earlier warm call on this document in this "
