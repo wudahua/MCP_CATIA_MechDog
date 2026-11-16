@@ -29,8 +29,9 @@ def test_registered_tools_and_schemas_are_unchanged():
     # 0.3.108 sketch_profile = 143; 0.3.119 measure_deviation = 144;
     # 0.3.121 solid_tube = 145; 0.3.122 gsd_splines = 146;
     # 0.3.124 solid_sweep_variable = 147; 0.3.125 set_constraint_value = 148;
-    # 0.3.127 catia_server_info = 149; 0.3.128 read/import_drawing = 151.
-    assert len(server._tool_router) == 153
+    # 0.3.127 catia_server_info = 149; 0.3.128 read/import_drawing = 151;
+    # 0.3.140 surface_probe = 154.
+    assert len(server._tool_router) == 154
     assert not any(name.startswith("catia_caa") for name in server._tool_router)
     for schema in server._schemas.values():
         Draft202012Validator.check_schema(schema)

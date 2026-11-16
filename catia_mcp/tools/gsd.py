@@ -331,6 +331,64 @@ def _deviation_verdict(rows: list[tuple[float, float | None]],
         + (f", and {len(over) - 5} more" if len(over) > 5 else "") + ").")
 
 
+def _probe_points(raw: Any) -> list[list[float]]:
+    """Validate the probe station list BEFORE anything is built.
+
+    Same rule as 0.3.127: a rejected argument must not need CATIA to be reachable,
+    let alone leave six probe points in the tree. The ceiling on the count is a
+    cost, not a style choice - each probe is a real element CATIA builds, updates
+    and measures.
+    """
+    if not isinstance(raw, (list, tuple)) or not raw:
+        raise ArgumentRejected(
+            f"'points' must be a non-empty list of [x, y, z] stations; got "
+            f"{type(raw).__name__}. Nothing was read.", code="BAD_ARGUMENT",
+            stage="validate")
+    if len(raw) > 200:
+        raise ArgumentOutOfRange(
+            f"{len(raw)} probe points is over the 200 ceiling. Each one is a point "
+            "CATIA builds, updates and measures, so 200 is already the slow end of "
+            "this call; split the stations into two calls. Nothing was read.",
+            code="TOO_MANY_PROBES", stage="validate")
+    points: list[list[float]] = []
+    for index, item in enumerate(raw, start=1):
+        if not isinstance(item, (list, tuple)) or len(item) != 3:
+            raise ArgumentRejected(
+                f"probe {index} is {item!r}; every station is [x, y, z]. Nothing "
+                "was read.", code="BAD_ARGUMENT", stage="validate")
+        try:
+            points.append([float(value) for value in item])
+        except (TypeError, ValueError):
+            raise ArgumentRejected(
+                f"probe {index} holds a non-number: {item!r}. Nothing was read.",
+                code="BAD_ARGUMENT", stage="validate")
+    return points
+
+
+def _probe_direction(raw: Any) -> list[float] | None:
+    """Validate the optional axis. A zero vector is refused, not normalised."""
+    if raw is None:
+        return None
+    if not isinstance(raw, (list, tuple)) or len(raw) != 3:
+        raise ArgumentRejected(
+            f"'direction' must be [dx, dy, dz]; got {raw!r}. Omitting it means "
+            "'nearest point', which is a different answer, so a malformed one is "
+            "refused rather than ignored. Nothing was read.",
+            code="BAD_ARGUMENT", stage="validate")
+    try:
+        vector = [float(value) for value in raw]
+    except (TypeError, ValueError):
+        raise ArgumentRejected(
+            f"'direction' holds a non-number: {raw!r}. Nothing was read.",
+            code="BAD_ARGUMENT", stage="validate")
+    if max(abs(value) for value in vector) < 1e-12:
+        raise ArgumentRejected(
+            "'direction' is the zero vector, so there is no line to meet the "
+            "surface along. Nothing was read.", code="BAD_ARGUMENT",
+            stage="validate")
+    return vector
+
+
 
 
 class GSDTools:
@@ -1977,6 +2035,119 @@ class GSDTools:
                 },
             },
             {
+                "name": "catia_surface_probe",
+                "description": (
+                    "ASK A SURFACE WHERE IT IS, at points you choose: for each "
+                    "point it returns the CLOSEST POINT ON THE SURFACE, the "
+                    "distance, the unit NORMAL there, and - with 'direction' - "
+                    "the height of the surface along YOUR axis. This is the "
+                    "primitive the 2026-11-16 report needed to put a shallow dome "
+                    "on a bottle handle and could not find: 'know the exact y of "
+                    "the bottle's front at every (z,x) on the spine'. "
+                    "HOW IT IS MEASURED, and why it is exact: "
+                    "Measurable.GetMinimumDistancePoints returns the closest point "
+                    "on each side, read through SystemService.Evaluate. Verified "
+                    "on B30 2026-11-16 against a cone built from two circles "
+                    "(r30 at z=0, r12 at z=60), whose answer is analytic: from "
+                    "(0,-25,30) the closest point came back (-0.0000, -21.3303, "
+                    "28.8991), whose radius 21.3303 IS the cone's radius at "
+                    "z=28.8991 (30 - 0.3z) to six decimals; a second station, "
+                    "same zero. The NORMAL is not estimated: the vector from the "
+                    "foot to the query point IS the surface normal at the foot - "
+                    "that is what a foot point is - so no stencil is involved. "
+                    "EVERY CALL CALIBRATES ITSELF: the first foot point is stepped "
+                    "0.5 mm along its normal and re-read; a calibrated reading "
+                    "returns the same foot and 0.5000 mm, and 'calibration' in the "
+                    "reply says whether that happened before any number is quoted. "
+                    "DISTANCE vs HEIGHT: a nearest point is NOT the height on your "
+                    "axis, and on a sloped face the difference is real - on that "
+                    "cone a query at (0,-25,30) looking along -y had its nearest "
+                    "point 1.10 mm away in z. Pass 'direction' (e.g. [0,-1,0]) and "
+                    "each probe is instead solved by projection iteration until the "
+                    "line through your point along that direction meets the surface "
+                    "('offset_mm' is then the signed distance along it, 'converged' "
+                    "says whether tolerance_mm was met). Without 'direction' the "
+                    "call is ONE read per point; with it, up to max_iterations. "
+                    "WHAT DOES NOT WORK, measured the same day so nobody rebuilds "
+                    "it: AddNewProject(point, surface) is a projection along the "
+                    "support's normal and landed 0.4128 mm off the true foot; "
+                    "AddNewIntersection(line, surface) builds but its coordinates "
+                    "cannot be read back (Evaluate raises); PointCoord.X/Y/Z are "
+                    "NOT writable, so each probe is its own point (they are deleted "
+                    "again, 'left_behind' counts any CATIA kept). "
+                    "TARGETS: a GSD surface, a topological face ('Face.3'), or a "
+                    "solid body. A BODY CANNOT TELL INSIDE FROM ON: an inside point "
+                    "reads 0.0000 mm and hands back the query point as the 'closest "
+                    "point' (measured on a 40x30x20 box), so those rows carry "
+                    "'on_surface_or_inside' - use a face or a surface when the side "
+                    "matters. "
+                    "RELATED TOOL: catia_curve_on_surface snaps a whole outline "
+                    "onto a body and threads it into a spline, and reports how far "
+                    "each point travelled; it cannot report WHERE each point landed "
+                    "or which way the surface faces. Use that one to build, this one "
+                    "to know."),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "surface": {
+                            "type": "string",
+                            "description": (
+                                "What to probe: a GSD surface name, 'Face.N' of the "
+                                "active body, or a body name. Naming a FACE is the "
+                                "stricter question - a point 2 mm inside the solid "
+                                "reads 0.0000 mm against the body and 2.0000 mm "
+                                "against the face it was meant to lie on."),
+                        },
+                        "points": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 200,
+                            "items": {
+                                "type": "array",
+                                "items": {"type": "number"},
+                                "minItems": 3,
+                                "maxItems": 3,
+                            },
+                            "description": (
+                                "Model-space points [x, y, z] in mm - the stations "
+                                "to ask about. Each one becomes a real element "
+                                "CATIA builds and updates, so the count is the cost "
+                                "of the call."),
+                        },
+                        "direction": {
+                            "type": "array",
+                            "items": {"type": "number"},
+                            "minItems": 3,
+                            "maxItems": 3,
+                            "description": (
+                                "Optional axis to solve the surface HEIGHT along, "
+                                "e.g. [0,-1,0] for 'where is the front skin at "
+                                "this (z,x)'. Given, offsets are measured along "
+                                "this axis and the answer is the point where the "
+                                "line through each probe along it meets the "
+                                "surface. Omitted, the answer is the nearest point."),
+                        },
+                        "tolerance_mm": {
+                            "type": "number",
+                            "default": 0.001,
+                            "description": (
+                                "With 'direction': how close the line is required "
+                                "to meet the surface before the iteration stops. "
+                                "Unconverged probes are reported as unconverged, "
+                                "not silently rounded."),
+                        },
+                        "max_iterations": {
+                            "type": "integer",
+                            "default": 12,
+                            "description": (
+                                "With 'direction': the iteration ceiling per probe "
+                                "(each one is a point built, updated and read)."),
+                        },
+                    },
+                    "required": ["surface", "points"],
+                },
+            },
+            {
                 "name": "catia_curve_on_surface",
                 "description": (
                     "PUT A PLANAR OUTLINE ON A CURVED FACE, point by point, and say "
@@ -2781,6 +2952,8 @@ class GSDTools:
                 return self._sweep(arguments)
             case "catia_measure_deviation":
                 return self._measure_deviation(arguments)
+            case "catia_surface_probe":
+                return self._surface_probe(arguments)
             case "catia_surface_engrave":
                 # This is the most dialog-prone call in the package: it creates a
                 # body, sweeps, closes a surface, runs a boolean that CONSUMES the
@@ -4210,7 +4383,11 @@ class GSDTools:
             points_note = (" Coordinates did not become tree elements: each spline "
                            "references its points and the part saves them, but the "
                            "set lists one element per curve (create_points=true "
-                           "changes that per entry).")
+                           "changes that per entry). Because they are NOT tree "
+                           "features, deleting the spline later leaves nothing "
+                           "behind - measured on B30 2026-11-16, six coordinates, "
+                           "one element, and 0 after the curve was deleted - so "
+                           "cascade=true has nothing to remove in this case.")
 
         if failed is not None:
             item, error = failed
@@ -8798,6 +8975,167 @@ class GSDTools:
             "the target and come back between two of them, so raise 'samples' "
             "where clearance matters." + zero_note + minimum_note + cleanup
         )
+
+    def _surface_probe(self, args: dict[str, Any]) -> str:
+        """Closest point, distance, normal - and, with 'direction', the height.
+
+        WHY THIS EXISTS (2026-11-16 report, P0). The reporter needed the bottle's
+        front skin y at sixteen (z, x) stations and concluded the server could not
+        answer it: catia_list_faces gives centroids, catia_measure_distance gives a
+        global minimum, catia_measure_deviation samples a curve that already
+        exists. He then rebuilt the height from the modelling JSON with linear
+        interpolation, which failed exactly where the surface curves - at the neck
+        - and put a wedge of material outside the part.
+
+        WHAT WAS MEASURED BEFORE WRITING IT (B30 2026-11-16,
+        ``scripts/b30_v0443_probe_surface_probe.py`` and ``...b``), on a cone
+        whose answer is analytic:
+
+            closest point   (0,-25,30) -> (-0.0000, -21.3303, 28.8991)
+                            radius 21.3303 = 30 - 0.3 * 28.8991, error 0.0000 mm
+            a face          Face.1 of a 40x30x20 box -> (20.000, 15.000, 20.000)
+            a body          (20,15,25) -> (20.000, 15.000, 20.000); but
+                            (20,15,10) INSIDE -> closest point = the query point,
+                            distance 0.0000, i.e. a body cannot tell inside from on
+            AddNewProject   0.4128 mm off the true foot - a projection, not a foot
+            PointCoord.Y    "Property 'AddNewPointCoord.Y' can not be set" - one
+                            point cannot serve N probes, so each probe is a point
+
+        So the primitive is GetMinimumDistancePoints (already in this package for
+        edge picking), and the normal comes free: for a foot point the vector from
+        it to the query point IS the normal.
+        """
+        points = _probe_points(args.get("points"))
+        direction = _probe_direction(args.get("direction"))
+        tolerance = args.get("tolerance_mm", 0.001)
+        try:
+            tolerance = float(tolerance)
+        except (TypeError, ValueError):
+            raise ArgumentRejected(
+                f"tolerance_mm must be a distance; got {tolerance!r}. Nothing was "
+                "read.", code="BAD_ARGUMENT", stage="validate")
+        if tolerance <= 0:
+            raise ArgumentOutOfRange(
+                f"tolerance_mm must be positive; got {tolerance}. A zero tolerance "
+                "cannot be reached by an iteration, so every probe would report "
+                "itself unconverged. Nothing was read.",
+                code="TOLERANCE_OUT_OF_RANGE", stage="validate")
+        iterations = args.get("max_iterations", 12)
+        try:
+            iterations = int(iterations)
+        except (TypeError, ValueError):
+            raise ArgumentRejected(
+                f"max_iterations must be a whole number; got {iterations!r}.",
+                code="BAD_ARGUMENT", stage="validate")
+        if not 1 <= iterations <= 100:
+            raise ArgumentOutOfRange(
+                f"max_iterations must be between 1 and 100; got {iterations}.",
+                code="ITERATIONS_OUT_OF_RANGE", stage="validate")
+        surface = args.get("surface")
+        if not surface:
+            raise ArgumentRejected(
+                "catia_surface_probe needs 'surface': the surface, face or body to "
+                "ask. Nothing was read.", code="SURFACE_REQUIRED",
+                stage="validate")
+
+        self.conn.ensure_connected()
+        # A BODY IS NOT A TREE ELEMENT, so _find_element cannot reach it and the
+        # first version of this tool answered "Element 'PartBody' not found" for a
+        # body sitting right there. Bodies are resolved first, by name, then the
+        # ordinary lookup handles 'Face.3', surfaces and sets.
+        part = self.conn.get_active_part()
+        target_ref = None
+        try:
+            for position in range(1, int(part.Bodies.Count) + 1):
+                candidate = part.Bodies.Item(position)
+                if str(candidate.Name) == str(surface):
+                    target_ref = part.CreateReferenceFromObject(candidate)
+                    break
+        except Exception:  # noqa: BLE001 - no body list, fall through to _ref
+            target_ref = None
+        if target_ref is None:
+            target_ref = self._ref(str(surface))
+        result = fidelity.surface_probe(
+            self.conn, target_ref, points, direction, tolerance, iterations)
+        rows = result["rows"]
+        filled = [row for row in rows if "distance_mm" in row or "offset_mm" in row]
+        failed = [row for row in rows if row.get("error")]
+        calibration = result.get("calibration") or {}
+
+        report: dict[str, Any] = {
+            "ok": True,
+            "surface": str(surface),
+            "mode": "along" if direction else "nearest",
+            "probes": rows,
+            "probes_created": result.get("probes_created"),
+            "left_behind": result.get("left_behind"),
+            "calibration": calibration,
+            "tips": [],
+        }
+        if direction:
+            report["direction"] = [round(float(value), 6) for value in direction]
+        tips = report["tips"]
+        if not filled:
+            tips.append(
+                "No probe answered. The target has to be something SPAWorkbench can "
+                "measure and a point can be set against - a GSD surface, a face "
+                "('Face.3') or a body. A datum plane or a sketch is not one.")
+        elif direction:
+            converged = sum(1 for row in filled if row.get("converged"))
+            if converged < len(filled):
+                tips.append(
+                    f"{len(filled) - converged} of {len(filled)} probe(s) did NOT "
+                    f"converge within {iterations} iteration(s) at {tolerance:g} mm; "
+                    "their offset_mm is the last iterate, not a hit - raise "
+                    "max_iterations, or check that the line really meets the "
+                    "surface at all.")
+            worst = max(float(row.get("gap_mm") or 0.0) for row in filled)
+            tips.append(
+                f"The offsets are distances along {report['direction']}; the worst "
+                f"gap between the solved point and the surface is {worst:.4f} mm.")
+        else:
+            rows_with_distance = [row for row in filled if "distance_mm" in row]
+            if rows_with_distance:
+                low = min(float(row["distance_mm"]) for row in rows_with_distance)
+                high = max(float(row["distance_mm"]) for row in rows_with_distance)
+                tips.append(
+                    f"Distances are NEAREST distances, from {low:.4f} to "
+                    f"{high:.4f} mm. On a sloped face the nearest point is not the "
+                    "height on your axis - pass 'direction' for that.")
+            if any(row.get("on_surface_or_inside") for row in filled):
+                tips.append(
+                    "At least one probe read 0.0000 mm with itself as the closest "
+                    "point: that point is ON the target or INSIDE it, and against a "
+                    "solid body the two cannot be told apart (measured on a "
+                    "40x30x20 box). Name a face or a surface when the side matters.")
+            disagree = [row for row in filled
+                        if row.get("agrees") is False]
+            if disagree:
+                tips.append(
+                    f"{len(disagree)} probe(s) report a distance that does not match "
+                    "the length of the returned offset vector; do not quote those "
+                    "rows - they are listed with both numbers.")
+        if calibration.get("ok") is True:
+            tips.append(
+                f"Calibrated: the first foot point was stepped "
+                f"{calibration.get('stepped_mm')} mm along its normal and read back "
+                f"{calibration.get('read_mm')} mm, foot drift "
+                f"{calibration.get('foot_drift_mm')} mm.")
+        elif calibration.get("ok") is False:
+            tips.append(
+                "NOT CALIBRATED: stepping 0.5 mm off the first foot point read back "
+                f"{calibration.get('read_mm')} mm instead, foot drift "
+                f"{calibration.get('foot_drift_mm')} mm. The numbers above are "
+                "then not surface distances - report this rather than using them.")
+        elif calibration.get("reason"):
+            tips.append("Calibration unavailable: " + str(calibration["reason"]))
+        if failed:
+            tips.append(f"{len(failed)} probe(s) failed; each row carries its error.")
+        if result.get("left_behind"):
+            tips.append(
+                f"{int(result['left_behind'])} helper element(s) could not be "
+                "removed and are still in the tree; they reference nothing.")
+        return json.dumps(report, ensure_ascii=False, indent=2)
 
     def _plane_normal_to_curve(self, args: dict[str, Any]) -> str:
         """A datum plane normal to a curve, with its origin ON that curve.

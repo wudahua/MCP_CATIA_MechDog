@@ -1135,11 +1135,19 @@ class PartDesignTools:
                     "names what it would have deleted, because on a long tree the "
                     "last created feature is usually the fillet you just added, not "
                     "the test sketch you meant (reported 2026-10-25). "
-                    "CASCADE: a feature built from COORDINATES owns the points it "
-                    "turned them into, and CATIA does not delete those with it - a "
-                    "six-point spline left six Point features behind when it was "
+                    "CASCADE: points that ARE tree features are not deleted with the "
+                    "feature that uses them - a six-point spline built with "
+                    "create_points=true left six Point features behind when it was "
                     "deleted (measured 2026-11-03, and a real session grew from 666 "
-                    "to 801 elements that way). cascade=true removes them too. Only "
+                    "to 801 elements that way), and the reply names them. "
+                    "cascade=true removes them too. THIS ONLY APPLIES WHEN THE "
+                    "POINTS ARE IN THE TREE: catia_gsd_spline builds with "
+                    "create_points=false by default, and then the points are "
+                    "referenced but not listed, so deleting the curve leaves "
+                    "NOTHING behind and cascade has nothing to do (measured on B30 "
+                    "2026-11-16: 6 coordinates -> 1 element -> 0 after the delete; "
+                    "the same six with create_points=true -> 7 elements -> 6 left). "
+                    "Only "
                     "points created in THIS session are recorded, so the reply says "
                     "how many it can account for. BATCH: pass 'names' with a list "
                     "to delete several elements in one call - cleaning up after a "
@@ -5546,11 +5554,48 @@ class PartDesignTools:
                     f"duplicates, then build again with a name that is free."
                 )
         if feature is None:
+            # A BODY IS NOT INSIDE A BODY, so this search cannot see it - and the
+            # reply used to say only "No feature ... named X" for an empty body
+            # sitting right there in the tree. The 2026-11-16 report was blocked
+            # by exactly that: a body left behind by a failed loft could be seen
+            # with catia_list_bodies and not removed, and the answer read as if
+            # the name did not exist. The tool for it has existed all along
+            # (catia_delete_body); what was missing was the pointer to it.
+            body = None
+            try:
+                for position in range(1, int(bodies.Count) + 1):
+                    candidate = bodies.Item(position)
+                    if str(candidate.Name) == target:
+                        body = candidate
+                        break
+            except Exception:  # noqa: BLE001 - no readable body list, no claim
+                body = None
+            if body is not None:
+                try:
+                    held = int(body.Shapes.Count)
+                except Exception:  # noqa: BLE001 - unknown, so do not claim a count
+                    held = -1
+                raise ArgumentRejected(
+                    f"'{target}' is a solid BODY, not a feature - bodies are not "
+                    "inside a body, so this tool's search cannot reach it, and that "
+                    "is why every earlier call answered 'No feature named'. "
+                    + (f"It holds {held} feature(s). " if held > 0 else
+                       "It is empty. " if held == 0 else "")
+                    + "Use catia_delete_body with the same name"
+                    + ("" if held == 0 else " and force=true if those features are "
+                                            "meant to go with it")
+                    + ", or catia_set_active_body if you meant to build in it. "
+                    "Nothing was deleted.",
+                    code="BODY_NOT_FEATURE", stage="execute", modified=False,
+                    data={"body": target, "features_held": None if held < 0 else held},
+                    next_actions=[f"catia_delete_body(name='{target}'"
+                                  + (")" if held <= 0 else ", force=true)")])
             raise ArgumentRejected(
-                f"No feature, sketch or GSD element named '{target}' in the active "
-                "part - searched every body's feature list, its sketches, and every "
-                "geometrical set (nested ones included). Use catia_list_features to "
-                "see feature names; 'sketches' and 'geometrical_sets' list the rest."
+                f"No feature, sketch, GSD element or body named '{target}' in the "
+                "active part - searched every body's feature list, its sketches, "
+                "every geometrical set (nested ones included), and the body list. "
+                "Use catia_list_features to see feature names; 'sketches' and "
+                "'geometrical_sets' list the rest."
             )
         # Deleting a solid feature takes its support sketch with it (CATIA
         # cascades), and the old reply said nothing about it - the reporter lost

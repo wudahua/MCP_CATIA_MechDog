@@ -37,6 +37,8 @@ from __future__ import annotations
 import math
 from typing import Any, Sequence
 
+from catia_mcp.results import ArgumentRejected
+
 # A probe that was placed exactly ON the curve still reads a little above zero
 # (CATIA's own tolerance, and the fact that the corner is a point while the
 # curve is a wire). One thousandth of a millimetre is the line between "the
@@ -261,3 +263,258 @@ def aligned(first: Sequence[float], second: Sequence[float],
     """Do two 3D boxes cover the same range on one axis?"""
     return (math.isclose(first[axis], second[axis], abs_tol=tolerance)
             and math.isclose(first[3 + axis], second[3 + axis], abs_tol=tolerance))
+
+
+# ── sampling a surface at points (report round 14, 2026-11-16) ──────────────
+#
+# The report asked for "signed distance + normal + closest point on the surface"
+# and said there was no entry and no equivalent. The equivalent was already
+# here, one call away: ``Measurable.GetMinimumDistancePoints`` returns the
+# closest point on each side, and it is exact - measured on B30 2026-11-16 on a
+# cone (r30 at z=0, r12 at z=60): from (0,-25,30) it answered
+# (-0.0000, -21.3303, 28.8991), whose radius 21.3303 IS the cone's radius at
+# z=28.8991 (30 - 0.3 z = 21.3303) to six decimals. Two stations, two zeros.
+#
+# What it does NOT do, measured in the same session, so nobody re-derives it:
+#   * AddNewProject(point, surface) projects along the support's own normal and
+#     landed 0.4128 mm off the true closest point - a projection is not a foot.
+#   * AddNewIntersection(line, surface) builds, but reading its coordinates
+#     raises inside SystemService.Evaluate: a ray cast cannot be read back.
+#   * PointCoord.X/Y/Z are NOT writable ("Property 'AddNewPointCoord.Y' can not
+#     be set"), so one point cannot serve N probes - each probe is one point.
+#   * A point INSIDE a solid body reads 0.0000 mm and its "closest point" is the
+#     query point itself, so a body target cannot tell "inside" from "on the
+#     surface". A face or a surface is the target that answers.
+#
+# The normal is free and exact for a nearest reading: the vector from the foot to
+# the query point IS the surface normal there, which is the definition of a foot
+# point. No stencil, no finite differences.
+
+def _norm(vector: Sequence[float]) -> float:
+    return math.sqrt(sum(float(value) * float(value) for value in vector))
+
+
+def _unit(vector: Sequence[float]) -> list[float] | None:
+    length = _norm(vector)
+    if length < 1e-12:
+        return None
+    return [float(value) / length for value in vector]
+
+
+def nearest_rows(points: Sequence[Sequence[float]],
+                 nearest: Any) -> list[dict[str, Any]]:
+    """Closest point, distance and normal for each query point. Pure.
+
+    ``nearest(where) -> (closest_point, api_distance)`` is the only CATIA
+    dependency, so the arithmetic below is testable against an analytic surface.
+    The distance is reported from BOTH sides: the API's own number and the length
+    of the vector it returned. They agree or the reading is not trusted, and
+    saying which is which is the point of ``agrees``.
+    """
+    rows: list[dict[str, Any]] = []
+    for where in points:
+        at = [float(value) for value in where]
+        try:
+            closest, reported = nearest(at)
+        except Exception as error:  # noqa: BLE001 - one bad probe, not the call
+            rows.append({"at": at, "error": str(error).splitlines()[0][:120]})
+            continue
+        offset = [at[i] - float(closest[i]) for i in range(3)]
+        length = _norm(offset)
+        normal = _unit(offset)
+        row: dict[str, Any] = {
+            "at": [round(value, 6) for value in at],
+            "surface_point": [round(float(value), 6) for value in closest],
+            "distance_mm": round(length, 6),
+            "offset": [round(value, 6) for value in offset],
+            "normal": [round(value, 6) for value in normal] if normal else None,
+            "agrees": abs(length - float(reported)) <= 1e-4,
+            "api_distance_mm": round(float(reported), 6),
+        }
+        # A body target answers 0.0000 for a point that is inside it AND for one
+        # that is on it, and hands back the query point as the "closest point".
+        # Naming that state is the difference between a reading and a lie.
+        if length <= 1e-6:
+            row["on_surface_or_inside"] = True
+        rows.append(row)
+    return rows
+
+
+def along_rows(points: Sequence[Sequence[float]],
+               direction: Sequence[float], nearest: Any,
+               tolerance: float = 0.001, max_iterations: int = 12
+               ) -> list[dict[str, Any]]:
+    """Where a line through each point meets the surface. Pure.
+
+    The nearest reading alone answers "how far is the surface", not "at what
+    height along MY axis", and on a sloped face the two differ: on the B30 cone,
+    a query at (0,-25,30) looked straight along -y at a surface whose closest
+    point sat 1.10 mm away in z. The fix is a projection iteration, not a new
+    CATIA call: move the query along ``direction`` by the component of the gap
+    that lies along it, and repeat until that component vanishes. Each step is
+    one more nearest reading (a new point each time - PointCoord is not movable).
+
+    ``converged`` says whether ``tolerance`` was met; a row that ran out of
+    iterations says so rather than presenting an unconverged number as a hit.
+    """
+    unit = _unit(direction)
+    if unit is None:
+        # A zero axis would make every step zero and report a converged hit at the
+        # query point itself. Coded, not a bare ValueError: this module's callers
+        # branch on codes and a bare raise answers COM_ERROR for a call that never
+        # reached CATIA (tests/test_argument_envelopes.py).
+        raise ArgumentRejected(
+            "direction is the zero vector, so there is no line to meet the surface "
+            "along. Nothing was read.", code="BAD_ARGUMENT", stage="validate")
+    rows: list[dict[str, Any]] = []
+    for where in points:
+        at = [float(value) for value in where]
+        t = 0.0
+        step = 0.0
+        closest: list[float] | None = None
+        iterations = 0
+        converged = False
+        error = ""
+        for iterations in range(1, max_iterations + 1):
+            probe = [at[i] + t * unit[i] for i in range(3)]
+            try:
+                closest, _reported = nearest(probe)
+            except Exception as failure:  # noqa: BLE001 - one bad probe
+                error = str(failure).splitlines()[0][:120]
+                closest = None
+                break
+            gap = [float(closest[i]) - probe[i] for i in range(3)]
+            step = sum(gap[i] * unit[i] for i in range(3))
+            t += step
+            if abs(step) <= tolerance:
+                converged = True
+                break
+        row: dict[str, Any] = {
+            "at": [round(value, 6) for value in at],
+            "offset_mm": round(t, 6),
+            "iterations": iterations,
+            "converged": converged,
+            "residual_mm": round(abs(step), 6),
+        }
+        if closest is not None:
+            row["surface_point"] = [round(float(value), 6) for value in closest]
+            hit = [at[i] + t * unit[i] for i in range(3)]
+            row["along_point"] = [round(value, 6) for value in hit]
+            row["gap_mm"] = round(_norm([hit[i] - float(closest[i])
+                                         for i in range(3)]), 6)
+        if error:
+            row["error"] = error
+        rows.append(row)
+    return rows
+
+
+def calibration_row(row: dict[str, Any], nearest: Any,
+                    stencil_mm: float = 0.5) -> dict[str, Any]:
+    """Feed a known answer back in: step off the surface and re-read.
+
+    Every report in this project carries one reading whose right answer is known
+    in advance. Here it is free: take the foot point of the first probe, move
+    ``stencil_mm`` along its normal, and ask again. A calibrated reading returns
+    the same foot point and a distance of ``stencil_mm``; anything else means the
+    numbers above are not surface distances and must not be quoted as such.
+    """
+    normal = row.get("normal")
+    if not row.get("surface_point") or not normal:
+        return {"ok": None, "reason": "the first probe gave no surface point "
+                                      "to calibrate against"}
+    base = [float(value) for value in row["surface_point"]]
+    moved = [base[i] + stencil_mm * float(normal[i]) for i in range(3)]
+    try:
+        closest, reported = nearest(moved)
+    except Exception as error:  # noqa: BLE001 - reported, not raised
+        return {"ok": None, "reason": str(error).splitlines()[0][:120]}
+    drift = _norm([float(closest[i]) - base[i] for i in range(3)])
+    return {"ok": abs(float(reported) - stencil_mm) <= 1e-3 and drift <= 1e-3,
+            "stepped_mm": stencil_mm,
+            "read_mm": round(float(reported), 6),
+            "foot_drift_mm": round(drift, 6),
+            "reason": ""}
+
+
+def _delete_all(conn: Any, shapes: Sequence[Any]) -> int:
+    """Remove this module's probe points in ONE selection. Returns how many stayed."""
+    shapes = [shape for shape in shapes if shape is not None]
+    if not shapes:
+        return 0
+    selection = conn.active_document.Selection
+    try:
+        selection.Clear()
+        for shape in shapes:
+            selection.Add(shape)
+        selection.Delete()
+    except Exception:  # noqa: BLE001 - fall back to one at a time
+        left = 0
+        for shape in shapes:
+            if not _delete(conn, shape):
+                left += 1
+        return left
+    finally:
+        try:
+            selection.Clear()
+        except Exception:  # noqa: BLE001
+            pass
+    return 0
+
+
+def surface_probe(conn: Any, target: Any,
+                  points: Sequence[Sequence[float]],
+                  direction: Sequence[float] | None = None,
+                  tolerance: float = 0.001, max_iterations: int = 12
+                  ) -> dict[str, Any]:
+    """Run ``nearest_rows``/``along_rows`` against a real CATIA element.
+
+    Probe points are created, updated, read and deleted: they are this module's
+    own scaffolding and nothing references them (measured 2026-11-14 on the same
+    pattern in ``probe_points``). ``left_behind`` counts the ones CATIA kept.
+    """
+    from catia_mcp.tools.measurement import read_min_distance_points
+
+    app = conn.app
+    part = conn.get_active_part()
+    document = conn.active_document
+    spa = document.GetWorkbench("SPAWorkbench")
+    factory = part.HybridShapeFactory
+    measurable = spa.GetMeasurable(target)
+
+    holder, created_holder = _holder(part)
+    made: list[Any] = []
+    if direction is None:
+        # one point per probe: PointCoord cannot be moved (measured 2026-11-16)
+        def nearest(where: Sequence[float]) -> tuple[list[float], float]:
+            point = factory.AddNewPointCoord(float(where[0]), float(where[1]),
+                                             float(where[2]))
+            holder.AppendHybridShape(point)
+            made.append(point)
+            part.UpdateObject(point)
+            closest, _echo = read_min_distance_points(
+                app, measurable, part.CreateReferenceFromObject(point))
+            return closest, _norm([float(where[i]) - float(closest[i])
+                                   for i in range(3)])
+        rows = nearest_rows(points, nearest)
+    else:
+        def nearest(where: Sequence[float]) -> tuple[list[float], float]:
+            point = factory.AddNewPointCoord(float(where[0]), float(where[1]),
+                                             float(where[2]))
+            holder.AppendHybridShape(point)
+            made.append(point)
+            part.UpdateObject(point)
+            closest, _echo = read_min_distance_points(
+                app, measurable, part.CreateReferenceFromObject(point))
+            return closest, _norm([float(where[i]) - float(closest[i])
+                                   for i in range(3)])
+        rows = along_rows(points, direction, nearest, tolerance, max_iterations)
+
+    calibration: dict[str, Any] = {}
+    if rows and "surface_point" in rows[0]:
+        calibration = calibration_row(rows[0], nearest)
+
+    left = _delete_all(conn, made)
+    if created_holder and not _delete(conn, holder):
+        left += 1
+    return {"rows": rows, "calibration": calibration, "left_behind": left,
+            "probes_created": len(made)}

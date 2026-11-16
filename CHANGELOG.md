@@ -2,6 +2,68 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.140] — 2026-11-16 · the surface answers where it is, and two descriptions stop disagreeing
+
+Round 14 reported one P0 and two P1. The P0 was a shallow dome on a bottle handle
+that could not be built: "know the exact y of the bottle's front at every (z, x)
+of the spine, and the server cannot be asked". It could be asked, one call away -
+but nothing in the tool list said so, and that is a defect of the same size.
+
+**`catia_surface_probe` (new, tool 154).** Given a surface and a list of points,
+it returns for each one the **closest point on the surface**, the distance, the
+unit normal there - and, with `direction`, the **height of the surface along your
+own axis**. Verified against a cone whose answer is analytic (r30 at z=0, r12 at
+z=60, so r(z) = 30 - 0.3z), B30 2026-11-16:
+
+```
+nearest, 5 stations at y=-32   worst radius error at the foot   0.000000 mm
+along +Y from y=-32 at z=30    offset 10.999958 mm (exact 11.0)
+along +Y from y=-32 at z=45    offset 15.499941 mm (exact 15.5)
+first foot stepped 0.5 mm off  read 0.5000 mm, foot drift 0.0000
+face target (Face.1 of a box)  foot (20, 15, 20), distance 5.0000
+left in the tree afterwards    0 elements, 0 helper points
+```
+
+The primitive is `Measurable.GetMinimumDistancePoints`, which was already in the
+package for edge picking. The normal costs nothing and is exact: the vector from
+a foot point to the query point **is** the surface normal there. And every call
+calibrates itself before quoting anything - it steps the first foot 0.5 mm along
+its normal and re-reads, because a number whose own calibration failed is not a
+smaller number.
+
+Measured in the same session, so nobody rebuilds them (probe scripts `v0443` and
+`v0443b`):
+
+```
+AddNewProject(point, surface)     0.4128 mm off the true foot - a projection
+AddNewIntersection(line, surface) builds, but its coordinates cannot be read
+PointCoord.X/Y/Z                  not writable - one point per probe, deleted after
+a point INSIDE a solid body       reads 0.0000 and hands back itself as the foot,
+                                  so a body target cannot tell inside from ON (flagged)
+a nearest point                   is NOT the height on your axis: on that cone a
+                                  query along -Y had its foot 1.10 mm away in z
+```
+
+**P1-1: `catia_delete_feature` on a body's name now points at the tool that can.**
+An empty body left by a failed loft answered "No feature, sketch or GSD element
+named 'HandleCrown'" - and the body-delete tool had existed since 0.3.x, so the
+capability was there and undiscoverable. It now answers `BODY_NOT_FEATURE` with
+the body's feature count and `next_actions: ["catia_delete_body(name='...')"]`,
+and the fallback message says the body list was searched too.
+
+**P1-2: the two descriptions that disagreed about coordinate points now name the
+condition.** One said "Coordinates did not become tree elements"; the other said
+"a six-point spline left six Point features behind". Both are true, of different
+settings, and neither said which - measured B30 2026-11-16:
+
+```
+create_points=false (default)   6 coordinates -> 1 element -> 0 after the delete
+create_points=true              6 coordinates -> 7 elements -> 6 left, cascade removes
+```
+
+So `cascade=true` is unnecessary in the default case and necessary in the other,
+and both descriptions now say so with the numbers.
+
 ## [0.3.139] — 2026-11-16 · a half-done bevel finally says so
 
 Reported on 2026-11-14 and again on 2026-11-16, so this one is a fix that took two
