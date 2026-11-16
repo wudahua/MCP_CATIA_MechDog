@@ -2069,8 +2069,14 @@ class GSDTools:
                     "expectation is exact on any surface - the hit point cannot "
                     "move and the offset must grow by exactly 0.5000 mm. "
                     "'calibration.ok' is true or false accordingly, and null only "
-                    "when the first probe gave nothing to check against - the "
+                    "when NO station gave anything to check against - the "
                     "reason then says which of the two it was. "
+                    "IT IS NOT PINNED TO STATION 1: on a real skin the first "
+                    "station is the one most likely to sit in the tightest "
+                    "curvature and miss, so the step runs on the first station "
+                    "that can carry it and 'calibration.station' says which "
+                    "(1-based) - a silent calibration on station 1 is not the "
+                    "same fact as a silent calibration everywhere. "
                     "DISTANCE vs HEIGHT: a nearest point is NOT the height on your "
                     "axis, and on a sloped face the difference is real - on that "
                     "cone a query at (0,-25,30) looking along -y had its nearest "
@@ -2084,11 +2090,21 @@ class GSDTools:
                     "in EVERY direction, not just along the axis: a step that "
                     "stopped moving because the remaining gap is tangential is "
                     "NOT a hit, which is the fake hit the 2026-11-16 round-15 "
-                    "report found. Without 'direction' the call is ONE read per "
-                    "point; with it, up to max_iterations. START OUTSIDE: a probe "
-                    "point inside the solid still gives real numbers against a "
-                    "face, and those rows carry 'inside_solid': true - not an "
-                    "error, but not a skin offset either. "
+                    "report found. THAT RULE COSTS, and the cost is paid in the "
+                    "payload, not in a footnote: a row that did not reach the "
+                    "surface answers offset_mm, surface_point and along_point as "
+                    "null, usable as false, and keeps what it did reach under "
+                    "last_iterate_mm / last_surface_point with gap_mm saying how "
+                    "far off that is. Six decimals next to a 0.19-0.79 mm gap is "
+                    "how round 16 found stations that read like hits and were "
+                    "not; a caller that reads only offset_mm can now never act "
+                    "on a miss without meeting the null. Without 'direction' the "
+                    "call is ONE read per point; with it, up to max_iterations. "
+                    "'start_distance_mm' is that station's own distance to the "
+                    "target, read for free on the first iteration. START OUTSIDE: "
+                    "a probe point inside the solid still gives real numbers "
+                    "against a face, and those rows carry 'inside_solid': true "
+                    "- not an error, but not a skin offset either. "
                     "WHAT DOES NOT WORK, measured the same day so nobody rebuilds "
                     "it: AddNewProject(point, surface) is a projection along the "
                     "support's normal and landed 0.4128 mm off the true foot; "
@@ -2110,6 +2126,24 @@ class GSDTools:
                     "point' (measured on a 40x30x20 box), so those rows carry "
                     "'on_surface_or_inside' - use a face or a surface when the side "
                     "matters, and there 'inside_solid' answers it. "
+                    "WHAT 'inside_solid' MEANS, in BOTH modes alike: true when "
+                    "the query point is in the solid and NOT on the target face; "
+                    "false when it is outside the solid; null when there is "
+                    "nothing to ask - the target IS the body, the check itself "
+                    "failed, or the query point lies exactly ON the target "
+                    "surface, where 'in the material' and 'on the skin' are "
+                    "one spot and this tool will not pick. It is the QUERY "
+                    "point, never the hit. Round 16 caught the along path "
+                    "answering null for stations whose ray missed - the ray's "
+                    "verdict standing in for the point's; measured back on B30 "
+                    "2026-11-16, an inside station 10 mm under the top face of "
+                    "a 40x30x20 box now reads true in both modes, whether or not "
+                    "the axis reaches that face. IT ASKS EVERY BODY, and "
+                    "names them in 'inside_checked_against': 'inside the "
+                    "material' is a fact about the part, not about one body - "
+                    "asking part.MainBody alone answered false for a station "
+                    "inside a second body 100 mm higher (measured the same day), "
+                    "which reads exactly like a station in thin air. "
                     "RELATED TOOL: catia_curve_on_surface snaps a whole outline "
                     "onto a body and threads it into a spline, and reports how far "
                     "each point travelled; it cannot report WHERE each point landed "
@@ -9089,15 +9123,34 @@ class GSDTools:
         # target is something else: against the body itself "inside" and "on the
         # surface" both read 0.0000 (measured on a 40x30x20 box), so passing it
         # would dress a shrug up as an answer.
-        solid_ref = None
+        solids: list[tuple[str, Any]] = []
         if not target_is_body:
+            # EVERY body, not part.MainBody: measured on B30 2026-11-16 with a
+            # second body named 'Upper' holding a solid 100 mm higher, a station
+            # inside 'Upper' answered inside_solid false when only MainBody was
+            # asked - the same silent false a caller cannot distinguish from
+            # "in thin air".
             try:
-                solid_ref = part.CreateReferenceFromObject(part.MainBody)
-            except Exception:  # noqa: BLE001 - a part with no body: not known
-                solid_ref = None
+                for position in range(1, int(part.Bodies.Count) + 1):
+                    body = part.Bodies.Item(position)
+                    try:
+                        if int(body.Shapes.Count) <= 0:
+                            continue
+                    except Exception:  # noqa: BLE001 - cannot count: still ask
+                        pass
+                    solids.append((str(body.Name),
+                                   part.CreateReferenceFromObject(body)))
+            except Exception:  # noqa: BLE001 - no body list: fall back to one
+                solids = []
+            if not solids:
+                try:
+                    solids = [(str(part.MainBody.Name),
+                               part.CreateReferenceFromObject(part.MainBody))]
+                except Exception:  # noqa: BLE001 - a part with no body
+                    solids = []
         result = fidelity.surface_probe(
             self.conn, target_ref, points, direction, tolerance, iterations,
-            solid=solid_ref)
+            solids=solids)
         rows = result["rows"]
         filled = [row for row in rows if "distance_mm" in row or "offset_mm" in row]
         failed = [row for row in rows if row.get("error")]
@@ -9108,6 +9161,9 @@ class GSDTools:
             "surface": str(surface),
             "mode": "along" if direction else "nearest",
             "probes": rows,
+            "stations": len(rows),
+            "usable_stations": int(result.get("usable_rows") or 0),
+            "inside_checked_against": result.get("inside_checked_against"),
             "probes_created": result.get("probes_created"),
             "left_behind": result.get("left_behind"),
             "calibration": calibration,
@@ -9127,16 +9183,21 @@ class GSDTools:
                 tips.append(
                     f"{len(filled) - converged} of {len(filled)} probe(s) did NOT "
                     f"converge: the line does not come within {tolerance:g} mm of "
-                    "the surface. Their offset_mm is the last iterate, NOT a hit - "
-                    "raise max_iterations, check that the axis really meets that "
-                    "surface, or move the start point outside the solid.")
+                    "the surface. Those rows answer offset_mm and surface_point as "
+                    "null and usable as false, because a number there would look "
+                    "like a hit and is not one; what they did reach is under "
+                    f"last_iterate_mm with gap_mm saying how far off it is. Raise "
+                    "max_iterations, check that the axis really meets that surface, "
+                    "or move the start point outside the solid.")
             worst = max(float(row.get("gap_mm") or 0.0) for row in filled)
             tips.append(
                 f"The offsets are distances along {report['direction']}; the worst "
                 f"gap between the solved point and the surface is {worst:.4f} mm. "
                 "A NEGATIVE offset means the surface was met BEHIND the start "
                 "point, which is legal: the axis is a line, not a ray.")
-            behind = sum(1 for row in filled if float(row.get("offset_mm") or 0.0) < 0)
+            behind = sum(1 for row in filled
+                         if row.get("offset_mm") is not None
+                         and float(row["offset_mm"]) < 0)
             if behind:
                 tips.append(
                     f"{behind} probe(s) met the surface behind the start point "
@@ -9170,24 +9231,37 @@ class GSDTools:
             # reach gives a real hit, and an inside start whose axis does not gives
             # a non-converged row - but neither says "you started inside the
             # material", which is the fact that makes the row worth re-reading.
+            # Round 16 then found this flag missing exactly there (null on every
+            # along row whose line missed), so the test above is now mode-free.
+            missed = [row for row in inside if not row.get("usable")]
             tips.append(
                 f"{len(inside)} probe(s) START INSIDE the part's solid "
                 "(inside_solid=true). Against a face this is still a real distance "
                 "- to that face - but a modelling station inside the material is "
-                "not what a skin offset is built from, so check the start points.")
+                "not what a skin offset is built from, so check the start points."
+                + (f" {len(missed)} of them also failed to reach the surface, so "
+                   "their offset is null - starting inside is the usual reason a "
+                   "line finds the surface behind it or not at all."
+                   if missed else ""))
         if calibration.get("ok") is True:
+            where = ""
+            station = calibration.get("station")
+            if station and int(station) != 1:
+                where = (f" Station {int(station)} of {calibration.get('stations')} "
+                         "was used, because station 1 gave nothing to check against.")
             if calibration.get("mode") == "along":
                 tips.append(
                     "Calibrated: the same ray started "
                     f"{calibration.get('stepped_mm')} mm earlier along the axis "
                     f"returned an offset larger by {calibration.get('read_mm')} mm, "
-                    f"and the hit point moved {calibration.get('foot_drift_mm')} mm.")
+                    f"and the hit point moved {calibration.get('foot_drift_mm')} mm."
+                    + where)
             else:
                 tips.append(
-                    f"Calibrated: the first foot point was stepped "
+                    f"Calibrated: the foot point of station {station} was stepped "
                     f"{calibration.get('stepped_mm')} mm along its normal and read "
                     f"back {calibration.get('read_mm')} mm, foot drift "
-                    f"{calibration.get('foot_drift_mm')} mm.")
+                    f"{calibration.get('foot_drift_mm')} mm." + where)
         elif calibration.get("ok") is False:
             tips.append(
                 "NOT CALIBRATED: the known-answer step did not read back "

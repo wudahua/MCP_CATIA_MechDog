@@ -323,7 +323,8 @@ def nearest_rows(points: Sequence[Sequence[float]], nearest: Any,
         try:
             closest, reported = nearest(at)
         except Exception as error:  # noqa: BLE001 - one bad probe, not the call
-            rows.append({"at": at, "error": str(error).splitlines()[0][:120]})
+            rows.append({"at": at, "error": str(error).splitlines()[0][:120],
+                         "usable": False})
             continue
         offset = [at[i] - float(closest[i]) for i in range(3)]
         length = _norm(offset)
@@ -342,18 +343,31 @@ def nearest_rows(points: Sequence[Sequence[float]], nearest: Any,
         # Naming that state is the difference between a reading and a lie.
         if length <= 1e-6:
             row["on_surface_or_inside"] = True
-        _mark_inside(row, inside, at, length)
+        row["usable"] = True
+        _mark_inside(row, inside, at, length <= 1e-6)
         rows.append(row)
     return rows
 
 
 def _mark_inside(row: dict[str, Any], inside: Any,
-                 at: Sequence[float], target_distance: float) -> None:
+                 at: Sequence[float], on_target: bool) -> None:
     """Put ``inside_solid`` on a row when the caller can answer it.
 
-    ``None`` means "not known", and is written as null rather than left out: a
-    field that is absent reads as "asked and false" to anyone parsing JSON, which
-    would be a claim this module cannot make when the part has no solid.
+    ``None`` means "not determined", and is written as null rather than left out:
+    a field that is absent reads as "asked and false" to anyone parsing JSON,
+    which would be a claim this module cannot make when the part has no solid.
+    It is answered in exactly three cases - no solid reference was supplied (the
+    target IS the body, where "inside" and "on" both read 0.0000), the check
+    itself failed, or ``on_target`` (below).
+
+    ``on_target`` says the QUERY POINT lies on the target surface itself. That is
+    the one case where "in the material" and "on the skin" are the same spot, and
+    this module will not pick one: null. It has to come from the query point's own
+    distance to the target - the first version passed the RAY's convergence
+    instead, so every along-mode row whose line missed the surface was answered
+    null and every inside station in the report read null (round 16, P1-1: 7/7
+    wrong, and the field's meaning changed with the mode, which is worse than
+    being absent).
     """
     if inside is None:
         return
@@ -364,11 +378,7 @@ def _mark_inside(row: dict[str, Any], inside: Any,
     if verdict is None:
         row["inside_solid"] = None
         return
-    # "Inside" and "on the target face" are different facts, and a point on the
-    # face is inside the solid's closure too: when the target distance is zero the
-    # honest answer is "cannot tell", not "inside".
-    row["inside_solid"] = (True if target_distance > 1e-6 else None) if verdict \
-        else False
+    row["inside_solid"] = (True if not on_target else None) if verdict else False
 
 
 def _solve_axis(where: Sequence[float], unit: Sequence[float], nearest: Any,
@@ -382,11 +392,15 @@ def _solve_axis(where: Sequence[float], unit: Sequence[float], nearest: Any,
     round 15). A step that stops changing is not a hit.
 
     Returns the iterate, the last surface point, the gap, and whether it met the
-    tolerance.
+    tolerance. ``start_gap`` is the distance from the QUERY POINT to the surface,
+    captured for free on the first iteration (where the probe is the query point
+    itself) - it is what tells "this station sits on the target" from "this
+    station merely failed to reach it", which the caller cannot recover later.
     """
     t = 0.0
     step = 0.0
     gap_size = 0.0
+    start_gap = 0.0
     closest: list[float] | None = None
     iterations = 0
     converged = False
@@ -400,20 +414,39 @@ def _solve_axis(where: Sequence[float], unit: Sequence[float], nearest: Any,
             closest = None
             break
         gap = [float(closest[i]) - probe[i] for i in range(3)]
-        step = sum(gap[i] * float(unit[i]) for i in range(3))
         gap_size = _norm(gap)
-        t += step
+        if iterations == 1:
+            start_gap = gap_size
+        # THE GAP IS MEASURED AT THE ITERATE THAT IS RETURNED. The first version
+        # stepped first and tested afterwards, so `gap` belonged to t_n while the
+        # row's `along_point`/`surface_point` were built from t_(n+1): on a
+        # cylinder the reported gap was the distance from the NEW point to the
+        # PREVIOUS foot, which is neither the distance to the surface nor the step
+        # that was taken (measured 2026-11-16: 0.000719 mm reported where the
+        # iterate itself was 0.9 mm short). Test first, step after.
         if gap_size <= tolerance:
             converged = True
+            step = 0.0
             break
-        if abs(step) <= tolerance and gap_size > tolerance:
-            # The axial component vanished but the surface point is somewhere
-            # else entirely: the line does not meet this surface. Stopping here
-            # is right; calling it converged is what produced round 15's fake
-            # hits.
+        step = sum(gap[i] * float(unit[i]) for i in range(3))
+        if abs(step) <= tolerance and gap_size > 100 * tolerance:
+            # The axial component vanished while the surface point is still far
+            # away: this axis cannot remove the remainder, so the line does not
+            # meet the surface. Stopping is right; calling it converged is what
+            # produced round 15's fake hits.
+            #
+            # BUT ONLY WHEN THE REMAINDER IS STILL LARGE. A shallow-angle station
+            # on a curved face steps a few tenths of a micron per iteration with
+            # the gap already at the reading's own floor - measured 2026-11-16 on
+            # a r=15 cylinder probed along +X at y=10: step 0.0008 mm, gap 0.0011
+            # mm. The first rule stopped there and called it a miss, which is how
+            # a station 1.1 um from the surface got no number at all; the axis was
+            # still making progress. Keep going while the gap is near tolerance.
             break
-    return {"t": t, "step": step, "gap": gap_size, "closest": closest,
-            "iterations": iterations, "converged": converged, "error": error}
+        t += step
+    return {"t": t, "step": step, "gap": gap_size, "start_gap": start_gap,
+            "closest": closest, "iterations": iterations,
+            "converged": converged, "error": error}
 
 
 def along_rows(points: Sequence[Sequence[float]],
@@ -434,6 +467,15 @@ def along_rows(points: Sequence[Sequence[float]],
     tangential remainder says false and carries ``gap_mm`` so the caller can see
     by how much. ``inside_solid`` describes the QUERY point (where the ray
     starts), never the hit.
+
+    A ROW THAT DID NOT HIT THE SURFACE DOES NOT CARRY A COORDINATE. It used to
+    print ``offset_mm`` and ``surface_point`` to six decimals anyway, which is
+    how round 16 found stations "0.19-0.79 mm off the face" reading like a hit:
+    two fields at six decimals dwarfed the only two that said otherwise
+    (``converged``, ``gap_mm``). So a miss now answers ``offset_mm: null``,
+    ``surface_point: null``, ``usable: false`` - and keeps the last iterate under
+    ``last_iterate_mm`` / ``last_surface_point`` so the trail is not lost, just
+    no longer named as the answer.
     """
     unit = _unit(direction)
     if unit is None:
@@ -449,23 +491,34 @@ def along_rows(points: Sequence[Sequence[float]],
         at = [float(value) for value in where]
         solved = _solve_axis(at, unit, nearest, tolerance, max_iterations)
         t = float(solved["t"])
+        converged = bool(solved["converged"])
         row: dict[str, Any] = {
             "at": [round(value, 6) for value in at],
-            "offset_mm": round(t, 6),
+            "offset_mm": round(t, 6) if converged else None,
             "iterations": int(solved["iterations"]),
-            "converged": bool(solved["converged"]),
+            "converged": converged,
+            "usable": converged,
             "residual_mm": round(abs(float(solved["step"])), 6),
+            "start_distance_mm": round(float(solved["start_gap"]), 6),
         }
         closest = solved["closest"]
         if closest is not None:
             hit = [at[i] + t * unit[i] for i in range(3)]
-            row["surface_point"] = [round(float(value), 6) for value in closest]
-            row["along_point"] = [round(value, 6) for value in hit]
             row["gap_mm"] = round(_norm([hit[i] - float(closest[i])
                                          for i in range(3)]), 6)
+            if converged:
+                row["surface_point"] = [round(float(value), 6) for value in closest]
+                row["along_point"] = [round(value, 6) for value in hit]
+            else:
+                row["last_iterate_mm"] = round(t, 6)
+                row["last_surface_point"] = [round(float(value), 6)
+                                             for value in closest]
+                row["last_along_point"] = [round(value, 6) for value in hit]
         if solved["error"]:
             row["error"] = solved["error"]
-        _mark_inside(row, inside, at, 1.0 if solved["converged"] else 0.0)
+        # The hedge is "is the QUERY POINT on the target", which the first
+        # iteration already measured; the ray's convergence says nothing about it.
+        _mark_inside(row, inside, at, float(solved["start_gap"]) <= 1e-6)
         rows.append(row)
     return rows
 
@@ -581,17 +634,28 @@ def surface_probe(conn: Any, target: Any,
                   points: Sequence[Sequence[float]],
                   direction: Sequence[float] | None = None,
                   tolerance: float = 0.001, max_iterations: int = 12,
-                  solid: Any = None) -> dict[str, Any]:
+                  solids: Sequence[tuple[str, Any]] = ()) -> dict[str, Any]:
     """Run ``nearest_rows``/``along_rows`` against a real CATIA element.
 
     Probe points are created, updated, read and deleted: they are this module's
     own scaffolding and nothing references them (measured 2026-11-14 on the same
     pattern in ``probe_points``). ``left_behind`` counts the ones CATIA kept.
 
-    ``solid`` is a reference to the part's solid body, or None when the target IS
-    that body - in which case "inside" cannot be told from "on the surface" and
-    every ``inside_solid`` is null (measured on a 40x30x20 box: an inside point
-    against the body reads 0.0000 and hands back itself as the closest point).
+    ``solids`` is every solid body of the part as (name, reference), and the
+    inside check asks ALL of them: "inside the material" is a fact about the
+    part, not about one body, and a part can hold several. The first version
+    asked ``part.MainBody`` only, and measured on B30 2026-11-16 with a 40x30x20
+    box in the main body and a second box 100 mm higher in a body called 'Upper',
+    a station INSIDE 'Upper' answered ``inside_solid: false`` - indistinguishable
+    from a station in thin air, and exactly the three false rows round 16 could
+    not explain from outside. The names go into the reply as
+    ``inside_checked_against``, so a wrong or missing body is visible rather than
+    silent.
+
+    Empty ``solids`` means the target IS a body: there "inside" cannot be told
+    from "on the surface" (measured on a 40x30x20 box: an inside point against
+    the body reads 0.0000 and hands back itself as the closest point), so every
+    ``inside_solid`` is null.
     """
     from catia_mcp.tools.measurement import read_min_distance_points
 
@@ -622,15 +686,23 @@ def surface_probe(conn: Any, target: Any,
                                for i in range(3)])
 
     inside = None
-    if solid is not None:
+    if solids:
         # GetMinimumDistance takes a REFERENCE, not a Measurable - passing the
         # Measurable answers "type mismatch" and the flag would silently be null
         # for every row (measured 2026-11-16 while re-testing round 15).
         def inside(where: Sequence[float]) -> bool | None:  # noqa: F811 - closure
             created = point(where)
-            distance = float(spa.GetMeasurable(
-                part.CreateReferenceFromObject(created)).GetMinimumDistance(solid))
-            return distance <= 1e-6
+            measurable = spa.GetMeasurable(part.CreateReferenceFromObject(created))
+            answered = False
+            for _name, solid in solids:
+                try:
+                    distance = float(measurable.GetMinimumDistance(solid))
+                except Exception:  # noqa: BLE001 - an empty body cannot answer
+                    continue
+                answered = True
+                if distance <= 1e-6:
+                    return True
+            return False if answered else None
 
     if direction is None:
         rows = nearest_rows(points, nearest, inside=inside)
@@ -638,16 +710,54 @@ def surface_probe(conn: Any, target: Any,
         rows = along_rows(points, direction, nearest, tolerance, max_iterations,
                           inside=inside)
 
-    calibration: dict[str, Any] = {}
-    if rows and "surface_point" in rows[0]:
-        if direction is None:
-            calibration = calibration_row(rows[0], nearest)
-        else:
-            calibration = calibration_along(rows[0], direction, nearest,
-                                            tolerance, max_iterations)
+    calibration = _calibration(rows, direction, nearest, tolerance, max_iterations)
 
     left = _delete_all(conn, made)
     if created_holder and not _delete(conn, holder):
         left += 1
     return {"rows": rows, "calibration": calibration, "left_behind": left,
-            "probes_created": len(made)}
+            "probes_created": len(made),
+            "inside_checked_against": [name for name, _ref in solids] or None,
+            "usable_rows": sum(1 for row in rows if row.get("usable"))}
+
+
+def _calibration(rows: Sequence[dict[str, Any]], direction: Any, nearest: Any,
+                 tolerance: float, max_iterations: int) -> dict[str, Any]:
+    """Calibrate on a station that CAN be calibrated - not on station one.
+
+    Round 16, P1-3: on a real free-form skin the first station is the one most
+    likely to sit in the tightest curvature and miss, so pinning the calibration
+    to ``rows[0]`` meant the field that had just been fixed was silent again on
+    exactly the surfaces it is for. The known-answer step only needs SOME row
+    that reached the surface, and which one it was is reported as ``station``
+    (1-based) so nobody reads a failed first station's silence as a failure.
+    """
+    mode = "nearest" if direction is None else "along"
+    if not rows:
+        return {}
+    if direction is None:
+        wanted = "a foot point with a normal"
+        index = next((at for at, row in enumerate(rows)
+                      if row.get("surface_point") and row.get("normal")), None)
+        missing = ("none of the {} station(s) returned a foot point with a normal "
+                   "to step along (a zero offset has no direction), so there is "
+                   "nothing to check a reading against")
+    else:
+        wanted = "a converged hit"
+        index = next((at for at, row in enumerate(rows) if row.get("converged")),
+                     None)
+        missing = ("none of the {} station(s) reached the surface, so there is no "
+                   "hit whose 0.5 mm step could be checked - the offsets above are "
+                   "not calibrated and this is not evidence that they are wrong, "
+                   "only that nothing here can vouch for them")
+    if index is None:
+        return {"ok": None, "mode": mode, "station": None, "stations": len(rows),
+                "reason": missing.format(len(rows))}
+    row = rows[index]
+    check = (calibration_row(row, nearest) if direction is None
+             else calibration_along(row, direction, nearest, tolerance,
+                                    max_iterations))
+    check["station"] = index + 1
+    check["stations"] = len(rows)
+    check["station_needs"] = wanted
+    return check

@@ -2,6 +2,86 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.142] — 2026-11-16 · a miss is not a coordinate, and the flag stops meaning two things
+
+Round 16 reported three defects in `catia_surface_probe`, all in the along path -
+the path the report uses to get a surface height. All three were real. Chasing
+the second turned up two more that no report could see from outside.
+
+**P1-1: `inside_solid` was answered from the RAY's convergence.** The hedge that
+turns "the query point is ON the target" into `null` was fed
+`1.0 if converged else 0.0`, so every along row whose line missed the face came
+back `null` while nearest mode said `true` for the same point - the field meant
+two different things depending on the mode, which is worse than being absent. It
+is now fed the query point's own distance to the target, measured for free on the
+first iteration (`start_distance_mm`). Measured on B30 2026-11-16, a 40x30x20 box,
+station (20,15,10) inside it, probing the z=20 face along -Y:
+
+```
+0.3.141   converged false, gap 10.0, inside_solid null
+0.3.142   converged false, gap 10.0, inside_solid true
+```
+
+**P1-2: a miss still handed out six decimals of coordinate.** The row carried
+`offset_mm` and `surface_point` whether or not the point was on the surface, so a
+caller reading those (not `converged`) built a section 0.19-0.79 mm off the skin.
+A miss now answers `offset_mm: null`, no `surface_point`/`along_point`, and
+`usable: false`, and keeps what it did reach under `last_iterate_mm` /
+`last_surface_point` with `gap_mm` saying how far off that is. Converged rows say
+`usable: true`. The reply also counts them: `stations` and `usable_stations`.
+
+**P1-3: calibration was pinned to station 1**, and on a real skin station 1 is the
+one most likely to sit in the tightest curvature and miss - so the field fixed in
+0.3.141 went silent again exactly where it was needed. It now runs on the first
+station that can carry it and reports which: `calibration.station` of
+`calibration.stations`.
+
+**Found while reproducing #2, invisible from outside: the gap belonged to the
+wrong iterate.** `_solve_axis` stepped first and tested afterwards, so `gap_mm`
+was measured at t_n while the row's `along_point`/`surface_point` were built from
+t_(n+1). On a r=15 cylinder probed along +X that reported `gap_mm 0.000719` for an
+iterate 0.9 mm short - neither the distance to the surface nor the step taken.
+Test first, step after; the published gap now belongs to the published point, and
+the acceptance re-measures it with an independent nearest call (10.000000 vs
+10.000000).
+
+That fix also exposed the premature stop: a step below the tolerance with the
+remainder just above it is "nearly there", not "the axis cannot reach it". The
+tangential break now needs `gap > 100 x tolerance`, and the station that 0.3.141
+cut off at gap 0.00108 mm (step 0.0008) converges at gap 0.00048:
+
+```
+cylinder r15, along +X, station y=10    0.3.141   not converged, gap 0.00108
+                                        0.3.142   converged, 18.819016
+analytic  30 - sqrt(15^2 - 10^2) = 18.819660
+```
+
+**And the three `false` rows in the report had their own cause: `inside_solid`
+asked `part.MainBody` only.** Measured the same day, with a 40x30x20 box in the
+main body and a second box 100 mm higher in a body called 'Upper':
+
+```
+station inside 'Upper'    inside_solid false   (checked against 零件几何体)
+station inside the main   inside_solid true
+```
+
+A false from the wrong body is indistinguishable from a false from the right one.
+The check now asks every body and the reply names them in
+`inside_checked_against: ["零件几何体", "Upper"]`.
+
+The three cell notes the report is owed: `null` means "not determined" and it
+happens in exactly three cases - the target IS the body (inside and on both read
+0.0000), the check itself failed, or the query point lies exactly ON the target;
+all three are now in the tool description. And the convergence criterion change
+in 0.3.141 was announced without its cost: the whole-gap rule is stricter than the
+axial-component rule, so a surface that used to report 16/16 converged will report
+fewer, and the offsets of the ones that stop short are no longer quoted at all.
+That is the intended trade - a station 0.2 mm off the skin is not a height - but
+it changes the numbers a pipeline sees, which is why this entry says it.
+
+B30: `scripts/b30_v0447_acceptance.py` 17/17; the round-15 acceptance still 13/13
+and the round-14 one still 15/15; 2288 tests.
+
 ## [0.3.141] — 2026-11-16 · the calibration answers in both modes, and a face is a face
 
 Round 15 reported two credibility defects in the tool 0.3.140 had just added. Both

@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.141** · [what changed](CHANGELOG.md) ·
+**0.3.142** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1374,6 +1374,38 @@ Two facts about real drawings that this had to accept:
   whole; one with live text imports the geometry and says how many runs it
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
+
+0.3.142 makes a miss in `catia_surface_probe` unable to look like a height, and
+stops `inside_solid` meaning two things:
+
+* **A row that did not reach the surface carries no coordinate.** `offset_mm` and
+  `surface_point` are now null and `usable` is false, with what the iteration did
+  reach under `last_iterate_mm` and `gap_mm` saying how far off. Six decimals next
+  to a 0.2-0.8 mm gap is how round 16 got stations that read like hits.
+  `stations` / `usable_stations` count them at the top of the reply.
+* **`inside_solid` is a fact about the point, not about the ray.** The hedge that
+  answers null when the query lies ON the target was fed the ray's convergence, so
+  every along row whose line missed came back null while nearest mode said true.
+  Measured: station (20,15,10) inside a 40x30x20 box, z=20 face along -Y ->
+  0.3.141 null, 0.3.142 **true**.
+* **It asks every body, and names them** (`inside_checked_against`). Asking
+  `part.MainBody` alone answered false for a station inside a second body 100 mm
+  higher - measured, and exactly the three unexplained false rows in the report.
+* **Calibration runs on the first station that can carry it**, not on station 1,
+  and reports `calibration.station` of `calibration.stations`.
+* **The gap now belongs to the iterate it is published with.** `_solve_axis`
+  stepped before testing, so `gap_mm` was measured at t_n and the point came from
+  t_(n+1): a cylinder station printed `gap 0.000719` while 0.9 mm short. Fixed, and
+  the acceptance re-measures the published point with an independent nearest call
+  (10.000000 vs 10.000000). The same fix removes a premature stop, so a
+  shallow-angle station that 0.3.141 cut off at gap 0.00108 mm now converges at
+  0.00048 and reads **18.819016** against the analytic 18.819660.
+
+**Threshold change to know about:** this stricter whole-gap rule means a surface
+that reported 16/16 converged under 0.3.140 will report fewer, and the ones that
+stop short no longer carry an offset at all. That is the point - a station 0.2 mm
+off the skin is not a height - but a pipeline that branched on `converged` will
+see different counts.
 
 0.3.141 fixes the two credibility defects round 15 found in the tool 0.3.140 had
 just added, and a third one it exposed:
