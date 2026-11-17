@@ -1023,9 +1023,49 @@ class PlannerTools:
             # 2026-10-31, §13). The full list is worth having; it is not worth
             # having INSTEAD of the failures.
             failures = [entry for entry in report if not entry["ok"]]
-            data["steps"] = failures
-            data["steps_omitted"] = len(report) - len(failures)
-            data["failed_indices"] = [entry["index"] for entry in failures]
+            if failures:
+                data["steps"] = failures
+                data["steps_omitted"] = len(report) - len(failures)
+                data["failed_indices"] = [entry["index"] for entry in failures]
+                data["summary_note"] = (
+                    f"summary=true: data.steps lists ONLY the {len(failures)} "
+                    f"step(s) that failed. The other {len(report) - len(failures)} "
+                    "succeeded and are counted in 'executed'; any successful step "
+                    "whose reply carried a WARNING is kept in 'step_warnings' "
+                    "(always present, possibly empty) with the warning text "
+                    "untruncated, because it is usually the reason a later step "
+                    "failed. Re-run without summary for every step record.")
+            elif code != "PLAN_OK":
+                # NOTHING FAILED AS A STEP, so the trimming above would answer
+                # with an empty list on the one failure this tool can report
+                # without a failed step: a failed ASSERTION. That is what
+                # happened to a 20-50 step plan whose expect did not hold - the
+                # caller got the measurement and the verdict and no trace, and had
+                # to run the plan twice to find which step moved the number
+                # (reported 2026-11-17). Keeping the whole report here is never
+                # bigger than not asking for summary at all, so it costs nothing
+                # that was not already on the table.
+                data["steps"] = report
+                data["steps_omitted"] = 0
+                data["failed_indices"] = []
+                data["summary_note"] = (
+                    "summary=true, but no STEP failed - the plan ran and its "
+                    f"assertions did not hold (or it has no assertions), so all "
+                    f"{len(report)} step record(s) are kept rather than filtered "
+                    "to a set of failures that does not exist. 'step_warnings' "
+                    "(always present) carries the untruncated warnings.")
+            else:
+                # A plan that PASSED is the case summary was built for: nothing to
+                # show but what a step warned about (2026-11-01).
+                data["steps"] = failures
+                data["steps_omitted"] = len(report)
+                data["failed_indices"] = []
+                data["summary_note"] = (
+                    "summary=true: every step succeeded, so data.steps is empty and "
+                    f"the {len(report)} record(s) are counted in 'executed'. Any "
+                    "step that printed a WARNING is kept in 'step_warnings' (always "
+                    "present, possibly empty). Re-run without summary for every step "
+                    "record.")
             # A step can succeed and still be the reason the NEXT one failed:
             # an arc drawn 355 degrees the wrong way round builds fine and then
             # takes the shaft down with it, and its "MAJOR arc" line is the only
@@ -1044,14 +1084,6 @@ class PlannerTools:
             # promises this field, and a caller that has to distinguish "absent"
             # from "none" cannot use it (reported 2026-11-08, N3).
             data["step_warnings"] = warned
-            data["summary_note"] = (
-                f"summary=true: data.steps lists ONLY the {len(failures)} step(s) "
-                f"that failed. The other {len(report) - len(failures)} succeeded "
-                "and are counted in 'executed'; any successful step whose reply "
-                "carried a WARNING is kept in 'step_warnings' (always present, "
-                "possibly empty) with the warning text untruncated, because it is "
-                "usually the reason a later step failed. Re-run without summary "
-                "for every step record.")
         return {
             "ok": ok,
             "code": code,

@@ -1791,6 +1791,14 @@ class DocumentTools:
         "close the loaded copy" into "close something else" in the 2026-11-08
         report (M4). Anything ambiguous is refused with the candidates, so the
         caller can retry with a path instead of guessing which one died.
+
+        THE STEM IS A NAME TOO, and this is the same four tiers
+        ``catia_activate_document`` has used since 0.3.32: the name as given, the
+        name without its extension, then both case-folded. It was not here, so
+        the two tools disagreed about what "the document's name" is - the
+        2026-11-17 report closed with "No open document matches 'Part1'. Open:
+        'Part1.CATPart'" from one tool and a successful activation from the other.
+        Ambiguity is still refused per tier rather than resolved by order.
         """
         wanted = str(wanted).strip()
         if not wanted:
@@ -1798,8 +1806,8 @@ class DocumentTools:
                 "'document' was given but is empty - name the document to close, or "
                 "omit the parameter to close the active one.")
         key = os.path.normcase(os.path.abspath(wanted))
-        exact: list[Any] = []
-        by_name: list[Any] = []
+        folded = wanted.casefold()
+        tiers: list[list[Any]] = [[], [], [], [], []]
         every: list[str] = []
         for index in range(1, int(self.conn.documents.Count) + 1):
             doc = self.conn.documents.Item(index)
@@ -1812,42 +1820,52 @@ class DocumentTools:
             except Exception:  # noqa: BLE001
                 full = ""
             every.append(full or name)
+            stem = name.split(".")[0]
             if full and os.path.normcase(os.path.abspath(full)) == key:
-                exact.append(doc)
-            elif name.casefold() == wanted.casefold():
-                by_name.append(doc)
-        if len(exact) == 1:
-            return exact[0]
-        matches = exact or by_name
-        if not matches:
-            raise CodedError(
-                f"No open document matches '{wanted}'. Open: "
-                + ("; ".join(f"'{name}'" for name in every) or "none")
-                + ". Nothing was closed.",
-                code="DOCUMENT_NOT_FOUND",
-                stage="validate",
-                modified=False,
-                next_actions=[
-                    "catia_list_documents shows every open document with its path "
-                    "and which assemblies use it",
-                ],
-            )
-        if len(matches) > 1:
-            raise CodedError(
-                f"'{wanted}' matches {len(matches)} open documents, so nothing was "
-                "closed: "
-                + "; ".join(
-                    "'%s'" % (str(getattr(doc, "FullName", "") or doc.Name))
-                    for doc in matches)
-                + ". Retry with the full path of the one you mean.",
-                code="DOCUMENT_AMBIGUOUS",
-                stage="validate",
-                modified=False,
-                data={"requested": wanted, "matches": [
-                    str(getattr(doc, "FullName", "") or doc.Name)
-                    for doc in matches]},
-            )
-        return matches[0]
+                tiers[0].append(doc)
+            elif name == wanted:
+                tiers[1].append(doc)
+            elif stem == wanted:
+                tiers[2].append(doc)
+            elif name.casefold() == folded:
+                tiers[3].append(doc)
+            elif stem.casefold() == folded:
+                tiers[4].append(doc)
+        for tier in tiers:
+            if len(tier) == 1:
+                return tier[0]
+            if len(tier) > 1:
+                self._refuse_ambiguous(wanted, tier)
+        raise CodedError(
+            f"No open document matches '{wanted}', by name, by name without its "
+            "extension, or case-insensitively. Open: "
+            + ("; ".join(f"'{name}'" for name in every) or "none")
+            + ". Nothing was closed.",
+            code="DOCUMENT_NOT_FOUND",
+            stage="validate",
+            modified=False,
+            next_actions=[
+                "catia_list_documents shows every open document with its path "
+                "and which assemblies use it",
+            ],
+        )
+
+    @staticmethod
+    def _refuse_ambiguous(wanted: str, matches: list[Any]) -> None:
+        raise CodedError(
+            f"'{wanted}' matches {len(matches)} open documents, so nothing was "
+            "closed: "
+            + "; ".join(
+                "'%s'" % (str(getattr(doc, "FullName", "") or doc.Name))
+                for doc in matches)
+            + ". Retry with the full path of the one you mean.",
+            code="DOCUMENT_AMBIGUOUS",
+            stage="validate",
+            modified=False,
+            data={"requested": wanted, "matches": [
+                str(getattr(doc, "FullName", "") or doc.Name)
+                for doc in matches]},
+        )
 
     def _close_document(self, save: bool = False,
                         document: str | None = None,

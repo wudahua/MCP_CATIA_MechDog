@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.144** · [what changed](CHANGELOG.md) ·
+**0.3.145** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1374,6 +1374,27 @@ Two facts about real drawings that this had to accept:
   whole; one with live text imports the geometry and says how many runs it
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
+
+0.3.145 answers the 2026-11-17 M113 report - four of its six items, with the two
+that need design work named instead of half-done:
+
+* **`catia_mirror` no longer undoes a cut.** It is `AddNewMirror(plane)`, which
+  mirrors the WHOLE body and UNIONs the copy: on a box with a pocket 80000 ->
+  160000 mm3, and on the report's groove 26228730.962 -> 42188262.4593, the
+  pre-groove volume, reported as success. The seed property that would make it a
+  feature mirror is read-only (`Property 'AddNewMirror.Object' can not be set`),
+  so a cut seed is now refused with the volume in `data`, `feature=` is refused
+  with the two-call recipe, and the body operation is behind
+  `allow_body_mirror=true` with the volume on both sides.
+* **The anchor retry re-matches instead of re-using dead references.** A failed
+  batch invalidates every topology reference taken before it, and the anchor path
+  was handing its retry exactly those - which is why a batch stuck at 2/4 stayed at
+  2/4. A miss now also carries `data.missed[]` with `nearest_edge` and
+  `distance_mm`.
+* **`catia_close_document` takes the stem**, the same four tiers
+  `catia_activate_document` has had since 0.3.32, still refusing ambiguity.
+* **`catia_run_plan` keeps its step records when the ASSERTION fails** (no step
+  failed, so `summary=true` used to answer with an empty list).
 
 0.3.144 answers a stall that round 17's all-green data exposed: four inside
 stations came back with `gap_mm == start_distance_mm` - the walk never moved,

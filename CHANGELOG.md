@@ -2,6 +2,65 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.145] — 2026-11-18 · a mirror that says no, and three answers that were off by one rule
+
+The 2026-11-17 report is a 100-instance M113 build. Six items; this release takes
+four, and the two that need design work (spline control points, frame-datum
+cleanup) are named at the end rather than half-done.
+
+**P0 - `catia_mirror` undid a cut and said it worked.** The report's groove went
+26228730.962 -> 42188262.4593 mm3 - the pre-groove volume - and deleting the
+mirror put it back. The mechanism is one line: the tool is
+`ShapeFactory.AddNewMirror(planeRef)`, which has no seed, and what it produces is
+"the whole current shape, mirrored, UNIONED with the body". Reproduced on B30
+2026-11-18 with a 60x40x50 box and a 20x40 pocket: 80000 -> 160000 mm3. On the
+report's part the mirror image had solid exactly where the groove removed it, so
+the union filled the cavity back in. And the one property that could have made it
+a feature mirror is read-only: `Property 'AddNewMirror.Object' can not be set`,
+for the feature and for a reference to it, before and after the first update.
+
+So it is now refused when the body's last feature is a cut (`MIRROR_WOULD_FILL_CUT`
+with the volume in `data`), refused when `feature=` names one
+(`MIRROR_SEED_UNSUPPORTED`), and the whole-body operation is behind
+`allow_body_mirror=true` with the volume before and after in every reply. The
+description says which operation it is instead of "mirror a feature or body". To
+mirror one feature, build it twice - the report's own route reached -0.00027% of
+its source volume that way.
+
+**Fillet batches: the anchor retry was re-using dead references.** The retry that
+saves a failed batch (`sequential_retry`) resolved its edges with
+`lambda: (labels, refs)` on the anchor path - and those references were taken
+before the batch was deleted, which invalidates every one of them. So a batch that
+could only do 2/4 stayed at 2/4, which is what "the edge_anchors path has no retry"
+looks like from outside. It now re-matches the ANCHORS (coordinates survive a
+rebuild) and falls back to the old pair if that matching refuses. A miss also
+carries its candidates as data now (`ANCHORS_NOT_MATCHED`, `data.missed[]` with
+`nearest_edge` and `distance_mm`), instead of only a sentence - the report had to
+re-list every edge to find the one its anchor was 3.22 mm from.
+
+**`catia_close_document` takes the stem.** It required `Part1.CATPart` while
+`catia_activate_document` had accepted `Part1` since 0.3.32: same four tiers now
+(name, stem, case-folded name, case-folded stem), still refusing ambiguity rather
+than picking the first match.
+
+**`catia_run_plan` keeps its trace when the ASSERTION fails.** `summary=true` trims
+`steps` to the ones that failed - and a failed `expect` has no failed step, so the
+list came back empty and a 20-50 step plan had to be run twice to find which step
+moved the number. It now keeps all records when the verdict is not `PLAN_OK` and no
+step failed; a plan that PASSED still trims, and a plan with a failed step still
+trims to the failures.
+
+B30: `scripts/b30_v0451_acceptance_mirror.py` 10/10 and
+`scripts/b30_v0452_acceptance_small.py` 11/11 (four anchors still 4/4, a miss
+reports `Edge.4 @ 3.3526 mm`, close-by-stem, and both plan cases), round 17's
+acceptance still 13/13, round 16 17/17. 2313 tests.
+
+**NOT in this release**, both from the same report and both real: `control_points`
++ `degree` + `knots` on `catia_sketch_spline` (the tool only interpolates, and the
+report measured +4.20% on P05's ring cavity when control points were treated as
+through-points, -0.00027% once sampled), and the frame sketch's private
+`Datum_frame.N` + 3 construction points that deleting the sketch leaves behind.
+
 ## [0.3.144] — 2026-11-16 · a stalled walk is not a missed line
 
 Round 17's report is all-green - five fixes verified on a real 18-section loft, no

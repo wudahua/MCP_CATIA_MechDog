@@ -978,8 +978,33 @@ class PartDesignTools:
             {
                 "name": "catia_mirror",
                 "description": (
-                    "Mirror a feature or body about a plane. "
-                    "Creates a symmetric copy of the geometry."
+                    "MIRROR THE WHOLE BODY about a plane and UNION the copy with it "
+                    "- Transform > Mirror, not 'mirror this one feature'. The "
+                    "distinction is not cosmetic and it is measured (B30 "
+                    "2026-11-18): ShapeFactory.AddNewMirror takes only a plane, and "
+                    "its Object property - the seed that would make it a feature "
+                    "mirror - answers \"Property 'AddNewMirror.Object' can not be "
+                    "set\", for the feature itself and for a reference to it, before "
+                    "and after the first update. On a 60x40x50 box with a 20x40 "
+                    "pocket (80000 mm3) this call answers 160000; on the 2026-11-17 "
+                    "report's groove it turned 26228730.962 mm3 into 42188262.4593 - "
+                    "the pre-groove volume - because the mirror image's solid lands "
+                    "exactly where the cut removed material. "
+                    "SO IT IS REFUSED WHEN THE LAST FEATURE IS A CUT (pocket, "
+                    "groove, hole, split, shell, thickness): MIRROR_WOULD_FILL_CUT, "
+                    "nothing created, and the volume in the payload. "
+                    "feature='<name>' is refused too (MIRROR_SEED_UNSUPPORTED) - "
+                    "this API cannot target a seed, and accepting the parameter "
+                    "would produce the body operation under a feature's name. "
+                    "TO MIRROR ONE FEATURE, build it twice: a second sketch on the "
+                    "mirrored frame, then the same pocket/groove. The report that "
+                    "found this reached -0.00027% of its source volume that way "
+                    "(frame u negated, two catia_groove(360) calls). "
+                    "allow_body_mirror=true performs the body operation anyway, for "
+                    "the case it IS right for: completing a symmetric part whose "
+                    "half was built from pads. Every reply carries the volume before "
+                    "and after, so 'the copy was added' is a measurement and not a "
+                    "claim."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -988,6 +1013,26 @@ class PartDesignTools:
                             "type": "string",
                             "description": "Mirror plane: 'xy', 'yz', or 'zx'",
                             "enum": ["xy", "yz", "zx"],
+                        },
+                        "feature": {
+                            "type": "string",
+                            "description": (
+                                "A feature name from catia_list_features, if what you "
+                                "want is one FEATURE mirrored. Refused with "
+                                "MIRROR_SEED_UNSUPPORTED and the two-call recipe: the "
+                                "underlying Mirror feature has no writable seed, so "
+                                "the call could only answer with the whole-body "
+                                "operation - which is a different shape, not a "
+                                "narrower one."),
+                        },
+                        "allow_body_mirror": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Perform the whole-body mirror even though the last "
+                                "feature is a cut. Correct for completing a symmetric "
+                                "half built from pads; it WILL put material back into "
+                                "a cut, and the reply says by how much."),
                         },
                     },
                     "required": ["plane"],
@@ -1970,12 +2015,30 @@ class PartDesignTools:
 
         trouble = self._anchor_trouble_text(missed, ambiguous, tol)
         if trouble and on_miss != "skip":
+            # The candidates travel in `data` as well as in the sentence: a caller
+            # correcting coordinates by hand reads the sentence, a caller
+            # re-matching them (catia_list_edges + a second call) needs the names
+            # and the distances as fields. Without them the 2026-11-17 report had
+            # to re-list every edge of the body to find out which one the anchor
+            # was 3.22 mm from.
             raise ArgumentRejected(
                 trouble + ". Nothing was filleted - the whole batch is refused so "
                 "that no edge gets a feature nobody asked for. Fix the coordinates "
                 "above, raise anchor_tol, or pass on_anchor_miss='skip' to fillet "
-                "the anchors that do match and have these reported instead."
-            )
+                "the anchors that do match and have these reported instead.",
+                code="ANCHORS_NOT_MATCHED", stage="validate",
+                data={"anchor_tol": tol,
+                      "missed": missed,
+                      "ambiguous": ambiguous,
+                      "matched": report},
+                next_actions=[
+                    "catia_list_edges(coords=true) lists every edge with its "
+                    "midpoint - feed those coordinates back as edge_anchors",
+                    "raise anchor_tol if the coordinates come from a coarser "
+                    "source; the 'distance_mm' in data.missed says by how much",
+                    "on_anchor_miss='skip' fillets the anchors that DO match and "
+                    "reports the rest instead of refusing the batch",
+                ])
         if trouble:
             report.append("SKIPPED (on_anchor_miss='skip'): " + trouble)
         if not matches:
@@ -1989,6 +2052,33 @@ class PartDesignTools:
             labels.append(f"{entry['name']} (by anchor)")
             refs.append(entry["cell"].Reference)
         return labels, refs, "Edge anchors: " + "; ".join(report) + ".", table
+
+    def _re_resolve_anchors(self, body: Any, anchors: list[list[float]],
+                            tol: float,
+                            fallback: tuple[list[str], list[Any]]
+                            ) -> tuple[list[str], list[Any]]:
+        """Match the anchors again, after a failed batch changed the topology.
+
+        Called by ``_apply_fillets`` only when a batch rebuild failed and its
+        features were deleted - so the references resolved before the failure are
+        dead, while the ANCHORS are coordinates and mean the same thing as they
+        did a second ago. Matching again is the difference between a retry and a
+        re-run of the same failure.
+
+        ``on_miss='skip'`` because a retry is not the place to refuse a batch: if
+        the topology moved enough that an anchor no longer has an edge, the
+        fallback (the pre-failure pair) is what this call had before, and the
+        per-edge failures are reported anyway. A refusal here would escape the
+        retry loop and leave the caller holding half a body.
+        """
+        try:
+            labels, refs, _report, _table = self._anchors_to_edges(
+                body, anchors, tol, on_miss="skip")
+        except Exception:  # noqa: BLE001 - the fallback is the old answer
+            return fallback
+        if not refs:
+            return fallback
+        return labels, refs
 
     @staticmethod
     def _anchor_trouble_text(missed: list[dict[str, Any]],
@@ -3551,7 +3641,22 @@ class PartDesignTools:
         try:
             out = self._apply_fillets(value, labels, refs, add, part=part,
                                       label=label,
-                                      resolve=lambda: (labels, refs),
+                                      # THE RETRY MUST RE-RESOLVE THE ANCHORS, not
+                                      # re-use the references it already has.
+                                      # `resolve` is only called after a failed
+                                      # batch has been deleted, and that rebuild
+                                      # kills every topology reference taken
+                                      # before it - so `lambda: (labels, refs)`
+                                      # handed the retry four dead references and
+                                      # every one of them failed again, which is
+                                      # how a batch that could only do 2/4 stayed
+                                      # at 2/4 (reported 2026-11-17: "the
+                                      # edge_anchors path has no retry"). The
+                                      # anchors are coordinates, so they survive:
+                                      # match them again, and if that matching
+                                      # now refuses, fall back to what we had.
+                                      resolve=lambda: self._re_resolve_anchors(
+                                          body, anchors, tol, (labels, refs)),
                                       context=report)
         finally:
             self._clear_selection()
@@ -5162,29 +5267,151 @@ class PartDesignTools:
         return f"User pattern '{pattern.Name}' created: " + summary + effect + note
 
     def _mirror(self, args: dict[str, Any]) -> str:
+        """Mirror the body about a plane - and refuse the case that lies.
+
+        WHAT THIS CALL ACTUALLY DOES (measured on B30 2026-11-18): it is
+        ``ShapeFactory.AddNewMirror(planeRef)``, which has no seed parameter and
+        produces "the whole current shape, mirrored, UNIONED with the body". On a
+        60x40x50 box with a 20x40 pocket (volume 80000 mm3) a mirror about xy
+        answers 160000: a second copy below z=0, added.
+
+        That is a real CATIA operation - Transform > Mirror on a body - and it is
+        the right thing when a caller has modelled half a symmetric part. It is
+        WRONG, and silently so, when the body's material is a CUT that is not
+        symmetric about the plane: the mirror image has solid exactly where the cut
+        removed it, and the union puts the material back. The 2026-11-17 report hit
+        that on a groove:
+
+            after the groove      26228730.962 mm3
+            after mirror(xy)      42188262.4593 mm3   <- the pre-groove volume
+
+        The tool reported success. So a cut seed is refused here rather than
+        answered with a wrong number (the reporter asked for exactly this), and
+        ``Mirror.Object`` - the one property that could have made it a feature
+        mirror - was measured to be read-only: "Property 'AddNewMirror.Object' can
+        not be set", for the feature itself and for a reference to it, before and
+        after the first update.
+
+        ``allow_body_mirror=true`` says "I know, I want the body operation" and is
+        what the old behaviour is now behind.
+        """
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
         body = self._prepare_body(part)
         sf = part.ShapeFactory
 
-        plane_key = args["plane"].lower()
+        plane_key = str(args["plane"]).lower()
         planes = self.conn.get_origin_elements()
         if plane_key not in planes:
             raise ArgumentRejected(f"Unknown plane '{plane_key}'. Use 'xy', 'yz', or 'zx'.")
 
+        shapes = body.Shapes
+        count = int(shapes.Count)
+        if count == 0:
+            raise ArgumentRejected(
+                f"Body '{body.Name}' holds no Part Design feature yet, so there is "
+                "nothing to mirror. Build the geometry first. Nothing was created.",
+                code="EMPTY_BODY", stage="validate")
+        last_shape = shapes.Item(count)
+        last_name = str(getattr(last_shape, "Name", "") or "")
+        last_kind = (self._feature_kind_resolved(part, last_shape)
+                     if last_shape is not None else "none")
+
+        seed = str(args.get("feature") or "").strip()
+        allow = bool(args.get("allow_body_mirror"))
+        names = []
+        for index in range(1, count + 1):
+            names.append(str(shapes.Item(index).Name))
+        if seed:
+            if seed not in names:
+                raise ArgumentRejected(
+                    f"No feature named '{seed}' in body '{body.Name}'. It holds: "
+                    + (", ".join(names) or "nothing") + ". Nothing was created.",
+                    code="FEATURE_NOT_FOUND", stage="validate")
+            seed_kind = self._feature_kind_resolved(
+                part, shapes.Item(names.index(seed) + 1))
+            raise CodedError(
+                f"A mirror of the single feature '{seed}' ({seed_kind}) is not "
+                "expressible through this API: ShapeFactory.AddNewMirror takes a "
+                "plane and nothing else, and its Object property - the seed - was "
+                "measured read-only on B30 2026-11-18 (\"Property "
+                "'AddNewMirror.Object' can not be set\", for the feature and for a "
+                "reference to it, before and after the first update). What the call "
+                "CAN do is mirror the whole body and union it, which is a different "
+                "operation and not what you asked for. Nothing was created.",
+                code="MIRROR_SEED_UNSUPPORTED",
+                stage="validate",
+                modified=False,
+                data={"requested_feature": seed, "kind": seed_kind,
+                      "body": str(body.Name), "features": names},
+                next_actions=[
+                    "Build the cut twice instead: a second sketch on the mirrored "
+                    "frame, then the same feature again. The 2026-11-17 report did "
+                    "exactly that for its two annular cavities - frame u negated, "
+                    "second catia_groove(360) - and landed on 9855303.187 mm3 "
+                    "against a 9855329.47 source (-0.00027%)",
+                    "mirror the SKETCH rather than the feature "
+                    "(catia_sketch_copy onto the mirrored frame, then "
+                    "catia_pocket/catia_groove with the same depth)",
+                    "allow_body_mirror=true mirrors the WHOLE body and unions it: "
+                    "right for completing a symmetric half built from pads, wrong "
+                    "for duplicating a cut",
+                ])
+        if last_kind in self._CUT_KINDS and not allow:
+            before, note = self._volume_probe(part, body)
+            raise CodedError(
+                f"REFUSED: the body's last feature is '{last_name}' ({last_kind}), "
+                "a cut. This tool mirrors the WHOLE body and unions the copy with "
+                "it, so the mirror image's material lands exactly where the cut "
+                "removed it - on B30 2026-11-18 a box with a 20x40 pocket (80000 "
+                "mm3) answered 160000 after a mirror about xy, and the 2026-11-17 "
+                "report's groove went 26228730.962 -> 42188262.4593 (the pre-groove "
+                "volume) with the tool reporting success. "
+                + (f"Right now this body is {before:.4f} mm3. " if before else "")
+                + "Nothing was created.",
+                code="MIRROR_WOULD_FILL_CUT",
+                stage="validate",
+                modified=False,
+                data={"last_feature": last_name, "kind": last_kind,
+                      "body": str(body.Name), "volume_mm3": before,
+                      "volume_note": note, "features": names},
+                next_actions=[
+                    "Mirror the FEATURE by building it twice: a second sketch on "
+                    "the mirrored frame, then the same pocket/groove. The "
+                    "2026-11-17 report reached -0.00027% of its source volume that "
+                    "way",
+                    "allow_body_mirror=true if you really want Transform > Mirror "
+                    "on the whole body (it will put material back into the cut)",
+                ])
+
         mirror_plane = planes[plane_key]
         ref = part.CreateReferenceFromObject(mirror_plane)
-
-        # AddNewMirror takes only the plane reference and mirrors the
-        # body's existing shapes; per-feature mirroring is not expressible
-        # through this API.
+        before, before_note = self._volume_probe(part, body)
         mirror = sf.AddNewMirror(ref)
-
         self._safe_update(part, mirror)
+        after, after_note = self._volume_probe(part, body)
         self.conn.refresh_display()
+        if before is None or after is None:
+            volume_sentence = (" The volume could not be read on both sides of the "
+                               f"call ({before_note or after_note}), so whether the "
+                               "copy was added is not verified.")
+        else:
+            delta = after - before
+            if abs(delta) < 1e-6:
+                volume_sentence = (
+                    f" Volume {before:.4f} -> {after:.4f} mm3: the body is already "
+                    "symmetric about this plane, so this mirror added nothing.")
+            else:
+                volume_sentence = (
+                    f" Volume {before:.4f} -> {after:.4f} mm3 (delta {delta:+.4f}): "
+                    "the whole body was mirrored and the copy UNIONED with it, which "
+                    "is Transform > Mirror - not a mirror of one feature.")
         return (
-            f"Mirror created about {plane_key.upper()} plane (mirrors the "
-            f"body's shapes). Feature: '{mirror.Name}'"
+            f"Mirror created about {plane_key.upper()} plane: the WHOLE body "
+            f"('{body.Name}', last feature '{last_name}' = {last_kind}) was mirrored "
+            f"and unioned with itself. Feature: '{mirror.Name}'." + volume_sentence
+            + " If you wanted ONE feature mirrored, this is not that operation - "
+            "see the tool description for the two-call route that is."
         )
 
     def _shell(self, args: dict[str, Any]) -> str:
@@ -6006,6 +6233,11 @@ class PartDesignTools:
             if name.startswith(prefix):
                 return kind
         return "unknown"
+
+    #: The kinds that REMOVE material. A mirror of the whole body unions the
+    #: image with the original, so on a body whose last feature is one of these
+    #: the union can put the removed material back - measured, 2026-11-18.
+    _CUT_KINDS = ("pocket", "groove", "hole", "split", "shell", "thickness")
 
     #: Which members a feature's FULL interface carries, for the case the name
     #: prefix cannot answer: a feature the caller renamed. `body.Shapes.Item(i)`
