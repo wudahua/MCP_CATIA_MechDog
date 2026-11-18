@@ -1207,7 +1207,11 @@ class PartDesignTools:
                     "failing. Such a delete is now REFUSED with the count, and "
                     "names=['P_04_06'] deletes every element carrying that name and "
                     "reports how many it took. New elements no longer create "
-                    "duplicates: a taken name comes back as 'P_04_06.2' with a note."
+                    "duplicates: a taken name comes back as 'P_04_06.2' with a note. "
+                    "FRAME SCAFFOLDING: deleting a sketch that was built on a frame "
+                    "leaves its datum plane and 3 construction points in the tree - "
+                    "they are NOT its children (measured on B30 2026-11-18). Pass "
+                    "cleanup_frame_datum=true to remove them with it."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1231,6 +1235,26 @@ class PartDesignTools:
                             "description": (
                                 "Also delete the construction points this feature "
                                 "created (recorded from this session only)."
+                            ),
+                        },
+                        "cleanup_frame_datum": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When the deleted element is a SKETCH, also remove "
+                                "the datum plane and the 3 points a frame support "
+                                "left in the tree. A frame sketch's scaffolding is "
+                                "not its child: deleting the sketch leaves "
+                                "'<sketch>_FRAME' and '<sketch>_FRAME.O/.U/.V' "
+                                "behind (measured on B30 2026-11-18: the plane "
+                                "and the 3 points stayed, and deleting them "
+                                "afterwards works, plane first). The names are "
+                                "given by catia_create_sketch since 0.3.146; a "
+                                "sketch made before that carries 'Datum_frame.N' "
+                                "and three unnamed points that cannot be tied to "
+                                "it, and the reply says so instead of deleting a "
+                                "neighbour's support. Off by default because the "
+                                "datum may be referenced by something else."
                             ),
                         },
                         "index": {
@@ -5672,6 +5696,11 @@ class PartDesignTools:
                     failed.append(f"'{name}' ({str(error).splitlines()[0][:120]})")
             # Kept OUT of `done`: that list is counted as elements removed, and a
             # sentence about the update is not one.
+            scaffold_note = ""
+            if args.get("cleanup_frame_datum") and removed_features:
+                scaffold_note = "".join(
+                    self._delete_frame_scaffold(name, update=False, quiet=True)
+                    for name in removed_features)
             update_note = (self._final_update_note(removed_features)
                            if removed_features else "")
             # `deleted` counts OBJECTS, so a name that two elements carried
@@ -5684,7 +5713,7 @@ class PartDesignTools:
                     f"'{name}' x{len(found[name])}" for name in duplicates) + ".")
             if failed:
                 summary += f" Failed ({len(failed)}): " + "; ".join(failed) + "."
-            return summary + " " + " ".join(done) + update_note
+            return summary + " " + " ".join(done) + scaffold_note + update_note
         return self._delete_one(args, None)
 
     def _delete_one(self, args: dict[str, Any], forced: str | None,
@@ -5938,7 +5967,143 @@ class PartDesignTools:
             )
         self._note_part_error(None)
         self.conn.refresh_display()
-        return self._deleted_message(kind, target, before, args)
+        message = self._deleted_message(kind, target, before, args)
+        if kind == "sketch" and args.get("cleanup_frame_datum"):
+            message += self._delete_frame_scaffold(target)
+        return message
+
+    def _delete_frame_scaffold(self, sketch_name: str,
+                               update: bool = True, quiet: bool = False) -> str:
+        """Remove the datum plane and the 3 points a frame sketch left behind.
+
+        NAMED, NOT GUESSED. Since 0.3.146 ``catia_create_sketch`` names them
+        ``<sketch>_FRAME`` and ``<sketch>_FRAME.O`` / ``.U`` / ``.V``, so this
+        can find them by name alone. It has to: on B30 2026-11-18 (probe v0454)
+        the ownership cannot be asked of CATIA at all - ``Sketch.Plane`` and
+        ``Sketch.Support`` do not exist ('Add.Plane'), ``AbsoluteAxis`` answers
+        no GetAxisData / Origin, and the plane built by ``AddNewPlane3Points``
+        has no FirstPoint / SecondPoint / ThirdPoint ('Item.FirstPoint'). The
+        three points are anonymous 点.N.
+
+        A sketch made before 0.3.146 therefore carries ``Datum_frame.N`` and
+        three 点.N that cannot be tied to it. That case is REPORTED, with the
+        candidates listed - deleting the nearest-looking plane would take
+        another sketch's support with it.
+
+        Order matters and was measured: the plane goes first, then the points.
+        With the plane still there, the points are its definition and the update
+        after deleting them fails.
+        """
+        part = self.conn.get_active_part()
+        base = f"{sketch_name}_FRAME"
+        planes: list[tuple[str, Any]] = []
+        points: list[tuple[str, Any]] = []
+        ignored: list[str] = []
+        try:
+            bodies = part.Bodies
+            for index in range(1, int(bodies.Count) + 1):
+                holder = bodies.Item(index)
+                try:
+                    shapes = holder.HybridShapes
+                except Exception:  # noqa: BLE001 - a body without hybrid shapes
+                    continue
+                for position in range(1, int(shapes.Count) + 1):
+                    node = shapes.Item(position)
+                    name = str(getattr(node, "Name", ""))
+                    if not name.startswith(base):
+                        continue
+                    # '<sketch>_FRAME', '<sketch>_FRAME.2' for a retried frame,
+                    # and '<sketch>_FRAME[.2].O|U|V' for the points. Anything
+                    # else that merely starts with the base is NOT touched: a
+                    # name this call does not understand is not a licence to
+                    # delete it.
+                    rest = name[len(base):]
+                    segments = [part for part in rest.split(".") if part]
+                    numbers = all(part.isdigit() for part in segments[:-1])
+                    if segments and segments[-1] in ("O", "U", "V") and numbers:
+                        points.append((name, node))
+                    elif not segments or (len(segments) == 1
+                                          and segments[0].isdigit()):
+                        planes.append((name, node))
+                    else:
+                        ignored.append(name)
+        except Exception as error:  # noqa: BLE001 - reported, not raised
+            return (f" Its frame scaffolding was NOT removed: the tree could not "
+                    f"be walked ({str(error).splitlines()[0][:100]}).")
+        if not planes and not points:
+            if quiet:
+                # A batch over skins that are mostly 'xy' sketches: saying "no
+                # scaffolding found" once per name would bury the ones that did.
+                return ""
+            candidates: list[str] = []
+            try:
+                bodies = part.Bodies
+                for index in range(1, int(bodies.Count) + 1):
+                    shapes = bodies.Item(index).HybridShapes
+                    for position in range(1, int(shapes.Count) + 1):
+                        name = str(getattr(shapes.Item(position), "Name", ""))
+                        if "FRAME" in name.upper() or name.startswith("Datum_frame"):
+                            candidates.append(name)
+            except Exception:  # noqa: BLE001 - the list is a courtesy
+                candidates = []
+            return (" Its frame scaffolding could not be identified: nothing named "
+                    f"'{base}*' is in the tree. A frame sketch made before 0.3.146 "
+                    "left 'Datum_frame.N' and three unnamed 点.N instead, and no "
+                    "call can say which of them belongs to this sketch - deleting "
+                    "the nearest-looking one would take another sketch's support "
+                    "with it. "
+                    + (f"Scaffolding-like names still in the tree: "
+                       f"{', '.join(candidates[:8])}. " if candidates else "")
+                    + "catia_list_features lists them; delete the ones you know "
+                      "are orphaned with catia_delete_feature(names=[...]).")
+        selection = self.conn.hso
+        removed: list[str] = []
+        failed: list[str] = []
+        for name, node in planes:
+            try:
+                selection.Clear()
+                selection.Add(node)
+                selection.Delete()
+                removed.append(name)
+            except Exception:  # noqa: BLE001 - reported per element
+                failed.append(name)
+        if points:
+            try:
+                selection.Clear()
+                for _name, node in points:
+                    selection.Add(node)
+                selection.Delete()
+                removed.extend(name for name, _node in points)
+            except Exception:  # noqa: BLE001 - fall back to one at a time
+                for name, node in points:
+                    try:
+                        selection.Clear()
+                        selection.Add(node)
+                        selection.Delete()
+                        removed.append(name)
+                    except Exception:  # noqa: BLE001 - reported per element
+                        failed.append(name)
+        try:
+            selection.Clear()
+        except Exception:  # noqa: BLE001
+            pass
+        note = ""
+        if update:
+            try:
+                part.Update()
+            except Exception as error:  # noqa: BLE001 - reported, not raised
+                note = (f" The part update after removing them failed "
+                        f"({str(error).splitlines()[0][:120]}).")
+        text = (f" Also removed the frame scaffolding it left behind: "
+                f"{len(removed)} element(s) ({', '.join(removed[:6])}"
+                f"{', ...' if len(removed) > 6 else ''}).")
+        if failed:
+            text += (f" {len(failed)} could NOT be removed and are still in the "
+                     f"tree: {', '.join(failed[:6])}.")
+        if ignored:
+            text += (f" Left alone because they are neither this frame's datum nor "
+                     f"its points: {', '.join(ignored[:6])}.")
+        return text + note
 
     def _deleted_message(self, kind: str, target: str, before: list[str],
                          args: dict[str, Any]) -> str:

@@ -1,6 +1,6 @@
 # CATIA V5 MCP Server — lite fork
 
-**0.3.145** · [what changed](CHANGELOG.md) ·
+**0.3.146** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1375,6 +1375,39 @@ Two facts about real drawings that this had to accept:
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
 
+0.3.146 finishes the two items 0.3.145 named and left alone. Each needed a
+measurement before it could be written, and both changed the answer.
+
+* **`catia_sketch_spline` takes the control points it was always given.**
+  `control_points` + `degree` (+ optional `knots`, `weights`) now define a
+  B-spline, and the report's own numbers are the reason this is not just a new
+  parameter: its P05 lobes came out +4.20 % in volume with the control points
+  typed into `points`, −0.00027 % once the real curve was sampled. CATIA cannot
+  be handed the curve - measured on B30 2026-11-18, `Factory2D.CreateSpline` is
+  the only sketch-spline constructor, it interpolates THROUGH point objects, and
+  `Spline2D` answers nothing about degree, knots or control points - so the
+  curve is evaluated in `catia_mcp/nurbs.py` (de Boor, rational) and drawn
+  through its samples. The reply carries BOTH errors: the sampling error
+  (arithmetic) and the error of the curve CATIA actually drew, measured between
+  the samples against the `Spline2D` itself (33 points / 0.0063 / 0.000000 mm on
+  the report's SP15, 65 / 0.0067 / 0.000000 on SP16). The report's 17-point curve
+  is 0.1057 mm on SP16 - over the 0.02 mm local tolerance in its own spec, which
+  is why 16 samples is not the default. Passing control points as `points` is
+  now refused outright: on the same witness points the two readings are 5.856 mm
+  and 0.941 mm apart.
+* **A frame sketch takes its scaffolding with it.** `catia_create_sketch` names
+  the datum `<sketch>_FRAME` and the three points `.O/.U/.V`, because ownership
+  cannot be asked afterwards (measured 2026-11-18: `Sketch.Plane`/`Support` do
+  not exist, `AbsoluteAxis` answers no GetAxisData, the plane has no
+  FirstPoint/SecondPoint/ThirdPoint, and the points arrive as anonymous 点.N).
+  `catia_delete_feature(cleanup_frame_datum=true)` then removes all four, plane
+  first. A sketch made before 0.3.146 is reported with the candidates instead of
+  guessed at - deleting the nearest-looking datum would take another sketch's
+  support with it.
+
+B30: `scripts/b30_v0456_acceptance_spline_frame.py` 15/15, round 18's acceptance
+still 10/10 and 11/11. 2339 tests.
+
 0.3.145 answers the 2026-11-17 M113 report - four of its six items, with the two
 that need design work named instead of half-done:
 
@@ -1962,6 +1995,17 @@ context (that refusal is a modal dialog, and reads as a bare `[WinError 2]`).
 Place the result with `catia_get_component_transform`.
 
 ## Known limits
+
+* **A sketch spline cannot be DEFINED by control points - only drawn through
+  samples.** `Spline2D` answers nothing about degree, knots or control points, and
+  `Factory2D.CreateSpline` interpolates through point objects (measured 2026-11-18),
+  so `catia_sketch_spline(control_points=..., degree=...)` evaluates the exact
+  B-spline in Python and draws the sketch spline through its samples. The reply
+  reports the sampling error and the measured error of the curve CATIA drew, and the
+  samples stay in the sketch as point elements (no Remove). A periodic sketch spline
+  is impossible too: `IsPeriodic` is read-only and repeating the first point is the
+  only closure - use `catia_gsd_spline(closed=true)` when the curve itself has to
+  close.
 
 * **A curve projected onto a CURVED surface cannot split or fill it — but it CAN
   engrave it.** Measured on B30 2026-11-10, three ways: `catia_gsd_split(element=<the

@@ -2,6 +2,58 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.146] — 2026-11-18 · the control points you were given, and the tree a frame leaves
+
+0.3.145 took four of the six 2026-11-17 items and named these two as not done.
+Both are done here, and each needed a measurement before it could be written.
+
+**P1 - `catia_sketch_spline` did not take a control-point B-spline.** The report's
+numbers are why this is not simply a new parameter. The same three control points
+read as THROUGH points gave 10 269 199.4647 mm3 against a 9 855 329.47 source
+(+4.20 %); sampling the real quadratic curve gave 9 855 303.1870 (-0.00027 %). And
+the curve cannot be handed to CATIA: measured on B30 2026-11-18, `Factory2D.
+CreateSpline` is the only sketch-spline constructor, it interpolates through point
+objects, and `Spline2D` (46 members) answers nothing about degree, knots or control
+points. So `control_points` + `degree` (+ optional `knots`, `weights`) are now
+evaluated in `catia_mcp/nurbs.py` - de Boor in homogeneous coordinates, so rational
+curves work - and the sketch spline is drawn through the samples.
+
+The reply carries TWO errors, because they are not the same number: the sampling
+error (exact curve to the sample polyline, arithmetic) and the error of the curve
+CATIA actually drew (measured against the `Spline2D` itself at points BETWEEN the
+samples, with each probe point deleted again and `InWorkObject` put back). On the
+report's rows: SP15 -> 33 points, 0.0063 mm sampling, 0.000000 mm measured; SP16 ->
+65 points, 0.0067 / 0.000000. `tolerance` (default 0.01 mm) picks the sample count
+by doubling from 8 and says when the limit was hit without meeting it; `samples`
+overrides it and the reply states the cost, because every sample is a point element
+and `GeometricElements` has no Remove. The report's 17-point curve is 0.1057 mm on
+SP16 - above the 0.02 mm local tolerance its own spec allows, and why 16 is not the
+default. `points` and `control_points` together are refused (`CONTROL_POINTS_AND_POINTS`): the two readings of the same numbers are 5.856 mm and 0.941 mm apart on
+one witness point of each curve.
+
+**P2 - a frame sketch left its datum and three points in the tree.** The report
+created 20+ of them and they accumulated. Before writing a cleanup, the ownership
+was measured (probe v0454): `Sketch.Plane` and `Sketch.Support` do not exist
+('Add.Plane'), `AbsoluteAxis` answers no GetAxisData / Origin, the plane built by
+`AddNewPlane3Points` has no FirstPoint / SecondPoint / ThirdPoint, and the three
+points are anonymous 点.N. Nothing can be asked, so nothing can be found - which is
+why the old reply could only say "delete them by name".
+
+`catia_create_sketch` now names them `<sketch>_FRAME` and `<sketch>_FRAME.O/.U/.V`
+once the sketch exists (the name is read back after writing it, and the reply quotes
+the one CATIA kept), and `catia_delete_feature(cleanup_frame_datum=true)` removes all
+four with the sketch - plane first, then the points, which is the order that updates.
+A name that merely starts with the base is left alone and reported; a sketch made
+before 0.3.146 has no such names, and the reply lists the `Datum_frame*` candidates
+instead of deleting one, because the nearest-looking plane may be another sketch's
+support.
+
+B30: `scripts/b30_v0456_acceptance_spline_frame.py` 15/15 - including the same
+witness point measured on the sampled curve (0.000000 mm) and on the interpolated
+one (5.856 mm / 0.941 mm), and a plain sketch deleted with `cleanup_frame_datum=true`
+leaving the neighbouring frame's four elements untouched. Round 18's acceptance
+still 10/10 and 11/11. 2339 tests.
+
 ## [0.3.145] — 2026-11-18 · a mirror that says no, and three answers that were off by one rule
 
 The 2026-11-17 report is a 100-instance M113 build. Six items; this release takes

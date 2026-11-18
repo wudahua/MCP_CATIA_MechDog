@@ -11,6 +11,7 @@ import math
 from typing import Any, Sequence
 
 from catia_mcp.connection import CATIAConnection
+from catia_mcp import nurbs
 from catia_mcp.fonts import has_glyph
 from catia_mcp.fonts import supported as font_charset
 from catia_mcp.fonts import text_to_outlines, text_to_strokes
@@ -797,7 +798,24 @@ class SketcherTools:
                     "element with catia_sketch_profile (lines where it is straight, "
                     "arcs where it is not): measured on B30 2026-11-12, a 60x40 "
                     "stadium of two lines and two half circles padded to 36566.37 mm3 "
-                    "= the analytic area, with no bowing anywhere."
+                    "= the analytic area, with no bowing anywhere. "
+                    "A CONTROL-POINT B-SPLINE IS ALSO ACCEPTED: pass "
+                    "'control_points' with 'degree' (plus optional 'knots' / "
+                    "'weights') and the exact curve is evaluated here and drawn as "
+                    "an interpolating spline through its samples. That is not a "
+                    "detail - the sketch spline object on B30 answers nothing about "
+                    "degree, knots or control points, and Factory2D.CreateSpline is "
+                    "the only sketch-spline constructor, so a control-point curve "
+                    "cannot be handed to CATIA at all (measured 2026-11-18). What "
+                    "it costs when the two are confused: measured 2026-11-17, "
+                    "P06's four cubic Beziers came out +0.9105 % in volume with "
+                    "the control points interpolated and -0.00105 % when sampled, "
+                    "P05's two quadratic plus two cubic lobes +4.20 % against "
+                    "-0.00027 %, and one control point sat 7.37 mm off its curve "
+                    "while the spec allowed 0.02 mm. So this tool refuses 'points' "
+                    "and 'control_points' together, and the reply carries both the "
+                    "sampling error and the measured error of the curve CATIA "
+                    "actually drew."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -810,7 +828,16 @@ class SketcherTools:
                                 "minItems": 2,
                                 "maxItems": 2,
                             },
-                            "description": "List of [x, y] control points in mm",
+                            "description": (
+                                "List of [x, y] points the curve is drawn THROUGH, in "
+                                "mm - it interpolates these, so they lie on the "
+                                "curve. For a B-spline's control points use "
+                                "'control_points' instead: a control point is "
+                                "usually NOT on its curve, and typing the two as "
+                                "the same thing is the +4.20 % volume error of "
+                                "2026-11-17. Mutually exclusive with "
+                                "'control_points'."
+                            ),
                             "minItems": 2,
                         },
                         "closed": {
@@ -825,12 +852,98 @@ class SketcherTools:
                                 "no SetClosing, so repeating the first point is the only "
                                 "way to close one in a sketch (measured 2026-11-10). For a "
                                 "genuinely closed curve use catia_gsd_spline(closed=true), "
-                                "which calls HybridShapeSpline.SetClosing."
+                                "which calls HybridShapeSpline.SetClosing. Not accepted "
+                                "together with 'control_points': a closed B-spline "
+                                "repeats its first CONTROL point as the last one."
                             ),
                             "default": False,
                         },
+                        "control_points": {
+                            "type": "array",
+                            "items": {
+                                "type": "array",
+                                "items": {"type": "number"},
+                                "minItems": 2,
+                                "maxItems": 2,
+                            },
+                            "description": (
+                                "Control points of a B-spline / Bezier, [x, y] in mm, "
+                                "with 'degree' (and optionally 'knots', 'weights'). "
+                                "CATIA's 2D spline takes only points to pass through "
+                                "- measured on B30 2026-11-18, 'Spline2D' answers "
+                                "nothing about degree, knots or control points and "
+                                "Factory2D.CreateSpline is the only constructor - so "
+                                "the exact curve is evaluated here and the sketch "
+                                "spline is drawn through its samples. Example, the "
+                                "report's SP15 quadratic: "
+                                "control_points=[[37.214626,336.867322],"
+                                "[49.398155,391.693203],[90,454.321087]], degree=2 "
+                                "(its curve passes (56.502734, 393.643704) at "
+                                "t=0.5, not through the middle control point). "
+                                "Needs at least degree+1 points. The reply reports "
+                                "BOTH errors: the sampling error (exact curve to "
+                                "the sample polyline, arithmetic) and the drawn "
+                                "error (exact curve to the curve CATIA drew, "
+                                "measured in the session)."
+                            ),
+                        },
+                        "degree": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": (
+                                "Degree of the B-spline (default 3). A quadratic "
+                                "Bezier is degree=2 with 3 control points, a cubic "
+                                "degree=3 with 4. With the default clamped knots "
+                                "these are exact Beziers: knots 0,0,0,1,1,1 for "
+                                "3 points of degree 2."
+                            ),
+                        },
+                        "knots": {
+                            "type": "array",
+                            "items": {"type": "number"},
+                            "description": (
+                                "Knot vector, count + degree + 1 values, "
+                                "non-decreasing. Leave it out for clamped uniform "
+                                "knots (a Bezier when there are degree+1 control "
+                                "points). Interior repeats control continuity: a "
+                                "double interior knot is a C0 break. A vector that "
+                                "cannot span the control points is refused rather "
+                                "than drawn as a different curve."
+                            ),
+                        },
+                        "weights": {
+                            "type": "array",
+                            "items": {"type": "number"},
+                            "description": (
+                                "One positive weight per control point, for a "
+                                "rational (NURBS) curve. Omit for a polynomial "
+                                "B-spline."
+                            ),
+                        },
+                        "samples": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": (
+                                "Intervals per span used to sample the curve "
+                                "(default: chosen to meet 'tolerance'). Every "
+                                "sample is a point element left in the sketch and "
+                                "GeometricElements has no Remove, so this is the "
+                                "clutter/loyalty dial: 16 gives 17 points and "
+                                "0.10 mm on the report's SP16 cubic, 64 gives 65 "
+                                "points and 0.0067 mm."
+                            ),
+                        },
+                        "tolerance": {
+                            "type": "number",
+                            "description": (
+                                "Largest sampling error to aim for, in mm "
+                                "(default 0.01). The sample count doubles from 8 "
+                                "until the polyline is within it or the count "
+                                "reaches 256 per span; the reply says which one "
+                                "happened and what the real deviation is."
+                            ),
+                        },
                     },
-                    "required": ["points"],
                 },
             },
             {
@@ -1432,7 +1545,13 @@ class SketcherTools:
                 )
             case "catia_sketch_spline":
                 return self._draw_spline(
-                    arguments["points"], arguments.get("closed", False),
+                    arguments.get("points"), arguments.get("closed", False),
+                    control_points=arguments.get("control_points"),
+                    degree=arguments.get("degree"),
+                    knots=arguments.get("knots"),
+                    weights=arguments.get("weights"),
+                    samples=arguments.get("samples"),
+                    tolerance=arguments.get("tolerance"),
                 )
             case "catia_sketch_point":
                 return self._draw_point(arguments["x"], arguments["y"],
@@ -1634,6 +1753,16 @@ class SketcherTools:
         # features are hidden where they are created, and the reply names them so
         # catia_set_visibility can bring one back.
         hidden = self._hide_datum(part, features)
+        # The four objects go to _create_sketch, which knows the sketch's name
+        # and can therefore give them a name that SAYS WHOSE THEY ARE. Nothing
+        # else can: measured on B30 2026-11-18 (probe v0454), the sketch has no
+        # Plane / Support property, and the plane answers no FirstPoint /
+        # SecondPoint / ThirdPoint - so "which datum belongs to this sketch"
+        # cannot be asked afterwards. A name can be read afterwards, and it
+        # survives a save and reopen.
+        self._last_frame_scaffold = {"plane": plane_feature,
+                                     "plane_name": plane_name,
+                                     "points": list(features[:-1])}
         # THEY OUTLIVE THE SKETCH, and the reply used to leave that out: the
         # 2026-11-12 report deleted 草图.6 and found the plane and its three
         # points still in the tree, with nothing said about what delete_feature
@@ -1647,9 +1776,17 @@ class SketcherTools:
                 "VISIBLE - this build refused the visibility call, so hide them "
                 f"with the CATIA UI (catia_set_visibility(name='{plane_name}') "
                 "may work once the part has been saved and reopened)")
+        # THE NAME ABOVE IS PROVISIONAL: _create_sketch renames these four to
+        # '<sketch>_FRAME*' once the sketch exists, and rewrites this sentence
+        # with that name - the frame is built before the sketch, so the sketch's
+        # name cannot be known here yet.
         note += (". They are tree elements, not an internal datum: deleting this "
-                 f"sketch does NOT take them with it, so '{plane_name}' and its "
-                 f"three points stay until you delete them by name")
+                 "sketch does NOT take them with it, so "
+                 f"'{plane_name}' and its "
+                 "three points stay until you delete them by name - either pass "
+                 "cleanup_frame_datum=true to catia_delete_feature with this "
+                 "sketch, or delete them with names=['"
+                 f"{plane_name}', ...]).")
         return part.CreateReferenceFromObject(plane_feature), note
 
     @staticmethod
@@ -2282,6 +2419,10 @@ class SketcherTools:
         part = self.conn.get_active_part()
         body = self.conn.get_active_part_body()
 
+        # Built by _resolve_support (below) when the support is a frame. Cleared
+        # here so a sketch on 'xy' after a frame sketch does not inherit the
+        # previous sketch's scaffolding names.
+        self._last_frame_scaffold = None
         ref, where = self._resolve_support(part, body, plane, offset)
 
         # Create the sketch on the plane
@@ -2370,10 +2511,62 @@ class SketcherTools:
         # 2026-11-08, P1-1, as the same "the pairing does not see this kind of
         # element" problem.
         self._profile_closed_curves = 0
+        # The frame's datum plane and its 3 points now take the sketch's name, so
+        # a later delete can find them by name alone (see _rename_frame_scaffold).
+        if getattr(self, "_last_frame_scaffold", None):
+            provisional = str(self._last_frame_scaffold.get("plane_name") or "")
+            final = self._rename_frame_scaffold(sketch)
+            if provisional and provisional != final:
+                where = where.replace(provisional, final)
 
         return (f"Sketch '{sketch.Name}' created on {where}. "
                 f"{self._axis_note(plane, placement)}. Ready for geometry."
                 + request_note + rename_note)
+
+    def _rename_frame_scaffold(self, sketch: Any) -> str:
+        """Name a frame's datum plane and its three points after the sketch.
+
+        WHY A NAME AND NOT A LOOKUP (measured on B30 2026-11-18, probe v0454):
+        the ownership cannot be asked afterwards. ``Sketch.Plane`` and
+        ``Sketch.Support`` do not exist ('Add.Plane'), ``AbsoluteAxis`` answers
+        no GetAxisData / Origin, and the plane built by ``AddNewPlane3Points``
+        has no FirstPoint / SecondPoint / ThirdPoint ('Item.FirstPoint'). The
+        three points come out of ``AddNewPointCoord`` unnamed, as 点.1..点.3.
+        So every frame sketch used to leave four anonymous tree elements that
+        nothing could tie back to it - which is why the 2026-11-17 report's 20+
+        frame sketches accumulated and could not be cleaned in a batch.
+
+        A name survives a save and reopen, and it is what the delete path reads
+        (``catia_delete_feature(..., cleanup_frame_datum=true)``). The name is
+        read back after writing it: the value in the reply is the one CATIA
+        kept, not the one we asked for.
+        """
+        scaffold = getattr(self, "_last_frame_scaffold", None)
+        if not scaffold:
+            return "Datum_frame"
+        part = getattr(self, "_sketch_part", None)
+        try:
+            body = self.conn.get_active_part_body()
+        except Exception:  # noqa: BLE001 - no body, keep the names CATIA gave
+            return str(getattr(scaffold["plane"], "Name", "Datum_frame") or
+                       "Datum_frame")
+        base = f"{sketch.Name}_FRAME"
+        plane = scaffold["plane"]
+        try:
+            plane.Name = self._free_feature_name(body, base)
+            part.UpdateObject(plane)
+        except Exception:  # noqa: BLE001 - the reply reports the name in use
+            pass
+        final = str(getattr(plane, "Name", base) or base)
+        for index, point in enumerate(scaffold["points"]):
+            suffix = "OUV"[index] if index < 3 else str(index + 1)
+            try:
+                point.Name = self._free_feature_name(body, f"{final}.{suffix}")
+                part.UpdateObject(point)
+            except Exception:  # noqa: BLE001 - one name, not the sketch
+                continue
+        self._last_frame_scaffold = None
+        return final
 
     def _discard_sketch(self, sketch: Any) -> bool:
         """Delete a sketch this call just created, and say whether it went.
@@ -4445,7 +4638,40 @@ class SketcherTools:
             + "".join(notes)
         )
 
-    def _draw_spline(self, points: list[list[float]], closed: bool = False) -> str:
+    def _draw_spline(self, points: list[list[float]] | None = None,
+                     closed: bool = False, control_points: Any = None,
+                     degree: Any = None, knots: Any = None,
+                     weights: Any = None, samples: Any = None,
+                     tolerance: Any = None,
+                     echo_points: bool = True) -> str:
+        if control_points is not None:
+            if points:
+                # THE MISTAKE THIS PARAMETER EXISTS TO PREVENT, and it is not
+                # silent: 2026-11-17 report, P06 4 control points used as
+                # interpolation points gave +0.9105 % volume and P05 +4.20 %,
+                # against -0.00105 % / -0.00027 % for sampled points of the same
+                # curves. Accepting both would leave the caller believing the
+                # numbers he passed are the curve he asked for.
+                raise ArgumentRejected(
+                    "Both 'points' and 'control_points' were given. They are "
+                    "different things: 'points' are interpolated THROUGH, "
+                    "'control_points' define a B-spline that the curve only "
+                    "approaches. Passing control points as 'points' is the "
+                    "documented failure mode - measured 2026-11-17, a 3-point "
+                    "quadratic Beziers' control point sat 7.37 mm off the curve, "
+                    "and the two P05 lobes came out +4.20 % in volume. Pass "
+                    "'control_points' (with 'degree' / 'knots') and let this "
+                    "tool sample the curve, or pass 'points' alone. Nothing was "
+                    "created.",
+                    code="CONTROL_POINTS_AND_POINTS", stage="validate",
+                    modified=False)
+            return self._draw_control_spline(control_points, degree, knots,
+                                             weights, samples, tolerance, closed)
+        if not points:
+            raise ArgumentRejected(
+                "catia_sketch_spline needs 'points' (interpolation points) or "
+                "'control_points' (a B-spline definition). Nothing was created.",
+                code="BAD_ARGUMENT", stage="validate", modified=False)
         self._ensure_sketch_open()
         factory = self._active_factory
 
@@ -4490,7 +4716,8 @@ class SketcherTools:
                 self, "_profile_closed_curves", 0) + 1
         self._note_ends((float(control[0][0]), float(control[0][1])),
                         (float(control[-1][0]), float(control[-1][1])))
-        pts_str = ", ".join(f"({p[0]}, {p[1]})" for p in points)
+        pts_str = (", ".join(f"({p[0]}, {p[1]})" for p in points)
+                   if echo_points else "")
         closed_note = ""
         if closed and len(control) > len(points):
             closed_note = (
@@ -4526,7 +4753,8 @@ class SketcherTools:
         # sketch is a real measurable (B30 2026-11-15), and it is the only way to
         # say how far a converted outline strayed from the polyline it replaced.
         self._last_drawn_spline = spline
-        return (f"Spline created through {len(points)} points: {pts_str}"
+        return (f"Spline created through {len(points)} points"
+                + (f": {pts_str}" if echo_points else "")
                 + closed_note
                 + f" The sketch also holds {len(control)} point element(s) "
                   "(点.N): CATIA's 2D spline is DEFINED through point objects, so "
@@ -4534,6 +4762,251 @@ class SketcherTools:
                   "(measured 2026-11-15). They are not profile geometry - "
                   "catia_sketch_get_geometry collapses them, and pad / loft read "
                   "the one curve.")
+
+    def _draw_control_spline(self, control: Any, degree: Any, knots: Any,
+                             weights: Any, samples: Any, tolerance: Any,
+                             closed: bool) -> str:
+        """A control-point B-spline, drawn as the interpolating spline CATIA takes.
+
+        WHY IT IS SAMPLED AND NOT HANDED OVER: measured on B30 2026-11-18 (probe
+        v0454), the sketch spline object ('Spline2D', 46 members) answers nothing
+        about degree, knots or control points, `Factory2D.CreateSpline` takes
+        point objects to pass THROUGH, and no other sketch-spline constructor
+        exists. So the exact curve is evaluated here and the sketch spline is
+        drawn through its samples - and the reply carries BOTH errors, because
+        they are not the same number:
+
+          * the sampling error (exact curve to the sample polyline) - arithmetic,
+          * the drawn error (exact curve to the curve CATIA actually drew) -
+            measured in the session, point by point.
+
+        A reply that printed the first as if it were the second would be the
+        proxy-quantity mistake of 0.3.141.
+        """
+        try:
+            points, degree = nurbs.check_control_points(control, degree)
+        except ArgumentRejected as error:
+            # nurbs refuses in the same envelope, but a caller has to be told
+            # that nothing was created - the refusal happens before the sketch
+            # is touched, and "invalid arguments" alone does not say that.
+            raise ArgumentRejected(
+                f"{error}. Nothing was created.", code=error.code,
+                stage="validate", modified=False) from error
+        except ValueError as error:
+            raise ArgumentRejected(
+                f"{error}. Nothing was created.",
+                code="BAD_ARGUMENT", stage="validate", modified=False) from error
+        if closed:
+            # A B-spline closes by repeating its first control point as the last
+            # one, which keeps the parameterisation honest. Repeating the first
+            # SAMPLE would close a different curve: the seam tangent is then the
+            # interpolation's, not the B-spline's.
+            raise ArgumentRejected(
+                "closed=true cannot be combined with 'control_points'. A closed "
+                "B-spline is made by repeating the first control point as the "
+                "last one (and using knots that keep the ends clamped), so the "
+                "seam is part of the definition instead of being drawn across "
+                "it afterwards. Draw it that way, or drop 'control_points' and "
+                "pass an explicit closed outline. Nothing was created.",
+                code="CLOSED_CONTROL_SPLINE", stage="validate", modified=False)
+        try:
+            knot_vector = (nurbs.check_knots(knots, len(points), degree) if knots
+                           else nurbs.clamped_knots(len(points), degree))
+        except ArgumentRejected as error:
+            raise ArgumentRejected(
+                f"{error}. Nothing was created.", code=error.code,
+                stage="validate", modified=False) from error
+        except (ValueError, TypeError) as error:
+            raise ArgumentRejected(
+                f"{error}. Nothing was created.",
+                code="BAD_KNOTS", stage="validate", modified=False) from error
+        weight_list = None
+        if weights is not None:
+            try:
+                weight_list = [float(value) for value in weights]
+            except (TypeError, ValueError) as error:
+                raise ArgumentRejected(
+                    f"'weights' is not a list of numbers: {weights!r}. Nothing "
+                    "was created.", code="BAD_ARGUMENT", stage="validate",
+                    modified=False) from error
+            if len(weight_list) != len(points):
+                raise ArgumentRejected(
+                    f"'weights' has {len(weight_list)} value(s) for "
+                    f"{len(points)} control point(s); one per control point is "
+                    "required. Nothing was created.",
+                    code="BAD_ARGUMENT", stage="validate", modified=False)
+            if any(value <= 0 for value in weight_list):
+                raise ArgumentRejected(
+                    "'weights' must all be positive - a zero or negative weight "
+                    f"is not a rational curve ({weight_list}). Nothing was "
+                    "created.", code="BAD_ARGUMENT", stage="validate",
+                    modified=False)
+
+        goal = 0.01 if tolerance is None else float(tolerance)
+        if samples is not None:
+            try:
+                per_span = int(samples)
+            except (TypeError, ValueError) as error:
+                raise ArgumentRejected(
+                    f"'samples' is {samples!r}, which is not an integer count of "
+                    "intervals per span. Nothing was created.",
+                    code="BAD_ARGUMENT", stage="validate",
+                    modified=False) from error
+            if per_span < 1:
+                raise ArgumentRejected(
+                    "'samples' is the number of intervals PER SPAN and must be at "
+                    f"least 1, got {per_span}. Nothing was created.",
+                    code="BAD_ARGUMENT", stage="validate", modified=False)
+            deviation = nurbs.polyline_deviation(points, degree, knot_vector,
+                                                 weight_list, per_span)
+            fit = {"per_span": per_span, "deviation_mm": deviation,
+                   "tolerance_mm": goal, "met": deviation <= goal}
+        else:
+            fit = nurbs.fit_samples(points, degree, knot_vector, weight_list,
+                                    tolerance=goal)
+
+        sample_points = nurbs.sample(points, degree, knot_vector, weight_list,
+                                     fit["per_span"])
+        text = self._draw_spline([list(point) for point in sample_points], False,
+                                 echo_points=False)
+
+        # Check points BETWEEN the samples: on them the drawn curve and the exact
+        # curve coincide by construction (the spline passes through every
+        # sample), so a reading taken at a sample would be 0.0000 mm whatever the
+        # shape of the drawn curve.
+        check_curves: list[tuple[float, float]] = []
+        segments = nurbs.spans(len(points), degree) * int(fit["per_span"])
+        low, high = knot_vector[degree], knot_vector[len(points)]
+        stride = max(1, segments // 16)
+        for index in range(0, segments, stride):
+            u = low + (high - low) * (index + 0.5) / segments
+            check_curves.append(nurbs.evaluate(points, degree, u, knot_vector,
+                                               weight_list))
+        measured = self._measure_drawn_curve(check_curves)
+
+        curve = (f"drawn from a degree-{degree} B-spline: {len(points)} control "
+                 f"point(s), {nurbs.spans(len(points), degree)} span(s), knots "
+                 + ",".join(f"{value:g}" for value in knot_vector)
+                 + (" , rational (weights given)" if weight_list else ""))
+        sampling = (f" It is drawn as ONE interpolating sketch spline through "
+                    f"{len(sample_points)} sampled points ({fit['per_span']} "
+                    f"interval(s) per span), so the sketch keeps that many point "
+                    f"elements - they are the spline's definition, not extra "
+                    f"geometry. THE SAMPLING misses the exact curve by at most "
+                    f"{fit['deviation_mm']:.4f} mm"
+                    + ("" if fit["met"] else
+                       f", which is MORE than the {fit['tolerance_mm']:g} mm asked "
+                       "for: the sample count hit its limit")
+                    + ".")
+        if measured["max_mm"] is None:
+            drawn = (" THE CURVE CATIA ACTUALLY DREW could not be measured here ("
+                     + (measured["why"] or "no reason given")
+                     + "), so no bound is claimed for it - the number above is the "
+                       "sampling error only.")
+        else:
+            drawn = (f" MEASURED ON THE CURVE THAT WAS ACTUALLY DRAWN: over "
+                     f"{measured['checked']} point(s) between the samples, its "
+                     f"distance to the exact B-spline never exceeded "
+                     f"{measured['max_mm']:.4f} mm"
+                     + (f" ({measured['failed']} reading(s) failed)" if
+                        measured["failed"] else "") + ".")
+        if not fit["met"] or (measured["max_mm"] is not None
+                              and measured["max_mm"] > goal):
+            # Said out loud rather than left for the caller to compare: the two
+            # numbers sit in different sentences, and "0.0067 mm sampling" reads
+            # as "within tolerance" even when the goal was 0.005.
+            return (text + f" {curve}." + sampling + drawn
+                    + f" The {goal:g} mm tolerance was NOT met by the drawn "
+                      "curve; raise 'samples' (or lower 'tolerance' with the "
+                      "sample count left free) and draw it again.")
+        return text + f" {curve}." + sampling + drawn
+
+    def _measure_drawn_curve(self, checks: list[tuple[float, float]]) -> dict[str, Any]:
+        """How far the spline this session just drew is from the exact curve.
+
+        ``checks`` are (x, y) in SKETCH coordinates. Each one becomes a real 3D
+        point in the body, is measured against the sketch spline itself (not the
+        sketch: a sketch's point elements are closer to any point than the curve
+        is, and would answer instead), and is deleted again. ``InWorkObject`` is
+        put back where it was - inserting a hybrid shape moves it, and the next
+        Part Design feature then fails at construction (0.3.120).
+        """
+        out: dict[str, Any] = {"checked": 0, "max_mm": None, "failed": 0,
+                               "why": ""}
+        spline = getattr(self, "_last_drawn_spline", None)
+        placement = getattr(self, "_last_placement", None)
+        part = getattr(self, "_sketch_part", None)
+        if spline is None or part is None:
+            out["why"] = "the spline object is not reachable from this session"
+            return out
+        if placement is None:
+            out["why"] = ("this sketch's frame is not known (a sketch on a face, "
+                          "or on a plane built outside this session)")
+            return out
+        try:
+            spa = self.conn.active_document.GetWorkbench("SPAWorkbench")
+            spline_ref = part.CreateReferenceFromObject(spline)
+        except Exception as error:  # noqa: BLE001 - reported, not raised
+            out["why"] = str(error).splitlines()[0][:120]
+            return out
+        try:
+            body = self.conn.get_active_part_body()
+        except Exception as error:  # noqa: BLE001 - reported, not raised
+            out["why"] = str(error).splitlines()[0][:120]
+            return out
+        factory = part.HybridShapeFactory
+        previous = None
+        try:
+            previous = part.InWorkObject
+        except Exception:  # noqa: BLE001 - no InWorkObject to restore
+            previous = None
+        made: list[Any] = []
+        readings: list[float] = []
+        try:
+            part.InWorkObject = body
+            for x, y in checks:
+                where = point_world(placement, x, y)
+                if where is None:
+                    continue
+                point = factory.AddNewPointCoord(float(where[0]), float(where[1]),
+                                                 float(where[2]))
+                body.InsertHybridShape(point)
+                part.UpdateObject(point)
+                made.append(point)
+                readings.append(float(spa.GetMeasurable(
+                    part.CreateReferenceFromObject(point)).GetMinimumDistance(spline_ref)))
+        except Exception as error:  # noqa: BLE001 - reported, not raised
+            out["why"] = str(error).splitlines()[0][:120]
+        finally:
+            failed = 0
+            for point in made:
+                try:
+                    selection = self.conn.hso
+                    selection.Clear()
+                    selection.Add(point)
+                    selection.Delete()
+                except Exception:  # noqa: BLE001 - a probe left in the tree
+                    failed += 1
+            try:
+                selection = self.conn.hso
+                selection.Clear()
+            except Exception:  # noqa: BLE001
+                pass
+            if previous is not None:
+                try:
+                    part.InWorkObject = previous
+                except Exception:  # noqa: BLE001 - left on the body
+                    pass
+            out["failed"] = failed
+        if readings:
+            out["checked"] = len(readings)
+            # NOT `if readings:` for the value: a perfect curve measures 0.0000,
+            # and a truth test would report "not measured" for the best possible
+            # answer (the `float(x or -1)` family).
+            out["max_mm"] = max(readings)
+        elif not out["why"]:
+            out["why"] = "the sketch's frame maps none of the check points"
+        return out
 
     def _draw_point(self, x: float, y: float, construction: bool = False) -> str:
         self._ensure_sketch_open()
