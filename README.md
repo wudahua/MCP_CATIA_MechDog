@@ -1,8 +1,8 @@
-# MCP_CATIA_MechDog 0.3.147
+# MCP_CATIA_MechDog 0.3.148
 
-![version](https://img.shields.io/badge/version-0.3.147-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![CATIA](https://img.shields.io/badge/CATIA-V5%20R30%20(B30)-orange) ![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20http-purple)
+![version](https://img.shields.io/badge/version-0.3.148-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![CATIA](https://img.shields.io/badge/CATIA-V5%20R30%20(B30)-orange) ![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20http-purple)
 
-当前正式版 **0.3.147**——样条采样有了预算（默认 0.03 mm、每段最多 32 点：二次曲线 17 个点元素、三次 33 个，原来是 65 与 129）；计划里的步骤不再把样条的误差数字切掉；`cleanup_frame_datum` 默认 `auto`，只在「这是最后一个草图」时清理——实测表明强制清会毁掉共用该 datum 的草图；无增量的镜像不再留下特征；`catia_get_color` 重新接受旧的 `structured` 参数 · [变更日志](CHANGELOG.md) · [Releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases)
+当前正式版 **0.3.148**——修掉一项**自己算错**的读数：样条「实际绘制误差」曾把调用方给的方向向量当位移用，`u=[1000,0,0]` 会把草图坐标放大 1000 倍、报出 99 900 mm 的假误差（草图本身一直是对的：拉伸 78 539.8 mm³ 对解析值 −0.00002 %）；现在方向向量一律归一化，且**读数大于探针自身跨度就直接判为不可验证**，不给数。报告里「镜像把重合实体算了两遍」经实测**不成立**——36 000→40 000 mm³（平面真的切开实体）对 132 000→264 000（全在一侧，本就该翻倍）；但回执过去只丢一句 UNIONED，现在先量顶点包络、说明是哪一种，真的两边都有材料时明确标「体积可疑」。`cleanup_frame_datum` 的 `auto` 判据从「体内还有别的草图」改成「**有没有草图在同一个平面上**」（读 `GetAbsoluteAxisData`），多草图零件终于会清理；样条可传 `structured=true` 拿到数值化 `metrics`，计划步骤也会带上它 · [变更日志](CHANGELOG.md) · [Releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases)
 
 > 让 AI 客户端通过 MCP，在 CATIA V5 里建**原生可编辑的实体特征**——并且每一步都能量回来。
 
@@ -20,7 +20,7 @@ MCP_CATIA_MechDog 是运行在你自己 Windows 电脑上的本地 MCP 服务（
 - **草图可回改**：`catia_sketch_edit` 重开已关闭的草图，`catia_sketch_delete_element` 删掉画错的一条，零件随之重建——错一条线不必整件重做。
 - **量不到就说量不到**：超范围、超能力或读数失败时，回执以 `UNVERIFIED:` 开头并说明哪一个测量失败，不会把失败写成成功。
 - **能力可发现**：诊断文字旁边给一行能直接粘贴的调用；「有工具但没人知道怎么调」和「没有这个工具」一样是缺陷。
-- **离线可测**：**2351** 个测试不需要 CATIA，`pytest` 在本机就能跑全绿；真机验收脚本在 `scripts/b30_*`。
+- **离线可测**：**2372** 个测试不需要 CATIA，`pytest` 在本机就能跑全绿；真机验收脚本在 `scripts/b30_*`。
 
 ## 环境要求
 
@@ -139,6 +139,7 @@ python -m venv .venv
 
 ## 已知限制
 
+- **方向向量的长度没有含义，但曾经有后果。** `frame` 平面按 `origin + u + v` 定义，`u=[1000,0,0]` 与 `u=[1,0,0]` 是同一个平面；0.3.148 之前本地把 `u` 当位移用，于是「草图坐标 → 世界坐标」被放大 |u| 倍，样条的实测偏差变成 999 × 半径。已修，并且读数一旦大于探针自身跨度就不再作为偏差发布。
 - **草图样条不能用控制点定义，只能采样逼近。** `Spline2D` 不暴露次数、节点矢量与控制点，`Factory2D.CreateSpline` 只吃「通过点」，所以 `catia_sketch_spline(control_points=…)` 在本地求值后采样绘制，回执同时给出采样偏差与**实测**的曲线偏差；采样点会作为点元素留在草图里（`GeometricElements` 没有 Remove），所以默认预算收到 0.03 mm、每段最多 32 点（0.3.147：二次 17 点、三次 33 点），需要更密就传 `tolerance` 或 `samples`，回执会说明代价。草图样条也无法做成周期曲线（`IsPeriodic` 只读），需要真正闭合请用 `catia_gsd_spline(closed=true)`。
 - **草图的坐标读不回来。** 草图对测量接口什么都不答，所以「多视图是否对齐」只能由 pad 后读实体包围盒来证明，不能直接读草图位置。
 - **投影到曲面的曲线不能分割或填充该曲面，但可以刻槽。** 实测：`gsd_split` / `gsd_fill` / `thick_surface` 在曲面上都失败，而同一闭合曲线在平面上分割正常；可行路线是 `catia_surface_engrave`（等深刻槽）。

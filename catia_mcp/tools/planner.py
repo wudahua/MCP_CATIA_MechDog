@@ -791,6 +791,14 @@ class PlannerTools:
                         code=raw.get("code"),
                         result=raw.get("message"),
                     )
+                    # THE NUMBERS, AS NUMBERS. A tool that answers structurally
+                    # puts them in 'data', and they used to be dropped here: the
+                    # step kept the sentence and not the measurement, so a plan
+                    # could only be gated by parsing prose (2026-11-18 report, P3:
+                    # "the spline's sampling / drawn error only exists inside
+                    # result"). They arrive as 'metrics', the name it asked for.
+                    if isinstance(raw.get("data"), dict):
+                        entry["metrics"] = raw["data"]
                     if raw.get("ok") is not True:
                         entry["error"] = raw.get("message")
                 else:

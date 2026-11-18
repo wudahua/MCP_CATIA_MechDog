@@ -2,7 +2,7 @@
 
 > **中文入口见 [README.md](README.md)。** This file is the full English reference: every tool, every measurement behind it, and every known limit.
 
-**0.3.147** · [what changed](CHANGELOG.md) ·
+**0.3.148** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1377,6 +1377,33 @@ Two facts about real drawings that this had to accept:
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
 
+0.3.148 fixes an error of my own arithmetic and answers three smaller findings
+from the same 2026-11-18 report. The bogus one first: `catia_sketch_spline`'s
+"drawn error" reported 99 900 mm for an R=100 quarter circle, because `frame_of`
+handed `point_world` the caller's raw direction vector - a frame given as
+`u=[1000, 0, 0]` (how you say "along +X") multiplied every sketch coordinate by
+1000, so the probes were placed a thousand times too far away and the reading was
+the distance to them. The sketch was never wrong: the same curve padded to
+78 539.8 mm3 against an analytic 78 539.816. `frame_of` now returns unit axes,
+and a reading larger than the span of its own probe points is published as
+`unverified` with the number and the reason, never as a bound.
+
+The report's P1 - "the mirror counts an overlapping solid twice" - is refuted by
+measurement: its own body sits at z 990..1010 plus a pad at z 0..10, so nothing
+crosses the plane and 2x IS the union (132 000 -> 264 000, reproduced). A body
+the plane really cuts through answers 36 000 -> 40 000, not 72 000. The reply was
+the problem: it said "UNIONED" and left `delta == volume` unexplained. It now
+reads the vertex envelope along the plane's normal BEFORE the mirror and says
+which case it found, flagging "TREAT THE VOLUME AS SUSPECT" only when the
+vertices really do sit on both sides.
+
+`cleanup_frame_datum="auto"` no longer asks "are there other sketches" (true in
+every real part, so it never fired) but "is another sketch on MY plane", read
+from `Sketch.GetAbsoluteAxisData` through the CATScript route - the plain call
+answers 「方法 GetAbsoluteAxisData 失败」. Unknown reads as "might be", never as
+"no". And `catia_sketch_spline(structured=true)` returns the two errors as
+numbers, which a plan step now keeps as `metrics` instead of dropping.
+
 0.3.147 answers the five residuals of the 2026-11-18 acceptance report. The
 sampling default went from 0.01 mm unbounded to 0.03 mm with at most 32 samples
 per span - a quadratic now costs 17 point elements and a cubic 33, against 65 and
@@ -2011,6 +2038,7 @@ Place the result with `catia_get_component_transform`.
 
 ## Known limits
 
+* **A direction vector's length means nothing - but it used to have consequences.** A `frame` plane is `origin + u + v`, so `u=[1000, 0, 0]` and `u=[1, 0, 0]` describe the same plane. Before 0.3.148 the local 2D-to-world mapping used `u` as a DISPLACEMENT, so every sketch coordinate came back |u| times too far out and the spline's measured error became 999 x radius. Fixed, and a reading larger than its own probe span is no longer published as a deviation.
 * **A sketch spline cannot be DEFINED by control points - only drawn through
   samples.** `Spline2D` answers nothing about degree, knots or control points, and
   `Factory2D.CreateSpline` interpolates through point objects (measured 2026-11-18),
@@ -2020,7 +2048,7 @@ Place the result with `catia_get_component_transform`.
   samples stay in the sketch as point elements (no Remove). A periodic sketch spline
   is impossible too: `IsPeriodic` is read-only and repeating the first point is the
   only closure - use `catia_gsd_spline(closed=true)` when the curve itself has to
-  close.
+  close. The drawn error this reply carries is a MEASUREMENT of the curve CATIA drew, taken at points between the samples and checked against the span of those probes: a reading larger than the probes themselves is published as `unverified` with its number and no bound, which is what a frame bug produced on 2026-11-18 (99 900 mm for R=100). `structured=true` returns both errors as numbers, and a plan step keeps them as `metrics`.
 
 * **A curve projected onto a CURVED surface cannot split or fill it — but it CAN
   engrave it.** Measured on B30 2026-11-10, three ways: `catia_gsd_split(element=<the

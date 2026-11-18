@@ -965,7 +965,24 @@ class SketcherTools:
                                 "says which of the two happened, what deviation was "
                                 "actually reached, and what a tighter target would "
                                 "cost in points."
-                                "happened and what the real deviation is."
+                            ),
+                        },
+                        "structured": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Return a structured result: the same sentence in "
+                                "'message', plus 'data' with the numbers as numbers "
+                                "- sampling_error_mm, sampling_tolerance_mm, "
+                                "sampling_tolerance_met, drawn_error_mm, "
+                                "drawn_error_state ('measured' / 'unverified'), "
+                                "drawn_error_checked_points, "
+                                "sample_points_written, control_points, degree, "
+                                "spans, knots. Read drawn_error_mm: null as 'no "
+                                "bound is claimed', never as 0 - it means the "
+                                "reading could not be verified, and "
+                                "drawn_error_reason says why. Inside a plan the "
+                                "same object arrives as the step's 'metrics'."
                             ),
                         },
                     },
@@ -1577,6 +1594,7 @@ class SketcherTools:
                     weights=arguments.get("weights"),
                     samples=arguments.get("samples"),
                     tolerance=arguments.get("tolerance"),
+                    structured=bool(arguments.get("structured", False)),
                 )
             case "catia_sketch_point":
                 return self._draw_point(arguments["x"], arguments["y"],
@@ -4668,7 +4686,8 @@ class SketcherTools:
                      degree: Any = None, knots: Any = None,
                      weights: Any = None, samples: Any = None,
                      tolerance: Any = None,
-                     echo_points: bool = True) -> str:
+                     echo_points: bool = True,
+                     structured: bool = False) -> Any:
         if control_points is not None:
             if points:
                 # THE MISTAKE THIS PARAMETER EXISTS TO PREVENT, and it is not
@@ -4691,7 +4710,8 @@ class SketcherTools:
                     code="CONTROL_POINTS_AND_POINTS", stage="validate",
                     modified=False)
             return self._draw_control_spline(control_points, degree, knots,
-                                             weights, samples, tolerance, closed)
+                                             weights, samples, tolerance, closed,
+                                             structured)
         if not points:
             raise ArgumentRejected(
                 "catia_sketch_spline needs 'points' (interpolation points) or "
@@ -4795,7 +4815,7 @@ class SketcherTools:
 
     def _draw_control_spline(self, control: Any, degree: Any, knots: Any,
                              weights: Any, samples: Any, tolerance: Any,
-                             closed: bool) -> str:
+                             closed: bool, structured: bool = False) -> Any:
         """A control-point B-spline, drawn as the interpolating spline CATIA takes.
 
         WHY IT IS SAMPLED AND NOT HANDED OVER: measured on B30 2026-11-18 (probe
@@ -4955,7 +4975,39 @@ class SketcherTools:
                     f"(reaches {finer['deviation_mm']:.4f} mm) - pass "
                     f"tolerance={goal / 4:g} or "
                     f"samples={int(finer['per_span'])} if that is worth the tree.")
-        return text + head + detail + drawn_tail + cost
+        message = text + head + detail + drawn_tail + cost
+        if not structured:
+            return message
+        # THE SAME SENTENCE, PLUS THE NUMBERS AS NUMBERS. The 2026-11-18 report
+        # asked for this twice (R2, P3): a gate cannot read "0.0335 mm" out of a
+        # sentence without parsing prose, and a number it cannot read is a number
+        # it will re-derive - possibly from the wrong one of the two errors.
+        return operation_result(
+            tool="catia_sketch_spline",
+            ok=True,
+            code="SPLINE_CREATED",
+            message=message,
+            modified=True,
+            data={
+                "mode": "control_points",
+                "control_points": len(points),
+                "degree": degree,
+                "spans": spans_count,
+                "knots": [round(float(value), 6) for value in knot_vector],
+                "rational": bool(weight_list),
+                "sample_points_written": len(sample_points),
+                "sampling_error_mm": round(float(fit["deviation_mm"]), 6),
+                "sampling_tolerance_mm": goal,
+                "sampling_tolerance_met": bool(fit["met"]),
+                "drawn_error_mm": (None if measured["max_mm"] is None else
+                                   round(float(measured["max_mm"]), 6)),
+                "drawn_error_state": ("measured" if measured["max_mm"] is not None
+                                      else "unverified"),
+                "drawn_error_checked_points": measured["checked"],
+                "drawn_error_rejected_mm": measured.get("rejected_mm"),
+                "drawn_error_reason": measured["why"] or None,
+            },
+        )
 
     def _measure_drawn_curve(self, checks: list[tuple[float, float]]) -> dict[str, Any]:
         """How far the spline this session just drew is from the exact curve.
@@ -4998,6 +5050,7 @@ class SketcherTools:
             previous = None
         made: list[Any] = []
         readings: list[float] = []
+        places: list[list[float]] = []
         try:
             part.InWorkObject = body
             for x, y in checks:
@@ -5009,6 +5062,7 @@ class SketcherTools:
                 body.InsertHybridShape(point)
                 part.UpdateObject(point)
                 made.append(point)
+                places.append([float(c) for c in where])
                 readings.append(float(spa.GetMeasurable(
                     part.CreateReferenceFromObject(point)).GetMinimumDistance(spline_ref)))
         except Exception as error:  # noqa: BLE001 - reported, not raised
@@ -5036,10 +5090,35 @@ class SketcherTools:
             out["failed"] = failed
         if readings:
             out["checked"] = len(readings)
+            span = 0.0
+            if len(places) > 1:
+                span = max(
+                    sum((b[i] - a[i]) ** 2 for i in range(3)) ** 0.5
+                    for a in places for b in places)
             # NOT `if readings:` for the value: a perfect curve measures 0.0000,
             # and a truth test would report "not measured" for the best possible
             # answer (the `float(x or -1)` family).
-            out["max_mm"] = max(readings)
+            worst = max(readings)
+            # A DEVIATION CANNOT BE BIGGER THAN THE CURVE. The check points span
+            # ``span`` mm; a reading larger than that is not a distance from a
+            # curve to a point on it, it is a distance to somewhere else - the
+            # 2026-11-18 report (P0) got 99 900 mm for a 100 mm radius because the
+            # probe points had been mapped with an unnormalised frame. Publishing
+            # that as an error bound is worse than publishing nothing: a gate
+            # built on it either rejects a correct curve or accepts a wrong one.
+            # So the number is replaced by the reason, and the guard is a
+            # measurement (the spread of the probes), not a threshold on trust.
+            if worst > span > 0:
+                out["max_mm"] = None
+                out["rejected_mm"] = worst
+                out["why"] = (
+                    f"the worst reading was {worst:.4f} mm, but the {len(readings)} "
+                    f"check point(s) themselves only span {span:.4f} mm - a point "
+                    "on the curve cannot be farther away than that, so the probe "
+                    "points are not in this sketch's frame and the number is not a "
+                    "deviation")
+            else:
+                out["max_mm"] = worst
         elif not out["why"]:
             out["why"] = "the sketch's frame maps none of the check points"
         return out

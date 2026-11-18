@@ -2,6 +2,76 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.148] — 2026-11-18 · the error that was arithmetic, and the doubling that was not a bug
+
+The 2026-11-18 (0.3.147) report raised two P0/P1 findings that "produce wrong
+numbers" and two smaller ones. One of them was real and mine; one was refuted by
+measurement; two were real and are answered here.
+
+**P0 - the "drawn error" of `catia_sketch_spline` was arithmetic, not CATIA.**
+The report saw 99 900 mm for a quarter circle of R=100, scaling exactly with R
+and unchanged by sample density - which is a proof that the number was not a
+distance to the curve. It was `frame_of`: it handed `point_world` the caller's
+raw direction vector, so a frame given as `u=[1000, 0, 0]` (a perfectly ordinary
+way to say "along +X", and what `catia_create_sketch` accepts) multiplied every
+sketch coordinate by 1000. The probe points were then placed 1000x too far away
+and the reading was the distance to THEM: 100 * 999 = 99 900, 10 * 999 = 9 990,
+and 163 941 for the report's cubic. The sketch was never wrong - the same curve
+padded to 78 539.8 mm3 against an analytic 78 539.816, which is what the report
+itself measured as -0.00002 %.
+
+Two changes, because one of them is the bug and the other is the class of bug:
+`frame_of` returns UNIT u/v whatever length was passed (measured on B30
+2026-11-18: the same curve now reports 0.0000 mm on a 1000 mm u, exactly what it
+reported on a unit u), and `_measure_drawn_curve` refuses to publish a reading
+that is larger than the span of its own probe points - a deviation cannot exceed
+the curve, so a number that does is reported as `unverified` with the reading
+and the reason instead of as a bound.
+
+**P1 - "the mirror counts an overlapping solid twice" is REFUTED.** The report's
+own body sits at z 990..1010 (its frame origin was (0, 0, 1000)) plus a pad at
+z 0..10: nothing crosses the plane, so the mirror image is disjoint and 2x IS the
+union. Measured on B30 2026-11-18, on the report's exact shape: 132 000 ->
+264 000 mm3, reproduced; and the contrast, a body the plane really cuts through:
+36 000 -> 40 000 (+4 000, only the material that moved), not 72 000. A doubling
+and a union are the same number for disjoint copies - that is arithmetic, not a
+double count.
+
+What was wrong was the reply: it said "UNIONED" and left `delta == volume` as an
+unexplained number. It now measures the body's vertex envelope along the plane's
+normal BEFORE the mirror (read afterwards it always straddles, because the copy
+is the part below the plane) and says which case it found: "all on one side, so
+the copy cannot overlap it" / "sits on one side and only touches it" / and when
+the vertices really do sit on both sides, "TREAT THE VOLUME AS SUSPECT" with the
+measurement that says why.
+
+**P2 - `cleanup_frame_datum="auto"` asked the wrong question.** "Are there other
+sketches" is true in every real part, so - as the report says - it never fired in
+P02/P05/P06. It now asks "is another sketch on MY PLANE", which is the condition
+that actually breaks the model (probe v0457: a second sketch built on the datum
+by name, then the update fails with 需要修改绝对轴定义). `Sketch.GetAbsoluteAxisData`
+through the CATScript route is what answers where a sketch sits - the plain call
+answers 「方法 GetAbsoluteAxisData 失败」, and the array-argument form of the script
+fails too (both measured 2026-11-18), so it is one sketch per call. Unknown
+reads as "might be", never as "no".
+
+**P3 - the numbers as numbers.** `catia_sketch_spline(..., structured=true)`
+returns the same sentence plus `data`: `sampling_error_mm`,
+`sampling_tolerance_mm`, `sampling_tolerance_met`, `drawn_error_mm`,
+`drawn_error_state` ('measured' / 'unverified'), `drawn_error_checked_points`,
+`drawn_error_rejected_mm`, `sample_points_written`, `control_points`, `degree`,
+`spans`, `knots`. A plan step now carries that object as `metrics` - `run_plan`
+used to drop `data` entirely, so a gate could only be built by parsing prose.
+
+B30 2026-11-18: `scripts/b30_v0461_acceptance_drawn_mirror_frame.py` **18/18** -
+the same curve on a 1000 mm u and on a unit u both report 0.0000 mm drawn error,
+the quarter circle still pads to its analytic volume, the report's own mirror case
+answers 132 000 -> 264 000 with the envelope named, a body the plane cuts through
+answers +4 000 with no duplication sentence, `auto` cleans a frame sketch in a
+three-frame part and refuses in a part where a sketch stands on the datum, and a
+plan step shows the metrics. Residues from 0.3.147 still 19/19, 0.3.146's 15/15,
+10/10 and 11/11. **2372 tests.**
+
 ## [0.3.147] — 2026-11-18 · the sampling budget, and the numbers a plan can see
 
 The 2026-11-18 acceptance report (0.3.146, run against the M113 build) confirmed

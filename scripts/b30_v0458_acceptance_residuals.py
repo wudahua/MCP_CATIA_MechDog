@@ -181,8 +181,12 @@ def main() -> int:
             for i in range(1, int(body.HybridShapes.Count) + 1)]
     cell("E2 auto leaves the datum when another sketch remains",
          "SHARED_FRAME" in left, f"left: {left}")
+    # 0.3.148 changed the criterion (same PLANE, not "another sketch exists"),
+    # so the sentence moved from "NOT removed" to "left alone" - same refusal,
+    # same reason, and it still has to name the sketch it is protecting.
     cell("E3 and says why, naming the sketch it is protecting",
-         "NOT removed" in reply and "RIDER" in reply, reply[-150:])
+         ("left alone" in reply or "NOT removed" in reply) and "RIDER" in reply,
+         reply[-150:])
     try:
         part.Update()
         healthy = True
