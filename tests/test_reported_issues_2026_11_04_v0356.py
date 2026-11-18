@@ -328,7 +328,7 @@ def test_the_spine_schema_corrects_0353_and_names_the_calls():
 def test_readme_says_the_call_does_build_a_real_fillet():
     from pathlib import Path
 
-    text = (Path(__file__).resolve().parents[1] / "README.md").read_text(
+    text = (Path(__file__).resolve().parents[1] / "README.en.md").read_text(
         encoding="utf-8")
     known = text.split("## Known limits", 1)[1]
     assert "No surface-to-surface fillet" not in known, (
@@ -341,7 +341,7 @@ def test_readme_says_the_call_does_build_a_real_fillet():
 def test_readme_no_longer_says_the_spine_cannot_be_driven():
     from pathlib import Path
 
-    text = (Path(__file__).resolve().parents[1] / "README.md").read_text(
+    text = (Path(__file__).resolve().parents[1] / "README.en.md").read_text(
         encoding="utf-8")
     assert "the typelib names no way to give it sections" not in text, (
         "HybridShapeSpine declares AddSection; the 0.3.53 probe looked at "

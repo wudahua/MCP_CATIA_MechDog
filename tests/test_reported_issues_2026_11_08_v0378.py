@@ -320,7 +320,7 @@ def test_the_loft_failure_has_a_name_not_a_guess():
 def test_the_readme_lists_the_threaded_hole_as_a_build_difference():
     from pathlib import Path
 
-    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(
+    readme = (Path(__file__).resolve().parents[1] / "README.en.md").read_text(
         encoding="utf-8")
     assert "Two** known build differences" in readme
     assert "threaded hole cannot be cut on B32" in readme

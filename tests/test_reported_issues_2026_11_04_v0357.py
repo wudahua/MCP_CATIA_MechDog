@@ -278,7 +278,7 @@ def test_check_surface_declares_the_split():
 def test_readme_records_the_older_release_cannot_open_newer_files():
     from pathlib import Path
 
-    text = (Path(__file__).resolve().parents[1] / "README.md").read_text(
+    text = (Path(__file__).resolve().parents[1] / "README.en.md").read_text(
         encoding="utf-8")
     known = text.split("## Known limits", 1)[1]
     assert "may not open on an older one" in known

@@ -40,9 +40,23 @@ MODULES: dict[str, tuple[str, str]] = {
 ROW = re.compile(r"^\|\s*([A-Za-z][A-Za-z ]*?)\s*\|\s*\*{0,2}(\d+)\*{0,2}\s*\|")
 
 
+ROOT = Path(__file__).resolve().parent.parent
+
+
 def readme_text() -> str:
-    root = Path(__file__).resolve().parent.parent
-    return (root / "README.md").read_text(encoding="utf-8")
+    """The FULL reference, which is the English file since 0.3.146.
+
+    README.md became the Chinese entry page, and it deliberately does not carry
+    the per-tool history this file checks (a translated copy of 2 600 lines would
+    drift from the measurements it quotes). README.en.md is the same document it
+    always was, so every assertion below keeps its evidence.
+    """
+    return (ROOT / "README.en.md").read_text(encoding="utf-8")
+
+
+def chinese_readme_text() -> str:
+    """The entry page, which is what a reader lands on."""
+    return (ROOT / "README.md").read_text(encoding="utf-8")
 
 
 def live_counts() -> dict[str, int]:
@@ -163,3 +177,17 @@ def test_setup_sh_installs_this_fork_not_upstream():
         assert "daiemon12/catia-v5-mcp-server" not in line, line
 
     assert "MCP_CATIA_MechDog" in script.split("INSTALL_DIR=")[1].splitlines()[0]
+
+def test_the_chinese_entry_page_states_the_real_tool_count():
+    """Two READMEs, one number: a translated page that miscounts is the same
+    defect the header had in v0.3.2, only in the file more people read."""
+    text = chinese_readme_text()
+    claimed = int(re.search(r"\*\*(\d+)\s*个工具\*\*", text).group(1))
+    live = sum(live_counts().values())
+    assert claimed == live, f"README.md says {claimed} tools, the server has {live}"
+    rows = [int(match.group(2)) for line in text.splitlines()
+            if (match := ROW.match(line))]
+    assert rows, "the Chinese README has no group table with counts"
+    assert sum(rows) == claimed, (
+        f"the Chinese group table sums to {sum(rows)}, the header says {claimed}")
+

@@ -84,7 +84,7 @@ def test_the_ceiling_records_the_reopen_result():
 def test_the_readme_table_no_longer_says_a_parallel_sketch_is_refused(monkeypatch):
     from pathlib import Path
 
-    readme = Path(__file__).resolve().parents[1] / "README.md"
+    readme = Path(__file__).resolve().parents[1] / "README.en.md"
     text = readme.read_text(encoding="utf-8")
     assert "refused — parallel or perpendicular is degenerate" not in text
     assert "lies on (0.0000 mm)" in text

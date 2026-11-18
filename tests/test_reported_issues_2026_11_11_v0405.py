@@ -137,7 +137,7 @@ def test_the_reopen_row_no_longer_promises_a_working_groove() -> None:
 
 
 def test_the_readme_no_longer_asks_for_one_session() -> None:
-    readme = pathlib.Path(__file__).resolve().parent.parent / "README.md"
+    readme = pathlib.Path(__file__).resolve().parent.parent / "README.en.md"
     text = readme.read_text(encoding="utf-8")
     assert "Do the projection and the engrave in ONE session" not in text
     assert "Reopening is NOT a reason to keep the calls in one session" in text
@@ -147,7 +147,7 @@ def test_the_readme_carries_the_measured_projection_grid() -> None:
     """The grid exists because advice was twice written from memory. The numbers
     below are the ones actually measured; if a row is edited, the number has to be
     re-measured, not smoothed."""
-    readme = pathlib.Path(__file__).resolve().parent.parent / "README.md"
+    readme = pathlib.Path(__file__).resolve().parent.parent / "README.en.md"
     text = readme.read_text(encoding="utf-8")
     for number in ("68.284", "32.111 mm (48.2 %)", "13.6 %", "16.0 %", "15.1 %"):
         assert number in text, number

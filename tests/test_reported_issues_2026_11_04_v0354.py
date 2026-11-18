@@ -179,7 +179,7 @@ def test_the_fillet_and_spine_refusal_is_in_the_readme():
     import os
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    text = open(os.path.join(root, "README.md"), encoding="utf-8").read()
+    text = open(os.path.join(root, "README.en.md"), encoding="utf-8").read()
     assert "AddNewFilletBiTangent" in text
     assert "AddNewSpine" in text
     assert "o1 = −1, o2 = +1" in text or "o1=-1" in text
