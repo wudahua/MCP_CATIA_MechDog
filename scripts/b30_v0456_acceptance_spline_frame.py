@@ -101,9 +101,14 @@ def distance_to_spline(conn, part, spline, xy) -> float | None:
 
 def reported_bounds(reply: str) -> dict[str, float | None]:
     """The two numbers the reply claims: sampling error and measured error."""
-    sampling = re.search(r"misses the exact curve by at most ([\d.]+) mm", reply)
-    drawn = re.search(r"distance to the exact B-spline never exceeded ([\d.]+) mm",
-                      reply)
+    # 0.3.147 moved the numbers to the front of the reply (so a plan cannot
+    # truncate them away) and reworded the sentences; both wordings are read here
+    # so this script keeps working across the change.
+    sampling = (re.search(r"Sampling error ([\d.]+) mm", reply)
+                or re.search(r"misses the exact curve by at most ([\d.]+) mm", reply))
+    drawn = (re.search(r"stays within ([\d.]+) mm of it", reply)
+             or re.search(r"distance to the exact B-spline never exceeded ([\d.]+) mm",
+                          reply))
     return {"sampling": float(sampling.group(1)) if sampling else None,
             "drawn": float(drawn.group(1)) if drawn else None}
 
@@ -178,7 +183,8 @@ def main() -> int:
                              {"control_points": SP16, "degree": 3, "samples": 16})
     bounds = reported_bounds(reply)
     cell("D1 samples=16 is the report's 17-point curve, and says so",
-         "17 sampled points" in reply, " ".join(reply.split())[:150])
+         "through 17 sample point(s)" in reply or "17 sampled points" in reply,
+         " ".join(reply.split())[:150])
     cell("D2 and it reports the sampling error that 17 points really has",
          bounds["sampling"] is not None and bounds["sampling"] > 0.02,
          f"{bounds['sampling']} mm - above the report's 0.02 mm local tolerance, "

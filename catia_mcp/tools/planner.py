@@ -1211,12 +1211,30 @@ class PlannerTools:
         segment = text[marker:].strip()
         return [segment[:1500] + ("..." if len(segment) > 1500 else "")]
 
-    @staticmethod
-    def _trim(value: Any) -> str:
+    #: Characters kept from the END of a result that has to be cut.
+    KEEP_TAIL_CHARS = 320
+
+    @classmethod
+    def _trim(cls, value: Any) -> str:
+        """Shorten one step's reply, keeping its END as well as its start.
+
+        Cutting only from the end lost the wrong half twice: 0.3.76 found a gap
+        list whose coordinates were the part that disappeared, and the 2026-11-18
+        report (R2) found the two error numbers the new control-point spline
+        exists to report cut off at "they are the spline's definiti... (975
+        chars)". A reply's conclusion - the numbers, the verdict, the advice -
+        sits at the end, so both ends are kept and only the middle is dropped.
+        """
         text = value if isinstance(value, str) else str(value)
-        if len(text) <= MAX_RESULT_CHARS:
+        limit = MAX_RESULT_CHARS + cls.KEEP_TAIL_CHARS
+        if len(text) <= limit:
             return text
-        return text[:MAX_RESULT_CHARS] + f"... ({len(text)} chars)"
+        head = text[:MAX_RESULT_CHARS]
+        tail = text[-cls.KEEP_TAIL_CHARS:]
+        dropped = len(text) - limit
+        return (f"{head} ... [{dropped} char(s) dropped from the middle of a "
+                f"{len(text)}-char reply; the last {cls.KEEP_TAIL_CHARS} follow] "
+                f"... {tail}")
 
     @staticmethod
     def _step_has_warning(result: Any) -> bool:

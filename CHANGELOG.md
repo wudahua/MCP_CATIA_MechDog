@@ -2,6 +2,59 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.147] — 2026-11-18 · the sampling budget, and the numbers a plan can see
+
+The 2026-11-18 acceptance report (0.3.146, run against the M113 build) confirmed
+five of the six 2026-11-17 items fixed and raised five residuals. Four are
+changed here; the fifth is answered with the measurement that says why it should
+not be changed.
+
+**R1 (P0) - one curve wrote 65 to 129 point elements into a sketch.** The 0.01 mm
+default bought accuracy the model did not need: 129 points for a 5-control-point
+cubic with two spans, 65 for a quadratic, ~260 for P06's four Beziers, and a file
+that grew from ~400 KB to 491 KB. Those points ARE the curve (`CreateSpline`
+takes point objects) and `GeometricElements` has no Remove, so no caller could
+trim them afterwards. The default now targets **0.03 mm with at most 32 samples
+per span**. Measured on B30: SP15 costs 17 points at 0.0252 mm and SP16 33 at
+0.0267 mm, against 65 and 129 before; `samples=64` still buys the old 65 points
+at 0.0067 mm. Every reply states the deviation actually reached and what a
+tighter target would cost in point elements - the one currency the caller pays in
+and cannot get back.
+
+**R2 (P1) - a plan cut off the two numbers this tool exists to report.** A step's
+`result` is truncated at 600 chars and the new errors were at the end, so
+`run_plan` showed "they are the spline's definiti... (975 chars)" while a single
+call showed 0.0063 mm. Two changes: the truncation keeps BOTH ends (600 head +
+320 tail, with the dropped count stated), and the spline writes its numbers in
+its first sentence. Verified inside a plan: the step carries "Sampling error".
+
+**R3 (P2) - `cleanup_frame_datum` now defaults to `"auto"`.** Not to `true`,
+because a measurement says `true` is dangerous: probe v0457 built a second sketch
+ON the first frame's datum by name, deleted the datum, and CATIA let it go -
+the surviving sketch then reads 需要修改绝对轴定义以解决这些问题 in the update
+diagnosis and the part update fails. `"auto"` cleans up only when that was the
+LAST sketch in the body (the case the report has: frame sketches built and
+dropped in one go), names the sketch it is protecting otherwise, and `true` still
+forces it - with the update failure reported, not hidden.
+
+**R4 (P3) - `catia_get_color` accepts the historical `structured` argument.**
+Not a 0.3.146 regression: the schema never had it. `appearance.py` was last
+touched in 0.3.138, and v0.3.138..v0.3.146 all declare only `target`, so a client
+that validates strictly rejected the argument on a READ call. Accepting and
+ignoring it costs nothing and spares the caller that error.
+
+**R5 (P4) - a mirror that adds nothing removes the node it just created.** Volume
+unchanged across the call means the operation was a no-op; the feature used to
+stay in the tree for the caller to delete by hand. It is deleted again and the
+reply answers `no_change: true` with the volume on both sides.
+
+B30 2026-11-18: `scripts/b30_v0458_acceptance_residuals.py` **19/19** - the new
+budget (17 / 33 points, 0.0252 / 0.0267 mm), `samples=64` still 65 points at
+0.0067, the plan step keeping its numbers, `auto` cleaning the last sketch and
+refusing while another one stands on the datum, `true` forcing it and reporting
+the failed update, `get_color(structured=true)` answering, and a symmetric-body
+mirror answering `no_change` with the tree unchanged. **2351 tests.**
+
 ## [0.3.146] — 2026-11-18 · the control points you were given, and the tree a frame leaves
 
 0.3.145 took four of the six 2026-11-17 items and named these two as not done.

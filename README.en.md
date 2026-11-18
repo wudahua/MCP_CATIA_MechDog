@@ -2,7 +2,7 @@
 
 > **中文入口见 [README.md](README.md)。** This file is the full English reference: every tool, every measurement behind it, and every known limit.
 
-**0.3.146** · [what changed](CHANGELOG.md) ·
+**0.3.147** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1376,6 +1376,19 @@ Two facts about real drawings that this had to accept:
   whole; one with live text imports the geometry and says how many runs it
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
+
+0.3.147 answers the five residuals of the 2026-11-18 acceptance report. The
+sampling default went from 0.01 mm unbounded to 0.03 mm with at most 32 samples
+per span - a quadratic now costs 17 point elements and a cubic 33, against 65 and
+129 - because those points ARE the curve and `GeometricElements` has no Remove,
+and every reply says what a tighter target would cost. A plan's step now keeps
+BOTH ends of a truncated result, so the two error numbers survive; the spline
+writes them in its first sentence. `cleanup_frame_datum` defaults to `"auto"`
+because probe v0457 showed `true` breaks a second sketch built on the same datum
+(需要修改绝对轴定义, part update fails), so it cleans up only when that was the
+last sketch in the body. `catia_get_color` accepts the historical `structured`
+argument (the schema never had it - not a 0.3.146 regression), and a mirror of an
+already-symmetric body deletes the node it created and answers `no_change: true`.
 
 0.3.146 finishes the two items 0.3.145 named and left alone. Each needed a
 measurement before it could be written, and both changed the answer.

@@ -27,6 +27,25 @@ from catia_mcp.sketch_frames import plane_angle_frame, point_world
 from catia_mcp.topo_search import topology_reference
 
 
+#: How closely a SAMPLED sketch spline has to follow the exact curve, in mm.
+#:
+#: 0.03 rather than 0.01 since 0.3.146. The 2026-11-18 acceptance report (R1)
+#: counted what the 0.01 default cost: 65 point elements for a 3-control-point
+#: quadratic and 129 for a 5-point cubic with two spans, and a rebuilt P06 grew
+#: from ~400 KB to 491 KB. Those points are the spline's DEFINITION - deleting
+#: one changes the curve - and GeometricElements has no Remove, so the caller has
+#: no way to trim them afterwards. 0.03 mm still draws a 3-point quadratic at 17
+#: samples and a 4-point cubic at 33, and the reply states the deviation it
+#: actually reached, so a caller with a 0.02 mm spec passes tolerance=0.02.
+DEFAULT_SAMPLING_TOLERANCE_MM = 0.03
+
+#: Samples per span the automatic fit may use at most.
+#:
+#: The same report: a curve is not allowed to fill a sketch on its own. Past 32
+#: the reply says the tolerance was not met and what raising 'samples' would buy.
+MAX_SAMPLES_PER_SPAN = 32
+
+
 def _pair(value: Any, complaint: str) -> list[float]:
     """``[x, y]`` from whatever shape the caller sent, or a clear refusal."""
     if isinstance(value, dict):
@@ -937,9 +956,15 @@ class SketcherTools:
                             "type": "number",
                             "description": (
                                 "Largest sampling error to aim for, in mm "
-                                "(default 0.01). The sample count doubles from 8 "
-                                "until the polyline is within it or the count "
-                                "reaches 256 per span; the reply says which one "
+                                "(default 0.03). The sample count doubles from 8 "
+                                "until the polyline is within it or it reaches 32 "
+                                "per span - every sample is a point element left in "
+                                "the sketch and the collection has no Remove, so the "
+                                "budget is capped by default (2026-11-18 report, R1: "
+                                "0.01 wrote 65-129 points for one curve). The reply "
+                                "says which of the two happened, what deviation was "
+                                "actually reached, and what a tighter target would "
+                                "cost in points."
                                 "happened and what the real deviation is."
                             ),
                         },
@@ -4753,15 +4778,20 @@ class SketcherTools:
         # sketch is a real measurable (B30 2026-11-15), and it is the only way to
         # say how far a converted outline strayed from the polyline it replaced.
         self._last_drawn_spline = spline
+        # The point-element paragraph is dropped when the caller is a tool that
+        # will write its own summary: 0.3.146's control-point path puts its two
+        # error numbers FIRST, because run_plan truncates a step's result and the
+        # 2026-11-18 report found the numbers cut off exactly there (R2).
+        note = "" if not echo_points else (
+            f" The sketch also holds {len(control)} point element(s) "
+            "(点.N): CATIA's 2D spline is DEFINED through point objects, so "
+            "they are part of the sketch and the collection has no Remove "
+            "(measured 2026-11-15). They are not profile geometry - "
+            "catia_sketch_get_geometry collapses them, and pad / loft read "
+            "the one curve.")
         return (f"Spline created through {len(points)} points"
                 + (f": {pts_str}" if echo_points else "")
-                + closed_note
-                + f" The sketch also holds {len(control)} point element(s) "
-                  "(点.N): CATIA's 2D spline is DEFINED through point objects, so "
-                  "they are part of the sketch and the collection has no Remove "
-                  "(measured 2026-11-15). They are not profile geometry - "
-                  "catia_sketch_get_geometry collapses them, and pad / loft read "
-                  "the one curve.")
+                + closed_note + note)
 
     def _draw_control_spline(self, control: Any, degree: Any, knots: Any,
                              weights: Any, samples: Any, tolerance: Any,
@@ -4842,7 +4872,7 @@ class SketcherTools:
                     "created.", code="BAD_ARGUMENT", stage="validate",
                     modified=False)
 
-        goal = 0.01 if tolerance is None else float(tolerance)
+        goal = DEFAULT_SAMPLING_TOLERANCE_MM if tolerance is None else float(tolerance)
         if samples is not None:
             try:
                 per_span = int(samples)
@@ -4863,7 +4893,7 @@ class SketcherTools:
                    "tolerance_mm": goal, "met": deviation <= goal}
         else:
             fit = nurbs.fit_samples(points, degree, knot_vector, weight_list,
-                                    tolerance=goal)
+                                    tolerance=goal, limit=MAX_SAMPLES_PER_SPAN)
 
         sample_points = nurbs.sample(points, degree, knot_vector, weight_list,
                                      fit["per_span"])
@@ -4884,42 +4914,48 @@ class SketcherTools:
                                                weight_list))
         measured = self._measure_drawn_curve(check_curves)
 
-        curve = (f"drawn from a degree-{degree} B-spline: {len(points)} control "
-                 f"point(s), {nurbs.spans(len(points), degree)} span(s), knots "
-                 + ",".join(f"{value:g}" for value in knot_vector)
-                 + (" , rational (weights given)" if weight_list else ""))
-        sampling = (f" It is drawn as ONE interpolating sketch spline through "
-                    f"{len(sample_points)} sampled points ({fit['per_span']} "
-                    f"interval(s) per span), so the sketch keeps that many point "
-                    f"elements - they are the spline's definition, not extra "
-                    f"geometry. THE SAMPLING misses the exact curve by at most "
-                    f"{fit['deviation_mm']:.4f} mm"
-                    + ("" if fit["met"] else
-                       f", which is MORE than the {fit['tolerance_mm']:g} mm asked "
-                       "for: the sample count hit its limit")
-                    + ".")
+        spans_count = nurbs.spans(len(points), degree)
+        # THE NUMBERS COME FIRST. A plan truncates a step's result at 600 chars,
+        # and the 2026-11-18 acceptance report found exactly the two new error
+        # numbers cut off there (R2): the readout that makes this tool worth
+        # using was the part nobody could see from a plan.
         if measured["max_mm"] is None:
-            drawn = (" THE CURVE CATIA ACTUALLY DREW could not be measured here ("
-                     + (measured["why"] or "no reason given")
-                     + "), so no bound is claimed for it - the number above is the "
-                       "sampling error only.")
+            drawn_head = ("and the curve CATIA drew could not be measured here, "
+                          "so no bound is claimed for it")
+            drawn_tail = (f" THE DRAWN CURVE could not be measured ("
+                          + (measured["why"] or "no reason given")
+                          + "); the number above is the sampling error only.")
         else:
-            drawn = (f" MEASURED ON THE CURVE THAT WAS ACTUALLY DRAWN: over "
-                     f"{measured['checked']} point(s) between the samples, its "
-                     f"distance to the exact B-spline never exceeded "
-                     f"{measured['max_mm']:.4f} mm"
-                     + (f" ({measured['failed']} reading(s) failed)" if
-                        measured["failed"] else "") + ".")
-        if not fit["met"] or (measured["max_mm"] is not None
-                              and measured["max_mm"] > goal):
-            # Said out loud rather than left for the caller to compare: the two
-            # numbers sit in different sentences, and "0.0067 mm sampling" reads
-            # as "within tolerance" even when the goal was 0.005.
-            return (text + f" {curve}." + sampling + drawn
-                    + f" The {goal:g} mm tolerance was NOT met by the drawn "
-                      "curve; raise 'samples' (or lower 'tolerance' with the "
-                      "sample count left free) and draw it again.")
-        return text + f" {curve}." + sampling + drawn
+            drawn_head = (f"the curve CATIA drew stays within "
+                          f"{measured['max_mm']:.4f} mm of it over "
+                          f"{measured['checked']} check point(s)")
+            drawn_tail = (f" MEASURED ON THE CURVE THAT WAS ACTUALLY DRAWN: "
+                          f"{measured['checked']} point(s) between the samples, "
+                          f"worst {measured['max_mm']:.4f} mm"
+                          + (f" ({measured['failed']} reading(s) failed)" if
+                             measured["failed"] else "") + ".")
+        head = (f" {spans_count} span(s), degree {degree}, {len(points)} control "
+                f"point(s); drawn as ONE spline through {len(sample_points)} "
+                f"sample point(s), which stay in the sketch as point elements. "
+                f"Sampling error {fit['deviation_mm']:.4f} mm; {drawn_head}.")
+        detail = (f" Knots {','.join(f'{value:g}' for value in knot_vector)}"
+                  + (" (rational: weights given)" if weight_list else "") + "."
+                  + ("" if fit["met"] else
+                     f" The {fit['tolerance_mm']:g} mm tolerance was NOT met: the "
+                     f"automatic count stops at {MAX_SAMPLES_PER_SPAN} per span, "
+                     "so pass a larger 'samples' and read the reply again."))
+        # What a finer curve would cost, in the unit the caller pays in: point
+        # elements that cannot be removed. Only when it would buy anything.
+        finer = nurbs.fit_samples(points, degree, knot_vector, weight_list,
+                                  tolerance=goal / 4, limit=256)
+        cost = ""
+        if finer["per_span"] > fit["per_span"]:
+            cost = (f" A {goal / 4:g} mm target would need "
+                    f"{spans_count * int(finer['per_span']) + 1} sample point(s) "
+                    f"(reaches {finer['deviation_mm']:.4f} mm) - pass "
+                    f"tolerance={goal / 4:g} or "
+                    f"samples={int(finer['per_span'])} if that is worth the tree.")
+        return text + head + detail + drawn_tail + cost
 
     def _measure_drawn_curve(self, checks: list[tuple[float, float]]) -> dict[str, Any]:
         """How far the spline this session just drew is from the exact curve.

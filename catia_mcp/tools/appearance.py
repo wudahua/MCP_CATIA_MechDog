@@ -209,6 +209,20 @@ class AppearanceTools:
                                 "components (product) or every body (part)."
                             ),
                         },
+                        "structured": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Accepted for compatibility and IGNORED. This tool "
+                                "has always answered in one shape and never had a "
+                                "`structured` argument - checked across v0.3.138 to "
+                                "v0.3.146, the schema only ever held `target`. A "
+                                "2026-11-18 report hit a client-side \"must NOT have "
+                                "additional properties\" on it, so passing it no "
+                                "longer fails. The write side is "
+                                "catia_colorize_assembly, which does have one."
+                            ),
+                        },
                     },
                 },
             },

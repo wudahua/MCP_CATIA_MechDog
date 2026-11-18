@@ -1210,8 +1210,12 @@ class PartDesignTools:
                     "duplicates: a taken name comes back as 'P_04_06.2' with a note. "
                     "FRAME SCAFFOLDING: deleting a sketch that was built on a frame "
                     "leaves its datum plane and 3 construction points in the tree - "
-                    "they are NOT its children (measured on B30 2026-11-18). Pass "
-                    "cleanup_frame_datum=true to remove them with it."
+                    "they are NOT its children (measured on B30 2026-11-18). "
+                    "cleanup_frame_datum defaults to \"auto\" and removes them when "
+                    "this was the last sketch in the body - a frame datum can be a "
+                    "SHARED support, and deleting it under a live sketch breaks that "
+                    "sketch (measured 2026-11-18). Pass true to force it, false to "
+                    "keep them."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1238,23 +1242,30 @@ class PartDesignTools:
                             ),
                         },
                         "cleanup_frame_datum": {
-                            "type": "boolean",
-                            "default": False,
+                            "type": ["boolean", "string"],
+                            "enum": [True, False, "auto"],
+                            "default": "auto",
                             "description": (
                                 "When the deleted element is a SKETCH, also remove "
                                 "the datum plane and the 3 points a frame support "
                                 "left in the tree. A frame sketch's scaffolding is "
-                                "not its child: deleting the sketch leaves "
+                                "NOT its child: deleting the sketch leaves "
                                 "'<sketch>_FRAME' and '<sketch>_FRAME.O/.U/.V' "
-                                "behind (measured on B30 2026-11-18: the plane "
-                                "and the 3 points stayed, and deleting them "
-                                "afterwards works, plane first). The names are "
-                                "given by catia_create_sketch since 0.3.146; a "
-                                "sketch made before that carries 'Datum_frame.N' "
-                                "and three unnamed points that cannot be tied to "
-                                "it, and the reply says so instead of deleting a "
-                                "neighbour's support. Off by default because the "
-                                "datum may be referenced by something else."
+                                "behind (measured on B30 2026-11-18: the plane and "
+                                "the 3 points stayed, and deleting them afterwards "
+                                "works, plane first). The names are given by "
+                                "catia_create_sketch since 0.3.146; a sketch made "
+                                "before that carries 'Datum_frame.N' and three "
+                                "unnamed points that cannot be tied to it, and the "
+                                "reply says so instead of deleting a neighbour's "
+                                "support. "
+                                "\"auto\" (the default) cleans up only when this was "
+                                "the LAST sketch in the body, because a frame datum "
+                                "can be shared: measured on B30 2026-11-18, a second "
+                                "sketch built ON that datum by name, and deleting the "
+                                "datum left it unsupported and the part update "
+                                "failing. true forces the cleanup and says the risk; "
+                                "false leaves everything alone."
                             ),
                         },
                         "index": {
@@ -5422,14 +5433,28 @@ class PartDesignTools:
         else:
             delta = after - before
             if abs(delta) < 1e-6:
-                volume_sentence = (
-                    f" Volume {before:.4f} -> {after:.4f} mm3: the body is already "
-                    "symmetric about this plane, so this mirror added nothing.")
-            else:
-                volume_sentence = (
-                    f" Volume {before:.4f} -> {after:.4f} mm3 (delta {delta:+.4f}): "
-                    "the whole body was mirrored and the copy UNIONED with it, which "
-                    "is Transform > Mirror - not a mirror of one feature.")
+                # A MIRROR THAT CHANGED NOTHING IS NOT A FEATURE WORTH KEEPING.
+                # The 2026-11-18 report (R5) mirrored a symmetric body, was told
+                # "added nothing", and still had a 镜像.1 in the tree to delete by
+                # hand. So the node this call created goes again, and the reply
+                # says the tree is back where it started.
+                removed = self._discard_feature(part, mirror)
+                return (
+                    f"Mirror about {plane_key.upper()} plane: the body "
+                    f"('{body.Name}') is already symmetric about this plane, so the "
+                    f"operation added nothing - volume {before:.4f} mm3 before and "
+                    "after (no_change: true). "
+                    + ("The mirror feature this call created was DELETED again, so "
+                       "the tree is unchanged." if removed else
+                       f"The feature '{mirror.Name}' could NOT be removed and is "
+                       "still in the tree; delete it with catia_delete_feature. "
+                       "The geometry is unchanged either way.")
+                    + " If you wanted ONE feature mirrored, this is not that "
+                      "operation - see the tool description for the two-call route.")
+            volume_sentence = (
+                f" Volume {before:.4f} -> {after:.4f} mm3 (delta {delta:+.4f}): "
+                "the whole body was mirrored and the copy UNIONED with it, which "
+                "is Transform > Mirror - not a mirror of one feature.")
         return (
             f"Mirror created about {plane_key.upper()} plane: the WHOLE body "
             f"('{body.Name}', last feature '{last_name}' = {last_kind}) was mirrored "
@@ -5437,6 +5462,29 @@ class PartDesignTools:
             + " If you wanted ONE feature mirrored, this is not that operation - "
             "see the tool description for the two-call route that is."
         )
+
+    def _discard_feature(self, part: Any, feature: Any) -> bool:
+        """Delete a feature this call just created, and say whether it went.
+
+        Used where the operation turned out to be a no-op (a mirror of a body that
+        is already symmetric): the node would otherwise sit in the tree until
+        somebody noticed it. Measured on B30 2026-11-18 - the selection route
+        deletes it and the update after it succeeds, the same route
+        catia_delete_feature takes.
+        """
+        try:
+            selection = self.conn.hso
+            selection.Clear()
+            selection.Add(feature)
+            selection.Delete()
+            selection.Clear()
+        except Exception:  # noqa: BLE001 - the caller reports what happened
+            return False
+        try:
+            part.Update()
+        except Exception:  # noqa: BLE001 - the caller reports what happened
+            return False
+        return True
 
     def _shell(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()
@@ -5697,10 +5745,13 @@ class PartDesignTools:
             # Kept OUT of `done`: that list is counted as elements removed, and a
             # sentence about the update is not one.
             scaffold_note = ""
-            if args.get("cleanup_frame_datum") and removed_features:
-                scaffold_note = "".join(
-                    self._delete_frame_scaffold(name, update=False, quiet=True)
-                    for name in removed_features)
+            scaffold_note = ""
+            if removed_features:
+                for name in removed_features:
+                    scaffold_note += self._cleanup_after_sketch(
+                        name, args.get("cleanup_frame_datum", "auto"),
+                        update=False, quiet=True)
+
             update_note = (self._final_update_note(removed_features)
                            if removed_features else "")
             # `deleted` counts OBJECTS, so a name that two elements carried
@@ -5968,9 +6019,54 @@ class PartDesignTools:
         self._note_part_error(None)
         self.conn.refresh_display()
         message = self._deleted_message(kind, target, before, args)
-        if kind == "sketch" and args.get("cleanup_frame_datum"):
-            message += self._delete_frame_scaffold(target)
+        if kind == "sketch":
+            message += self._cleanup_after_sketch(
+                target, args.get("cleanup_frame_datum", "auto"))
         return message
+
+    def _cleanup_after_sketch(self, sketch_name: str, mode: Any,
+                              update: bool = True, quiet: bool = False) -> str:
+        """Whether this sketch's frame scaffolding may go, and why.
+
+        ``"auto"`` (the default since 0.3.147) cleans up only when this was the
+        LAST sketch in the part. That line was measured on B30 2026-11-18 (probe
+        v0457): a frame datum is a legitimate support for a SECOND sketch, and
+        CATIA deletes it anyway - the survivor then reads "需要修改绝对轴定义以解决
+        这些问题" in the update diagnosis and the part update fails. So the default
+        does the common case (a frame sketch built and dropped in one go) and
+        stops where the datum might still be a support.
+
+        ``true`` forces it and says the risk out loud; ``false`` does nothing.
+        """
+        forced = mode is True
+        if isinstance(mode, str):
+            forced = mode.strip().lower() in ("true", "force", "yes")
+            if mode.strip().lower() in ("false", "no", "keep", ""):
+                return ""
+        elif mode is False:
+            return ""
+        if not forced:
+            try:
+                remaining = self._sketch_names()
+            except Exception:  # noqa: BLE001 - unknown, so do not delete
+                remaining = []
+            if remaining:
+                if quiet:
+                    return ""
+                return (f" Its frame scaffolding was NOT removed: {len(remaining)} "
+                        f"other sketch(es) remain here "
+                        f"({', '.join(remaining[:4])}"
+                        f"{', ...' if len(remaining) > 4 else ''}) and a frame "
+                        "datum is a legitimate support for a second sketch - "
+                        "deleting it under a live sketch leaves that sketch "
+                        "unsupported and the update failing (measured on B30 "
+                        "2026-11-18). Pass cleanup_frame_datum=true if you know "
+                        f"'{sketch_name}_FRAME' is orphaned.")
+        note = "" if not forced else (
+            " Forced cleanup: a frame datum can be a shared support, so if a "
+            "sketch built on it now fails, that is why.")
+        return self._delete_frame_scaffold(sketch_name, update=update,
+                                           quiet=quiet) + note
 
     def _delete_frame_scaffold(self, sketch_name: str,
                                update: bool = True, quiet: bool = False) -> str:

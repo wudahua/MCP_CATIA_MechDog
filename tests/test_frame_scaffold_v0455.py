@@ -232,10 +232,56 @@ def test_delete_feature_offers_the_parameter_and_says_why():
                    for tool in PartDesignTools(None).get_tool_definitions()}
     schema = definitions["catia_delete_feature"]["inputSchema"]["properties"]
     assert "cleanup_frame_datum" in schema
-    assert schema["cleanup_frame_datum"].get("default") is False
+    # 0.3.147: three-state, because "always" and "never" are both wrong - see
+    # tests below, which pin the case the default has to stop at.
+    assert schema["cleanup_frame_datum"].get("default") == "auto"
+    assert schema["cleanup_frame_datum"].get("enum") == [True, False, "auto"]
     text = definitions["catia_delete_feature"]["description"]
-    assert "cleanup_frame_datum=true" in text
+    assert "cleanup_frame_datum defaults to" in text
     assert "NOT its children" in text
+
+
+def _scaffold_tools(remaining: list[str]):
+    body = _Body([_Node("FRAME_A_FRAME"), _Node("FRAME_A_FRAME.O"),
+                  _Node("FRAME_A_FRAME.U"), _Node("FRAME_A_FRAME.V")])
+    body.Sketches = _Collection([_Node(name) for name in remaining])
+    part = _Part(body)
+    selection = _Selection()
+    return PartDesignTools(_Connection(part, body, selection)), body, selection
+
+
+def test_auto_cleans_up_when_it_was_the_last_sketch():
+    tools, _body, selection = _scaffold_tools([])
+    text = tools._cleanup_after_sketch("FRAME_A", "auto")
+    assert "removed the frame scaffolding" in text
+    assert selection.batches[0] == ["FRAME_A_FRAME"], "plane first, then points"
+
+
+def test_auto_stops_when_another_sketch_could_be_standing_on_the_datum():
+    # MEASURED on B30 2026-11-18 (probe v0457): a second sketch built ON the
+    # datum by name survives the delete, then reads 需要修改绝对轴定义 and the part
+    # update fails. So "auto" must not touch it while another sketch remains.
+    tools, body, selection = _scaffold_tools(["ON_FRAME"])
+    text = tools._cleanup_after_sketch("FRAME_A", "auto")
+    assert "NOT removed" in text
+    assert "ON_FRAME" in text, "the reply has to name what it is protecting"
+    assert selection.batches == []
+    assert "FRAME_A_FRAME" in body.HybridShapes.names()
+
+
+def test_true_forces_the_cleanup_and_names_the_risk():
+    tools, _body, selection = _scaffold_tools(["ON_FRAME"])
+    text = tools._cleanup_after_sketch("FRAME_A", True)
+    assert "removed the frame scaffolding" in text
+    assert "Forced cleanup" in text and "shared support" in text
+    assert selection.batches[0] == ["FRAME_A_FRAME"]
+
+
+def test_false_leaves_everything_alone():
+    tools, body, selection = _scaffold_tools([])
+    assert tools._cleanup_after_sketch("FRAME_A", False) == ""
+    assert selection.batches == []
+    assert "FRAME_A_FRAME" in body.HybridShapes.names()
 
 
 def test_the_frame_reply_names_the_delete_route():
