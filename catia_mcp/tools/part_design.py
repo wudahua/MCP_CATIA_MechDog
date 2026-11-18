@@ -201,6 +201,17 @@ def _sketch_point_world(placement: Any, x: float, y: float) -> list[float] | Non
     return point_world(placement, x, y)
 
 
+def _describe_axes(axes: Any) -> str:
+    """``origin (x, y, z), H (..), V (..)`` for a reply, or a placeholder."""
+    try:
+        origin, h, v = axes
+        return (f"origin ({origin[0]:.4f}, {origin[1]:.4f}, {origin[2]:.4f}), "
+                f"H ({h[0]:g}, {h[1]:g}, {h[2]:g}), "
+                f"V ({v[0]:g}, {v[1]:g}, {v[2]:g})")
+    except Exception:  # noqa: BLE001 - never worth failing a reply over
+        return "axes not printable"
+
+
 def _in_plane_distance(first: Any, second: Any, placement: Any) -> float | None:
     """Distance between two world points measured IN the sketch plane."""
     frame = _sketch_frame(placement)
@@ -290,11 +301,13 @@ class PartDesignTools:
 
     def __init__(self, connection: CATIAConnection) -> None:
         self.conn = connection
-        #: plane signature of each sketch this call deleted, by name. Read
-        #: BEFORE the delete because nothing about a deleted sketch can be read
-        #: afterwards, and the frame cleanup needs it to know which surviving
-        #: sketches could have been standing on the datum (0.3.148).
-        self._deleted_sketch_planes: dict[str, Any] = {}
+        #: absolute axis system (origin, H, V) of each sketch this call deleted,
+        #: by name. Read BEFORE the delete because nothing about a deleted sketch
+        #: can be read afterwards, and the frame cleanup needs it to know which
+        #: surviving sketches could have been standing on the datum (0.3.149:
+        #: the whole axis system, not just the plane - two frames on one plane
+        #: are two datums).
+        self._deleted_sketch_datums: dict[str, Any] = {}
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
         return [
@@ -1218,14 +1231,21 @@ class PartDesignTools:
                     "leaves its datum plane and 3 construction points in the tree - "
                     "they are NOT its children (measured on B30 2026-11-18). "
                     "cleanup_frame_datum defaults to \"auto\" and removes them "
-                    "unless ANOTHER SKETCH SITS ON THAT PLANE - a frame datum can "
-                    "be a shared support, and deleting it under a live sketch "
+                    "unless ANOTHER SKETCH STANDS ON THAT DATUM - a frame datum "
+                    "can be a shared support, and deleting it under a live sketch "
                     "breaks that sketch (measured on B30 2026-11-18: the "
                     "survivor then reads 需要修改绝对轴定义以解决这些问题 and the "
-                    "update fails). Which sketches sit on that plane is READ "
-                    "from their own axes, not guessed from how many sketches "
-                    "exist; when it cannot be read, nothing is deleted. Pass "
-                    "true to force it, false to keep them."
+                    "update fails). Which sketches stand on it is READ from their "
+                    "own absolute axis systems, not guessed from how many sketches "
+                    "exist and not inferred from sharing its plane; when it cannot "
+                    "be read, nothing is deleted. Pass true to force it, false to "
+                    "keep them. "
+                    "A SKETCH A FEATURE CONSUMES is refused before anything is "
+                    "attempted (SKETCH_CONSUMED_BY): the Part Design features "
+                    "answer .Sketch, so the profile of '凸台.1' is known, and "
+                    "deleting that sketch is either refused by CATIA or leaves "
+                    "the pad in error - measured both ways on B30 2026-11-18. "
+                    "Delete the feature instead, or pass both names to 'names'."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1270,17 +1290,23 @@ class PartDesignTools:
                                 "reply says so instead of deleting a neighbour's "
                                 "support. "
                                 "\"auto\" (the default) cleans up unless another "
-                                "sketch sits on the same plane. That is the "
-                                "measured criterion, not the old \"are there other "
-                                "sketches\" one: every frame sketch has its own "
-                                "datum, so a part full of them (the 2026-11-18 "
-                                "report's P02/P05/P06 hold 5-8 each) never cleaned "
-                                "anything up. A sketch that stands on this datum "
-                                "lies on its plane, and Sketch.GetAbsoluteAxisData "
-                                "says where each surviving sketch sits; if that "
-                                "cannot be read, nothing is deleted. true forces "
-                                "the cleanup (and reports an update failure if one "
-                                "follows), false leaves everything alone."
+                                "sketch stands on the same DATUM - the same "
+                                "absolute axis system, origin and directions both. "
+                                "Two earlier criteria were measured wrong and are "
+                                "recorded: \"are there other sketches\" was not "
+                                "about the datum at all, so a part full of frame "
+                                "sketches (the 2026-11-18 report's P02/P05/P06 "
+                                "hold 5-8 each) never cleaned anything up; and "
+                                "\"same plane\" (0.3.148) refused on sketches that "
+                                "merely share an infinite plane - two frames on "
+                                "z = 0 with datum points 50 mm apart are two "
+                                "datums, and the reporter measured that the "
+                                "cleanup is safe there. Sketch.GetAbsoluteAxisData "
+                                "says where each surviving sketch sits, origin "
+                                "included; if that cannot be read, nothing is "
+                                "deleted. true forces the cleanup (and reports an "
+                                "update failure if one follows), false leaves "
+                                "everything alone."
                             ),
                         },
                         "index": {
@@ -5825,7 +5851,17 @@ class PartDesignTools:
             done: list[str] = list(deleted)
             failed: list[str] = [f"'{name}' (could not be deleted)" for name in kept]
             removed_features: list[str] = []
-            for name in others:
+            # A SKETCH TAKEN BY A FEATURE EARLIER IN THE SAME CALL IS NOT A
+            # FAILURE. The first B30 acceptance run of this batch form
+            # (v0464, 2026-11-18) asked for ['凸台.2', 'SK_Q'], the pad went and
+            # cascaded the sketch, and the reply read "Deleted 1 element(s) for 2
+            # name(s) given. Failed (1): 'SK_Q' (No feature ... named 'SK_Q')" -
+            # a complete success reported as a partial one, immediately after a
+            # reply that had just recommended this exact call.
+            sketches_alive = set(self._sketch_names())
+            went_with: dict[str, str] = {}
+            cascaded: list[str] = []
+            for name in self._batch_order(others):
                 try:
                     # NO UPDATE PER NAME. The 2026-11-13 report (P0-1) deleted a PAIR
                     # of one-sided pockets in one batch and got, after the first of
@@ -5838,20 +5874,32 @@ class PartDesignTools:
                     # caller to delete six healthy downstream features with it.
                     # Deleting the whole list and updating ONCE removes the state
                     # that produced that sentence.
-                    done.append(self._delete_one(args, name, defer_update=True))
+                    done.append(self._delete_one(args, name, defer_update=True,
+                                                 also=set(many)))
                     removed_features.append(name)
+                    try:
+                        after = set(self._sketch_names())
+                    except Exception:  # noqa: BLE001 - no list, no bookkeeping
+                        after = sketches_alive
+                    for gone in sketches_alive - after:
+                        went_with.setdefault(gone, name)
+                    sketches_alive = after
                 except Exception as error:  # noqa: BLE001 - reported per name
-                    failed.append(f"'{name}' ({str(error).splitlines()[0][:120]})")
+                    first = str(error).splitlines()[0]
+                    if name in went_with and "No feature, sketch, GSD element" in first:
+                        cascaded.append(f"'{name}' (taken with "
+                                        f"'{went_with[name]}')")
+                        continue
+                    failed.append(f"'{name}' ({first[:120]})")
             # Kept OUT of `done`: that list is counted as elements removed, and a
             # sentence about the update is not one.
-            scaffold_note = ""
             scaffold_note = ""
             if removed_features:
                 for name in removed_features:
                     scaffold_note += self._cleanup_after_sketch(
                         name, args.get("cleanup_frame_datum", "auto"),
                         update=False, quiet=True,
-                        plane=self._deleted_sketch_planes.pop(name, None))
+                        datum=self._deleted_sketch_datums.pop(name, None))
 
             update_note = (self._final_update_note(removed_features)
                            if removed_features else "")
@@ -5859,7 +5907,11 @@ class PartDesignTools:
             # contributes two entries: saying "1 of 1" after removing two of them
             # would be the same kind of half-truth this batch exists to avoid.
             duplicates = [name for name in gsd_names if len(found.get(name, [])) > 1]
-            summary = (f"Deleted {len(done)} element(s) for {len(many)} name(s) given.")
+            summary = (f"Deleted {len(done) + len(cascaded)} element(s) for "
+                       f"{len(many)} name(s) given.")
+            if cascaded:
+                summary += (" Also gone, taken by a feature deleted above: "
+                            + ", ".join(cascaded) + ".")
             if duplicates:
                 summary += (" Duplicate names removed in full: " + ", ".join(
                     f"'{name}' x{len(found[name])}" for name in duplicates) + ".")
@@ -5869,7 +5921,8 @@ class PartDesignTools:
         return self._delete_one(args, None)
 
     def _delete_one(self, args: dict[str, Any], forced: str | None,
-                    defer_update: bool = False) -> str:
+                    defer_update: bool = False,
+                    also: set[str] | None = None) -> str:
         """Delete one named element. ``defer_update`` leaves Part.Update to a caller.
 
         The batch form deletes a whole list and updates ONCE at the end: an update
@@ -5877,6 +5930,11 @@ class PartDesignTools:
         fillet on it) cannot succeed, and reading that in-between failure as a
         verdict on the model is what produced the destructive advice of 0.3.122
         (reported 2026-11-13, P0-1).
+
+        ``also`` is the rest of that list. A sketch whose consuming feature is
+        being deleted in the SAME call may go: the feature delete takes it, and
+        refusing would make the one sensible batch ('delete the pad and the
+        sketch') impossible.
         """
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
@@ -5913,6 +5971,10 @@ class PartDesignTools:
             target = str(shapes.Item(index).Name)
         feature = None
         kind = "feature"
+        # (features asked, features that would not answer) - filled in only for a
+        # sketch, and read by the delete-failure sentence below. Initialised so
+        # that sentence can never depend on a branch having run.
+        sketch_scan = (0, 0)
         bodies = part.Bodies
         for b in range(1, bodies.Count + 1):
             body = bodies.Item(b)
@@ -6012,9 +6074,41 @@ class PartDesignTools:
         # THE PLANE HAS TO BE READ NOW. After the delete there is nothing left to
         # ask, and the frame cleanup needs to know whether a surviving sketch was
         # standing on this datum or merely somewhere in the same body.
-        self._deleted_sketch_planes.pop(target, None)
+        self._deleted_sketch_datums.pop(target, None)
         if kind == "sketch":
-            self._deleted_sketch_planes[target] = self._sketch_plane(feature)
+            # A SKETCH A FEATURE CONSUMES IS NOT A SKETCH THIS TOOL MAY DELETE.
+            # Measured both ways on B30 2026-11-18: CATIA sometimes refuses
+            # (「方法 Delete 失败」, which the old reply read as a dead reference
+            # and sent the reporter round an update-retry loop that could not
+            # help), and sometimes accepts and leaves the consuming feature in
+            # error (probe v0462: 凸台.1 then fails every later update). Both are
+            # worse than not trying, and the Part Design features answer
+            # ``.Sketch`` - 凸台.1 -> 'SK_A' - so this can be asked first.
+            consumers, unasked = self._sketch_consumers(target)
+            sketch_scan = (len(unasked) + len(consumers), len(unasked))
+            still = [name for name in consumers
+                     if not (also and name in also)]
+            if still:
+                raise ArgumentRejected(
+                    f"SKETCH_CONSUMED_BY: '{target}' is the profile of "
+                    f"{' and '.join(repr(name) for name in still)}. CATIA does "
+                    "not let a consumed sketch go on its own - measured both "
+                    "ways on B30 2026-11-18: it can refuse the delete outright, "
+                    "and it can accept it and leave the feature in error so that "
+                    "every later update stops there. Either way the sketch is "
+                    f"not the thing to delete. Nothing was deleted. Delete "
+                    f"{' or '.join(repr(name) for name in still)} instead - the "
+                    "sketch goes with it - or pass both names in one call "
+                    "('names'), which removes the feature and takes the sketch "
+                    "with it.",
+                    code="SKETCH_CONSUMED_BY", stage="execute", modified=False,
+                    data={"sketch": target, "consumed_by": still,
+                          "features_asked": len(unasked) + len(consumers)},
+                    next_actions=[
+                        f"catia_delete_feature(feature_name='{still[0]}')",
+                    ],
+                )
+            self._deleted_sketch_datums[target] = self._sketch_axes(feature)
         sel = self.conn.hso
         try:
             sel.Clear()
@@ -6062,10 +6156,32 @@ class PartDesignTools:
             except Exception:                                 # noqa: BLE001
                 remaining = []
             still_there = target in remaining
+            # A CONSUMED SKETCH IS THE FIRST HYPOTHESIS WHEN THE ELEMENT IS A
+            # SKETCH, because it is the one that needs a different NEXT action.
+            # The 2026-11-18 report walked the old advice end to end - update
+            # (succeeded), retry the same name (refused again), suspect the file
+            # - while the answer was 凸台.1 all along. The features here were
+            # asked before the delete (``_sketch_consumers``), so this sentence
+            # can say how many of them answered and where the blind spot is.
+            about_sketch = ""
+            if kind == "sketch":
+                seen, blind = sketch_scan
+                about_sketch = (
+                    "A SKETCH IS CONSUMED BY SOMETHING, USUALLY. This tool already "
+                    f"asked the {seen} Part Design feature(s) in this part which "
+                    "profile is theirs, and none named this one"
+                    + (f" ({blind} of them do not answer .Sketch at all, so the "
+                       "question is unanswered for those)" if blind else "")
+                    + ". What that leaves is a consumer outside the body's "
+                    "features: a GSD element (measured on B30 2026-11-18 - a "
+                    "sketch fed to catia_gsd_extrude was deleted without a "
+                    "refusal, and 拉伸.1 then failed every later update). ")
             raise CodedError(
                 f"'{target}' is listed in the tree, but CATIA refused to delete "
                 f"it ({str(error).splitlines()[0][:160]}). This call did NOT have "
-                "that sketch open, so the likeliest cause is what a failed update "
+                "that sketch open. "
+                + about_sketch
+                + "Otherwise the likeliest cause is what a failed update "
                 "leaves behind: a dead reference, which the tree still lists and "
                 "the selection cannot take. "
                 + (f"It is still listed among the sketches after the attempt. "
@@ -6129,40 +6245,46 @@ class PartDesignTools:
         if kind == "sketch":
             message += self._cleanup_after_sketch(
                 target, args.get("cleanup_frame_datum", "auto"),
-                plane=self._deleted_sketch_planes.pop(target, None))
+                datum=self._deleted_sketch_datums.pop(target, None))
         return message
 
     def _cleanup_after_sketch(self, sketch_name: str, mode: Any,
                               update: bool = True, quiet: bool = False,
-                              plane: Any = None) -> str:
+                              datum: Any = None) -> str:
         """Whether this sketch's frame scaffolding may go, and why.
 
         ``"auto"`` (the default) cleans up unless another sketch in the part
-        stands on the SAME PLANE. That is the criterion since 0.3.148, and it
-        replaces "are there other sketches at all":
+        stands on the SAME DATUM - the same absolute axis system, origin and
+        directions both. That is the criterion since 0.3.149. Two earlier ones
+        are recorded here because each was measured to be wrong:
 
-        * the old test was not about the datum at all, and the 2026-11-18 report
-          said so from its own project - 20+ frame sketches in one part, every
-          one of them with its own ``_FRAME``, so ``auto`` never fired in exactly
-          the parts that needed it (P2);
-        * what actually breaks is measured: probe v0457 on B30 2026-11-18 built a
-          second sketch ON ``A_FRAME`` by name, deleted the datum, and CATIA let
-          it go - the survivor then reads 「需要修改绝对轴定义以解决这些问题」 and
-          ``part.Update`` fails;
-        * a sketch that stands on a datum necessarily lies on that datum's plane,
-          and ``Sketch.GetAbsoluteAxisData`` (through the CATScript route, see
-          ``sketch_frames.read_absolute_axes``) is the one way this build answers
-          where a sketch sits - a second sketch built on the frame reports the
-          identical ``[0, 0, 1000, 1, 0, 0, 0, 1, 0]``.
+        * "are there other sketches at all" was not about the datum, and the
+          2026-11-18 report said so from its own project - 20+ frame sketches in
+          one part, every one of them with its own ``_FRAME``, so ``auto`` never
+          fired in exactly the parts that needed it;
+        * "is another sketch on the same PLANE" (0.3.148) was a proxy that
+          over-refused, and the same reporter measured it: two frame sketches on
+          z = 0 with datum points 50 mm apart are two datums, and deleting the
+          first one's frame left the part updating normally. A plane is an
+          infinite set; a datum is one axis system.
 
-        So "same plane" is a conservative PROXY for "still referenced": it can
-        answer yes for a sketch on a different (but coplanar) support, which only
-        costs the caller an explicit ``true``, and it cannot answer no for a
-        sketch that really does reference the datum.
+        Comparing axis systems is safe in the direction that matters because the
+        thing that breaks is measured: probe v0457 on B30 2026-11-18 built a
+        second sketch ON ``A_FRAME`` by name, deleted the datum, and CATIA let it
+        go - the survivor then reads 「需要修改绝对轴定义以解决这些问题」 and
+        ``part.Update`` fails. Probe v0463 the same day measured that the two
+        orientations report differently: a sketch built on the frame reports the
+        identical ``(origin, H, V)`` triple (gap 0.000000 mm), while a sketch on
+        a coplanar DIFFERENT datum reports the same H and V but an origin 50 mm
+        away. ``Sketch.GetAbsoluteAxisData`` - through the CATScript route in
+        ``sketch_frames.read_absolute_axes`` - is the only way this build answers
+        where a sketch sits; ``Sketch.Reference`` / ``.Support`` / ``.Plane`` look
+        like members to ``getattr`` and are not (they answer a placeholder whose
+        ``.Name`` raises, probe v0462).
 
-        ``plane`` is the deleted sketch's own ``(point, unit normal)``, captured
-        BEFORE the delete - there is nothing to read afterwards. ``None`` means
-        unknown, and unknown refuses rather than guesses.
+        ``datum`` is the deleted sketch's own ``(origin, H, V)``, captured BEFORE
+        the delete - there is nothing to read afterwards. ``None`` means unknown,
+        and unknown refuses rather than guesses.
 
         ``true`` forces the cleanup and says the risk out loud; ``false`` does
         nothing at all.
@@ -6174,6 +6296,7 @@ class PartDesignTools:
                 return ""
         elif mode is False:
             return ""
+        elsewhere: list[tuple[str, float | None]] = []
         if not forced:
             if not self._has_frame_scaffold(sketch_name):
                 return ""
@@ -6183,7 +6306,7 @@ class PartDesignTools:
             except Exception:  # noqa: BLE001 - unknown, so do not delete
                 others = ["(the sketch list could not be read)"]
             if others:
-                same, why = self._sketches_on_plane(others, plane)
+                same, elsewhere, why = self._sketches_on_datum(others, datum)
                 if same is None:
                     if quiet:
                         return ""
@@ -6198,23 +6321,118 @@ class PartDesignTools:
                     if quiet:
                         return ""
                     return (f" Its frame scaffolding was left alone: "
-                            f"{len(same)} other sketch(es) sit on the SAME plane "
-                            f"as this one ({', '.join(same[:4])}"
-                            f"{', ...' if len(same) > 4 else ''}) - they were "
-                            f"nearly certainly built on '{sketch_name}_FRAME', and "
-                            "deleting it under them leaves them unsupported and "
-                            "the update failing (measured on B30 2026-11-18: "
-                            "需要修改绝对轴定义以解决这些问题). Pass "
-                            "cleanup_frame_datum=true if you know that datum is "
-                            "orphaned.")
+                            f"{len(same)} other sketch(es) share this datum - "
+                            f"their absolute axis system is the same as this "
+                            f"one's, origin and directions both "
+                            f"({_describe_axes(datum)}): {', '.join(same[:4])}"
+                            f"{', ...' if len(same) > 4 else ''}. A sketch built "
+                            f"on '{sketch_name}_FRAME' reports exactly this "
+                            "triple (measured on B30 2026-11-18), and deleting "
+                            "the datum under it leaves it unsupported and the "
+                            "update failing (需要修改绝对轴定义以解决这些问题). "
+                            "Pass cleanup_frame_datum=true if you know that "
+                            "datum is orphaned.")
         note = "" if not forced else (
             " Forced cleanup: a frame datum can be a shared support, so if a "
             "sketch built on it now fails, that is why.")
-        return self._delete_frame_scaffold(sketch_name, update=update,
-                                           quiet=quiet) + note
+        return (self._delete_frame_scaffold(sketch_name, update=update,
+                                            quiet=quiet)
+                + note
+                + self._coplanar_note(elsewhere))
 
-    def _sketch_plane(self, sketch: Any) -> Any:
-        """``(point, unit normal)`` of a sketch's own plane, or None.
+    @staticmethod
+    def _coplanar_note(elsewhere: list[tuple[str, float | None]]) -> str:
+        """Why sketches on the same plane did not stop the cleanup.
+
+        The 0.3.148 criterion refused on these, so saying which ones were
+        considered and why they were let go is the difference between a decision
+        and an omission - and the numbers are the evidence (2026-11-18 report,
+        P2: two datums 50 mm apart on z = 0).
+        """
+        if not elsewhere:
+            return ""
+        gaps = [gap for _name, gap in elsewhere if gap is not None]
+        worst = (f", {min(gaps):.4f} mm apart at the closest" if gaps else "")
+        names = ", ".join(name for name, _gap in elsewhere[:4])
+        return (f" {len(elsewhere)} other sketch(es) lie on the same plane but on "
+                f"a different datum, so they do not stand on it ({names}"
+                f"{', ...' if len(elsewhere) > 4 else ''}{worst}): a datum is an "
+                "axis system, not a plane.")
+
+    def _profile_map(self) -> tuple[dict[str, list[str]], list[str]]:
+        """``{sketch name: [features whose profile it is]}``, and what would not
+        answer.
+
+        THE ONE BACK-REFERENCE B30 HAS. Measured on B30 2026-11-18 (probe v0463):
+        ``凸台.1.Sketch.Name`` answers 'SK_P' and ``凹槽.1.Sketch.Name`` answers
+        'SK_Q', while every non-sketch-based feature answers a placeholder whose
+        ``.Name`` raises - so ``getattr`` alone would be a lie and every candidate
+        has to be dismantled before it counts. Those placeholders are returned as
+        "could not be asked" instead of being silently skipped: a caller that is
+        told "no feature names it" deserves to know how many were asked.
+
+        What this CANNOT see: a GSD element that consumed the sketch
+        (``catia_gsd_extrude`` with profile='SK_G' built 拉伸.1, and the sketch
+        was in that set, not in any body's feature list). That case is why the
+        delete-failure reply still lists "consumed somewhere it cannot read"
+        before it mentions a dead reference. It is also why this returns a map
+        rather than a single answer - one walk serves a whole batch.
+        """
+        profiles: dict[str, list[str]] = {}
+        unasked: list[str] = []
+        try:
+            bodies = self.conn.get_active_part().Bodies
+            for index in range(1, int(bodies.Count) + 1):
+                shapes = bodies.Item(index).Shapes
+                for position in range(1, int(shapes.Count) + 1):
+                    shape = shapes.Item(position)
+                    name = str(getattr(shape, "Name", "") or "?")
+                    try:
+                        profile = str(shape.Sketch.Name)
+                    except Exception:  # noqa: BLE001 - not a sketch-based shape
+                        unasked.append(name)
+                        continue
+                    profiles.setdefault(profile, []).append(name)
+        except Exception:  # noqa: BLE001 - unknown, and unknown must not refuse
+            return profiles, unasked
+        return profiles, unasked
+
+    def _sketch_consumers(self, sketch_name: str
+                          ) -> tuple[list[str], list[str]]:
+        """Features naming ``sketch_name`` as their profile, and the rest."""
+        profiles, unasked = self._profile_map()
+        return list(profiles.get(sketch_name, ())), unasked
+
+    def _batch_order(self, names: list[str]) -> list[str]:
+        """The batch's names, every consumer before the sketch it consumes.
+
+        ORDER MATTERS INSIDE ONE CALL. A caller who writes ``names=["SK_Q",
+        "凸台.2"]`` wants both gone, and doing it in that order would delete the
+        profile out from under a live pad - which CATIA either refuses or accepts
+        and breaks the part with (measured both ways on B30 2026-11-18). So the
+        pad goes first, whatever order the list arrived in, and the sketch is
+        already gone when its turn comes; ``_delete_feature`` counts that as
+        removed-with rather than as a failure.
+        """
+        profiles, _unasked = self._profile_map()
+        ordered: list[str] = []
+        remaining = list(names)
+        while remaining:
+            ready = [name for name in remaining
+                     if not (set(profiles.get(name, ())) & set(remaining)
+                             - {name})]
+            if not ready:
+                # A cycle cannot happen with a profile relation, but a name that
+                # consumes itself would make this loop run forever - say nothing
+                # and keep the caller's order instead.
+                ordered.extend(remaining)
+                break
+            ordered.extend(ready)
+            remaining = [name for name in remaining if name not in ready]
+        return ordered
+
+    def _sketch_axes(self, sketch: Any) -> Any:
+        """``(origin, H, V)`` of a sketch's own axes, or None.
 
         ``Sketch.GetAbsoluteAxisData`` is the only handle on this build, and it
         needs a by-ref out array - so it goes through the CATScript route in
@@ -6229,10 +6447,7 @@ class PartDesignTools:
             return None
         if not axes:
             return None
-        try:
-            return sketch_frames.plane_signature(axes[0])
-        except Exception:  # noqa: BLE001 - a degenerate axis system
-            return None
+        return axes[0]
 
     def _has_frame_scaffold(self, sketch_name: str) -> bool:
         """Whether ``<sketch>_FRAME`` (or a numbered variant) is in the tree."""
@@ -6252,16 +6467,21 @@ class PartDesignTools:
             return True
         return False
 
-    def _sketches_on_plane(self, names: list[str], plane: Any
-                           ) -> tuple[list[str] | None, str]:
-        """Which of ``names`` sit on ``plane``, and why when that is unknown.
+    def _sketches_on_datum(self, names: list[str], datum: Any
+                           ) -> tuple[list[str] | None,
+                                      list[tuple[str, float | None]], str]:
+        """Which of ``names`` stand on ``datum``, which merely share its plane.
 
-        ``(None, reason)`` means the question could not be answered - an axis
-        system that will not read - and every caller treats that as "do not
-        delete", never as "none of them".
+        Returns ``(same_datum, coplanar_different_datum, why)``. The first is
+        ``None`` when the question could not be answered - an axis system that
+        will not read - and every caller treats that as "do not delete", never as
+        "none of them". The second is only used to explain a decision that was
+        taken; it never stops a delete on its own (0.3.148 did stop on it, and
+        the 2026-11-18 report measured that as a false refusal).
         """
-        if plane is None:
-            return None, "this sketch's own plane could not be read before it was deleted"
+        if datum is None:
+            return (None, [], "this sketch's own axes could not be read before "
+                              "it was deleted")
         sketches = []
         by_name: dict[str, Any] = {}
         try:
@@ -6272,29 +6492,44 @@ class PartDesignTools:
                     sketch = held.Item(position)
                     by_name[str(sketch.Name)] = sketch
         except Exception as error:  # noqa: BLE001 - reported, not raised
-            return None, f"the sketches could not be listed ({str(error).splitlines()[0][:80]})"
+            return (None, [], "the sketches could not be listed "
+                              f"({str(error).splitlines()[0][:80]})")
         for name in names:
             if name in by_name:
                 sketches.append(by_name[name])
         if not sketches:
-            return [], ""
+            return [], [], ""
         try:
             axes = sketch_frames.read_absolute_axes(self.conn.app, sketches)
         except Exception as error:  # noqa: BLE001 - reported, not raised
-            return None, (f"CATIA would not report where the remaining sketches "
-                          f"sit ({str(error).splitlines()[0][:80]})")
+            return (None, [], "CATIA would not report where the remaining "
+                              f"sketches sit ({str(error).splitlines()[0][:80]})")
         if axes is None:
-            return None, ("CATIA would not report where the remaining sketches sit "
-                          "(Sketch.GetAbsoluteAxisData through the CATScript route)")
+            return (None, [], "CATIA would not report where the remaining "
+                              "sketches sit (Sketch.GetAbsoluteAxisData through "
+                              "the CATScript route)")
         same: list[str] = []
+        elsewhere: list[tuple[str, float | None]] = []
         for sketch, system in zip(sketches, axes):
-            signature = sketch_frames.plane_signature(system)
-            verdict = sketch_frames.same_plane(plane, signature)
+            verdict = sketch_frames.same_datum(datum, system)
             if verdict is None:
-                return None, f"the plane of '{sketch.Name}' could not be read"
+                return None, [], f"where '{sketch.Name}' sits could not be read"
             if verdict:
                 same.append(str(sketch.Name))
-        return same, ""
+                continue
+            # Same plane, different axis system - worth saying only because the
+            # previous criterion refused on it.
+            try:
+                signature = sketch_frames.plane_signature(system)
+                mine = sketch_frames.plane_signature(datum)
+                coplanar = (signature is not None and mine is not None
+                            and sketch_frames.same_plane(mine, signature) is True)
+            except Exception:  # noqa: BLE001 - a degenerate axis system
+                coplanar = False
+            if coplanar:
+                elsewhere.append((str(sketch.Name),
+                                  sketch_frames.origin_gap(datum, system)))
+        return same, elsewhere, ""
 
     def _delete_frame_scaffold(self, sketch_name: str,
                                update: bool = True, quiet: bool = False) -> str:

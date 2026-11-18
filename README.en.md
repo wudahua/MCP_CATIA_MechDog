@@ -2,7 +2,7 @@
 
 > **中文入口见 [README.md](README.md)。** This file is the full English reference: every tool, every measurement behind it, and every known limit.
 
-**0.3.148** · [what changed](CHANGELOG.md) ·
+**0.3.149** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1377,7 +1377,45 @@ Two facts about real drawings that this had to accept:
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
 
-0.3.148 fixes an error of my own arithmetic and answers three smaller findings
+0.3.149 answers the two findings of the 0.3.148 report, and both are a
+criterion whose INPUT was not the thing it claimed to judge.
+
+`cleanup_frame_datum="auto"` compared PLANES, and a plane is infinite: the
+reporter's part spreads frame sketches over z = 0 at different origins, so
+`auto` refused them all - the same non-cleanup it was introduced to fix, with
+a new sentence. It now compares the whole absolute axis system, origin and
+directions both, which is what a datum is. Measured on B30 2026-11-18: two
+frames on z = 0 with datum points 50 mm apart report origins (0,0,0) and
+(50,0,0) with the same H and V, and forcing the first one's cleanup answered
+"Part updated successfully"; a sketch built ON `<owner>_FRAME` by name
+reports the identical triple (gap 0.000000 mm) and is still refused. The
+reply names the sketches that share the plane but not the datum, with the
+distance between the origins. The reporter's first suggestion - compare
+`Sketch.Reference` - does not exist on this build: `getattr` returns
+something for `Reference`, `Support` and `Plane`, and using it fails with
+`'NoneType' object has no attribute 'Name'` (probe v0462).
+
+Deleting a sketch a pad consumes was diagnosed as a corrupt file and sent the
+caller through an update that could not help. The cause is one sentence long:/nCATIA does not let a consumed sketch go on its own - measured both ways, it
+can refuse the delete, and it can accept it and leave the pad failing every
+later update. Part Design features answer `.Sketch` (`凸台.1.Sketch.Name` ->
+'SK_A'), so the check is a read before the attempt: `SKETCH_CONSUMED_BY`
+names the feature, nothing is attempted, `modified` is false. The batch form
+then had to learn two things, both found by the acceptance run: put every
+consumer BEFORE the sketch it consumes (so `names=["SK_Q", "凸台.2"]`, the
+order anyone writes, cannot delete a profile out from under a live pad), and
+count a sketch a feature took as removed-with instead of as a failure - the
+first run reported a complete success as "Deleted 1 element(s) for 2 name(s)
+given. Failed (1)". A GSD element that consumed the sketch is still
+invisible to that scan, and the delete-failure reply now says so, with the
+count of features it managed to ask, before it mentions a dead reference.
+
+`sampling_limited_by` joins the structured spline data: `"cap"` when the
+32-per-span budget ended the fit, `"samples"` when the caller's own count
+did, `null` when the tolerance was met - so `sampling_tolerance_met: false`
+no longer has to be read as "this curve cannot do it".
+
+0.3.148 fixed an error of my own arithmetic and answered three smaller findings
 from the same 2026-11-18 report. The bogus one first: `catia_sketch_spline`'s
 "drawn error" reported 99 900 mm for an R=100 quarter circle, because `frame_of`
 handed `point_world` the caller's raw direction vector - a frame given as
@@ -2038,6 +2076,17 @@ Place the result with `catia_get_component_transform`.
 
 ## Known limits
 
+* **A plane is not a datum, just as "the south side" is not a street address.**
+  A `frame` plane is infinite, so two sketches lying on one plane says nothing
+  about standing on one support: measured on z = 0, two datums 50 mm apart
+  report the same H and V with different origins, and deleting one datum's
+  plane left the other sketch's part updating normally. Comparing whole axis
+  systems is what separates them; comparing planes refused every sketch in a
+  part like P06, which has one frame per wheel station. The same lesson in
+  another costume: **a successful `getattr` is not a member** -
+  `Sketch.Reference`, `.Support` and `.Plane` all return a placeholder, and
+  using it answers `'NoneType' object has no attribute 'Name'`, so "can this
+  be read" had to be settled by using it once.
 * **A direction vector's length means nothing - but it used to have consequences.** A `frame` plane is `origin + u + v`, so `u=[1000, 0, 0]` and `u=[1, 0, 0]` describe the same plane. Before 0.3.148 the local 2D-to-world mapping used `u` as a DISPLACEMENT, so every sketch coordinate came back |u| times too far out and the spline's measured error became 999 x radius. Fixed, and a reading larger than its own probe span is no longer published as a deviation.
 * **A sketch spline cannot be DEFINED by control points - only drawn through
   samples.** `Spline2D` answers nothing about degree, knots or control points, and

@@ -2,6 +2,83 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.149] — 2026-11-18 · a plane is not a datum, and a sketch that is spoken for
+
+The 2026-11-18 (0.3.148) report closed four of the previous five items - one of
+them by retracting its own P1 - and raised two new ones. Both of them are the
+same kind of mistake: a criterion whose INPUT was not the thing it claimed to
+judge.
+
+**P2 - "on the same plane" was answering for "on the same datum".** 0.3.148
+replaced "are there other sketches" with "is another sketch on MY PLANE", and a
+plane is infinite: the report's own part has frame sketches spread over z = 0 at
+different origins, so `auto` refused on them all - the same non-cleanup it was
+meant to fix, with a new sentence. It now compares the whole absolute axis
+system, origin and directions both, which is what a datum is. Measured on B30
+2026-11-18 (probe v0463): two frame sketches on z = 0 with datum points 50 mm
+apart report origins (0,0,0) and (50,0,0) with the SAME H and V, and forcing the
+cleanup of the first answered "Part updated successfully" - the reporter's
+measurement, reproduced. The direction that must not be got wrong reports the
+identical triple: a sketch built ON `<owner>_FRAME` by name comes back with gap
+0.000000 mm (probe v0462), so it is still refused. The reply now says which
+sketches share the plane but sit on a different datum, with the distance between
+the two origins, so the decision is visible instead of implied.
+
+The route the report suggested first - compare `Sketch.Reference` - does not
+exist on this build, and that took a probe to establish: `getattr` RETURNS
+something for `Reference`, `Support` and `Plane`, and using it fails with
+`'NoneType' object has no attribute 'Name'` (probe v0462). A member is not a
+member because `getattr` answered.
+
+**P1 - deleting a sketch a feature consumes was diagnosed as a corrupt file.**
+The reply said "dead reference" and sent the caller to `catia_update_part`, which
+succeeded and changed nothing. The cause is one sentence long and this tool
+already knew it elsewhere: CATIA does not let a consumed sketch go on its own.
+Measured both ways on B30 2026-11-18 - probe v0462 deleted a sketch under a pad
+and CATIA ACCEPTED it, leaving 凸台.1 failing every later update, which is worse
+than the refusal the reporter saw. So the check now happens before the attempt,
+as a read: every Part Design feature answers `.Sketch` (`凸台.1.Sketch.Name` ->
+'SK_A', `凹槽.1.Sketch.Name` -> 'SK_Q'), and no feature answers a placeholder.
+The reply is `SKETCH_CONSUMED_BY` with the feature named, `consumed_by` in
+`data`, nothing attempted, and `modified: false`.
+
+Two things follow from that read, and both were found by the acceptance run
+rather than by reasoning:
+
+* the batch form puts every consumer BEFORE the sketch it consumes, so
+  `names=["SK_Q", "凸台.2"]` - the order a caller naturally writes - cannot
+  delete a profile out from under a live pad;
+* and it counts a sketch that a feature took as removed-with, not as a failure.
+  The first acceptance run got "Deleted 1 element(s) for 2 name(s) given. Failed
+  (1): 'SK_Q' (No feature ... named 'SK_Q')" for a call that did exactly what it
+  was asked - a complete success reported as a partial one, in the same reply
+  that recommends that call.
+
+What the check cannot see is stated where it matters: a GSD element consuming the
+sketch lives in no body's feature list (measured: a sketch fed to
+`catia_gsd_extrude` deletes without a refusal, and 拉伸.1 then fails every
+update), so the delete-failure reply now lists "consumed somewhere it cannot
+read" - with the count of features it managed to ask - before it mentions a dead
+reference.
+
+**P3 (was P4) - why a sample count stopped.** `sampling_tolerance_met: false` read
+as "this curve cannot be drawn to 0.03 mm" when it meant "not with 32 points per
+span". The structured data now carries `sampling_limited_by`: `"cap"` when the
+per-span budget ended the fit, `"samples"` when the count the caller passed ended
+it, and `null` when the tolerance was met - the same "no claim" reading as
+`drawn_error_mm: null`. The sentence says which of the two happened instead of
+always blaming the cap.
+
+B30 2026-11-18: `scripts/b30_v0464_acceptance_datum_consumer.py` **26/26** - the
+report's two-datum case is cleaned up and updates; a sketch standing on the datum
+is refused with its name and the triple quoted; deleting the dependant first lets
+the same cleanup through; deleting a consumed sketch answers `SKETCH_CONSUMED_BY`
+with nothing attempted and the part still healthy; deleting the pad takes the
+sketch with it; the batch does it in one call in either order without a false
+failure; and a capped fit says `"cap"` while a met one says `null`. Regressions
+still green: 0.3.148's 18/18, 0.3.147's 19/19, 0.3.146's 15/15, 10/10 and 11/11.
+**2388 tests.**
+
 ## [0.3.148] — 2026-11-18 · the error that was arithmetic, and the doubling that was not a bug
 
 The 2026-11-18 (0.3.147) report raised two P0/P1 findings that "produce wrong

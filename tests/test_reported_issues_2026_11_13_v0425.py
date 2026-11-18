@@ -162,7 +162,7 @@ def test_a_batch_updates_the_part_once_not_once_per_name(monkeypatch):
     tools, part = _design()
     seen = []
 
-    def one(args, forced, defer_update=False):
+    def one(args, forced, defer_update=False, also=None):
         seen.append(defer_update)
         return f"Deleted feature '{forced}'."
 
@@ -183,7 +183,7 @@ def test_a_terminal_failure_never_says_delete_those_too(monkeypatch):
     """
     tools, part = _design(update_fails=True)
     monkeypatch.setattr(tools, "_delete_one",
-                        lambda args, forced, defer_update=False: "Deleted.")
+                        lambda args, forced, defer_update=False, also=None: "Deleted.")
     monkeypatch.setattr("catia_mcp.tools.part_design.failing_elements",
                         lambda _part: ["凹槽.3", "移除.1"])
     reply = tools.execute("catia_delete_feature", {"names": ["凹槽.1"]})
@@ -198,7 +198,7 @@ def test_one_unreadable_element_does_not_say_elements_fail(monkeypatch):
     """Singular/plural comes from describe(), which the reply must not re-declare."""
     tools, _part = _design(update_fails=True)
     monkeypatch.setattr(tools, "_delete_one",
-                        lambda args, forced, defer_update=False: "Deleted.")
+                        lambda args, forced, defer_update=False, also=None: "Deleted.")
     monkeypatch.setattr("catia_mcp.tools.part_design.failing_elements",
                         lambda _part: ["封闭曲面.1"])
     reply = tools.execute("catia_delete_feature", {"names": ["Neck_T"]})

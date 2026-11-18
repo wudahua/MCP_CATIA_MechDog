@@ -46,6 +46,20 @@ DEFAULT_SAMPLING_TOLERANCE_MM = 0.03
 MAX_SAMPLES_PER_SPAN = 32
 
 
+def _limited_by(fit: dict[str, Any]) -> str | None:
+    """What ended the sampling fit: ``"cap"``, ``"samples"``, or None.
+
+    The 2026-11-18 report (P4) asked for this because ``sampling_tolerance_met:
+    false`` conflates two different situations: the 32-per-span budget ran out
+    (raise ``samples`` and it may pass) and the caller's own count was not enough
+    (nothing was capped). ``None`` means the tolerance was met and no limit
+    applied at all - the same "no claim" reading as ``drawn_error_mm: null``.
+    """
+    if fit["met"]:
+        return None
+    return "cap" if fit.get("capped") else "samples"
+
+
 def _pair(value: Any, complaint: str) -> list[float]:
     """``[x, y]`` from whatever shape the caller sent, or a clear refusal."""
     if isinstance(value, dict):
@@ -974,7 +988,10 @@ class SketcherTools:
                                 "Return a structured result: the same sentence in "
                                 "'message', plus 'data' with the numbers as numbers "
                                 "- sampling_error_mm, sampling_tolerance_mm, "
-                                "sampling_tolerance_met, drawn_error_mm, "
+                                "sampling_tolerance_met, sampling_limited_by "
+                                "('cap' = the 32-per-span budget ended the fit, "
+                                "'samples' = the count you passed ended it, null = "
+                                "the tolerance was met), drawn_error_mm, "
                                 "drawn_error_state ('measured' / 'unverified'), "
                                 "drawn_error_checked_points, "
                                 "sample_points_written, control_points, degree, "
@@ -4909,8 +4926,11 @@ class SketcherTools:
                     code="BAD_ARGUMENT", stage="validate", modified=False)
             deviation = nurbs.polyline_deviation(points, degree, knot_vector,
                                                  weight_list, per_span)
+            # No cap was applied: the count is the caller's, so when the
+            # tolerance is missed, that count is what missed it.
             fit = {"per_span": per_span, "deviation_mm": deviation,
-                   "tolerance_mm": goal, "met": deviation <= goal}
+                   "tolerance_mm": goal, "met": deviation <= goal,
+                   "capped": False}
         else:
             fit = nurbs.fit_samples(points, degree, knot_vector, weight_list,
                                     tolerance=goal, limit=MAX_SAMPLES_PER_SPAN)
@@ -4961,9 +4981,14 @@ class SketcherTools:
         detail = (f" Knots {','.join(f'{value:g}' for value in knot_vector)}"
                   + (" (rational: weights given)" if weight_list else "") + "."
                   + ("" if fit["met"] else
-                     f" The {fit['tolerance_mm']:g} mm tolerance was NOT met: the "
-                     f"automatic count stops at {MAX_SAMPLES_PER_SPAN} per span, "
-                     "so pass a larger 'samples' and read the reply again."))
+                     (f" The {fit['tolerance_mm']:g} mm tolerance was NOT met: the "
+                      f"automatic count stops at {MAX_SAMPLES_PER_SPAN} per span, "
+                      "so pass a larger 'samples' and read the reply again."
+                      if fit["capped"] else
+                      f" The {fit['tolerance_mm']:g} mm tolerance was NOT met by "
+                      f"the {fit['per_span']} sample(s) per span this call was "
+                      "given - nothing capped it, so ask for more if it "
+                      "matters.")))
         # What a finer curve would cost, in the unit the caller pays in: point
         # elements that cannot be removed. Only when it would buy anything.
         finer = nurbs.fit_samples(points, degree, knot_vector, weight_list,
@@ -4999,6 +5024,11 @@ class SketcherTools:
                 "sampling_error_mm": round(float(fit["deviation_mm"]), 6),
                 "sampling_tolerance_mm": goal,
                 "sampling_tolerance_met": bool(fit["met"]),
+                # WHY it was not met, when it was not. `false` above is a fact
+                # about the polyline that was written; on its own it reads as
+                # "this curve cannot be drawn to 0.03 mm", which is not what a
+                # capped fit measured (2026-11-18 report, P4).
+                "sampling_limited_by": _limited_by(fit),
                 "drawn_error_mm": (None if measured["max_mm"] is None else
                                    round(float(measured["max_mm"]), 6)),
                 "drawn_error_state": ("measured" if measured["max_mm"] is not None

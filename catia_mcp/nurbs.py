@@ -230,7 +230,7 @@ def fit_samples(control: Sequence[Sequence[float]], degree: int,
                 knots: Sequence[float] | None = None,
                 weights: Sequence[float] | None = None,
                 tolerance: float = 0.01, start: int = 8,
-                limit: int = 256) -> dict[str, float]:
+                limit: int = 256) -> dict[str, Any]:
     """Smallest per-span sample count whose polyline meets ``tolerance``.
 
     The cost of more samples is real: every sample is a point element in the
@@ -239,6 +239,13 @@ def fit_samples(control: Sequence[Sequence[float]], degree: int,
     the caller's tolerance rather than fixed, and the reply says which number it
     landed on and what the deviation actually is - including when the limit was
     hit and the tolerance was NOT met.
+
+    ``capped`` says WHY the count stopped when the tolerance was not met. It is
+    true when ``limit`` ended the fit, and that is the only reason the loop exits
+    without meeting the tolerance - so a caller can tell "my budget ran out" from
+    "the tolerance was met" without parsing the deviation (2026-11-18 report P3:
+    ``sampling_tolerance_met: false`` read as "this curve cannot do 0.03 mm",
+    when it only meant "not with 32 points per span").
     """
     per_span = max(1, int(start))
     limit = max(per_span, int(limit))
@@ -248,7 +255,8 @@ def fit_samples(control: Sequence[Sequence[float]], degree: int,
             return {"per_span": per_span,
                     "deviation_mm": deviation,
                     "tolerance_mm": float(tolerance),
-                    "met": deviation <= tolerance}
+                    "met": deviation <= tolerance,
+                    "capped": deviation > tolerance and per_span >= limit}
         per_span = min(limit, per_span * 2)
 
 

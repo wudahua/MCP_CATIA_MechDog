@@ -297,7 +297,7 @@ def test_batch_delete_aggregates_and_reports_each_failure():
     tools = _part_design()
     deferred = []
 
-    def one(args, forced, defer_update=False):
+    def one(args, forced, defer_update=False, also=None):
         deferred.append(defer_update)
         if forced == "bad":
             raise RuntimeError("No feature named 'bad'")

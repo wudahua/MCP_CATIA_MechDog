@@ -216,3 +216,54 @@ def same_plane(first: tuple[list[float], list[float],
     offset = sum((b - a) * n for a, b, n in zip(first_point, second_point,
                                                 first_normal))
     return abs(offset) <= tolerance_mm
+
+
+def origin_gap(first: tuple[list[float], list[float], list[float]] | None,
+               second: tuple[list[float], list[float], list[float]] | None
+               ) -> float | None:
+    """Distance between two sketches' axis origins, or None when unknown."""
+    if first is None or second is None:
+        return None
+    return math.sqrt(sum((a - b) ** 2 for a, b in zip(first[0], second[0])))
+
+
+def same_datum(first: tuple[list[float], list[float], list[float]] | None,
+               second: tuple[list[float], list[float], list[float]] | None,
+               tolerance_mm: float = 1e-4) -> bool | None:
+    """Whether two sketches stand on the SAME datum, or None when unknown.
+
+    Same datum = the same axis system: the same origin AND the same H and V
+    directions. Since 0.3.149 this is the test behind
+    ``cleanup_frame_datum="auto"``, and it replaces "same plane" because a plane
+    is not a datum. The 2026-11-18 report (P2) measured that: two frame sketches
+    on z = 0 whose datum points are 50 mm apart are two datums, and deleting the
+    first one's frame leaves the second one alone.
+
+    THE ORIGIN IS THE DATUM'S OWN POINT, NOT THE PROJECTION OF THE PART ORIGIN.
+    That is what makes the comparison usable at all, and it was measured rather
+    than assumed (probe v0463 on B30 2026-11-18): ``DAT_A`` at (0, 0, 0) and
+    ``DAT_B`` at (50, 0, 0), both on z = 0 with H = +X and V = +Y, report
+    origins (0,0,0) and (50,0,0) - the same H and V, a 50 mm gap. Forcing the
+    cleanup of ``DAT_A`` then answered "Part updated successfully", so "different
+    origin" is a fact that can be acted on, not a guess.
+
+    The direction that must not be got wrong is the other one: a sketch built ON
+    ``<other>_FRAME`` by name reports the IDENTICAL triple (measured the same
+    day: ``ON_FRAME`` vs its owner, gap 0.000000 mm). Answering "different" there
+    would delete a live support and leave the survivor reading
+    「需要修改绝对轴定义以解决这些问题」.
+    """
+    if first is None or second is None:
+        return None
+    gap = origin_gap(first, second)
+    if gap is None or gap > tolerance_mm:
+        return False
+    first_h, first_v = _unit(first[1]), _unit(first[2])
+    second_h, second_v = _unit(second[1]), _unit(second[2])
+    if None in (first_h, first_v, second_h, second_v):
+        return None
+    for one, other in ((first_h, second_h), (first_v, second_v)):
+        dot = sum(a * b for a, b in zip(one, other))
+        if abs(dot) < 1.0 - 1e-9:
+            return False
+    return True

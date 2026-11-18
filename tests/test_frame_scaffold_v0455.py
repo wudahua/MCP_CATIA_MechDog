@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import pytest
 
-from catia_mcp import sketch_frames
 from catia_mcp.tools.part_design import PartDesignTools
 from catia_mcp.tools.sketcher import SketcherTools
 
@@ -284,33 +283,64 @@ def _stub_axes(monkeypatch, systems: dict[str, tuple], tools=None):
 # 1000 mm up, u = +X, v = +Y - the array B30 answers for a frame at (0, 0, 1000).
 ON_1000 = ([0.0, 0.0, 1000.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0])
 ON_ZERO = ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0])
-PLANE_1000 = sketch_frames.plane_signature(ON_1000)
+# The same plane z = 0 with a datum point 50 mm away - the 2026-11-18 report's
+# P2 repro, measured on B30 2026-11-18 (probe v0463): two frame sketches there
+# report origins (0,0,0) and (50,0,0) with the same H and V.
+COPLANAR_APART = ([50.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0])
+# The same plane AND the same origin, turned 90 degrees about the normal.
+TURNED = ([0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0])
 
 
-def test_auto_stops_when_another_sketch_sits_on_the_same_plane(monkeypatch):
+def test_auto_stops_when_another_sketch_stands_on_the_same_datum(monkeypatch):
     # MEASURED on B30 2026-11-18 (probe v0457): a second sketch built ON the
     # datum by name survives the delete, then reads 需要修改绝对轴定义 and the part
-    # update fails. A sketch that stands on the datum lies on its plane, and
-    # GetAbsoluteAxisData is how this build answers where a sketch sits.
+    # update fails - and it reports the identical axis system as its owner
+    # (probe v0462: gap 0.000000 mm), which is what this compares.
     tools, body, selection = _scaffold_tools(["ON_FRAME"])
     _stub_axes(monkeypatch, {"ON_FRAME": ON_1000}, tools)
-    text = tools._cleanup_after_sketch("FRAME_A", "auto", plane=PLANE_1000)
+    text = tools._cleanup_after_sketch("FRAME_A", "auto", datum=ON_1000)
     assert "left alone" in text
     assert "ON_FRAME" in text, "the reply has to name what it is protecting"
-    assert "SAME plane" in text
+    assert "share this datum" in text
     assert selection.batches == []
     assert "FRAME_A_FRAME" in body.HybridShapes.names()
+
+
+def test_auto_cleans_up_when_a_coplanar_sketch_is_on_another_datum(monkeypatch):
+    # THE 2026-11-18 REPORT'S P2. 0.3.148 refused here because the two sketches
+    # share the plane z = 0; the reporter measured that the cleanup is SAFE
+    # (forced cleanup + part.Update answered "Part updated successfully"). A
+    # datum is an axis system, not an infinite plane.
+    tools, body, selection = _scaffold_tools(["SK_B"])
+    _stub_axes(monkeypatch, {"SK_B": COPLANAR_APART}, tools)
+    text = tools._cleanup_after_sketch("FRAME_A", "auto", datum=ON_ZERO)
+    assert "removed the frame scaffolding" in text
+    assert "same plane but on a different datum" in text, (
+        "a decision the previous criterion would have taken differently has to "
+        "say which sketches it considered and why they were let go")
+    assert "50.0000 mm apart" in text, "the numbers are the evidence"
+    assert selection.batches[0] == ["FRAME_A_FRAME"]
+
+
+def test_auto_compares_directions_not_only_the_point_and_normal(monkeypatch):
+    # Same plane, same origin, H and V turned about the normal. Deleting the
+    # datum is still safe for this one only because CATIA would report the
+    # datum's own directions - the comparison is the whole axis system.
+    tools, _body, selection = _scaffold_tools(["TURNED"])
+    _stub_axes(monkeypatch, {"TURNED": TURNED}, tools)
+    text = tools._cleanup_after_sketch("FRAME_A", "auto", datum=ON_ZERO)
+    assert "removed the frame scaffolding" in text
+    assert selection.batches[0] == ["FRAME_A_FRAME"]
 
 
 def test_auto_cleans_up_when_the_other_sketches_are_on_their_own_planes(monkeypatch):
     # THE REPORT'S OWN PROJECT (2026-11-18, P2): P02/P05/P06 hold 5-8 frame
     # sketches, each with its own _FRAME, so "are there other sketches" was
-    # always true and auto never fired. "Are they on MY plane" is the question
-    # that has an answer.
+    # always true and auto never fired.
     tools, body, selection = _scaffold_tools(["SK_1", "SK_2", "SK_3"])
     _stub_axes(monkeypatch, {"SK_1": ON_ZERO, "SK_2": ON_ZERO,
                              "SK_3": ON_ZERO}, tools)
-    text = tools._cleanup_after_sketch("FRAME_A", "auto", plane=PLANE_1000)
+    text = tools._cleanup_after_sketch("FRAME_A", "auto", datum=ON_1000)
     assert "removed the frame scaffolding" in text
     assert selection.batches[0] == ["FRAME_A_FRAME"]
 
@@ -319,7 +349,7 @@ def test_auto_refuses_when_where_the_other_sketches_sit_cannot_be_read():
     # The fake connection has no .app, so the axis route cannot run. Unknown is
     # not "none of them": nothing is deleted.
     tools, body, selection = _scaffold_tools(["ON_FRAME"])
-    text = tools._cleanup_after_sketch("FRAME_A", "auto", plane=PLANE_1000)
+    text = tools._cleanup_after_sketch("FRAME_A", "auto", datum=ON_1000)
     assert "NOT removed" in text
     assert "could not be decided" in text
     assert selection.batches == []
@@ -331,7 +361,7 @@ def test_auto_does_nothing_when_there_is_no_scaffolding_to_remove():
     body = _Body([_Node("UNRELATED")])
     tools = PartDesignTools(_Connection(_Part(body), body, _Selection()))
     assert tools._cleanup_after_sketch("FRAME_A", "auto",
-                                       plane=PLANE_1000) == ""
+                                       datum=ON_1000) == ""
 
 
 def test_true_forces_the_cleanup_and_names_the_risk():
