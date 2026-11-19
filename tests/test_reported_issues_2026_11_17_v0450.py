@@ -158,6 +158,24 @@ def test_a_failed_assertion_keeps_every_step_record():
     assert "no STEP failed" in data["summary_note"]
 
 
+def test_the_kept_records_are_compact_not_whole_replies():
+    """0.3.150: the trace stays, the prose does not.
+
+    The 2026-11-19 report got 19 full records (about 9 KB) on the plan that
+    needed a short answer - an assertion had failed. Each kept record is now
+    index/tool/code/metrics plus the first 160 characters of its result, which
+    still locates the step that moved the number.
+    """
+    planner = _planner({"volume_mm3": 100.0, "faces": 6, "edges": 12, "vertices": 8})
+    reply = planner._run_plan({**_PLAN, "expect": {"volume_mm3": 999.0}})
+    steps = reply["data"]["steps"]
+    assert len(steps) == 3
+    for entry in steps:
+        assert set(entry) == {"index", "tool", "ok", "code", "metrics", "result"}
+        assert len(entry["result"]) <= 160
+    assert "COMPACT" in reply["data"]["summary_note"]
+
+
 def test_a_passing_plan_still_trims_its_steps():
     planner = _planner({"volume_mm3": 100.0, "faces": 6, "edges": 12, "vertices": 8})
     reply = planner._run_plan({**_PLAN, "expect": {"volume_mm3": 100.0}})

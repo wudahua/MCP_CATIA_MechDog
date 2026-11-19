@@ -37,7 +37,7 @@ import math
 import pytest
 
 from catia_mcp.geometry2d import _arc, _line, crossings, describe, segments_of
-from catia_mcp.results import CodedError
+from catia_mcp.results import ArgumentRejected, CodedError
 from catia_mcp.tools.part_design import PartDesignTools
 from catia_mcp.tools.sketcher import (
     SketcherTools,
@@ -118,18 +118,31 @@ def test_ends_already_on_the_circle_are_left_alone_and_not_reported() -> None:
     assert plan[1]["adjust"] == []
 
 
-def test_a_radius_that_would_change_by_more_than_5_percent_is_not_rebuilt() -> None:
-    """A wild mismatch is bad data, not rounding: say where the ends land."""
+def test_a_radius_that_would_change_by_more_than_5_percent_is_refused() -> None:
+    """A wild mismatch is bad data, and drawing it anyway leaves the profile open.
+
+    0.3.149 changed this cell's contract. It used to KEEP the caller's circle and
+    report that the ends had moved - and the 2026-11-19 report measured what that
+    costs: the dog-bone profile's four arcs said R0.35 while their endpoints were
+    R0.25 from the centre, the ends moved 0.1 mm each, and the sketch was 16 loose
+    ends that only catia_pad noticed, two calls later. Both numbers are in hand
+    here and nothing has been drawn yet, so this refuses.
+    """
     tools = SketcherTools(connection=None)
-    # Same two ends, but told they sit on a R12 circle - the rebuild would need
-    # R20.17, so the caller's circle is kept and the ends are reported as moved.
-    plan = [tools._plan_segment(1, {"type": "arc", "center": [60.0, 0.0],
-                                    "radius": 12.0, "p1": [39.95, 0.0],
-                                    "p2": [60.0, 20.05], "direction": "ccw"})]
-    arc = plan[0]
-    assert arc["radius"] == pytest.approx(12.0)
-    assert any("NOT rebuilt" in note for note in arc["adjust"])
-    assert _point_gap(arc["start"], (39.95, 0.0)) > 1.0        # it moved, as said
+    # Same two ends, but told they sit on a R12 circle - the endpoints say R47.
+    with pytest.raises(ArgumentRejected) as caught:
+        tools._plan_segment(1, {"type": "arc", "center": [60.0, 0.0],
+                                "radius": 12.0, "p1": [39.95, 0.0],
+                                "p2": [60.0, 20.05], "direction": "ccw"})
+    error = caught.value
+    assert error.code == "ARC_RADIUS_MISMATCH"
+    assert error.modified is False
+    assert "R12.0000" in str(error), "the radius that was asked for"
+    assert "R47.2431" in str(error), "the radius the endpoints describe"
+    assert "Nothing was drawn" in str(error)
+    assert error.data["radius_given_mm"] == pytest.approx(12.0)
+    assert error.data["radius_from_endpoints_mm"] == pytest.approx(47.2431, abs=1e-4)
+    assert error.data["endpoint_offset_mm"] > 8.0, "how far the ends would move"
 
 
 # ── §7/§8/§9 what counts as crossing itself ──────────────────────────────

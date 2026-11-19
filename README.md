@@ -1,8 +1,8 @@
-# MCP_CATIA_MechDog 0.3.149
+# MCP_CATIA_MechDog 0.3.150
 
-![version](https://img.shields.io/badge/version-0.3.149-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![CATIA](https://img.shields.io/badge/CATIA-V5%20R30%20(B30)-orange) ![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20http-purple)
+![version](https://img.shields.io/badge/version-0.3.150-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![CATIA](https://img.shields.io/badge/CATIA-V5%20R30%20(B30)-orange) ![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20http-purple)
 
-当前正式版 **0.3.149**——两条都是**判据问错了对象**。`cleanup_frame_datum` 的 `auto` 上一版改问「有没有草图在同一个**平面**上」，而平面是无限的：报告里的零件在 z=0 上散着多个不同原点的 frame 草图，于是照样一个个拒绝。现在比的是**整个绝对轴系**（原点 + H/V），那才是一个 datum——实测两个相距 50 mm 的 datum 报出原点 (0,0,0) 与 (50,0,0)、H/V 相同，强制清理后 `Part updated successfully`；而「建在 `_FRAME` 上」的草图报的是**同一组三元组**（间距 0.000000 mm），照样拒绝。另一条：删被凸台消费的草图过去被判成「文件损坏」，真因只有一句——CATIA 不让被消费的草图单独走（实测两种表现：要么拒绝，要么删掉后凸台每次都更新失败）；现在**先查再说**，零件设计特征都答 `.Sketch`，于是回执直接给 `SKETCH_CONSUMED_BY` 加特征名，不动手。样条另加 `sampling_limited_by`，区分「预算封顶」与「你给的点数不够」。 · [变更日志](CHANGELOG.md) · [Releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases)
+当前正式版 **0.3.150**——按 2026-11-19 的报告逐条处理（1 个 P0、8 个 P1、5 个 P2，14 项里 12 项落地，2 项写明为何留到下一版）。**双向非对称拉伸**：`catia_pad` / `catia_pocket` 新增 `limit1`/`limit2`，一个特征两段长度（实测 z −3.000..+5.000、1600 mm³，树里只有 1 个形状）——报告为 SolidWorks 的「−57.5 / +4.5」建了两个 Pad，代价是草图平面处多一圈面、面数 72 对 47；`catia_shaft` / `catia_groove` 新增 `angle1`/`angle2`，中面对称的 67° 段不再需要「360° 回转 + 布尔求交」。**单边倒角 25–56 s 的根因是它自己的记账**：22 条路径实测后，回执现在直接报三段耗时——`edges resolved / features built / rebuild`，于是看到 17 501 / 16 / 16 ms；修三处（删掉「探针删除后再枚举一遍」这次多余的整表遍历、所有锚点只更新一次探针集合、单个特征用 `UpdateObject`），同一调用 **17.7 s → 0.86 s**。**装配约束**再试 5 条新路径（`ReferenceProduct`、根产品、`CreateReferenceFromName`×3、`ApplyWorkMode`×3、`StartWorkbench`×4）仍然全失败，`GenerateConstraints` 不存在，所以改为 `catia_new_product` 的回复里**当场声明**，不让调用者试到第 8 个 `add_component` 才发现。另外：半径与端点自相矛盾的弧**当场拒绝**（`ARC_RADIUS_MISMATCH`，两个半径都写出来），`new_part` 无路径直接拒，`delete_feature` 支持 `dry_run`，`boolean` 的 `target_body` 支持 `first`/`active` 别名，`list_features` 把 frame 骨架按草图折叠计数。 · [变更日志](CHANGELOG.md) · [Releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases)
 
 > 让 AI 客户端通过 MCP，在 CATIA V5 里建**原生可编辑的实体特征**——并且每一步都能量回来。
 
@@ -20,7 +20,7 @@ MCP_CATIA_MechDog 是运行在你自己 Windows 电脑上的本地 MCP 服务（
 - **草图可回改**：`catia_sketch_edit` 重开已关闭的草图，`catia_sketch_delete_element` 删掉画错的一条，零件随之重建——错一条线不必整件重做。
 - **量不到就说量不到**：超范围、超能力或读数失败时，回执以 `UNVERIFIED:` 开头并说明哪一个测量失败，不会把失败写成成功。
 - **能力可发现**：诊断文字旁边给一行能直接粘贴的调用；「有工具但没人知道怎么调」和「没有这个工具」一样是缺陷。
-- **离线可测**：**2388** 个测试不需要 CATIA，`pytest` 在本机就能跑全绿；真机验收脚本在 `scripts/b30_*`。
+- **离线可测**：**2408** 个测试不需要 CATIA，`pytest` 在本机就能跑全绿；真机验收脚本在 `scripts/b30_*`。
 
 ## 环境要求
 
@@ -140,6 +140,9 @@ python -m venv .venv
 ## 已知限制
 
 - **平面不等于 datum，就像「南边」不等于一个门牌号。** `frame` 平面是无限的，两个草图落在同一平面上不代表它们踩在同一个基准上：实测 z=0 上相距 50 mm 的两个 datum 报出相同 H/V、不同原点，删其一的基准对面另一个毫无影响。判「谁还站在这个 datum 上」要比完原点与两个方向；退化成比平面会把 P06 这类多轮位零件全部误拒。另记一条同源的坑：**`getattr` 成功不代表成员存在**——`Sketch.Reference` / `.Support` / `.Plane` 都会返回一个占位对象，真去用就报 `'NoneType' object has no attribute 'Name'`，所以「能不能读」必须靠用一次来判断。
+- **「慢」多半是自己的记账，不是 CATIA。** 单边倒角 25–56 s，实测拆开是「选边 17 501 ms / 建特征 16 ms / 重建 16 ms」：真正贵的是把整张边表**又枚举了一遍**（以为引用会随选择集失效，实测不会），以及给每个锚点都做一次**全文档** `part.Update()`。把耗时打进回执，比猜十次都有用。
+- **报告提的判据也要测。** 报告说「两个 R 之和大于棱间距就一定失败」，而实测 0.9 mm 间距 + R3 两条都建成了。于是把这条从「预言」降级为「flag」，两种实测结论一起写进同一句话——预报错了会和算错一样伤信任。
+- **设了参数还要 update 才算测过。** `Pad.SecondLimit.Dimension.Value` 写进去、不 update 就量体积，得到的永远是旧值：第一版探针就这样「证明」了双限不可用。
 - **方向向量的长度没有含义，但曾经有后果。** `frame` 平面按 `origin + u + v` 定义，`u=[1000,0,0]` 与 `u=[1,0,0]` 是同一个平面；0.3.148 之前本地把 `u` 当位移用，于是「草图坐标 → 世界坐标」被放大 |u| 倍，样条的实测偏差变成 999 × 半径。已修，并且读数一旦大于探针自身跨度就不再作为偏差发布。
 - **草图样条不能用控制点定义，只能采样逼近。** `Spline2D` 不暴露次数、节点矢量与控制点，`Factory2D.CreateSpline` 只吃「通过点」，所以 `catia_sketch_spline(control_points=…)` 在本地求值后采样绘制，回执同时给出采样偏差与**实测**的曲线偏差；采样点会作为点元素留在草图里（`GeometricElements` 没有 Remove），所以默认预算收到 0.03 mm、每段最多 32 点（0.3.147：二次 17 点、三次 33 点），需要更密就传 `tolerance` 或 `samples`，回执会说明代价。草图样条也无法做成周期曲线（`IsPeriodic` 只读），需要真正闭合请用 `catia_gsd_spline(closed=true)`。
 - **草图的坐标读不回来。** 草图对测量接口什么都不答，所以「多视图是否对齐」只能由 pad 后读实体包围盒来证明，不能直接读草图位置。

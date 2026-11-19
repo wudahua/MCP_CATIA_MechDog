@@ -3956,6 +3956,43 @@ class SketcherTools:
                 center, radius = new_center, new_radius
                 first = _project_to_circle(first, center, radius)
                 second = _project_to_circle(second, center, radius)
+            elif rebuilt is not None:
+                # THE INPUT CONTRADICTS ITSELF, AND PROJECTING QUIETLY IS THE
+                # WORST ANSWER (2026-11-19 report, P1-5). The report's dog-bone
+                # profile said R0.35 on four arcs whose endpoints were R0.25 from
+                # the centre: this branch used to draw R0.35 and move each end by
+                # 0.1 mm, so the profile was 16 loose ends - which only the PAD
+                # found, two calls later. Refuse here, where both numbers are in
+                # hand and neither has been drawn yet.
+                drawn_first = _project_to_circle(first, center, radius)
+                drawn_second = _project_to_circle(second, center, radius)
+                moved = max(_point_gap(first, drawn_first),
+                            _point_gap(second, drawn_second))
+                raise ArgumentRejected(
+                    f"Segment {number} (arc) contradicts itself: its endpoints "
+                    f"{_fmt_point(first)} and {_fmt_point(second)} are "
+                    f"{_point_gap(first, center):.4f} and "
+                    f"{_point_gap(second, center):.4f} mm from the centre "
+                    f"{_fmt_point(center)}, so they describe R{rebuilt[1]:.4f}, "
+                    f"while 'radius' says R{radius:.4f}. Drawing it either way "
+                    "would be a guess: at R"
+                    f"{radius:.4f} each end lands {moved:.4f} mm from where it "
+                    "was given, which leaves the profile OPEN - and a pad or "
+                    "pocket on an open profile builds nothing. Nothing was "
+                    "drawn. Fix the record: either pass radius="
+                    f"{rebuilt[1]:.4f} (what the endpoints say), or move the "
+                    "endpoints onto the R"
+                    f"{radius:.4f} circle. Every arc of the profile is checked "
+                    "this way, so the message names the first one that "
+                    "disagrees.",
+                    code="ARC_RADIUS_MISMATCH", stage="validate", modified=False,
+                    data={"segment": number,
+                          "centre": list(center),
+                          "radius_given_mm": radius,
+                          "radius_from_endpoints_mm": rebuilt[1],
+                          "endpoint_1": list(first),
+                          "endpoint_2": list(second),
+                          "endpoint_offset_mm": moved})
             else:
                 drawn_first = _project_to_circle(first, center, radius)
                 drawn_second = _project_to_circle(second, center, radius)
@@ -3963,8 +4000,8 @@ class SketcherTools:
                             _point_gap(second, drawn_second))
                 adjust = [
                     f"arc {number}: its circle was NOT rebuilt (the three points "
-                    f"are collinear or the rebuilt radius is off by more than 5 %), "
-                    f"so its ends land where the circle puts them - up to "
+                    f"are collinear, so they do not define a circle), so its "
+                    f"ends land where the circle puts them - up to "
                     f"{moved:.4f} mm from the points given"]
                 first, second = drawn_first, drawn_second
         else:

@@ -1046,22 +1046,34 @@ class PlannerTools:
             elif code != "PLAN_OK":
                 # NOTHING FAILED AS A STEP, so the trimming above would answer
                 # with an empty list on the one failure this tool can report
-                # without a failed step: a failed ASSERTION. That is what
-                # happened to a 20-50 step plan whose expect did not hold - the
-                # caller got the measurement and the verdict and no trace, and had
-                # to run the plan twice to find which step moved the number
-                # (reported 2026-11-17). Keeping the whole report here is never
-                # bigger than not asking for summary at all, so it costs nothing
-                # that was not already on the table.
-                data["steps"] = report
+                # without a failed step: a failed ASSERTION. A 20-50 step plan
+                # whose expect did not hold used to answer with the measurement
+                # and the verdict and no trace at all (reported 2026-11-17).
+                #
+                # But "keep everything" is not the fix either: the 2026-11-19
+                # report got 19 full records - about 9 KB - on exactly the plan
+                # that needed a SHORT reply, because an assertion failed. So the
+                # records are kept COMPACT: what a caller needs to find the step
+                # that moved the number (its index, tool, code, the numbers it
+                # produced, and the head of its sentence), not the whole prose.
+                data["steps"] = [
+                    {"index": entry["index"], "tool": entry["tool"],
+                     "ok": entry["ok"], "code": entry.get("code"),
+                     "metrics": entry.get("metrics"),
+                     "result": " ".join(str(entry.get("result") or "").split())[:160]}
+                    for entry in report
+                ]
                 data["steps_omitted"] = 0
                 data["failed_indices"] = []
                 data["summary_note"] = (
                     "summary=true, but no STEP failed - the plan ran and its "
-                    f"assertions did not hold (or it has no assertions), so all "
-                    f"{len(report)} step record(s) are kept rather than filtered "
-                    "to a set of failures that does not exist. 'step_warnings' "
-                    "(always present) carries the untruncated warnings.")
+                    f"assertions did not hold (or it has no assertions). All "
+                    f"{len(report)} step record(s) are kept in COMPACT form: "
+                    "index, tool, code, metrics and the first 160 characters of "
+                    "each result, which is what locates the step that moved the "
+                    "number. 'assertions' holds the per-item verdicts, "
+                    "'step_warnings' (always present) the untruncated warnings. "
+                    "Re-run without summary for every record in full.")
             else:
                 # A plan that PASSED is the case summary was built for: nothing to
                 # show but what a step warned about (2026-11-01).

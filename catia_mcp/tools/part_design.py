@@ -92,9 +92,13 @@ class _ProbePoints:
 
     NAME = "MCP_probe_points"
 
-    def __init__(self, conn: Any, part: Any) -> None:
+    def __init__(self, conn: Any, part: Any, body: Any = None) -> None:
         self.conn = conn
         self.part = part
+        #: The body the anchors will be matched in, when the caller has it.
+        #: ``close`` updates THIS instead of the whole document when it can - see
+        #: ``update`` for why a full rebuild per anchor is not acceptable.
+        self.body = body
         self.factory = part.HybridShapeFactory
         # What was in work BEFORE the scratch set existed. Adding a HybridBody
         # moves InWorkObject onto it, and deleting the set does not move it
@@ -159,10 +163,25 @@ class _ProbePoints:
         return point
 
     def update(self) -> None:
-        """One rebuild for every point added since the last one."""
+        """One rebuild for every point added since the last one.
+
+        THE SCOPE OF THE REBUILD IS THE POINT (2026-11-19 report, P1-4). This
+        used to be ``part.Update()`` - the WHOLE document's tree - and it ran once
+        per anchor, so a twenty-anchor fillet rebuilt the entire part twenty
+        times: the report measured single-edge chamfers at 25-56 s on a 140-face
+        part while pad took 0.3 s, and the reply said nothing about where the time
+        went. ``UpdateObject(self.set)`` updates the scratch set, which is all a
+        probe point needs: measured on B30 2026-11-19, the distance from the
+        probe to the edge it sits on is exactly 0.0000 mm after it, exactly as
+        after a full rebuild. The full rebuild stays as the fallback, so a build
+        that refuses a partial update behaves as it did.
+        """
         if self._updated or not self.shapes:
             return
-        self.part.Update()
+        try:
+            self.part.UpdateObject(self.set)
+        except Exception:  # noqa: BLE001 - fall back to what always worked
+            self.part.Update()
         self._updated = True
 
     def close(self) -> None:
@@ -174,8 +193,15 @@ class _ProbePoints:
             sel.Clear()
         except Exception:  # noqa: BLE001 - a leftover probe set is not fatal
             pass
+        # Updating the BODY, not the document, for the same reason `update` does:
+        # the solid's topology did not change when the scratch set went away, and
+        # a full tree rebuild here was the second half of the cost the 2026-11-19
+        # report measured.
         try:
-            self.part.Update()
+            if self.body is not None:
+                self.part.UpdateObject(self.body)
+            else:
+                self.part.Update()
         except Exception:  # noqa: BLE001
             pass
         # After the rebuild, because deleting a set can itself move the in-work
@@ -349,7 +375,37 @@ class PartDesignTools:
                         },
                         "height": {
                             "type": "number",
-                            "description": "Extrusion height/depth in mm",
+                            "description": (
+                                "Extrusion height in mm, on ONE side of the sketch "
+                                "plane. For two different extents use limit1/limit2 "
+                                "instead - they are the same feature, not two pads."
+                            ),
+                        },
+                        "limit1": {
+                            "type": "number",
+                            "description": (
+                                "Two-sided extrusion: how far the pad runs toward "
+                                "the sketch normal's positive side, in mm. Give "
+                                "limit2 as well for the other side - one Pad whose "
+                                "two extents differ, which is what a SolidWorks "
+                                "'blind 57.5 / blind 4.5' becomes. Measured on B30 "
+                                "2026-11-19: limit1=5, limit2=3 on a 20x10 profile "
+                                "gave z -3.000..+5.000 and 1600 mm3 "
+                                "(200 mm2 x 8). Two separate pads would put a "
+                                "split face where the sketch plane is, and the "
+                                "2026-11-19 report measured that cost: 72 faces "
+                                "against 47 on the same part."
+                            ),
+                        },
+                        "limit2": {
+                            "type": "number",
+                            "description": (
+                                "How far the same Pad runs the OTHER way from the "
+                                "sketch plane, in mm (CATIA's Limit 2). 0 or "
+                                "omitted is one-sided. 'direction' still decides "
+                                "which side limit1 counts on; with "
+                                "direction='reverse' the two extents swap."
+                            ),
                         },
                         "direction": {
                             "type": "string",
@@ -373,7 +429,11 @@ class PartDesignTools:
                             "description": "Name of sketch to use. If not specified, uses the last created sketch.",
                         },
                     },
-                    "required": ["height"],
+                    "required": [],
+                    # One of the two extent FORMS, checked by the schema so a
+                    # call with neither is rejected before CATIA is touched:
+                    # height for one side, limit1 (with optional limit2) for two.
+                    "anyOf": [{"required": ["height"]}, {"required": ["limit1"]}],
                 },
             },
             {
@@ -420,6 +480,24 @@ class PartDesignTools:
                         "depth": {
                             "type": "number",
                             "description": "Cut depth in mm. Omit when through_all is true.",
+                        },
+                        "limit1": {
+                            "type": "number",
+                            "description": (
+                                "Two-sided cut: how far the pocket runs toward the "
+                                "sketch normal's positive side, in mm. Give limit2 "
+                                "for the other side - one Pocket whose two depths "
+                                "differ (catia_pad has the same pair; measured "
+                                "there on B30 2026-11-19, z -3..+5 for limit1=5, "
+                                "limit2=3)."
+                            ),
+                        },
+                        "limit2": {
+                            "type": "number",
+                            "description": (
+                                "How far the same Pocket cuts the OTHER way from "
+                                "the sketch plane, in mm. 0 or omitted = one-sided."
+                            ),
                         },
                         "through_all": {
                             "type": "boolean",
@@ -491,8 +569,37 @@ class PartDesignTools:
                     "properties": {
                         "angle": {
                             "type": "number",
-                            "description": "Revolution angle in degrees (default: 360 for full revolution)",
+                            "description": (
+                                "Revolution angle in degrees (default: 360 for full "
+                                "revolution), swept on ONE side of the profile "
+                                "plane. For 'the same sweep either side of that "
+                                "plane' - a 67 deg segment centred on it - use "
+                                "angle1/angle2 instead."
+                            ),
                             "default": 360,
+                        },
+                        "angle1": {
+                            "type": "number",
+                            "description": (
+                                "Revolution angle swept toward one side of the "
+                                "profile plane, in degrees. With angle2 it makes "
+                                "one Shaft whose segment straddles the plane - "
+                                "CATIA's Angle 1 / Angle 2. Measured on B30 "
+                                "2026-11-19: angle1=30, angle2=30 swept the same "
+                                "total as a single 60 (1570.7963 mm3 both times) "
+                                "but its extent moved, so angle2 really is the "
+                                "OTHER side. A report's '67 deg, symmetric about "
+                                "the mid-plane' is angle1=33.5, angle2=33.5."
+                            ),
+                        },
+                        "angle2": {
+                            "type": "number",
+                            "description": (
+                                "Revolution angle swept the other way from the "
+                                "profile plane, in degrees (default 0). Only read "
+                                "when angle1 is given."
+                            ),
+                            "default": 0,
                         },
                         "axis": {
                             "type": "string",
@@ -531,8 +638,29 @@ class PartDesignTools:
                     "properties": {
                         "angle": {
                             "type": "number",
-                            "description": "Revolution angle in degrees (default: 360)",
+                            "description": (
+                                "Revolution angle in degrees (default: 360), swept "
+                                "on ONE side of the profile plane. Use "
+                                "angle1/angle2 for a groove centred on that plane."
+                            ),
                             "default": 360,
+                        },
+                        "angle1": {
+                            "type": "number",
+                            "description": (
+                                "Sweep toward one side of the profile plane, in "
+                                "degrees - see catia_shaft, where the pair is "
+                                "measured."
+                            ),
+                        },
+                        "angle2": {
+                            "type": "number",
+                            "description": (
+                                "Sweep the other way from the profile plane, in "
+                                "degrees (default 0). Only read when angle1 is "
+                                "given."
+                            ),
+                            "default": 0,
                         },
                         "axis": {
                             "type": "string",
@@ -1271,6 +1399,20 @@ class PartDesignTools:
                                 "created (recorded from this session only)."
                             ),
                         },
+                        "dry_run": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Answer what this delete WOULD take with it, and "
+                                "delete nothing: the sketch a feature's profile "
+                                "consumes (CATIA cascades it), whether a sketch is "
+                                "consumed at all (that delete is refused), and "
+                                "which features come later in the tree as "
+                                "CANDIDATES for breaking - a superset, because "
+                                "this server has no dependency graph. Needs "
+                                "'feature_name' or 'names'."
+                            ),
+                        },
                         "cleanup_frame_datum": {
                             "type": ["boolean", "string"],
                             "enum": [True, False, "auto"],
@@ -1606,7 +1748,12 @@ class PartDesignTools:
                             "type": "string",
                             "description": (
                                 "Body that keeps the result. Defaults to the active "
-                                "body; the active body then becomes the target."
+                                "body; the active body then becomes the target. "
+                                "ALIASES so a non-English installation's default "
+                                "body name is not needed: 'active'/'current' is the "
+                                "body in work, 'first'/'main'/'mainbody'/'partbody' "
+                                "is the part's main body (零件几何体 on a Chinese "
+                                "B30). Anything else is looked up as a name."
                             ),
                         },
                         "name": {
@@ -1973,13 +2120,14 @@ class PartDesignTools:
         except Exception:
             pass
 
-    def _edge_probe_points(self, part: Any) -> "_ProbePoints":
+    def _edge_probe_points(self, part: Any,
+                           body: Any = None) -> "_ProbePoints":
         """Scratch points for "which edge is this coordinate on" questions."""
-        return _ProbePoints(self.conn, part)
+        return _ProbePoints(self.conn, part, body)
 
     def _anchors_to_edges(
         self, body: Any, anchors: list[list[float]], tol: float,
-        on_miss: str = "fail",
+        on_miss: str = "fail", sweep: float | None = None,
     ) -> tuple[list[str], list[Any], str, list[dict[str, Any]]]:
         """Map anchor coordinates to edges by minimum distance.
 
@@ -2032,15 +2180,24 @@ class PartDesignTools:
         missed: list[dict[str, Any]] = []
         ambiguous: list[dict[str, Any]] = []
         seen: set[int] = set()
-        probe = self._edge_probe_points(part)
+        probe = self._edge_probe_points(part, body)
+        point_refs: dict[int, Any] = {}
         try:
-            for anchor in anchors:
+            # ALL THE POINTS FIRST, ONE UPDATE. One rebuild per anchor is what
+            # made a twenty-anchor fillet rebuild a whole part twenty times
+            # (2026-11-19 report, P1-4). The points are independent scratch
+            # objects, so one update after the last one is enough for all of them.
+            indexed: list[tuple[int, list[float]]] = []
+            for position, anchor in enumerate(anchors):
                 if len(anchor) != 3:
                     raise ArgumentRejected(
                         f"Each edge anchor must be [x, y, z]; got {anchor!r}."
                     )
-                point_ref = probe.add(*anchor)
-                probe.update()
+                point_refs[position] = probe.add(*anchor)
+                indexed.append((position, anchor))
+            probe.update()
+            for position, anchor in indexed:
+                point_ref = point_refs[position]
                 dists: list[tuple[float, int]] = []
                 for i, measurable in enumerate(measurables):
                     try:
@@ -2084,9 +2241,10 @@ class PartDesignTools:
                 report.append(
                     f"Anchor {anchor} -> {entry['name']} @ {best_distance:.4f} mm")
         finally:
-            # The probe set is deleted here, and that clears the selection,
-            # which invalidates every topology Reference taken from it - so the
-            # references are re-read afterwards, by index, not kept from above.
+            # The probe set is deleted here. Its points are scratch objects in a
+            # throwaway geometrical set; the solid's topology is untouched, and
+            # the edge references above keep working afterwards (measured on B30
+            # 2026-11-19 - see the note where they are taken).
             probe.close()
 
         trouble = self._anchor_trouble_text(missed, ambiguous, tol)
@@ -2122,12 +2280,90 @@ class PartDesignTools:
                 "None of the given edge_anchors matched a distinct edge"
                 + (": " + trouble if trouble else ".")
             )
-        table = self._edge_table(body)
+        # NO SECOND ENUMERATION. This used to re-read the whole edge table after
+        # the probe set was deleted, on the belief that the references taken
+        # earlier died with the selection. Measured on B30 2026-11-19: they do
+        # not - a fillet built from a reference taken BEFORE probe.close() went
+        # in for 38 ms with the volume moving 16000 -> 15982.8, and
+        # topology_cells after the close returns the very same references. That
+        # second walk was the expensive one, too: 7 955 ms for 12 edges right
+        # after a close against 483 ms cold, because each edge's Length is
+        # re-measured. It is most of what made a single-edge chamfer 25-56 s on a
+        # 140-face part (2026-11-19 report, P1-4).
         for index in matches:
             entry = table[index]
             labels.append(f"{entry['name']} (by anchor)")
             refs.append(entry["cell"].Reference)
-        return labels, refs, "Edge anchors: " + "; ".join(report) + ".", table
+        clash = self._clash_note(table, matches, spa, sweep)
+        return (labels, refs,
+                "Edge anchors: " + "; ".join(report) + "." + clash, table)
+
+    def _clash_note(self, table: list[dict[str, Any]], matches: list[int],
+                    spa: Any, size: float | None,
+                    pair_limit: int = 40) -> str:
+        """How close the chosen edges pass to each other, in mm.
+
+        THE REPORT ASKED FOR A PRE-CHECK AND THE MEASUREMENT DOWNGRADED IT
+        (2026-11-19, P1-3). Its hypothesis was arithmetic: two rounds of size R
+        on edges less than 2R apart cannot both exist. That held for its part -
+        16 of 20 edges took R3 and the four refusals were the two pairs 0.921 mm
+        apart - and it did NOT hold here: on B30 the same day, two edges 0.900 mm
+        apart took R3 and both were built (2/2, volume moving as expected). So
+        this publishes the DISTANCE and says plainly that it is a flag rather
+        than a verdict. A warning that cries wolf on a legal selection is worse
+        than the number itself.
+
+        Only pairs that SHARE A FACE are measured - that is where edges run
+        alongside each other - and the count is capped, because each distance is
+        a COM call. What was not checked is stated as such.
+        """
+        if not size or len(matches) < 2:
+            return ""
+        pairs: list[tuple[int, int]] = []
+        for first in range(len(matches)):
+            for second in range(first + 1, len(matches)):
+                pairs.append((matches[first], matches[second]))
+        if not pairs:
+            return ""
+        # FACE-SHARING PAIRS FIRST. Adjacent edges of one wall are the shape the
+        # report's tight pairs had, and they are measured before the rest so a
+        # capped walk still looks where it is most likely to matter. The 0.9 mm
+        # pair measured on B30 shared no face, so the rest are measured too -
+        # which is why the cap is higher than the number of face pairs.
+        pairs.sort(key=lambda pair: -len(set(table[pair[0]]["bounded_by"])
+                                        & set(table[pair[1]]["bounded_by"])))
+        checked = 0
+        tight: list[tuple[str, str, float]] = []
+        for one, other in pairs[:pair_limit]:
+            try:
+                gap = float(spa.GetMeasurable(
+                    table[one]["cell"].Reference).GetMinimumDistance(
+                        table[other]["cell"].Reference))
+            except Exception:  # noqa: BLE001 - one pair, not the call
+                continue
+            checked += 1
+            if gap < 2.0 * size:
+                tight.append((table[one]["name"], table[other]["name"], gap))
+        if not tight:
+            return (f" Closest pair: the {checked} checked pair(s) of chosen edges "
+                    f"are all further apart than 2x{size:g} = "
+                    f"{2 * size:g} mm, which is the pattern the 2026-11-19 report "
+                    "saw EVERY refusal in - so the size itself is not what would "
+                    "refuse one of these.")
+        listed = "; ".join(f"{a} and {b} are {gap:.4f} mm apart"
+                           for a, b, gap in tight[:6])
+        more = "" if len(tight) <= 6 else f"; and {len(tight) - 6} more pair(s)"
+        return (f" CLOSE PAIR{'' if len(tight) == 1 else 'S'}: {len(tight)} pair(s) "
+                f"of the chosen edges pass closer than 2x{size:g} = "
+                f"{2 * size:g} mm - {listed}{more}. That is the situation the "
+                "2026-11-19 report lost 4 of 20 edges in (two pairs 0.921 mm "
+                "apart), and it is NOT a prediction: measured on B30 the same day, "
+                "two edges 0.9 mm apart took R3 and BOTH succeeded. CATIA has the "
+                "last word, so read the applied/rejected list rather than this "
+                f"number. Checked {checked} of {len(pairs)} pair(s)"
+                + ("" if len(pairs) <= pair_limit else
+                   " - the rest were not measured, because each costs a COM call")
+                + ".")
 
     def _re_resolve_anchors(self, body: Any, anchors: list[list[float]],
                             tol: float,
@@ -2284,7 +2520,90 @@ class PartDesignTools:
                 "allow_open_curves=true to send it to CATIA anyway",
             ])
 
+    @staticmethod
+    def _pad_extents(args: dict[str, Any]
+                     ) -> tuple[bool, float, float, float | None, str, bool]:
+        """Validate the extent arguments BEFORE CATIA is touched.
+
+        Two reasons this is separate. A caller that asked for both forms at once
+        gets the answer without a document being opened ("a writer rejected on
+        its arguments is not told to inspect the model" - test_route_matrix), and
+        the two-sided form is the one that has to be checked for arithmetic a pad
+        cannot express (a zero extent, a negative length).
+
+        Returns ``(two_sided, first_side, second_side, height, direction,
+        symmetric)``.
+        """
+        height = args.get("height")
+        limit1 = args.get("limit1")
+        limit2 = args.get("limit2")
+        direction = args.get("direction", "normal")
+        symmetric = bool(args.get("symmetric", False)) or direction == "both"
+
+        # TWO EXTENTS ON ONE FEATURE (2026-11-19 report, P1-1). `height` is the
+        # one-sided form; limit1/limit2 say "this far one way, that far the
+        # other". Accepting both forms at once would be two ways to say the same
+        # thing with different answers, so the combination is refused.
+        two_sided = limit1 is not None or limit2 is not None
+        if not two_sided:
+            if height is None:
+                raise ArgumentRejected(
+                    "catia_pad needs an extent: 'height' for one side, or "
+                    "'limit1'/'limit2' for two different ones. Nothing was "
+                    "created.", code="BAD_ARGUMENT", stage="validate",
+                    modified=False)
+            return False, 0.0, 0.0, float(height), direction, symmetric
+        if height is not None:
+            raise ArgumentRejected(
+                "'height' is the ONE-sided form and 'limit1'/'limit2' are the "
+                "two-sided form - pass one or the other. height=H means the "
+                "pad runs H on one side; limit1=A, limit2=B means it runs A "
+                "toward the normal and B the other way, in ONE feature. "
+                "Nothing was created.",
+                code="BAD_ARGUMENT", stage="validate", modified=False)
+        if symmetric:
+            raise ArgumentRejected(
+                "symmetric=true already means 'the same extent both ways'; "
+                "with limit1/limit2 the two extents are given explicitly, so "
+                "one of the two is redundant. Pass limit1=limit2=H/2 for a "
+                "symmetric pad, or drop symmetric. Nothing was created.",
+                code="BAD_ARGUMENT", stage="validate", modified=False)
+        try:
+            first_side = float(limit1 if limit1 is not None else 0.0)
+            second_side = float(limit2 if limit2 is not None else 0.0)
+        except (TypeError, ValueError) as error:
+            raise ArgumentRejected(
+                f"limit1={limit1!r} / limit2={limit2!r} are not numbers; both "
+                "are lengths in mm. Nothing was created.",
+                code="BAD_ARGUMENT", stage="validate") from error
+        if first_side < 0 or second_side < 0:
+            raise ArgumentRejected(
+                f"limit1={first_side:g} / limit2={second_side:g}: both are "
+                "LENGTHS, so neither can be negative - use 'direction' to say "
+                "which side limit1 counts on. Nothing was created.",
+                code="BAD_ARGUMENT", stage="validate", modified=False)
+        if first_side <= 0 and second_side <= 0:
+            raise ArgumentRejected(
+                "limit1 and limit2 are both 0, so the pad would have no "
+                "extent. Nothing was created.",
+                code="BAD_ARGUMENT", stage="validate", modified=False)
+        if first_side <= 0:
+            # Only limit2 was given: put the material on the first limit and flip
+            # the pair, because a Sweep's first limit is the one CATIA builds
+            # from the profile plane.
+            first_side, second_side = second_side, 0.0
+            direction = "reverse"
+        # NOTE: 'reverse' does NOT swap the two magnitudes. Measured on B30
+        # 2026-11-19: limit1=4, limit2=1 with DirectionOrientation=1 gave
+        # z -4.000..+1.000 - the orientation flips the PAIR about the sketch
+        # plane, so limit1 keeps its magnitude and changes side. Swapping first
+        # and then flipping (which this did in its first version) cancels out and
+        # hands back the request the caller did not make: z -1..+4.
+        return True, first_side, second_side, None, direction, symmetric
+
     def _pad(self, args: dict[str, Any]) -> str:
+        two_sided, first_side, second_side, height, direction, symmetric = \
+            self._pad_extents(args)
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
         body = self._prepare_body(part)
@@ -2299,9 +2618,6 @@ class PartDesignTools:
         # remove nothing, and CATIA's own sentence about that points at the
         # direction instead of at the sketch.
         self._refuse_open_curves(sketch, bool(args.get("allow_open_curves", False)))
-        height = args["height"]
-        direction = args.get("direction", "normal")
-        symmetric = args.get("symmetric", False) or direction == "both"
 
         # CATIA's IsSymmetric is a *mirrored extent*: each side gets the full
         # dimension, so the solid comes out 2x thick. Measured on V5-6R2020 B30
@@ -2321,7 +2637,19 @@ class PartDesignTools:
             # make every new part look doubtful.
             before, volume_note = 0.0, None
 
-        pad = sf.AddNewPad(sketch, height / 2.0 if symmetric else height)
+        if two_sided:
+            pad = sf.AddNewPad(sketch, first_side)
+            if second_side > 0:
+                # Limit 2 is the same Prism feature's other extent - measured on
+                # B30 2026-11-19: 20x10 profile, limit1=5, limit2=3 answered
+                # z -3.000..+5.000 and 1600 mm3 (200 x 8), i.e. limit2 sweeps
+                # AGAINST the first limit, which is the SolidWorks "blind 57.5
+                # one way, 4.5 the other" shape in one feature.
+                pad.SecondLimit.Dimension.Value = second_side
+            if direction == "reverse":
+                pad.DirectionOrientation = 1
+        else:
+            pad = sf.AddNewPad(sketch, height / 2.0 if symmetric else height)
 
         if symmetric:
             pad.IsSymmetric = True
@@ -2343,7 +2671,10 @@ class PartDesignTools:
         # Removing that probe also took the caller's sketch with it, so the retry
         # the message discouraged could not even run.
         flipped = False
-        if took is False and not symmetric:
+        # NOT FLIPPED when the two extents were given: 'limit1 one way, limit2
+        # the other' is an explicit statement about both sides, and swapping them
+        # would silently hand back the mirror image of what was asked for.
+        if took is False and not symmetric and not two_sided:
             pad.DirectionOrientation = 0 if direction == "reverse" else 1
             flip_error = self._try_update(part, pad)
             after, retook = self._settle(part, body, before, expect="add")
@@ -2424,8 +2755,12 @@ class PartDesignTools:
                 ),
             )
         self.conn.refresh_display()
-        span = "total %.3f mm, %0.3f each side" % (height, height / 2.0) if symmetric \
-            else "%.3f mm" % height
+        if two_sided:
+            span = (f"{first_side:.3f} mm one way + {second_side:.3f} mm the "
+                    f"other (total {first_side + second_side:.3f} mm)")
+        else:
+            span = ("total %.3f mm, %0.3f each side" % (height, height / 2.0)
+                    if symmetric else "%.3f mm" % height)
         if took is None:
             # No volume, no verdict - same rule as pocket and hole. And when CATIA
             # also raised, "no volume" plus "update failed" is not an ok:true.
@@ -2571,6 +2906,8 @@ class PartDesignTools:
             return False
 
     def _pocket(self, args: dict[str, Any]) -> str:
+        if args.get("limit1") is not None or args.get("limit2") is not None:
+            return self._pocket_two_sided(args)
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
         body = self._prepare_body(part)
@@ -2786,6 +3123,95 @@ class PartDesignTools:
              "a through_all cut whose sketch sits on a datum plane can come back "
              "empty while the same profile cuts with an explicit depth"])
 
+    def _pocket_two_sided(self, args: dict[str, Any]) -> str:
+        """A pocket with two different depths - one feature, two limits.
+
+        `depth`/`through_all` and the limit pair are different forms of the same
+        request, so mixing them is refused here, before CATIA is touched. The
+        report that asked for this (2026-11-19, P1-1) had to build two pads for a
+        SolidWorks asymmetric extrude and measured what the split costs: 72 faces
+        against 47 on the same part, because the split puts a face where the
+        sketch plane is.
+        """
+        if "depth" in args or args.get("through_all"):
+            raise ArgumentRejected(
+                "'limit1'/'limit2' are the two-sided form and 'depth'/'through_all' "
+                "are the one-sided ones - pass one form or the other. Nothing was "
+                "created.", code="BAD_ARGUMENT", stage="validate", modified=False)
+        try:
+            first_side = float(args.get("limit1") or 0.0)
+            second_side = float(args.get("limit2") or 0.0)
+        except (TypeError, ValueError) as error:
+            raise ArgumentRejected(
+                f"limit1={args.get('limit1')!r} / limit2={args.get('limit2')!r} are "
+                "not numbers; both are lengths in mm. Nothing was created.",
+                code="BAD_ARGUMENT", stage="validate") from error
+        if first_side < 0 or second_side < 0:
+            raise ArgumentRejected(
+                f"limit1={first_side:g} / limit2={second_side:g}: both are LENGTHS, "
+                "so neither can be negative - use 'direction' to say which side "
+                "limit1 counts on. Nothing was created.",
+                code="BAD_ARGUMENT", stage="validate", modified=False)
+        if first_side <= 0 and second_side <= 0:
+            raise ArgumentRejected(
+                "limit1 and limit2 are both 0, so the cut would remove nothing. "
+                "Nothing was created.",
+                code="BAD_ARGUMENT", stage="validate", modified=False)
+        if args.get("symmetric") or args.get("direction") == "both":
+            raise ArgumentRejected(
+                "'symmetric'/'direction=\"both\"' already mean 'the same depth both "
+                "ways'; with limit1/limit2 the two depths are given explicitly. "
+                "Nothing was created.",
+                code="BAD_ARGUMENT", stage="validate", modified=False)
+
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        body = self._prepare_body(part)
+        sf = part.ShapeFactory
+        sketch = self._get_last_sketch(args.get("sketch_name"))
+        self._refuse_open_curves(sketch, bool(args.get("allow_open_curves", False)))
+        reverse = args.get("direction") == "reverse"
+        if reverse or first_side <= 0:
+            first_side, second_side = second_side, first_side
+            reverse = True
+
+        before, volume_note = self._volume_probe(part, body)
+        pocket = sf.AddNewPocket(sketch, first_side)
+        if second_side > 0:
+            try:
+                pocket.SecondLimit.Dimension.Value = second_side
+            except Exception as error:  # noqa: BLE001 - reported, not hidden
+                self._remove_feature(part, pocket, body)
+                raise CodedError(
+                    "CATIA refused to give this Pocket a second limit "
+                    f"({str(error).splitlines()[0][:120]}), so the two-sided cut "
+                    "would have been silently one-sided. The feature was removed "
+                    "again. Build it as two one-sided pockets instead and expect "
+                    "the face the sketch plane leaves behind.",
+                    code="POCKET_SECOND_LIMIT_UNSUPPORTED", stage="execute",
+                    modified=False) from error
+        pocket.DirectionOrientation = 1 if reverse else 0
+        self._try_update(part, pocket)
+        after, took = self._settle(part, body, before, expect="subtract")
+        if took is False:
+            gone = self._remove_feature(part, pocket, body)
+            stayed = (f"The volume stayed {before:.1f} mm3."
+                      if before is not None else
+                      f"The volume could not be measured ({volume_note}).")
+            raise FeatureRejected(
+                f"The two-sided pocket removed no material ({stayed}) and was "
+                f"rolled back{'' if gone else ' (it could not be removed)'}. Check "
+                "that the profile is closed and that the cut passes through "
+                "material on at least one of the two sides.",
+                rolled_back=gone)
+        self.conn.refresh_display()
+        removed = (f"{before - after:.1f} mm3" if before is not None
+                   and after is not None else "an unmeasured amount")
+        return (f"Pocket created: {first_side:.3f} mm one way + "
+                f"{second_side:.3f} mm the other (total "
+                f"{first_side + second_side:.3f} mm), removed {removed}. Feature: "
+                f"'{pocket.Name}'")
+
     def _pocket_area_note(self, sketch: Any, depth: float | None,
                           through_all: bool, symmetric: bool,
                           single_sided: bool) -> str:
@@ -2917,18 +3343,85 @@ class PartDesignTools:
             return f"the {text.lower()} axis of '{sketch.Name}'"
         return f"'{text}' (an element of the tree, not a sketch axis)"
 
+    @staticmethod
+    def _revolution_angles(args: dict[str, Any]) -> tuple[float, float]:
+        """``(first, second)`` sweep angles from `angle` or `angle1`/`angle2`.
+
+        CATIA's Shaft/Groove have Angle 1 and Angle 2, and the 2026-11-19 report
+        is right that a segment symmetric about the profile plane needs both.
+        Measured on B30 2026-11-19: angle1=30 + angle2=30 swept 1570.7963 mm3 -
+        exactly the single 60 - while the extent moved, so Angle 2 is the OTHER
+        side and not a duplicate.
+        """
+        angle1 = args.get("angle1")
+        angle2 = args.get("angle2")
+        if angle1 is None:
+            if angle2:
+                raise ArgumentRejected(
+                    f"angle2={angle2} sweeps the other side of the profile plane "
+                    "and only means something with angle1. Pass angle1 as well "
+                    "(the pair is CATIA's Angle 1 / Angle 2), or drop angle2 and "
+                    "use 'angle' for a one-sided sweep. Nothing was created.",
+                    code="BAD_ARGUMENT", stage="validate", modified=False)
+            return float(args.get("angle", 360)), 0.0
+        if "angle" in args:
+            # NOT a blanket refusal: `angle` carries a schema default of 360, and
+            # an MCP client that fills defaults in would then make angle1
+            # unusable. A value that differs from that default is a real
+            # conflict; 360 is what the caller would get by saying nothing.
+            try:
+                one_sided = float(args["angle"])
+            except (TypeError, ValueError):
+                one_sided = 360.0
+            if one_sided != 360.0:
+                raise ArgumentRejected(
+                    "'angle' is the one-sided form; 'angle1'/'angle2' give both "
+                    f"sides explicitly - got angle={args['angle']} with "
+                    f"angle1={angle1}. Pass one form or the other. Nothing was "
+                    "created.", code="BAD_ARGUMENT", stage="validate",
+                    modified=False)
+        try:
+            first, second = float(angle1), float(angle2 or 0.0)
+        except (TypeError, ValueError) as error:
+            raise ArgumentRejected(
+                f"angle1={angle1!r} / angle2={angle2!r} are not numbers; both are "
+                "degrees. Nothing was created.",
+                code="BAD_ARGUMENT", stage="validate") from error
+        for value in (first, second):
+            if value < 0 or value > 360:
+                raise ArgumentRejected(
+                    f"angle1={first:g} / angle2={second:g}: each sweep is 0 to 360 "
+                    "degrees, and each is measured from the profile plane toward "
+                    "its own side. Nothing was created.",
+                    code="BAD_ARGUMENT", stage="validate", modified=False)
+        if first + second <= 0:
+            raise ArgumentRejected(
+                "angle1 and angle2 are both 0, so the revolution would have no "
+                "extent. Nothing was created.",
+                code="BAD_ARGUMENT", stage="validate", modified=False)
+        return first, second
+
     def _build_revolution(self, part: Any, sketch: Any, angle: float, axis_mode: str,
-                          from_ref: str, label: str) -> Any:
+                         from_ref: str, label: str,
+                         second_angle: float = 0.0) -> Any:
         """Create a Shaft/Groove through the ...FromRef constructor.
 
         AddNewShaft(sketch) looks like the obvious call and always fails at
         UpdateObject: CATIA wants the profile and the axis set explicitly on a
         feature created empty, and FirstAngle is an object with a .Value, not a
         number. Verified against V5-6R2020 B30; see FORK.md.
+
+        ``second_angle`` is Angle 2 - the sweep on the other side of the profile
+        plane (2026-11-19 report, P1-2). Measured on B30 2026-11-19 on the same
+        profile: 60/0 and 30/30 both gave 1570.7963 mm3, but the axial extent ran
+        5.000..20.000 for the first and 8.660..17.320 for the second, which is
+        what "symmetric about the profile plane" has to look like.
         """
         factory = part.ShapeFactory
         feature = getattr(factory, from_ref)(part.CreateReferenceFromName(""))
         feature.FirstAngle.Value = angle
+        if second_angle:
+            feature.SecondAngle.Value = second_angle
         feature.SetProfileElement(part.CreateReferenceFromObject(sketch))
         feature.RevoluteAxis = self._revolve_axis_reference(part, sketch, axis_mode)
         self._safe_update(part, feature)
@@ -2940,18 +3433,23 @@ class PartDesignTools:
         part = self.conn.get_active_part()
         self._prepare_body(part)
         sketch = self._get_last_sketch(args.get("sketch_name"))
-        angle = args.get("angle", 360)
+        angle, second = self._revolution_angles(args)
         axis_mode = args.get("axis", "horizontal")
 
         before = self._body_volume_mm3(part, self.conn.get_active_part_body())
-        shaft = self._build_revolution(part, sketch, angle, axis_mode, "AddNewShaftFromRef", "Shaft")
+        shaft = self._build_revolution(part, sketch, angle, axis_mode, "AddNewShaftFromRef", "Shaft",
+                                       second_angle=second)
         after = self._body_volume_mm3(part, self.conn.get_active_part_body())
 
         detail = ""
         if before is not None and after is not None:
             detail = f" Volume {before:.1f} -> {after:.1f} mm3 (added {after - before:.1f})."
+        swept = (f"{angle}deg on one side of the profile plane"
+                 if not second else
+                 f"{angle}deg + {second}deg the other side "
+                 f"(total {angle + second}deg, centred on the profile plane)")
         return (
-            f"Shaft created: {angle}deg about "
+            f"Shaft created: {swept} about "
             f"{self._axis_label(axis_mode, sketch)}.{detail} "
             f"Feature: '{shaft.Name}'"
         )
@@ -2961,11 +3459,12 @@ class PartDesignTools:
         part = self.conn.get_active_part()
         self._prepare_body(part)
         sketch = self._get_last_sketch(args.get("sketch_name"))
-        angle = args.get("angle", 360)
+        angle, second = self._revolution_angles(args)
         axis_mode = args.get("axis", "horizontal")
 
         before = self._body_volume_mm3(part, self.conn.get_active_part_body())
-        groove = self._build_revolution(part, sketch, angle, axis_mode, "AddNewGrooveFromRef", "Groove")
+        groove = self._build_revolution(part, sketch, angle, axis_mode, "AddNewGrooveFromRef", "Groove",
+                                        second_angle=second)
         after = self._body_volume_mm3(part, self.conn.get_active_part_body())
 
         detail = ""
@@ -2974,8 +3473,12 @@ class PartDesignTools:
             detail = f" Removed {removed:.1f} mm3 ({before:.1f} -> {after:.1f})."
             if abs(removed) < 1e-6:
                 detail += " WARNING: nothing was removed - check the profile side of the axis."
+        swept = (f"{angle}deg on one side of the profile plane"
+                 if not second else
+                 f"{angle}deg + {second}deg the other side "
+                 f"(total {angle + second}deg, centred on the profile plane)")
         return (
-            f"Groove created: {angle}deg about "
+            f"Groove created: {swept} about "
             f"{self._axis_label(axis_mode, sketch)}.{detail} "
             f"Feature: '{groove.Name}'"
         )
@@ -3689,13 +4192,16 @@ class PartDesignTools:
         body = self._prepare_body(part)
         sf = part.ShapeFactory
 
+        resolve_started = time.perf_counter()
         labels, refs, report, table = self._anchors_to_edges(
-            body, anchors, tol, on_miss=on_miss)
+            body, anchors, tol, on_miss=on_miss, sweep=value)
         if specs:
             more_labels, more_refs = self._resolve_edge_specs(body, specs,
                                                               table=table)
             labels = more_labels + labels
             refs = more_refs + refs
+        resolve_ms = int((time.perf_counter() - resolve_started) * 1000)
+        timings: dict[str, int] = {"resolve_ms": resolve_ms}
 
         if kind == "chamfer":
             def add(ref: Any) -> Any:
@@ -3733,11 +4239,19 @@ class PartDesignTools:
                                       # now refuses, fall back to what we had.
                                       resolve=lambda: self._re_resolve_anchors(
                                           body, anchors, tol, (labels, refs)),
-                                      context=report)
+                                      context=report,
+                                      timings=timings)
         finally:
             self._clear_selection()
             self.conn.refresh_display()
-        return out + " " + report
+        # WHERE THE TIME WENT. The 2026-11-19 report timed five single-edge
+        # chamfers at 25.0-56.3 s on a 140-face part while pad/pocket took
+        # 0.2-0.5 s in the same session, and the reply said nothing about which
+        # phase was paying. These three numbers answer that without a profiler.
+        spent = (f" [timings: edges resolved {timings.get('resolve_ms', 0)} ms, "
+                 f"features built {timings.get('build_ms', 0)} ms, "
+                 f"rebuild {timings.get('rebuild_ms', 0)} ms]")
+        return out + " " + report + spent
 
     @staticmethod
     def _propagation(args: dict[str, Any]) -> int:
@@ -3804,7 +4318,8 @@ class PartDesignTools:
                        resolve: Any = None,
                        sequential_retry: bool = True,
                        strict: bool = True,
-                       context: str = "") -> str:
+                       context: str = "",
+                       timings: dict[str, int] | None = None) -> str:
         """Create one fillet per (name, ref), then rebuild once.
 
         ``add`` is injectable for tests; it may return the new feature (in which
@@ -3817,8 +4332,13 @@ class PartDesignTools:
         reports why: the retry costs one rebuild per edge (measured about 6 s
         each), so the all-edges path only pays it when the caller bounded the
         edge count.
+
+        ``timings`` collects ``build_ms`` and ``rebuild_ms`` so a caller can see
+        where a slow call spent its time instead of guessing (2026-11-19 report,
+        P1-4: a single chamfer took 25-56 s and nothing in the reply said why).
         """
         done, failed, created = [], [], []
+        build_started = time.perf_counter()
         for name, ref in zip(names, refs):
             try:
                 feature = add(ref)
@@ -3827,13 +4347,29 @@ class PartDesignTools:
                     created.append(feature)
             except Exception as error:        # noqa: BLE001 - reported per edge
                 failed.append((name, str(error).splitlines()[0][:120]))
+        if timings is not None:
+            timings["build_ms"] = int((time.perf_counter() - build_started) * 1000)
 
         rebuild_error = None
+        rebuild_started = time.perf_counter()
         if created and part is not None:
             try:
-                part.Update()
+                if len(created) == 1:
+                    # ONE FEATURE: update THAT feature, as pad/pocket do. The
+                    # 2026-11-19 report measured a single chamfer taking 25-56 s
+                    # on a 140-face part while pad took 0.3 s in the same
+                    # session, and the difference is exactly this call:
+                    # part.Update() rebuilds the whole tree, UpdateObject(feature)
+                    # updates one node. A full rebuild is needed only when
+                    # several features were created together (their references
+                    # all go stale at once), which is the other branch.
+                    part.UpdateObject(created[0])
+                else:
+                    part.Update()
             except Exception as error:        # noqa: BLE001 - reported below
                 rebuild_error = str(error).splitlines()[0][:120]
+        if timings is not None:
+            timings["rebuild_ms"] = int((time.perf_counter() - rebuild_started) * 1000)
 
         shown = f"{label}{radius}" if label.endswith("R") else f"{label} {radius}"
         head = f"{shown}: {len(done)}/{len(names)} edge(s) done"
@@ -5828,6 +6364,8 @@ class PartDesignTools:
         of waiting for a job that is one request.
         """
         self.conn.ensure_connected()
+        if args.get("dry_run"):
+            return self._delete_dry_run(args)
         many = args.get("names")
         if isinstance(many, list) and many:
             if args.get("feature_name") or args.get("index") is not None or args.get("last"):
@@ -5919,6 +6457,88 @@ class PartDesignTools:
                 summary += f" Failed ({len(failed)}): " + "; ".join(failed) + "."
             return summary + " " + " ".join(done) + scaffold_note + update_note
         return self._delete_one(args, None)
+
+    def _delete_dry_run(self, args: dict[str, Any]) -> str:
+        """What a delete WOULD take with it, without deleting anything.
+
+        The 2026-11-19 report deleted a middle feature and broke every feature
+        after it, then worked around it by deleting in reverse order - a rule it
+        had to discover. Two of those consequences can be named exactly before
+        anything is touched:
+
+        * a FEATURE whose profile is a sketch - the delete takes the sketch with
+          it (measured on B30 2026-11-18: "CATIA also removed 1 sketch(es)");
+        * a SKETCH that a feature consumes - deleting it is refused outright.
+
+        What is NOT claimed: which downstream features will fail. This tool has
+        no dependency graph, so it lists the features that come LATER in the tree
+        and says they are candidates, not casualties. That is a superset, and it
+        is labelled as one.
+        """
+        self.conn.ensure_connected()
+        body = self.conn.get_active_part_body()
+        many = args.get("names")
+        if isinstance(many, list) and many:
+            targets = [str(item) for item in many]
+        elif args.get("feature_name"):
+            targets = [str(args["feature_name"])]
+        else:
+            raise ArgumentRejected(
+                "dry_run=true needs the names to plan for: pass 'feature_name' "
+                "or 'names' (the index/last shortcuts resolve to whatever is "
+                "last, which is the accident this preview exists to prevent). "
+                "Nothing was deleted.",
+                code="BAD_ARGUMENT", stage="validate", modified=False)
+        shapes = body.Shapes
+        order = {str(shapes.Item(i).Name): i
+                 for i in range(1, int(shapes.Count) + 1)}
+        sketches = set(self._sketch_names())
+        lines: list[str] = []
+        for target in targets:
+            index = order.get(target)
+            if target in sketches:
+                consumers, _unasked = self._sketch_consumers(target)
+                if consumers:
+                    lines.append(
+                        f"'{target}' is a SKETCH that is the profile of "
+                        f"{', '.join(consumers)} - deleting it would be REFUSED "
+                        "(SKETCH_CONSUMED_BY). Delete the feature instead and the "
+                        "sketch goes with it.")
+                else:
+                    mine = [entry for entry in
+                            self._frame_scaffold_inventory(body).get("sketches", [])
+                            if entry["sketch"] == target]
+                    extra = (f" Its {mine[0]['elements']} frame-datum element(s) go "
+                             "too, subject to cleanup_frame_datum."
+                             if mine else "")
+                    lines.append(f"'{target}' is a SKETCH with no consuming "
+                                 f"feature; it would be deleted.{extra}")
+                continue
+            if index is None:
+                lines.append(f"'{target}' is not in this body's feature list - "
+                             "nothing here can say what it would take with it "
+                             "(a geometrical-set element is not walked).")
+                continue
+            try:
+                profile = str(shapes.Item(index).Sketch.Name)
+            except Exception:  # noqa: BLE001 - not a sketch-based feature
+                profile = ""
+            later = [name for name, position in sorted(order.items(),
+                                                       key=lambda pair: pair[1])
+                     if position > index]
+            piece = f"'{target}' is a feature (#{index})."
+            if profile:
+                piece += (f" It would ALSO remove the sketch '{profile}', because "
+                          "CATIA cascades a feature's profile with it.")
+            if later:
+                piece += (f" Later in the tree ({len(later)}): "
+                          f"{', '.join(later[:8])}"
+                          f"{', ...' if len(later) > 8 else ''} - CANDIDATES, not "
+                          "casualties: this tool has no dependency graph, and a "
+                          "feature that consumes this one fails its update.")
+            lines.append(piece)
+        return ("DRY RUN - nothing was deleted, created or updated. "
+                + " ".join(lines))
 
     def _delete_one(self, args: dict[str, Any], forced: str | None,
                     defer_update: bool = False,
@@ -7164,6 +7784,26 @@ class PartDesignTools:
                 "server are given a free name from 0.3.78 on, so a conflict that "
                 "is still here came from an older session or from CATIA's own "
                 "numbering.")
+        # THE FRAME SCAFFOLDING, COUNTED RATHER THAN HIDDEN (2026-11-19 report,
+        # P2-5). Every sketch built on a frame leaves a datum plane and three
+        # construction points in body.HybridShapes, and this listing never
+        # mentioned them: the reporter's four frame sketches left 16 tree
+        # elements that were visible in CATIA's tree and absent from every reply.
+        # They are not features and stay out of 'count', but their number and
+        # their owner are worth one paragraph - that is what "collapsed" can
+        # honestly mean here, since this tool cannot hide anything in the tree.
+        scaffold = self._frame_scaffold_inventory(body)
+        if scaffold["element_count"]:
+            payload["frame_scaffolding"] = scaffold
+            payload["frame_scaffolding_note"] = (
+                f"{scaffold['element_count']} element(s) belong to frame datums, "
+                "not to the model: one plane and three construction points per "
+                "sketch created with plane={type:'frame'}. They stay after the "
+                "sketch is deleted, and catia_delete_feature("
+                "cleanup_frame_datum='auto') removes them with it - 'auto' keeps "
+                "them only while another sketch stands on the same datum. They "
+                "are NOT counted in 'count' and they are not in 'features'."
+            )
         if sketches:
             payload["sketches_note"] = (
                 "sketches live in the body alongside the features (a sketch "
@@ -7180,6 +7820,37 @@ class PartDesignTools:
         if notes:
             payload["note"] = " ".join(notes)
         return json.dumps(payload, indent=2)
+
+    def _frame_scaffold_inventory(self, body: Any) -> dict[str, Any]:
+        """How many frame-datum elements the body holds, grouped by owner.
+
+        Named since 0.3.146 (``<sketch>_FRAME`` and ``.O/.U/.V``), so this is a
+        name walk, not a guess - the same names ``_delete_frame_scaffold``
+        deletes. Older parts carry ``Datum_frame.N`` and are counted separately
+        rather than attributed to a sketch they cannot be tied to.
+        """
+        owners: dict[str, int] = {}
+        legacy = 0
+        total = 0
+        try:
+            shapes = body.HybridShapes
+            for index in range(1, int(shapes.Count) + 1):
+                name = str(getattr(shapes.Item(index), "Name", "") or "")
+                if "_FRAME" in name:
+                    owner = name.split("_FRAME", 1)[0]
+                    owners[owner] = owners.get(owner, 0) + 1
+                    total += 1
+                elif name.startswith("Datum_frame"):
+                    legacy += 1
+                    total += 1
+        except Exception:  # noqa: BLE001 - a listing must not fail over this
+            return {"element_count": 0, "sketches": [], "legacy": 0}
+        return {
+            "element_count": total,
+            "sketches": [{"sketch": owner, "elements": count}
+                         for owner, count in sorted(owners.items())],
+            "legacy": legacy,
+        }
 
     @staticmethod
     def _shared_sketch_names(part: Any) -> dict[str, int]:
@@ -8661,12 +9332,24 @@ class PartDesignTools:
             ) from None
 
         if args.get("target_body"):
-            try:
-                target = bodies.Item(args["target_body"])
-            except Exception:
-                raise ArgumentRejected(
-                    f"No body named '{args['target_body']}'."
-                ) from None
+            # ALIASES, because the body a part is born with is called whatever the
+            # INSTALLATION calls it ('零件几何体' on a Chinese B30) and the 2026-11-19
+            # report had to run catia_list_bodies purely to learn that string.
+            # Only the two names a caller can mean without ambiguity are aliases;
+            # anything else is still a name and is looked up as one.
+            wanted = str(args["target_body"]).strip()
+            alias = wanted.lower()
+            if alias in ("active", "current"):
+                target = self.conn.get_active_part_body()
+            elif alias in ("first", "main", "mainbody", "partbody"):
+                target = part.MainBody
+            else:
+                try:
+                    target = bodies.Item(wanted)
+                except Exception:
+                    raise ArgumentRejected(
+                        f"No body named '{wanted}'."
+                    ) from None
         else:
             # Default target is "the other body". The active body is the usual
             # answer (you just built the tool body), but when the tool body IS

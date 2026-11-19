@@ -376,9 +376,27 @@ def test_new_part_names_the_file_a_plan_must_assert_on():
     assert "must use the" in reply and "FILE name" in reply
 
 
-def test_new_part_without_a_path_still_asks_to_save():
+def test_new_part_without_a_path_is_refused_before_the_document_exists():
+    """0.3.149: the old reply said "save it now" AFTER creating a dead end.
+
+    The 2026-11-19 report made one by accident and had to close and rebuild it -
+    the only thing a pathless part is good for. The refusal costs nothing because
+    nothing has been added to the document list yet.
+    """
+    from catia_mcp.results import ArgumentRejected
+
     tools = _new_part_tools(None)
-    reply = tools._new_part(name="V322test")
+    with pytest.raises(ArgumentRejected) as caught:
+        tools._new_part(name="V322test")
+    assert caught.value.code == "MISSING_FILE_PATH"
+    assert caught.value.modified is False
+    assert "Nothing was created" in str(caught.value)
+    assert "defer_save" in str(caught.value), "the escape hatch has to be named"
+
+
+def test_new_part_with_defer_save_is_the_deliberate_scratch_document():
+    tools = _new_part_tools(None)
+    reply = tools._new_part(name="V322scratch", defer_save=True)
     assert "catia_save_document" in reply
     assert "expect.document" not in reply
 

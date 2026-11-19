@@ -2,6 +2,130 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.150] — 2026-11-19 · two extents on one feature, and where the seconds went
+
+The 2026-11-19 report built four parts and an eight-instance assembly from a text
+description with no imported geometry, and it is the most demanding field test
+this server has had. One P0, eight P1s, five P2s. This release answers all but
+two of them, and the two it does not answer are named at the end rather than
+quietly dropped.
+
+**P0-1 - assembly constraints are not available here, and now the assembly says
+so before you build it.** Twelve routes have now been measured on V5-6R2020 B30,
+five of them added this round at the report's suggestion: `AddMonoEltCst` with
+the component, its `ReferenceProduct` and the root product;
+`CreateReferenceFromName` with three path shapes (all E_FAIL);
+`ApplyWorkMode(0/1/2)`; `StartWorkbench` under four assembly workbench names -
+which answers OK even for names that do not exist, so that OK is not evidence of
+anything - and the constraint still refuses afterwards. `GenerateConstraints`
+does not exist on the type. `catia_new_product` now states the ceiling in its
+reply, with the measurement and the way out (`catia_set_component_transform`:
+the report's own eight instances landed at 3.88e-10 mm that way). The constraint
+tools keep their own explanation.
+
+**P1-1 - `catia_pad` and `catia_pocket` take `limit1`/`limit2`.** The report's
+lever was one SolidWorks feature: −X 57.5, +X 4.5. It had to build two pads, and
+measured what that costs - a face where the sketch plane is, 72 faces against 47,
+area +12.48 %. Both tools now build it as ONE feature. Measured on B30
+2026-11-19: `limit1=5, limit2=3` on a 20×10 profile gave z −3.000..+5.000 and
+1600 mm³ (200 × 8), one shape in the tree; the pocket equivalent removed
+552.9 mm³ through a 30 mm wall.
+
+Two things were learned by measuring rather than by assuming, and both are now
+pinned by tests. `SecondLimit` is inert until the feature is UPDATED - the first
+probe set the dimension, measured without updating and "proved" nothing.
+And `direction='reverse'` does not swap the two magnitudes: it flips the pair
+about the sketch plane, so `limit1` keeps its magnitude and changes side
+(`z −4..+1`). The first version of the code swapped first and then flipped,
+which cancels out and hands back the request nobody made (`z −1..+4`) - caught
+by the acceptance cell, not by review.
+
+**P1-2 - `catia_shaft` and `catia_groove` take `angle1`/`angle2`.** CATIA's
+Angle 1 / Angle 2 are both sweeps from the profile plane, one each way.
+Measured on B30 2026-11-19: 60/0 and 30/30 gave the same 1570.7963 mm³ while the
+axial extent moved from 5.000..20.000 to 8.660..17.320, which is what "symmetric
+about the mid-plane" has to look like. The report's 67° centred segment is now
+`angle1=33.5, angle2=33.5` instead of a 360° revolution plus a boolean.
+
+**P1-4 - a single-edge chamfer took 25-56 s; the cause was the tool's own
+bookkeeping, twice over.** The reply now carries its phase timings, which is how
+this was found: `edges resolved 17 501 ms, features built 16 ms, rebuild 16 ms`.
+Three changes:
+
+* the edge table was enumerated a SECOND time after the probe points were
+  deleted, on the belief that references die with the selection. Measured: they
+  do not - a fillet built from a reference taken before the probe closed went in
+  for 38 ms with the volume moving 16000 → 15982.8. That second walk was the
+  expensive one (7 955 ms for twelve edges, against 483 ms cold) because it
+  re-measures every edge's length;
+* the probe points were updated once PER ANCHOR, and the update was
+  `part.Update()` - the whole document's tree. It is now one update for all the
+  anchors, and it is `part.UpdateObject(the probe set)`: measured, the distance
+  from a probe point to the edge it sits on is exactly 0.0000 mm after it, the
+  same as after a full rebuild;
+* the rebuild after creating features is `UpdateObject(the new feature)` when
+  there is exactly one - a full `part.Update()` is only needed when several
+  features were created together, because that is when their references go stale
+  at once.
+
+Same call, same block: **17.7 s → 0.86 s**. A residue remains and is stated
+rather than hidden: the same call measured 0.72 s and 9.0 s on two runs minutes
+apart, always inside `edges resolved` (`topology_cells` plus one length per
+edge - CATIA's own enumeration), so a slow call now says which phase was slow
+instead of leaving the caller to guess.
+
+**P1-5 - a sketch profile that contradicts itself is refused, once.** The
+report's dog-bone had four arcs labelled R0.35 whose endpoints were R0.25 from
+the centre. The tool drew R0.35, projected each end 0.1 mm, and the profile had
+16 loose ends - which only `catia_pad` noticed, two calls later. Now
+`catia_sketch_profile` refuses with `ARC_RADIUS_MISMATCH` and both numbers
+("they describe R0.1768, while 'radius' says R0.3500"), names the arc and the
+offset it would have caused, and says nothing was drawn. Collinear points are
+NOT refused - three nearly-collinear points can define no circle, and refusing
+them would break legitimate 180° arcs - they keep the old "not rebuilt" note.
+
+**P1-3 - the pre-check the report asked for, downgraded by measurement.** Its
+hypothesis was arithmetic: two rounds of size R on edges less than 2R apart
+cannot both exist (16 of 20 edges took R3; the four refusals were the two pairs
+0.921 mm apart). Measured on B30 the same day: two edges 0.900 mm apart took R3
+and BOTH were built. So the tool publishes the measured distance between the
+chosen edges and says plainly that it is a flag, not a prediction - both
+measurements are in the sentence. A warning that cries wolf on a legal selection
+is worse than the number.
+
+**P1-7 - a part with no path is refused before it exists.** The report made one
+by accident and had to close and rebuild it. `catia_new_part` now answers
+`MISSING_FILE_PATH` unless `defer_save=true` says a scratch document was meant.
+
+**P2-3, P2-4, P2-5, P2-1.** `catia_delete_feature(dry_run=true)` names what the
+delete would take (the sketch a feature's profile consumes - measured, CATIA
+cascades it - and whether a sketch delete would be refused), and lists the
+features LATER in the tree as candidates, not casualties, because this server
+has no dependency graph. `catia_boolean(target_body=...)` accepts
+`active`/`current`/`first`/`main`/`mainbody`/`partbody`, so a Chinese B30's
+`零件几何体` no longer has to be looked up first. `catia_list_features` counts the
+frame-datum elements and groups them by owning sketch (16 elements from four
+frame sketches were visible in CATIA's tree and absent from every reply).
+`catia_run_plan(summary=true)` keeps the step trace when an assertion fails, but
+COMPACT: index, tool, code, metrics and the first 160 characters - the report got
+19 full records (about 9 KB) on the plan that most needed a short answer.
+
+**Not in this release, on purpose.** P1-6 (a disk cache for STL exports): the
+18.9 s figure is the FIRST export per part, the session cache already keeps the
+second one, and a path+size+mtime cache would need invalidation rules this
+server cannot verify - a stale bounding box is worse than a slow one.
+P2-2 (`quiet=true` to shorten the repeated sketch explanations): worth doing, but
+it touches thirty replies at once and this release already changes the shape of
+several, so it gets its own version.
+
+B30 2026-11-19: `scripts/b30_v0466_acceptance_limits_and_hints.py` **28/28** -
+asymmetric pad (volume AND bbox), reverse flips the pair, two-sided pocket,
+shaft 30/30 against 60/0, pathless part refused, constraint ceiling in the
+new_product reply, contradicting arc refused with both radii, single-edge chamfer
+under a second with its phases, the close-pair flag, dry_run, the body alias,
+frame counting. Regressions: 0.3.149's 26/26, 0.3.148's 18/18, 0.3.147's 19/19,
+0.3.146's 15/15. **2408 tests.**
+
 ## [0.3.149] — 2026-11-18 · a plane is not a datum, and a sketch that is spoken for
 
 The 2026-11-18 (0.3.148) report closed four of the previous five items - one of

@@ -113,11 +113,25 @@ class DocumentTools:
                             "type": "string",
                             "description": (
                                 "Save the new part here straight away, e.g. "
-                                "'E:/WB_CATIA/parts/P05.CATPart'. Missing parent "
-                                "folders are created. The FILE NAME must be ASCII "
-                                "(PATH_NOT_ASCII otherwise); a non-ASCII folder is "
-                                "accepted - see the tool description for what to "
-                                "do if CATIA refuses the first save there."
+                                "'E:/WB_CATIA/parts/P05.CATPart'. REQUIRED unless "
+                                "defer_save=true: a part with no path cannot be "
+                                "saved later (a first save needs a path) and "
+                                "cannot be inserted into an assembly, so building "
+                                "in one is wasted work (2026-11-19 report, P1-7). "
+                                "Missing parent folders are created. The FILE NAME "
+                                "must be ASCII (PATH_NOT_ASCII otherwise); a "
+                                "non-ASCII folder is accepted - see the tool "
+                                "description for what to do if CATIA refuses the "
+                                "first save there."
+                            ),
+                        },
+                        "defer_save": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Create the part WITHOUT a path on purpose - a "
+                                "scratch document you intend to discard. Without "
+                                "this flag, a call with no file_path is refused."
                             ),
                         },
                         "overwrite": {
@@ -460,7 +474,8 @@ class DocumentTools:
                                       arguments.get("file_path"),
                                       bool(arguments.get("overwrite", False)),
                                       bool(arguments.get("ascii_fallback", False)),
-                                      arguments.get("ascii_name"))
+                                      arguments.get("ascii_name"),
+                                      bool(arguments.get("defer_save", False)))
             case "catia_new_product":
                 return self._new_product(arguments.get("name"),
                                          arguments.get("file_path"))
@@ -566,7 +581,28 @@ class DocumentTools:
                   file_path: str | None = None,
                   overwrite: bool = False,
                   ascii_fallback: bool = False,
-                  ascii_name: str | None = None) -> str:
+                  ascii_name: str | None = None,
+                  defer_save: bool = False) -> str:
+        # A PART WITH NO PATH IS A DEAD END, AND IT IS CHEAP TO REFUSE.
+        # The 2026-11-19 report made one by accident and got a reply telling it
+        # to save "because a part that has geometry but no path cannot be saved
+        # later" - true, but said after the document exists, so the only way out
+        # was close-and-rebuild. The refusal costs nothing: nothing has been
+        # added to the document list at this point.
+        if not file_path and not defer_save:
+            raise ArgumentRejected(
+                "catia_new_part was called without 'file_path'. Such a part "
+                "cannot be saved (a first save needs a path) and cannot be "
+                "inserted into an assembly, so the only thing left to do with it "
+                "is close it - which is what the 2026-11-19 report had to do. "
+                "Nothing was created. Pass file_path, or defer_save=true to say "
+                "you know it is a scratch document.",
+                code="MISSING_FILE_PATH", stage="validate", modified=False,
+                next_actions=[
+                    "catia_new_part(name='...', file_path='E:/WB_CATIA/parts/P01.CATPart')",
+                    "or catia_new_part(name='...', defer_save=true) for a "
+                    "document you intend to throw away",
+                ])
         self._check_ascii_name(ascii_name)
         self.conn.ensure_connected()
         docs = self.conn.documents
@@ -900,8 +936,43 @@ class DocumentTools:
                "stop")
             + "."
             + saved
+            + self._constraint_ceiling_note()
             + self._name_collision_note(doc)
         )
+
+    #: Said ONCE, when the assembly is created, and measured rather than assumed.
+    #:
+    #: The 2026-11-19 report built 8 instances, then tried 4 constraint tools and
+    #: found all of them refusing - by which point it had committed to an
+    #: assembly that could not be constrained. Every route this surface offers has
+    #: been tried on V5-6R2020 B30 (2026-10-23, then again 2026-11-19 with the
+    #: routes that report suggested): AddMonoEltCst with the component, its
+    #: ReferenceProduct, and the root product; AddBiEltCst for
+    #: coincidence/offset/angle; ApplyWorkMode 0/1/2 on the component;
+    #: StartWorkbench for four assembly workbench names; and
+    #: CreateReferenceFromName for three path shapes - all E_FAIL, with the
+    #: constraint count staying at 0. GenerateConstraints does not exist on the
+    #: type. So the answer is said up front instead of 8 calls later.
+    _CONSTRAINT_CEILING = (
+        " ASSEMBLY CONSTRAINTS ARE NOT AVAILABLE IN THIS ENVIRONMENT: every "
+        "route this surface offers was tried on V5-6R2020 B30 (2026-10-23 and "
+        "again 2026-11-19) and all of them answer E_FAIL with the constraint "
+        "count staying at 0 - Fix (AddMonoEltCst) with the component, its "
+        "ReferenceProduct and the root product; coincidence/offset/angle "
+        "(AddBiEltCst); ApplyWorkMode 0/1/2; StartWorkbench under four assembly "
+        "workbench names; and CreateReferenceFromName with three path shapes. "
+        "Product.GenerateConstraints does not exist on this type. "
+        "WHAT TO DO INSTEAD: place components with catia_set_component_transform "
+        "from a table of transforms - one call sets many, and the reply reports "
+        "the residual it read back (a 24-instance quadcopter landed at 5e-7 mm, "
+        "and the 2026-11-19 report's 8 instances at 3.88e-10 mm). The tree then "
+        "shows the root as not fixed, which affects nothing: the positions are "
+        "absolute. catia_fix_constraint and the three mate tools will refuse with "
+        "this same explanation - do not plan around them."
+    )
+
+    def _constraint_ceiling_note(self) -> str:
+        return self._CONSTRAINT_CEILING
 
     def _open_document(self, file_path: str) -> str:
         # THE NAME IS CHECKED BEFORE THE CONNECTION, not after. Until 0.3.127 this

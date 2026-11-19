@@ -2,7 +2,7 @@
 
 > **中文入口见 [README.md](README.md)。** This file is the full English reference: every tool, every measurement behind it, and every known limit.
 
-**0.3.149** · [what changed](CHANGELOG.md) ·
+**0.3.150** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1377,7 +1377,49 @@ Two facts about real drawings that this had to accept:
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
 
-0.3.149 answers the two findings of the 0.3.148 report, and both are a
+0.3.150 answers the 2026-11-19 report: one P0, eight P1s, five P2s - twelve
+of the fourteen, with the other two named in the changelog rather than
+dropped.
+
+`catia_pad` and `catia_pocket` take `limit1`/`limit2`, so an asymmetric
+two-sided extrude is ONE feature: measured on B30 2026-11-19, limit1=5 +
+limit2=3 on a 20x10 profile gave z -3.000..+5.000 and 1600 mm3 with one shape
+in the tree, where the report had to build two pads and measured the cost
+(a face at the sketch plane, 72 faces against 47, area +12.48 %). `catia_shaft`
+and `catia_groove` take `angle1`/`angle2`: 60/0 and 30/30 both swept
+1570.7963 mm3 while the axial extent moved 5.000..20.000 to 8.660..17.320, so
+Angle 2 really is the other side of the profile plane.
+
+The single-edge chamfer that took 25-56 s was this tool's own bookkeeping, and
+the reply now reports its phases (`edges resolved / features built / rebuild`),
+which is how it was found: 17 501 / 16 / 16 ms. Three causes: the edge table
+was enumerated a SECOND time after the probe points were deleted, on a belief
+that measurement refutes (a reference taken before the probe closed builds a
+fillet 38 ms later); the probe points were updated once PER ANCHOR with
+`part.Update()` - a whole-document rebuild - instead of once in total with
+`UpdateObject(set)`; and the rebuild after one new feature was also the whole
+tree. Same call, same block: 17.7 s -> 0.86 s. A residue is stated rather than
+hidden: the same call measured 0.72 s and 9.0 s minutes apart, always inside
+`edges resolved`, so a slow call now says which phase was slow.
+
+Assembly constraints were probed once more with the five routes the report
+suggested (ReferenceProduct, the root product, CreateReferenceFromName with
+three path shapes, ApplyWorkMode 0/1/2, StartWorkbench under four names) and
+all of them still answer E_FAIL; GenerateConstraints does not exist on the
+type. So `catia_new_product` now states that ceiling in its own reply, with
+the evidence and the way out, instead of letting a caller find out after eight
+components.
+
+An arc whose radius and endpoints disagree is refused once, with both radii
+(`ARC_RADIUS_MISMATCH`) - the report's dog-bone was drawn at R0.35 with ends at
+R0.25, moved each end 0.1 mm, and only the pad noticed two calls later. A part
+with no file_path is refused before it exists. `delete_feature(dry_run=true)`
+names what a delete would take. `boolean(target_body=...)` accepts
+active/first aliases, so a localized body name is not needed.
+`list_features` counts frame-datum elements by owning sketch. `run_plan`
+keeps its step trace under `summary` when an assertion fails, but compact.
+
+0.3.149 answered the two findings of the 0.3.148 report, and both were a
 criterion whose INPUT was not the thing it claimed to judge.
 
 `cleanup_frame_datum="auto"` compared PLANES, and a plane is infinite: the
