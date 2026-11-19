@@ -15,9 +15,11 @@ drawn. Reproduced on B30 2026-11-12 with a 4-element stadium whose arc ends sat
 "8 loose endpoint(s) in 4 break(s), 0.0500 mm".
 
 What these tests pin, without CATIA:
-  1  _sweep_choice is one rule, and _plan_segment's midpoint uses it
-  2  _circle_through passes through its three points and refuses collinear ones
-  3  an arc whose ends are off the circle gets a circle rebuilt THROUGH them
+  1  _sweep_choice is one rule, and _plan_segment uses it for the sweep
+  2  _circle_at_radius keeps the radius and puts both ends on it
+  3  an arc whose ends are off the circle keeps the RADIUS and moves the
+     centre by the size of that error (0.3.151: the three-point version
+     amplified it by 1/(1-cos(sweep/2)) - see the 2026-11-19 report)
   4  the junction gap after that rebuild is zero, not "within tolerance"
   5  an arc whose ends are already on the circle is left alone and says nothing
   6  a wild radius mismatch is NOT rebuilt - it says where the ends will land
@@ -41,7 +43,7 @@ from catia_mcp.results import ArgumentRejected, CodedError
 from catia_mcp.tools.part_design import PartDesignTools
 from catia_mcp.tools.sketcher import (
     SketcherTools,
-    _circle_through,
+    _circle_at_radius,
     _mm,
     _point_gap,
     _sweep_choice,
@@ -61,17 +63,31 @@ def test_the_sweep_rule_is_shared_between_the_builder_and_the_planner() -> None:
     assert (round(math.degrees(start)), round(math.degrees(sweep)), ccw) == (90, 270, False)
 
 
-# ── §2 a circle through three points ──────────────────────────────────────
-def test_the_circle_through_three_points_passes_through_all_three() -> None:
-    points = [(20.0, 0.0), (20.0 * math.cos(math.pi / 4), 20.0 * math.sin(math.pi / 4)),
-              (0.0, 20.0)]
-    center, radius = _circle_through(*points)
-    for point in points:
-        assert _point_gap(point, center) == pytest.approx(radius, abs=1e-9)
+# ── §2 the circle of a GIVEN radius through both ends ─────────────────────
+def test_the_fitted_circle_keeps_the_radius_and_passes_through_both_ends() -> None:
+    # The 2026-11-19 report's web arc: R72.367, ends 0.0027 mm off it. The
+    # three-point fit answered R72.4594 (34x the error, see the next test); this
+    # one keeps the radius to the last bit, which is what "coaxial" means.
+    center, drift = _circle_at_radius((-55.222, 17.5), (-55.222, -17.5),
+                                      (15.0, 0.0), 72.367)
+    assert drift == pytest.approx(0.0027, abs=5e-4)
+    for end in ((-55.222, 17.5), (-55.222, -17.5)):
+        assert _point_gap(end, center) == pytest.approx(72.367, abs=1e-9)
 
 
-def test_collinear_points_have_no_circle() -> None:
-    assert _circle_through((0.0, 0.0), (5.0, 0.0), (10.0, 0.0)) is None
+def test_a_chord_longer_than_the_diameter_has_no_circle() -> None:
+    # No curve of radius 1 can join two points 5 apart, at any centre.
+    assert _circle_at_radius((0.0, 0.0), (5.0, 0.0), (2.5, 0.0), 1.0) is None
+
+
+def test_the_fitted_circle_picks_the_side_the_caller_meant() -> None:
+    # Both candidate centres are equidistant from the ends - (5, +12) and
+    # (5, -12) - so only the caller's own centre says which one. Pick the wrong
+    # one and the arc bulges the other way and crosses itself.
+    above, _ = _circle_at_radius((0.0, 0.0), (10.0, 0.0), (-5.0, 6.0), 13.0)
+    below, _ = _circle_at_radius((0.0, 0.0), (10.0, 0.0), (-5.0, -6.0), 13.0)
+    assert above[0] == pytest.approx(5.0) and above[1] > 0
+    assert below[0] == pytest.approx(5.0) and below[1] < 0
 
 
 # ── §3/§4/§5/§6 the planner resolves the ends that will be DRAWN ─────────
@@ -87,7 +103,7 @@ def _stadium(off: float) -> list[dict]:
     ]
 
 
-def test_an_arc_off_its_circle_gets_a_circle_through_its_endpoints() -> None:
+def test_an_arc_off_its_circle_keeps_its_radius_and_moves_its_centre() -> None:
     tools = SketcherTools(connection=None)
     plan = [tools._plan_segment(i, raw)
             for i, raw in enumerate(_stadium(0.05), start=1)]
@@ -95,10 +111,15 @@ def test_an_arc_off_its_circle_gets_a_circle_through_its_endpoints() -> None:
     # The ends the caller gave are the ends the plan now carries...
     assert _point_gap(arc["start"], (39.95, 0.0)) == pytest.approx(0.0, abs=1e-9)
     assert _point_gap(arc["end"], (60.0, 20.05)) == pytest.approx(0.0, abs=1e-9)
-    # ...and both really sit on the rebuilt circle.
+    # ...both really sit on the circle...
     assert _point_gap(arc["start"], arc["center"]) == pytest.approx(arc["radius"], abs=1e-9)
-    assert arc["radius"] > 20.0
-    assert any("rebuilt" in note for note in arc["adjust"])
+    # ...and the RADIUS is the one that was asked for. 0.3.150 fitted a circle
+    # through the ends and the arc's midpoint and answered R20.18 here; that
+    # midpoint is computed from this radius, so the fit spends the whole
+    # residual on the radius (2026-11-19 report, §3.1).
+    assert arc["radius"] == pytest.approx(20.0, abs=1e-12)
+    assert _point_gap(arc["center"], (60.0, 0.0)) == pytest.approx(0.07, abs=0.01)
+    assert any("KEPT" in note for note in arc["adjust"])
 
 
 def test_after_the_rebuild_every_junction_is_exactly_zero() -> None:
@@ -118,31 +139,37 @@ def test_ends_already_on_the_circle_are_left_alone_and_not_reported() -> None:
     assert plan[1]["adjust"] == []
 
 
-def test_a_radius_that_would_change_by_more_than_5_percent_is_refused() -> None:
+def test_a_centre_drift_over_5_percent_is_refused_with_two_real_fixes() -> None:
     """A wild mismatch is bad data, and drawing it anyway leaves the profile open.
 
-    0.3.149 changed this cell's contract. It used to KEEP the caller's circle and
-    report that the ends had moved - and the 2026-11-19 report measured what that
-    costs: the dog-bone profile's four arcs said R0.35 while their endpoints were
-    R0.25 from the centre, the ends moved 0.1 mm each, and the sketch was 16 loose
-    ends that only catia_pad noticed, two calls later. Both numbers are in hand
-    here and nothing has been drawn yet, so this refuses.
+    Two rounds changed this cell's contract, both from measuring. 0.3.149 stopped
+    drawing the caller's radius over ends that are 0.1 mm off it (the 2026-11-19
+    dog-bone: 16 loose ends that only catia_pad noticed). 0.3.151 stopped calling
+    ONE radius *the* fix: it said radius=0.1768, and 0.1768 is half the chord -
+    the half circle through the two ends - so following it turned a 90-degree
+    corner into a 180-degree one. What is refused now is a centre move of more
+    than 5 % of the radius, and the reply names both ways out.
     """
     tools = SketcherTools(connection=None)
-    # Same two ends, but told they sit on a R12 circle - the endpoints say R47.
+    # The report's dog-bone A01: centre (-2.75,-1.10), R0.35, ends at R0.25.
     with pytest.raises(ArgumentRejected) as caught:
-        tools._plan_segment(1, {"type": "arc", "center": [60.0, 0.0],
-                                "radius": 12.0, "p1": [39.95, 0.0],
-                                "p2": [60.0, 20.05], "direction": "ccw"})
+        tools._plan_segment(1, {"type": "arc", "center": [-2.75, -1.10],
+                                "radius": 0.35, "p1": [-3.00, -1.10],
+                                "p2": [-2.75, -1.35], "direction": "ccw"})
     error = caught.value
     assert error.code == "ARC_RADIUS_MISMATCH"
     assert error.modified is False
-    assert "R12.0000" in str(error), "the radius that was asked for"
-    assert "R47.2431" in str(error), "the radius the endpoints describe"
+    assert "R0.3500" in str(error), "the radius that was asked for"
     assert "Nothing was drawn" in str(error)
-    assert error.data["radius_given_mm"] == pytest.approx(12.0)
-    assert error.data["radius_from_endpoints_mm"] == pytest.approx(47.2431, abs=1e-4)
-    assert error.data["endpoint_offset_mm"] > 8.0, "how far the ends would move"
+    # The two fixes, both of them real:
+    assert "radius=0.2500" in str(error), "keep the centre, take their distance"
+    assert "0.1000" in str(error), "keep the radius, move each end"
+    # ...and the trap, named so that it cannot be mistaken for a fix:
+    assert "R0.1768" in str(error) and "NOT one of them" in str(error)
+    assert error.data["radius_keeping_centre_mm"] == pytest.approx(0.25)
+    assert error.data["semicircle_radius_mm"] == pytest.approx(0.1768, abs=1e-4)
+    assert error.data["endpoint_moves_mm"] == pytest.approx([0.1, 0.1], abs=1e-9)
+    assert error.data["centre_move_to_keep_radius_mm"] > 0.1
 
 
 # ── §7/§8/§9 what counts as crossing itself ──────────────────────────────

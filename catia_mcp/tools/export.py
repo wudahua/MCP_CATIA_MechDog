@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import time
 from typing import Any
 
 from catia_mcp.connection import CATIAConnection
@@ -79,27 +80,29 @@ class ExportTools:
                 "description": (
                     "Capture a screenshot of the current 3D view and save as image file. "
                     "Supports JPG, BMP, TIFF (CATIA V5 cannot capture PNG; a .png path "
-                    "is saved as .jpg instead). THE SIZE IS THE 3D WINDOW'S, NOT YOURS: "
-                    "CATIA V5 captures the viewer's client area and exposes no "
-                    "capture-resolution setting (measured on B30 2026-11-03, where "
-                    "900x900 was asked for and 300x400 written). The reply reports the "
-                    "real pixel size read from the file header, and says so when it "
-                    "differs from the request - resize the CATIA window if the picture "
-                    "has to be bigger. "
-                    "THE PICTURE IS NOT A CLEAN RENDER: it is the window's client "
-                    "area, so the specification tree and the axis are in it (reported "
-                    "2026-11-08, P2-1). There is no supported way to suppress it from "
-                    "automation - `Application.StartCommand` does NOT validate the "
-                    "command name (an unknown one is accepted and then opens a modal "
-                    "未知命令 dialog on the automation thread, measured 2026-11-08), so "
-                    "a guessed command is not a shortcut, it is a freeze. Hide the "
-                    "tree in the UI (F3) before calling this if the picture is for a "
-                    "report. "
-                    "THERE IS NO 'crop': CATIA exposes no capture region, and "
-                    "cutting the written file would need a JPEG decoder, which this "
-                    "server does not ship. 'zoom' is the supported way to make the "
-                    "part fill more of the frame - it writes Viewpoint3D.Zoom and "
-                    "puts it back afterwards."
+                    "is saved as .jpg instead). "
+                    "THE SIZE IS THE WINDOW'S, AND THE WINDOW CAN BE RESIZED: pass "
+                    "width/height and this tool sets Window.Width/Height before the "
+                    "capture and puts them back afterwards. Measured on B30 "
+                    "2026-11-19: 600x877, 1100x900 and 1600x900 requested gave files "
+                    "of exactly those sizes (the 0.3.103 note that said otherwise was "
+                    "wrong - it read the client area of a maximized window and "
+                    "concluded the setter did nothing). width/height of 0 (the "
+                    "default) leave the window alone and the reply reports the size "
+                    "actually written, read from the file header. A maximized window "
+                    "ignores the setter, and a size larger than the screen is clamped; "
+                    "the reply names whichever happened. "
+                    "THE PICTURE IS NOT A CLEAN RENDER: it contains the specification "
+                    "tree and the axis triad, and neither can be suppressed from "
+                    "automation - no viewer member controls them, and "
+                    "`Application.StartCommand` does NOT validate the command name (an "
+                    "unknown one is accepted and then opens a modal 未知命令 dialog on "
+                    "the automation thread; re-measured 2026-11-19, it hangs the "
+                    "caller). Hide the tree in the UI (F3) before calling this if the "
+                    "picture is for a report. "
+                    "crop=[x, y, w, h] cuts the written image afterwards (needs "
+                    "Pillow; without it the tool says so instead of pretending), which "
+                    "is the only way to drop the tree or the triad from a picture."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -127,19 +130,37 @@ class ExportTools:
                         "width": {
                             "type": "integer",
                             "description": (
-                                "Requested image width in pixels - ADVISORY: CATIA "
-                                "captures the 3D window's client area and cannot be "
-                                "told another size. The reply reports what was written."
+                                "Image width in pixels. The tool resizes the CATIA "
+                                "window to match before capturing and restores it "
+                                "afterwards (measured on B30 2026-11-19: 600 / 1100 / "
+                                "1600 asked, 600x877 / 1100x900 / 1600x900 written). "
+                                "0 = leave the window as it is and report the size "
+                                "that was written."
                             ),
-                            "default": 1920,
+                            "default": 0,
                         },
                         "height": {
                             "type": "integer",
                             "description": (
-                                "Requested image height in pixels - ADVISORY, see "
-                                "'width'; the reply reports the real size."
+                                "Image height in pixels, same rule as 'width'; 0 = "
+                                "leave the window's height alone."
                             ),
-                            "default": 1080,
+                            "default": 0,
+                        },
+                        "crop": {
+                            "type": "array",
+                            "items": {"type": "integer"},
+                            "minItems": 4,
+                            "maxItems": 4,
+                            "description": (
+                                "[x, y, width, height] in pixels from the TOP-LEFT of "
+                                "the captured image, applied to the written file with "
+                                "Pillow. This is the only way to take the "
+                                "specification tree or the axis triad out of a "
+                                "picture: CATIA exposes no capture region and no "
+                                "switch for either. The reply reports the cropped "
+                                "size."
+                            ),
                         },
                         "clean": {
                             "type": ["boolean", "string"],
@@ -279,10 +300,11 @@ class ExportTools:
             case "catia_screenshot":
                 return self._screenshot(
                     arguments["file_path"],
-                    arguments.get("width", 1920),
-                    arguments.get("height", 1080),
+                    arguments.get("width", 0),
+                    arguments.get("height", 0),
                     self._clean_mode(arguments.get("clean")),
                     arguments.get("zoom", 1.0),
+                    arguments.get("crop"),
                 )
             case "catia_set_view":
                 return self._set_view(
@@ -522,8 +544,9 @@ class ExportTools:
             "this is the only class that can be hidden without taking the solid "
             "off the screen).", code="BAD_CLEAN_MODE", stage="validate")
 
-    def _screenshot(self, file_path: str, width: int = 1920, height: int = 1080,
-                    clean: str = "", zoom: float = 1.0) -> str:
+    def _screenshot(self, file_path: str, width: int = 0, height: int = 0,
+                    clean: str = "", zoom: float = 1.0,
+                    crop: Any = None) -> str:
         # A zoom that is not a usable number is a typo, and it is answerable
         # without a session (0.3.127's rule: refuse before doing anything).
         try:
@@ -540,6 +563,7 @@ class ExportTools:
                 "anything beyond that either loses the part or puts the camera "
                 "inside it. Nothing was captured.", code="BAD_ARGUMENT",
                 stage="validate")
+        box = self._crop_box(crop)
         self.conn.ensure_connected()
 
         # Ensure output directory exists
@@ -560,7 +584,8 @@ class ExportTools:
             file_path = os.path.splitext(file_path)[0] + ".jpg"
             capture_format = 5
 
-        viewer = self.conn.active_window.ActiveViewer
+        window = self.conn.active_window
+        viewer = window.ActiveViewer
         # Ask the viewer to repaint first. It is one call and it cannot hurt;
         # measured on B30 it does not change the frame either (the "stale
         # screenshot" of the 2026-11-03 report was really the wrong view table,
@@ -569,6 +594,28 @@ class ExportTools:
             viewer.Update()
         except Exception:  # noqa: BLE001 - not every build exposes Update
             pass
+        # THE SIZE IS CONTROLABLE, AND 0.3.103 SAID IT WAS NOT (2026-11-19 report,
+        # §3.5, which asked for a conclusion rather than another version). That
+        # note - "Window.Width/Height do not change it" - was measured on a
+        # MAXIMIZED window, where the setter is a no-op; on a normal window the
+        # capture follows the window exactly (B30 2026-11-19: 600/1100/1600 asked,
+        # 600x877 / 1100x900 / 1600x900 written). So a requested size is honoured
+        # by resizing the window, and the window is put back afterwards.
+        resize_note, restore_size = self._apply_capture_size(window, width,
+                                                             height, viewer)
+        if restore_size is not None:
+            # THE VIEWER IS BOUND TO THE WINDOW IT WAS TAKEN FROM. Measured on
+            # B30 2026-11-19: after resizing, a capture through the OLD viewer
+            # object wrote the previous frame at the previous size (808x744 for a
+            # window that had just been set to 1200x800, and the restore then put
+            # 772 back - so the resize looked like it had been ignored). Re-read
+            # both, and repaint through the new one.
+            try:
+                window = self.conn.active_window
+                viewer = window.ActiveViewer
+                viewer.Update()
+            except Exception:  # noqa: BLE001 - the resize note already said so
+                pass
         hidden_note = ""
         records: list[Any] = []
         zoom_note = ""
@@ -612,7 +659,29 @@ class ExportTools:
             except Exception:  # noqa: BLE001 - not every build exposes Update
                 pass
         try:
-            viewer.CaptureToFile(capture_format, os.path.normpath(file_path))
+            # A RESIZED WINDOW IS NOT A RESIZED VIEW YET. Measured on B30
+            # 2026-11-19: on a document created in the same automation call, a
+            # capture taken 0.25 s after setting 1200x800 wrote 808x744 - the
+            # view is laid out by CATIA's own message loop, which is busy running
+            # this call. A one-second pause is enough (measured: 1.0 s -> 1200x800,
+            # 0.25 s -> 808x744, and calling Reframe/Activate does NOT help). So
+            # the size is VERIFIED on the file and the capture is retried, which
+            # costs nothing when the first one is already right.
+            expected = (f"{int(width or 0)}x{int(height or 0)}"
+                        if (width or height) and int(width or 0) and int(height or 0)
+                        else "")
+            attempts = 3 if (restore_size is not None and expected) else 1
+            for attempt in range(attempts):
+                viewer.CaptureToFile(capture_format, os.path.normpath(file_path))
+                if attempt + 1 >= attempts:
+                    break
+                if self._image_size(file_path) == expected:
+                    break
+                try:
+                    viewer.Update()
+                except Exception:  # noqa: BLE001 - not every build exposes Update
+                    pass
+                time.sleep(0.55)
         finally:
             if records:
                 self._restore_view(records)
@@ -623,23 +692,156 @@ class ExportTools:
                     viewpoint.Zoom = base_zoom
                 except Exception:  # noqa: BLE001 - a left zoom is not a failure
                     pass
+            self._restore_window_size(window, restore_size)
 
-        actual = self._image_size(file_path)
+        captured = self._image_size(file_path)
         note = ""
         if swapped_from:
             note += (f" [asked for '{swapped_from}', wrote JPEG: CATIA V5 can only "
                      "capture TIFF, BMP or JPEG]")
+        asked = (int(width or 0), int(height or 0))
+        if captured and asked != (0, 0) and captured != f"{asked[0]}x{asked[1]}":
+            # The resize is the mechanism, so a file that still disagrees is
+            # either a clamped window, a maximized one (said above) or a capture
+            # taken before the repaint - worth naming, not worth hiding. Measured
+            # BEFORE the crop: comparing a 300x200 crop against "asked for
+            # 900x700" would be a complaint about the caller's own crop.
+            note += (f" [asked for {asked[0]}x{asked[1]}, wrote {captured}: the "
+                     "capture is the window's own size]")
+        actual = captured
+        crop_note = ""
+        if box is not None:
+            cropped = self._crop_image(file_path, box)
+            if cropped is not None:
+                crop_note = f" [cropped to {cropped} px]"
+                actual = cropped
         size_note = f"{actual} px" if actual else "size unreadable"
-        if actual and (int(width or 0), int(height or 0)) != (0, 0):
-            requested = f"{int(width)}x{int(height)}"
-            if requested != actual:
-                note += (f" [asked for {requested}; CATIA V5 captures the 3D window's "
-                         "client area and exposes no capture-resolution setting - "
-                         "Window.Width/Height do not change it, measured on B30 "
-                         "2026-11-03. Resize the CATIA window to change this.]")
         return (f"Screenshot saved to {file_path} ({size_note}){note}"
-                f"{zoom_note}{hidden_note}"
+                f"{resize_note}{crop_note}{zoom_note}{hidden_note}"
                 + (self._AXIS_TRIAD_NOTE if clean else ""))
+
+    # ── the size and the crop, in one place ───────────────────────────────
+    @staticmethod
+    def _crop_box(crop: Any) -> tuple[int, int, int, int] | None:
+        """Validate ``crop=[x, y, w, h]`` before anything is captured."""
+        if crop is None:
+            return None
+        try:
+            values = [int(value) for value in crop]
+        except (TypeError, ValueError) as error:
+            raise ArgumentRejected(
+                f"crop has to be four integers [x, y, width, height] in pixels; "
+                f"got {crop!r}. Nothing was captured.", code="BAD_ARGUMENT",
+                stage="validate") from error
+        if len(values) != 4:
+            raise ArgumentRejected(
+                f"crop needs four numbers [x, y, width, height]; got {len(values)}. "
+                "Nothing was captured.", code="BAD_ARGUMENT", stage="validate")
+        x, y, box_width, box_height = values
+        if min(values) < 0 or box_width == 0 or box_height == 0:
+            raise ArgumentRejected(
+                f"crop={values} has a negative coordinate or a zero size. x/y are "
+                "pixels from the top-left corner, width/height are pixels. Nothing "
+                "was captured.", code="BAD_ARGUMENT", stage="validate")
+        return x, y, box_width, box_height
+
+    def _apply_capture_size(self, window: Any, width: Any, height: Any,
+                            viewer: Any) -> tuple[str, tuple[int, int] | None]:
+        """Resize the window to the requested capture size; return what to restore.
+
+        Measured on B30 2026-11-19 (probe v0471): the capture is exactly the
+        window's size, and ``Window.Width``/``Height`` are writable on a normal
+        window. A MAXIMIZED window ignores them - that is what the 0.3.103 note
+        measured, and it generalised one window state into "cannot be done".
+        """
+        wanted = [int(width or 0), int(height or 0)]
+        if wanted == [0, 0]:
+            return "", None
+        try:
+            state = int(getattr(window, "WindowState", 0))
+        except Exception:  # noqa: BLE001 - unknown is not maximized
+            state = 0
+        if state != 0:
+            return (" [the window is maximized, so it ignored the requested size - "
+                    "restore it (or set WindowState=0) to choose the capture size]",
+                    None)
+        try:
+            original = (int(window.Width), int(window.Height))
+        except Exception as error:  # noqa: BLE001 - read-only build
+            return (f" [the window size could not be read ({str(error).splitlines()[0][:60]}),"
+                    " so the capture is whatever the window is]", None)
+        try:
+            if wanted[0]:
+                window.Width = wanted[0]
+            if wanted[1]:
+                window.Height = wanted[1]
+        except Exception as error:  # noqa: BLE001 - reported, not raised
+            return (f" [the window would not resize ({str(error).splitlines()[0][:60]});"
+                    f" captured at {original[0]}x{original[1]}]", None)
+        try:
+            viewer.Update()
+        except Exception:  # noqa: BLE001 - not every build exposes Update
+            pass
+        # A capture straight after a resize has been seen to write the previous
+        # frame; the sleep is 0.25 s and the file header is checked afterwards
+        # either way, so a miss is reported rather than hidden.
+        time.sleep(0.25)
+        got = (int(getattr(window, "Width", 0)), int(getattr(window, "Height", 0)))
+        expected = (wanted[0] or original[0], wanted[1] or original[1])
+        note = ""
+        if got != expected:
+            # A size larger than the screen is clamped, and a window that is
+            # mid-layout can refuse quietly; both are worth a sentence, because
+            # the next line writes a file that does not match the request.
+            note = (f" [asked for {expected[0]}x{expected[1]}, the window is "
+                    f"{got[0]}x{got[1]}: a size larger than the screen is clamped, "
+                    "and a window that is still being created can ignore the setter]")
+        return note, original
+
+    @staticmethod
+    def _restore_window_size(window: Any, original: tuple[int, int] | None) -> None:
+        if original is None:
+            return
+        try:
+            window.Width, window.Height = original
+        except Exception:  # noqa: BLE001 - a left size is not a failed capture
+            pass
+
+    @staticmethod
+    def _crop_image(path: str, box: tuple[int, int, int, int]) -> str | None:
+        """Cut ``box`` out of the file that was just written, in place.
+
+        Pillow is optional (it is not in the runtime dependencies), so a machine
+        without it gets a sentence, not a traceback - and never a silently
+        uncropped picture.
+        """
+        try:
+            from PIL import Image
+        except ImportError as error:
+            raise CodedError(
+                "crop needs Pillow, which is not installed here, so the image was "
+                "NOT cropped (it is the full window capture).",
+                code="OPTIONAL_DEPENDENCY_MISSING", stage="validate",
+                next_actions=["pip install pillow, then call catia_screenshot again"]) from error
+        try:
+            with Image.open(path) as image:
+                width, height = image.size
+                if box[0] + box[2] > width or box[1] + box[3] > height:
+                    raise ArgumentRejected(
+                        f"crop={list(box)} does not fit the {width}x{height} capture: "
+                        f"x+width={box[0] + box[2]} and y+height={box[1] + box[3]}. "
+                        "The image was written uncropped.", code="BAD_ARGUMENT",
+                        stage="validate", modified=True)
+                cut = image.crop((box[0], box[1], box[0] + box[2], box[1] + box[3]))
+                cut.save(path)
+                return f"{cut.size[0]}x{cut.size[1]}"
+        except ArgumentRejected:
+            raise
+        except Exception as error:  # noqa: BLE001 - the capture itself is fine
+            raise CodedError(
+                f"The capture was written but could not be cropped "
+                f"({str(error).splitlines()[0][:80]}).",
+                code="CROP_FAILED", stage="execute", modified=True) from error
 
     # The 0.3.120 report photographed a clean part and found "a small white mesh
     # under the model" - the viewer's own axis system indicator, which it read as

@@ -2,6 +2,121 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.151] — 2026-11-19 · the arc that was rebuilt for no reason, and a 27-second pass that only read a length
+
+The 2026-11-19 acceptance of 0.3.150 reports 8 closed / 3 partial / 1 untouched /
+2 declined, and no regression: the same geometry rebuilt to 3791.12 mm³ against
+0.3.149's 3789.32, closer to the source record. It also withdraws its own §2 of
+the previous round, and that withdrawal is accepted here - see the last section.
+
+**§3.1 - an arc whose ends are 0.0027 mm off its circle is no longer rebuilt at
+0.09 mm.** 0.3.120 rebuilt the circle through the two endpoints and the arc's
+MIDPOINT, to close profiles whose ends were fitted a few hundredths off. That
+midpoint is not data: it is computed from the radius the caller gave. Feeding it
+back as a third constraint added no information and froze the wrong degree of
+freedom, so the entire residual came out as a radius change - amplified by
+1/(1−cos(sweep/2)), which is 34× for a 28° arc and 3.4× for a 90° one. The
+report's web arc (R72.367, ends 0.0027 mm off - its own arithmetic says 0.0035,
+same conclusion) came back as R72.4594 with the centre 0.0924 mm away, and two
+faces the drawing calls coaxial came out 0.09 mm apart. The same amplification
+turned a 0.0005 mm error on the star's R10 into R9.7386.
+
+Two endpoints plus a radius leave exactly one degree of freedom - which side the
+centre is on - so the radius is now KEPT to the last bit and the centre moves by
+the size of the error itself. Measured on B30 2026-11-19: the report's arc keeps
+R72.3670 with the centre 0.0028 mm away, the sketch reads back
+`radius_mm: 72.367` (`catia_sketch_get_geometry`), the profile closes, and the
+pad builds. The reply says both numbers and names the amplification it avoided,
+because the old behaviour was invisible: the sentence used to report only the
+result. Above 5 % of the radius in centre drift the call is still refused - that
+part of P1-5 from the previous round stands.
+
+**§3.2 - `ARC_RADIUS_MISMATCH` no longer recommends the half circle.** It used to
+say "pass radius=0.1768 (what the endpoints say)", and 0.1768 was the
+circumradius of the three points - half the chord - i.e. the HALF CIRCLE through
+the two ends. Following that advice turns a 90° corner into a 180° one: from
+"the profile will not close" to "it closes and is the wrong shape", which is
+harder to find. The refusal now names the two real fixes and their consequences:
+keep the centre and pass R0.2500 (the distance of the ends from it), or keep
+R0.3500 and move each end 0.1000 mm onto that circle. The half circle is named
+explicitly as NOT one of them. `data` carries all of it:
+`radius_keeping_centre_mm`, `radius_from_each_end_mm`, `endpoint_moves_mm`,
+`semicircle_radius_mm`, `centre_move_to_keep_radius_mm`.
+
+**§3.3 - naming an edge is now 7.7× cheaper, because the expensive call was
+`GetMeasurable` and only a fingerprint needed it.** Measured on B30 2026-11-19
+(probe v0468, a 288-edge star): `topology_cells` 4 477 ms, the NLS pass 1 185 ms,
+and `SPAWorkbench.GetMeasurable` **26 219 ms for 288 edges** - 91 ms each, against
+3.6 ms each on the second pass, because SPA caches measurables itself. `Length`
+was 312 ms of that. So the pass existed to create the measurables, not to read
+lengths, and the anchor path was paying for it twice (once to fill the edge
+table, once to measure distances).
+
+`_edge_table(lengths=False)` builds rows with faces and no length, and
+`_length_filler` reads a length only for the rows that need one - the matched
+edge, the tie candidates, or the whole table on a "nothing matches" path where
+the reply quotes what it looked at. `catia_list_edges` and the anchor path are
+unchanged in what they report. Measured: one chamfer by name **34 079 →
+4 452 ms**; the reply's label still carries the length (`Edge.12
+(L10.4194|Sketch.1;94|Pad.1;2)`) because exactly one row is measured.
+
+The anchored path cannot skip the pass - an anchor has to be measured against
+every edge to find the nearest one - so it now says so. The reply reports
+`edges resolved 30 186 ms over 288 edge(s), 105 ms each` and, above 8 ms per
+edge, that `Edge.N` from `catia_list_edges` skips the pass. The report's second
+suggestion - caching the edge table between calls - is declined with the reason:
+it would save the enumeration (`topology_cells` + NLS, 5.6 s here) at the price
+of handing back references from before a rebuild, and a stale reference does not
+fail loudly, it fillets the edge that now has that index. The measurements that
+made the trade visible are in the reply instead.
+
+**§3.4 - the pad schema said the extents "swap"; the code flips them.** The
+description now says what the code does, with the worked example: `limit1=1,
+limit2=4` with `direction='reverse'` gives z −4..+1, not −1..+4.
+
+**§3.5 - `catia_screenshot` can set the resolution after all, and the note that
+said it could not was wrong.** 0.3.103 measured "Window.Width/Height do not
+change it" on a MAXIMIZED window, where the setter is a no-op, and generalised
+one window state into "cannot be done". Measured on B30 2026-11-19: 600×877,
+1100×900 and 1600×900 requested gave files of exactly those sizes. `width`/
+`height` now resize the window before the capture and put it back afterwards
+(default 0 = leave the window alone, which is what the old advisory-only
+parameters effectively did).
+
+One trap, measured twice: a resized window is not a resized VIEW yet. On a
+document created in the same automation call, a capture 0.25 s after setting
+1200×800 wrote 808×744 - CATIA lays the view out in its own message loop, which
+is busy running the call. A one-second pause is enough; `Reframe()` and
+`Activate()` do not help. So the written size is verified and the capture
+retried (up to three attempts), which costs nothing when the first one is right.
+
+`crop=[x, y, width, height]` now cuts the written file with Pillow - the second
+"sorry, no" from 0.3.103 that turned out to be only true without a decoder.
+Pillow is NOT a runtime dependency, so the crop is guarded: without it the reply
+says the image was not cropped instead of writing a quietly uncropped one. The
+picture still contains the specification tree and the axis triad and neither can
+be suppressed: no viewer member controls them, and `Application.StartCommand`
+does not validate its argument - re-measured this round, a guessed command name
+hangs the caller instead of raising. That part of P1-8 is final: crop it out.
+
+**§2 - the face count was never the split's fault, and the 0.3.150 entry was
+wrong to repeat it.** The report built the same shaft with one pad and with two
+and got 72/191/120 both ways - CATIA merges the coplanar walls, so the split
+face does not exist. `limit1`/`limit2` stay (one feature, shorter tree, 3791.12
+against 3789.32) and the schema no longer claims a face count; what it claims is
+the tree and the volume. Nothing else in this release chases the 72 vs 47: the
+report's own face census shows 46 of the 72 are slivers ≤ 0.016 mm² at coplanar
+overlaps between the web, the ribs and the revolved shell, which is a kernel
+difference and not something a feature count can fix.
+
+### Verification
+
+B30 2026-11-19: `scripts/b30_v0472_acceptance_arc_and_cost.py` **18/18** -
+the arc drawn at R72.367 with the radius read back from the sketch, the refusal
+naming both fixes and leaving the sketch empty, 288 edges named at 5.5 s against
+37.5 s anchored, a 1200×800 capture with the window restored, a 300×200 crop.
+Regressions: 0.3.150's **28/28**, 0.3.149's **26/26**. **2423 tests**.
+
 ## [0.3.150] — 2026-11-19 · two extents on one feature, and where the seconds went
 
 The 2026-11-19 report built four parts and an eight-instance assembly from a text
@@ -26,7 +141,10 @@ tools keep their own explanation.
 **P1-1 - `catia_pad` and `catia_pocket` take `limit1`/`limit2`.** The report's
 lever was one SolidWorks feature: −X 57.5, +X 4.5. It had to build two pads, and
 measured what that costs - a face where the sketch plane is, 72 faces against 47,
-area +12.48 %. Both tools now build it as ONE feature. Measured on B30
+area +12.48 %. [That cost was retracted by the same reporter a round later: one
+pad and two pads both give 72/191/120, because CATIA merges the coplanar walls.
+The feature stayed for the shorter tree and the volume - see 0.3.151 §2.]
+Both tools now build it as ONE feature. Measured on B30
 2026-11-19: `limit1=5, limit2=3` on a 20×10 profile gave z −3.000..+5.000 and
 1600 mm³ (200 × 8), one shape in the tree; the pocket equivalent removed
 552.9 mm³ through a 30 mm wall.

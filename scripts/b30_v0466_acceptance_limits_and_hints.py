@@ -215,9 +215,11 @@ def main() -> int:
         say("  " + " ".join(str(error).split())[:260])
         check("G the contradiction is refused", error.code == "ARC_RADIUS_MISMATCH",
               error.code)
+        # 0.3.151 replaced "the radius the endpoints describe" with the two real
+        # fixes; the cell keeps the part that still has to hold - both numbers.
         check("G both radii are named",
               "R0.3500" in str(error)
-              and f"R{error.data['radius_from_endpoints_mm']:.4f}" in str(error),
+              and f"{error.data['radius_keeping_centre_mm']:.4f}" in str(error),
               str(error)[:120])
         check("G nothing was drawn", "Nothing was drawn" in str(error), "")
 

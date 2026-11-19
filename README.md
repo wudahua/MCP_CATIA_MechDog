@@ -1,8 +1,8 @@
-# MCP_CATIA_MechDog 0.3.150
+# MCP_CATIA_MechDog 0.3.151
 
-![version](https://img.shields.io/badge/version-0.3.150-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![CATIA](https://img.shields.io/badge/CATIA-V5%20R30%20(B30)-orange) ![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20http-purple)
+![version](https://img.shields.io/badge/version-0.3.151-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![CATIA](https://img.shields.io/badge/CATIA-V5%20R30%20(B30)-orange) ![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20http-purple)
 
-当前正式版 **0.3.150**——按 2026-11-19 的报告逐条处理（1 个 P0、8 个 P1、5 个 P2，14 项里 12 项落地，2 项写明为何留到下一版）。**双向非对称拉伸**：`catia_pad` / `catia_pocket` 新增 `limit1`/`limit2`，一个特征两段长度（实测 z −3.000..+5.000、1600 mm³，树里只有 1 个形状）——报告为 SolidWorks 的「−57.5 / +4.5」建了两个 Pad，代价是草图平面处多一圈面、面数 72 对 47；`catia_shaft` / `catia_groove` 新增 `angle1`/`angle2`，中面对称的 67° 段不再需要「360° 回转 + 布尔求交」。**单边倒角 25–56 s 的根因是它自己的记账**：22 条路径实测后，回执现在直接报三段耗时——`edges resolved / features built / rebuild`，于是看到 17 501 / 16 / 16 ms；修三处（删掉「探针删除后再枚举一遍」这次多余的整表遍历、所有锚点只更新一次探针集合、单个特征用 `UpdateObject`），同一调用 **17.7 s → 0.86 s**。**装配约束**再试 5 条新路径（`ReferenceProduct`、根产品、`CreateReferenceFromName`×3、`ApplyWorkMode`×3、`StartWorkbench`×4）仍然全失败，`GenerateConstraints` 不存在，所以改为 `catia_new_product` 的回复里**当场声明**，不让调用者试到第 8 个 `add_component` 才发现。另外：半径与端点自相矛盾的弧**当场拒绝**（`ARC_RADIUS_MISMATCH`，两个半径都写出来），`new_part` 无路径直接拒，`delete_feature` 支持 `dry_run`，`boolean` 的 `target_body` 支持 `first`/`active` 别名，`list_features` 把 frame 骨架按草图折叠计数。 · [变更日志](CHANGELOG.md) · [Releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases)
+当前正式版 **0.3.151**——按 0.3.150 的验收报告处理，两条主因都是**同一个错误**：把「由你的输入算出来的东西」当成「观测到的东西」再喂回去。**弧的圆不该被重建**：上一版用一个过两端点和**弧中点**的圆去闭合轮廓，而那个中点是**由半径算出来的**，等于把误差全挤进半径，浅弧上放大 `1/(1−cos(θ/2))`——报告的腹板弧端点只偏 0.0027 mm，却被改成 R72.4594、圆心挪 0.0924 mm，两处「设计上同轴」的 R72.367 变成差 0.09 mm。现在**保住半径、圆心只移误差本身**（实测 0.0028 mm，草图回读 `radius_mm: 72.367`）。`ARC_RADIUS_MISMATCH` 也不再建议「传半径=弦长的一半」——那是**半圆**，会把 90° 圆角画成 180°；改为给出两个真解法（保圆心 R0.2500 / 保半径各移 0.1 mm）。**「选边 10 s」的真相是一次全表 `GetMeasurable`**：288 条边首次 26.2 s（91 ms/条，SPA 自己第二次只要 3.6 ms），而 `Length` 只占 312 ms——所以名字选边不再为全表建 Measurable，**34.1 s → 4.5 s**；锚点路径省不掉，于是回执报「288 边 × 105 ms」并提示改用 `Edge.N`。**截图分辨率其实可以设**：0.3.103 的「不可改」是在最大化窗口上测的；实测 600×877 / 1100×900 / 1600×900 请求即所得，`crop=[x,y,w,h]` 用 Pillow 裁剪（未装则明说未裁）。 · [变更日志](CHANGELOG.md) · [Releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases)
 
 > 让 AI 客户端通过 MCP，在 CATIA V5 里建**原生可编辑的实体特征**——并且每一步都能量回来。
 
@@ -20,7 +20,7 @@ MCP_CATIA_MechDog 是运行在你自己 Windows 电脑上的本地 MCP 服务（
 - **草图可回改**：`catia_sketch_edit` 重开已关闭的草图，`catia_sketch_delete_element` 删掉画错的一条，零件随之重建——错一条线不必整件重做。
 - **量不到就说量不到**：超范围、超能力或读数失败时，回执以 `UNVERIFIED:` 开头并说明哪一个测量失败，不会把失败写成成功。
 - **能力可发现**：诊断文字旁边给一行能直接粘贴的调用；「有工具但没人知道怎么调」和「没有这个工具」一样是缺陷。
-- **离线可测**：**2408** 个测试不需要 CATIA，`pytest` 在本机就能跑全绿；真机验收脚本在 `scripts/b30_*`。
+- **离线可测**：**2423** 个测试不需要 CATIA，`pytest` 在本机就能跑全绿；真机验收脚本在 `scripts/b30_*`。
 
 ## 环境要求
 
@@ -140,6 +140,10 @@ python -m venv .venv
 ## 已知限制
 
 - **平面不等于 datum，就像「南边」不等于一个门牌号。** `frame` 平面是无限的，两个草图落在同一平面上不代表它们踩在同一个基准上：实测 z=0 上相距 50 mm 的两个 datum 报出相同 H/V、不同原点，删其一的基准对面另一个毫无影响。判「谁还站在这个 datum 上」要比完原点与两个方向；退化成比平面会把 P06 这类多轮位零件全部误拒。另记一条同源的坑：**`getattr` 成功不代表成员存在**——`Sketch.Reference` / `.Support` / `.Plane` 都会返回一个占位对象，真去用就报 `'NoneType' object has no attribute 'Name'`，所以「能不能读」必须靠用一次来判断。
+- **由输入算出来的量，不是观测。** 上一版用「过两端点和弧中点的圆」去闭合轮廓，而那个中点是**由半径算出来的**——把它当第三个约束喂回去，等于把全部残差挤进半径，浅弧上放大 `1/(1−cos(θ/2))`（28° 弧 34 倍、90° 弧 3.4 倍）。判据就是**放大倍数**本身：端点偏 0.0027 mm 却挪了 0.09 mm，这个倍数在说「哪个自由度被冻结了」。正解是保住那个有物理含义的量（半径/同轴），只移动派生不出来的那个（圆心）——两点 + 半径只剩一个自由度，选离调用方最近的那一支。
+- **贵的那一次调用往往不是你以为的那次。** 「选边 10 s」查下来是 `GetMeasurable` 每条边 91 ms（288 条 26.2 s），而读 `Length` 只要 312 ms——全表建 Measurable 只是为了让指纹有个长度。于是「按名字选边」根本不需要它：34.1 s → 4.5 s。**缓存整张边表被拒绝**：省下的只是枚举（5.6 s），代价是可能把重建前的引用交给调用方——过期引用不会响亮地失败，而是圆角落在现在占了那个下标的边上。
+- **「做不到」要写清是在什么状态下测的。** 0.3.103 说「窗口大小改不了截图分辨率」，那是在**最大化窗口**上测的——最大化时 setter 本来就是空操作。普通窗口下请求 600/1100/1600 就是 600/1100/1600。于是「做不到」变成「做得到，附一句：最大化时无效」。
+- **改完窗口，视图还没改。** 同一个自动化调用里新建的文档，设完 1200×800、等 250 ms 再拍，写出的是 808×744：视图布局在 CATIA 自己的消息循环里，而那个循环正在跑你的调用。`Reframe()`/`Activate()` 都没用，**等 1 秒**才有用——所以拍完要**回读文件尺寸校验并重拍**。
 - **「慢」多半是自己的记账，不是 CATIA。** 单边倒角 25–56 s，实测拆开是「选边 17 501 ms / 建特征 16 ms / 重建 16 ms」：真正贵的是把整张边表**又枚举了一遍**（以为引用会随选择集失效，实测不会），以及给每个锚点都做一次**全文档** `part.Update()`。把耗时打进回执，比猜十次都有用。
 - **报告提的判据也要测。** 报告说「两个 R 之和大于棱间距就一定失败」，而实测 0.9 mm 间距 + R3 两条都建成了。于是把这条从「预言」降级为「flag」，两种实测结论一起写进同一句话——预报错了会和算错一样伤信任。
 - **设了参数还要 update 才算测过。** `Pad.SecondLimit.Dimension.Value` 写进去、不 update 就量体积，得到的永远是旧值：第一版探针就这样「证明」了双限不可用。

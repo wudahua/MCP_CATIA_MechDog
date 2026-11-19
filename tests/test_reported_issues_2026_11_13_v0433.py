@@ -128,16 +128,31 @@ def test_a_zoom_that_cannot_be_a_magnification_is_refused(value):
     assert conn.touched is False, "a typo must not open a session"
 
 
-def test_the_screenshot_schema_states_why_there_is_no_crop():
+def test_the_screenshot_schema_states_what_it_cannot_do():
+    """0.3.151 turned two of the three "cannot"s into "can"s, and one stands.
+
+    The old assertion here was `"NO 'crop'" in description`, which 0.3.151 made
+    false: `crop=[x,y,w,h]` exists now (Pillow is on the box). What survives is
+    the part CATIA really does not expose - no switch for the specification tree
+    and none for the axis triad - so the schema has to keep saying that, and has
+    to say what the crop needs.
+    """
     tools, _conn = _export()
     definition = [tool for tool in tools.get_tool_definitions()
                   if tool["name"] == "catia_screenshot"][0]
     description = definition["description"]
-    assert "NO 'crop'" in description
-    assert "zoom" in definition["inputSchema"]["properties"]
-    zoom = definition["inputSchema"]["properties"]["zoom"]
+    properties = definition["inputSchema"]["properties"]
+    assert "crop" in properties, "it exists; the schema has to say so"
+    assert "Pillow" in properties["crop"]["description"]
+    assert "specification tree" in description
+    assert "neither can be suppressed" in description
+    assert "zoom" in properties
+    zoom = properties["zoom"]
     assert "24 668" in zoom["description"], "the pixel measurement is the evidence"
     assert "RESTORED" in zoom["description"], "the camera has to be put back"
+    # The size is no longer advisory-only: it is honoured by resizing the window,
+    # and the number that proved it is in the description.
+    assert "1600x900" in description
 
 # ── a zero-millisecond reading is a reading (found by CI, 2026-11-15) ────────
 

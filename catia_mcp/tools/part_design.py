@@ -391,10 +391,11 @@ class PartDesignTools:
                                 "'blind 57.5 / blind 4.5' becomes. Measured on B30 "
                                 "2026-11-19: limit1=5, limit2=3 on a 20x10 profile "
                                 "gave z -3.000..+5.000 and 1600 mm3 "
-                                "(200 mm2 x 8). Two separate pads would put a "
-                                "split face where the sketch plane is, and the "
-                                "2026-11-19 report measured that cost: 72 faces "
-                                "against 47 on the same part."
+                                "(200 mm2 x 8). ONE feature in the tree instead "
+                                "of two pads; the face count is the same either "
+                                "way (72/191/120 measured both routes - CATIA "
+                                "merges the coplanar walls), so the gain is the "
+                                "tree and the volume, not the topology."
                             ),
                         },
                         "limit2": {
@@ -402,9 +403,12 @@ class PartDesignTools:
                             "description": (
                                 "How far the same Pad runs the OTHER way from the "
                                 "sketch plane, in mm (CATIA's Limit 2). 0 or "
-                                "omitted is one-sided. 'direction' still decides "
-                                "which side limit1 counts on; with "
-                                "direction='reverse' the two extents swap."
+                                "omitted is one-sided. 'direction' decides which "
+                                "side limit1 counts on, and reverse FLIPS THE "
+                                "PAIR about the sketch plane - limit1 keeps its "
+                                "magnitude and changes side (limit1=1, limit2=4 "
+                                "with reverse gives z -4..+1, not -1..+4). "
+                                "Measured on B30 2026-11-19."
                             ),
                         },
                         "direction": {
@@ -2161,13 +2165,18 @@ class PartDesignTools:
                     "session does not expose",
                 ],
             )
-        table = self._edge_table(body)
+        # NO LENGTHS HERE: the measurables below are the expensive part and
+        # they answer Length too, so asking the table for lengths as well would
+        # pay for the same 53-ms-per-edge pass twice (see _edge_table).
+        table = self._edge_table(body, lengths=False)
         if not table:
             raise PreconditionRejected("The active body has no edges to fillet yet.")
         measurables = []
         for entry in table:
             try:
-                measurables.append(spa.GetMeasurable(entry["cell"].Reference))
+                measured = spa.GetMeasurable(entry["cell"].Reference)
+                entry["measurable"] = measured
+                measurables.append(measured)
             except Exception as exc:  # noqa: BLE001
                 raise RuntimeError(
                     f"Could not measure {entry['name']}: {exc}"
@@ -2213,11 +2222,19 @@ class PartDesignTools:
                 best_distance, best_index = dists[0]
                 entry = table[best_index]
                 if best_distance > tol:
+                    # One length, because the caller's next move is to aim at
+                    # this edge: the measurable is already in hand, so this is a
+                    # property read, not another 53 ms pass.
+                    if entry["length"] is None:
+                        entry["length"] = self._cell_measure(
+                            spa, entry["cell"], "Length",
+                            measurable=entry.get("measurable"))
                     missed.append({
                         "anchor": [round(float(v), 6) for v in anchor],
                         "nearest_edge": entry["name"],
-                        "nearest_length_mm": (round(entry["length"], 4)
-                                              if entry["length"] is not None else None),
+                        "nearest_length_mm": (
+                            None if entry["length"] is None else
+                            round(entry["length"], 4)),
                         "distance_mm": round(best_distance, 4),
                     })
                     continue
@@ -3129,9 +3146,10 @@ class PartDesignTools:
         `depth`/`through_all` and the limit pair are different forms of the same
         request, so mixing them is refused here, before CATIA is touched. The
         report that asked for this (2026-11-19, P1-1) had to build two pads for a
-        SolidWorks asymmetric extrude and measured what the split costs: 72 faces
-        against 47 on the same part, because the split puts a face where the
-        sketch plane is.
+        SolidWorks asymmetric extrude, and the SAME report then measured the
+        split's cost at zero faces - 72/191/120 both ways, because CATIA merges
+        the coplanar walls. What one feature buys is a shorter tree and the
+        volume, not fewer faces.
         """
         if "depth" in args or args.get("through_all"):
             raise ArgumentRejected(
@@ -3864,8 +3882,25 @@ class PartDesignTools:
     # mm3). The bounding faces (``Pad.6;2``, ``Sketch.7;2``) and the edge's own
     # length do not drift, so those are what the tools take now.
 
-    def _edge_table(self, body: Any) -> list[dict[str, Any]]:
-        """Every solid edge, with the handles that survive a rebuild."""
+    def _edge_table(self, body: Any, lengths: bool = True) -> list[dict[str, Any]]:
+        """Every solid edge, with the handles that survive a rebuild.
+
+        ``lengths=False`` skips the Length read, and that is not a micro-
+        optimisation: ``SPAWorkbench.GetMeasurable`` costs 53 ms per edge the
+        FIRST time it is asked for a given reference (measured on B30 2026-11-19
+        on a 144-edge star: 7 625 ms for the first pass, 514 ms for the second,
+        because SPA caches measurables itself). Length is 312 ms of that 7 625,
+        so the pass exists to create the measurables, not to read them - and
+        reading them is only needed for a fingerprint, which is only needed to
+        MATCH or to REPORT an edge.
+
+        A caller that resolves ``Edge.N`` never needs either. On the 288-edge
+        part the 2026-11-19 report used for its 10 s chamfer, that pass was 27 s
+        of the 31 s the reply called "edges resolved".
+
+        Rows carry ``length=None`` and ``fingerprint=None`` when it was skipped;
+        ``_length_filler`` fills them for the few rows that need it.
+        """
         part = self.conn.get_active_part()
         spa = self._topo_measure(part)
         cells = topology_cells(self.conn, body, "Edge")
@@ -3873,7 +3908,7 @@ class PartDesignTools:
         for index, cell in enumerate(cells, start=1):
             nls = nls_of(cell)
             faces = face_keys(nls)
-            length = self._cell_measure(spa, cell, "Length")
+            length = self._cell_measure(spa, cell, "Length") if lengths else None
             table.append({
                 "index": index,
                 "name": f"Edge.{index}",
@@ -3881,9 +3916,36 @@ class PartDesignTools:
                 "nls": nls,
                 "bounded_by": faces,
                 "length": length,
-                "fingerprint": edge_fingerprint(faces, length),
+                "fingerprint": (edge_fingerprint(faces, length) if lengths
+                                else None),
             })
         return table
+
+    def _length_filler(self, table: list[dict[str, Any]]):
+        """A function that fills ``length``/``fingerprint`` for the rows given.
+
+        Lazy twice over: nothing is measured until a row is actually asked for,
+        and the workbench is not even looked up until then - a caller that
+        resolves ``Edge.N`` never needs a length, and on a 288-edge part the
+        whole-body pass is 27 s (``GetMeasurable`` is 53 ms per edge the first
+        time, see ``_edge_table``). Idempotent: a row that already knows its
+        length costs nothing.
+        """
+
+        def fill(entries: list[dict[str, Any]]) -> None:
+            pending = [entry for entry in entries if entry.get("length") is None]
+            if not pending:
+                return
+            part = self.conn.get_active_part()
+            spa = self._topo_measure(part)
+            for entry in pending:
+                entry["length"] = self._cell_measure(
+                    spa, entry["cell"], "Length",
+                    measurable=entry.get("measurable"))
+                entry["fingerprint"] = edge_fingerprint(entry["bounded_by"],
+                                                        entry["length"])
+
+        return fill
 
     @staticmethod
     def _parse_edge_spec(spec: Any) -> tuple[int | None, list[str], float | None]:
@@ -3940,9 +4002,10 @@ class PartDesignTools:
         resolve both against ONE table.
         """
         if table is None:
-            table = self._edge_table(body)
+            table = self._edge_table(body, lengths=False)
         if not table:
             raise PreconditionRejected("The active body has no edges to fillet yet.")
+        fill = self._length_filler(table)
         labels: list[str] = []
         refs: list[Any] = []
         for spec in specs:
@@ -3965,14 +4028,23 @@ class PartDesignTools:
                         "and take the Edge.N from that listing."
                     )
             else:
-                entry = self._match_edge(table, faces, length, spec)
+                entry = self._match_edge(table, faces, length, spec, fill=fill)
+            fill([entry])       # the label quotes the length, so one row is read
             labels.append(f"{entry['name']} ({entry['fingerprint']})")
             refs.append(entry["cell"].Reference)
         return labels, refs
 
     @classmethod
     def _match_edge(cls, table: list[dict[str, Any]], faces: list[str],
-                    length: float | None, spec: Any) -> dict[str, Any]:
+                    length: float | None, spec: Any, fill: Any = None,
+                    ) -> dict[str, Any]:
+        """The one edge ``spec`` means, or a refusal that lists the candidates.
+
+        ``fill`` reads lengths on demand - only the rows that could still be the
+        answer, plus the whole table on the "nothing matches" path, where the
+        reply has to quote what it looked at.
+        """
+        fill = fill or (lambda entries: None)
         wanted = set(faces)
         candidates = [e for e in table if wanted and set(e["bounded_by"]) == wanted]
         if not candidates and wanted:
@@ -3980,6 +4052,7 @@ class PartDesignTools:
         if not candidates and not wanted:
             candidates = list(table)
         if length is not None and candidates:
+            fill(candidates)
             close = [e for e in candidates if e["length"] is not None
                      and abs(e["length"] - length) <= 0.01]
             if close:
@@ -3991,6 +4064,7 @@ class PartDesignTools:
         if len(candidates) == 1:
             return candidates[0]
         if not candidates:
+            fill(table)         # the refusal quotes what it looked at
             near = sorted(table, key=lambda e: abs((e["length"] or 0.0) - (length or 0.0)))[:5]
             raise ArgumentRejected(
                 f"No edge matches '{spec}'. The body's edges are (nearest first): "
@@ -3998,6 +4072,7 @@ class PartDesignTools:
                 + ". Fingerprints come from catia_list_edges and are re-resolved "
                 "on every call, so they survive renumbering - an Edge.N does not."
             )
+        fill(candidates)
         same_print = len({e["fingerprint"] for e in candidates}) == 1
         raise ArgumentRejected(
             f"'{spec}' matches {len(candidates)} edges: "
@@ -4201,7 +4276,8 @@ class PartDesignTools:
             labels = more_labels + labels
             refs = more_refs + refs
         resolve_ms = int((time.perf_counter() - resolve_started) * 1000)
-        timings: dict[str, int] = {"resolve_ms": resolve_ms}
+        timings: dict[str, int] = {"resolve_ms": resolve_ms,
+                                   "edge_count": len(table)}
 
         if kind == "chamfer":
             def add(ref: Any) -> Any:
@@ -4248,9 +4324,23 @@ class PartDesignTools:
         # chamfers at 25.0-56.3 s on a 140-face part while pad/pocket took
         # 0.2-0.5 s in the same session, and the reply said nothing about which
         # phase was paying. These three numbers answer that without a profiler.
-        spent = (f" [timings: edges resolved {timings.get('resolve_ms', 0)} ms, "
-                 f"features built {timings.get('build_ms', 0)} ms, "
-                 f"rebuild {timings.get('rebuild_ms', 0)} ms]")
+        #
+        # The EDGE COUNT and the per-edge cost joined them in 0.3.151: the same
+        # report measured 10.3 s on a 186-edge part against the 0.86 s this
+        # changelog quoted for a 12-edge box, and the difference is entirely
+        # "how many edges does an anchor have to be measured against". Saying the
+        # count turns that into arithmetic the caller can act on.
+        edges = int(timings.get("edge_count") or 0)
+        per_edge = (timings.get("resolve_ms", 0) / edges) if edges else 0
+        spent = (f" [timings: edges resolved {timings.get('resolve_ms', 0)} ms"
+                 + (f" over {edges} edge(s), {per_edge:.0f} ms each" if edges else "")
+                 + f", features built {timings.get('build_ms', 0)} ms, "
+                 f"rebuild {timings.get('rebuild_ms', 0)} ms]"
+                 + (" [an anchor has to be measured against every edge of the "
+                    "body to find the nearest one; an 'Edge.N' or fingerprint "
+                    "from catia_list_edges targets one directly and skips that "
+                    "pass - worth it above a few hundred edges]"
+                    if per_edge >= 8 else ""))
         return out + " " + report + spent
 
     @staticmethod
@@ -9772,8 +9862,13 @@ class PartDesignTools:
             except Exception:
                 return None
 
-    def _cell_measure(self, spa: Any, cell: Any, prop: str) -> float | None:
+    def _cell_measure(self, spa: Any, cell: Any, prop: str,
+                      measurable: Any = None) -> float | None:
         """Read Area/Length off an HSO cell, or None when the value is not real.
+
+        ``measurable`` lets a caller that has already built one pass it in:
+        ``GetMeasurable`` is the expensive call (53 ms per edge on the first
+        pass, B30 2026-11-19), not the property read.
 
         SPA does not raise for topology it cannot resolve - it hands back a
         placeholder constant (field-measured on V5-6R2020 B30: 2e7 for an edge
@@ -9785,7 +9880,9 @@ class PartDesignTools:
         if spa is None:
             return None
         try:
-            raw = getattr(spa.GetMeasurable(cell.Reference), prop)
+            if measurable is None:
+                measurable = spa.GetMeasurable(cell.Reference)
+            raw = getattr(measurable, prop)
         except Exception:
             return None
         if prop == "Area":

@@ -192,36 +192,54 @@ def _sweep_choice(a1: float, a2: float, direction: str,
     return start, sweep, chosen_ccw
 
 
-def _circle_through(first: Sequence[float], mid: Sequence[float],
-                    second: Sequence[float]) -> tuple[list[float], float] | None:
-    """The circle through three points, or None when they are collinear.
+#: How far an arc's centre may move to put both of its ends on the radius the
+#: caller asked for, as a fraction of that radius. Above it the radius and the
+#: endpoints describe two different arcs and the call is refused; below it they
+#: are one arc with rounding in the ends.
+ARC_CENTRE_DRIFT_LIMIT = 0.05
 
-    WHY THIS EXISTS (2026-11-12 report, P0-1). A CATIA arc is created from
-    centre + radius + angles, so a caller's ``p1`` is not where the arc starts:
-    the drawn start is ``centre + radius * unit(p1 - centre)``, the RADIAL
-    PROJECTION of the point onto the circle. A least-squares arc fit puts p1 a
-    few hundredths off that circle, so a 73-segment profile that answered "every
-    junction meets within 0.0000 mm" was 30 seams wide when measured on what was
-    actually drawn - 0.0043 to 0.0960 mm. Rebuilding the circle through the two
-    endpoints and the old arc's midpoint keeps the shape (the reporter measured
-    0.112 mm of deviation) and makes "the end you gave" and "the end that was
-    drawn" the same point.
+
+def _circle_at_radius(first: Sequence[float], second: Sequence[float],
+                      center: Sequence[float], radius: float
+                      ) -> tuple[list[float], float] | None:
+    """The circle of the GIVEN radius through both endpoints, nearest ``center``.
+
+    WHY NOT THREE POINTS (2026-11-19 report, §3.1). This used to fit a circle
+    through the two endpoints and the old arc's midpoint, and that midpoint is
+    not data: it is computed FROM the radius the caller gave. Feeding it back as
+    a third constraint adds no information and freezes the wrong degree of
+    freedom, so the whole residual comes out as a radius change - amplified by
+    1/(1-cos(sweep/2)), which is 34x for the report's 28-degree web arc. There,
+    0.0027 mm of endpoint error became 0.0924 mm of radius AND of centre, and two
+    features the drawing calls coaxial (R72.367 twice) came out 0.09 mm apart.
+    The same amplification is why a 0.0005 mm error on R10 answered R9.7386.
+
+    Two endpoints and a radius leave exactly one degree of freedom - which side
+    the centre is on - and taking the branch nearest the caller's centre keeps
+    the radius to the last bit and moves the centre by about the endpoint error
+    itself. ``None`` when no such circle exists: the chord is longer than the
+    diameter, so the radius and the endpoints are not rounding but a
+    contradiction.
     """
     ax, ay = float(first[0]), float(first[1])
-    bx, by = float(mid[0]), float(mid[1])
-    cx, cy = float(second[0]), float(second[1])
-    determinant = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
-    if abs(determinant) < 1e-12:
+    bx, by = float(second[0]), float(second[1])
+    half = math.hypot(bx - ax, by - ay) / 2.0
+    if half <= 1e-12 or radius < half - 1e-9:
         return None
-    aa = ax * ax + ay * ay
-    bb = bx * bx + by * by
-    cc = cx * cx + cy * cy
-    ux = (aa * (by - cy) + bb * (cy - ay) + cc * (ay - by)) / determinant
-    uy = (aa * (cx - bx) + bb * (ax - cx) + cc * (bx - ax)) / determinant
-    radius = math.hypot(ax - ux, ay - uy)
-    if not math.isfinite(radius) or radius <= 0:
+    middle_x, middle_y = (ax + bx) / 2.0, (ay + by) / 2.0
+    nx, ny = ay - by, bx - ax            # normal to the chord, before scaling
+    norm = math.hypot(nx, ny)
+    if norm <= 1e-12:
         return None
-    return [ux, uy], radius
+    nx, ny = nx / norm, ny / norm
+    height = math.sqrt(max(0.0, radius * radius - half * half))
+    best: tuple[list[float], float] | None = None
+    for sign in (1.0, -1.0):
+        candidate = [middle_x + sign * height * nx, middle_y + sign * height * ny]
+        drift = _point_gap(candidate, center)
+        if best is None or drift < best[1]:
+            best = (candidate, drift)
+    return best
 
 
 def _project_to_circle(point: Sequence[float], center: Sequence[float],
@@ -3918,92 +3936,109 @@ class SketcherTools:
             start_angle = end_angle = None
             # THE POINT GIVEN IS NOT THE POINT DRAWN. An arc is created from
             # centre + radius + angles, so CATIA starts it at the RADIAL
-            # PROJECTION of p1 onto that circle. A fitted p1 sits a few
-            # hundredths off it, and then the profile this tool calls "closed"
-            # is 30 seams wide in catia_close_sketch (2026-11-12 report: 73
-            # segments, "every junction within 0.0000 mm" here against 0.0043 to
-            # 0.0960 mm there). So rebuild the circle through p1, the old arc's
-            # midpoint and p2: the endpoints then lie on it exactly and the
-            # shape moves by the fit's own error, which the reporter measured at
-            # 0.112 mm.
-            mid_angle, sweep, _ = _sweep_choice(
-                math.atan2(first[1] - center[1], first[0] - center[0]),
-                math.atan2(second[1] - center[1], second[0] - center[0]),
-                direction, bool(raw.get("major", False)))
-            mid = _on_circle(center, radius, math.degrees(mid_angle + sweep / 2.0))
-            already_on = max(
-                abs(_point_gap(first, center) - radius),
-                abs(_point_gap(second, center) - radius))
-            rebuilt = None if already_on <= 1e-9 else _circle_through(first, mid, second)
-            # A circle through three nearly collinear points is meaningless, and
-            # a rebuilt radius far from the one asked for means the data, not the
-            # rounding, is the problem - keep the caller's circle there and say
-            # where the ends will land instead of silently drawing something else.
-            if already_on <= 1e-9:
-                # The ends already lie on the circle: nothing was moved and
-                # there is nothing to report. Saying "rebuilt (R20 -> R20)"
-                # would be noise in every well-formed call.
+            # PROJECTION of p1 onto that circle. When the caller's ends are not
+            # on the caller's circle, something has to give, and WHICH thing
+            # gives is the whole question: the radius is what a diameter callout
+            # names and what two coaxial features share, so the radius is kept
+            # and the centre moves by the minimum that puts both ends on it.
+            radials = (_point_gap(first, center), _point_gap(second, center))
+            deviation = max(abs(radials[0] - radius), abs(radials[1] - radius))
+            if deviation <= 1e-9:
+                # Both ends already lie on the circle: nothing moved and there
+                # is nothing to report. Saying "rebuilt (R20 -> R20)" would be
+                # noise in every well-formed call.
                 pass
-            elif rebuilt is not None and abs(rebuilt[1] - radius) <= max(0.02, 0.05 * radius):
-                new_center, new_radius = rebuilt
-                adjust = [
-                    f"arc {number}: its circle was rebuilt through its two "
-                    f"endpoints and its midpoint (R{radius:.4f} -> "
-                    f"R{new_radius:.4f}, centre moved "
-                    f"{_point_gap(center, new_center):.4f} mm) because an arc is "
-                    "drawn from centre+radius+angles and the endpoints you gave "
-                    "were not exactly on that circle"]
-                center, radius = new_center, new_radius
-                first = _project_to_circle(first, center, radius)
-                second = _project_to_circle(second, center, radius)
-            elif rebuilt is not None:
-                # THE INPUT CONTRADICTS ITSELF, AND PROJECTING QUIETLY IS THE
-                # WORST ANSWER (2026-11-19 report, P1-5). The report's dog-bone
-                # profile said R0.35 on four arcs whose endpoints were R0.25 from
-                # the centre: this branch used to draw R0.35 and move each end by
-                # 0.1 mm, so the profile was 16 loose ends - which only the PAD
-                # found, two calls later. Refuse here, where both numbers are in
-                # hand and neither has been drawn yet.
-                drawn_first = _project_to_circle(first, center, radius)
-                drawn_second = _project_to_circle(second, center, radius)
-                moved = max(_point_gap(first, drawn_first),
-                            _point_gap(second, drawn_second))
-                raise ArgumentRejected(
-                    f"Segment {number} (arc) contradicts itself: its endpoints "
-                    f"{_fmt_point(first)} and {_fmt_point(second)} are "
-                    f"{_point_gap(first, center):.4f} and "
-                    f"{_point_gap(second, center):.4f} mm from the centre "
-                    f"{_fmt_point(center)}, so they describe R{rebuilt[1]:.4f}, "
-                    f"while 'radius' says R{radius:.4f}. Drawing it either way "
-                    "would be a guess: at R"
-                    f"{radius:.4f} each end lands {moved:.4f} mm from where it "
-                    "was given, which leaves the profile OPEN - and a pad or "
-                    "pocket on an open profile builds nothing. Nothing was "
-                    "drawn. Fix the record: either pass radius="
-                    f"{rebuilt[1]:.4f} (what the endpoints say), or move the "
-                    "endpoints onto the R"
-                    f"{radius:.4f} circle. Every arc of the profile is checked "
-                    "this way, so the message names the first one that "
-                    "disagrees.",
-                    code="ARC_RADIUS_MISMATCH", stage="validate", modified=False,
-                    data={"segment": number,
-                          "centre": list(center),
-                          "radius_given_mm": radius,
-                          "radius_from_endpoints_mm": rebuilt[1],
-                          "endpoint_1": list(first),
-                          "endpoint_2": list(second),
-                          "endpoint_offset_mm": moved})
             else:
-                drawn_first = _project_to_circle(first, center, radius)
-                drawn_second = _project_to_circle(second, center, radius)
-                moved = max(_point_gap(first, drawn_first),
-                            _point_gap(second, drawn_second))
-                adjust = [
-                    f"arc {number}: its circle was NOT rebuilt (the three points "
-                    f"are collinear, so they do not define a circle), so its "
-                    f"ends land where the circle puts them - up to "
-                    f"{moved:.4f} mm from the points given"]
-                first, second = drawn_first, drawn_second
+                fitted = _circle_at_radius(first, second, center, radius)
+                if fitted is not None and fitted[1] <= max(
+                        1e-4, ARC_CENTRE_DRIFT_LIMIT * radius):
+                    # KEEP THE RADIUS, MOVE THE CENTRE (2026-11-19 report, §3.1).
+                    moved_center, drift = fitted
+                    _, sweep, _ = _sweep_choice(
+                        math.atan2(first[1] - center[1], first[0] - center[0]),
+                        math.atan2(second[1] - center[1], second[0] - center[0]),
+                        direction, bool(raw.get("major", False)))
+                    amplification = (1.0 / (1.0 - math.cos(sweep / 2.0))
+                                     if sweep < math.pi else 1.0)
+                    adjust = [
+                        f"arc {number}: R{radius:.4f} is KEPT and its centre "
+                        f"moved {drift:.4f} mm to {_fmt_point(moved_center)}, "
+                        f"because the ends you gave were up to {deviation:.4f} mm "
+                        "off that circle and an arc is drawn from "
+                        "centre+radius+angles - the ends have to lie on it. "
+                        "Moving the centre by the size of that error is the "
+                        "smallest change that closes them"
+                        + (f"; a circle fitted through the ends AND the arc's "
+                           f"midpoint would have moved it {amplification:.0f}x "
+                           f"further (~{amplification * deviation:.4f} mm), "
+                           "because that midpoint is computed from this radius "
+                           "rather than measured" if amplification > 2 else "")
+                        + "."]
+                    center = moved_center
+                    first = _project_to_circle(first, center, radius)
+                    second = _project_to_circle(second, center, radius)
+                else:
+                    # THE INPUT CONTRADICTS ITSELF, AND ANSWERING WITH ONE
+                    # NUMBER IS THE WORST ANSWER (2026-11-19 report, §3.2). This
+                    # branch used to say "pass radius=0.1768 (what the endpoints
+                    # say)", and 0.1768 was the circumradius of the three points
+                    # - half the chord - i.e. the HALF CIRCLE through the two
+                    # ends. Following that advice turned a 90-degree corner into
+                    # a 180-degree one: from "the profile will not close" to "it
+                    # closes and is the wrong shape", which is harder to find.
+                    # Keep the centre or keep the radius; both are real fixes and
+                    # they are different arcs, so both are named with their
+                    # consequence.
+                    drawn_first = _project_to_circle(first, center, radius)
+                    drawn_second = _project_to_circle(second, center, radius)
+                    moved = (_point_gap(first, drawn_first),
+                             _point_gap(second, drawn_second))
+                    chord = _point_gap(first, second)
+                    if fitted is None:
+                        why = (f"The two ends are {chord:.4f} mm apart, which is "
+                               f"more than the {2 * radius:.4f} mm diameter, so "
+                               f"no arc of R{radius:.4f} can join them at all.")
+                    else:
+                        why = (f"Putting both ends on a R{radius:.4f} circle "
+                               f"would move the centre {fitted[1]:.4f} mm "
+                               f"({fitted[1] / radius:.1%} of the radius), which "
+                               "is a different arc, not rounding.")
+                    raise ArgumentRejected(
+                        f"Segment {number} (arc) contradicts itself: its ends "
+                        f"{_fmt_point(first)} and {_fmt_point(second)} are "
+                        f"{radials[0]:.4f} and {radials[1]:.4f} mm from the "
+                        f"centre {_fmt_point(center)}, while 'radius' says "
+                        f"R{radius:.4f}. {why} Drawing it either way would be a "
+                        "guess, and at R"
+                        f"{radius:.4f} each end lands {moved[0]:.4f} / "
+                        f"{moved[1]:.4f} mm from where it was given, which leaves "
+                        "the profile OPEN - and a pad or pocket on an open "
+                        "profile builds nothing. Nothing was drawn. Two fixes, "
+                        "and they are different arcs:\n"
+                        f"  · keep the centre {_fmt_point(center)}: pass "
+                        f"radius={max(radials):.4f}, and the arc ends exactly "
+                        "where you put them;\n"
+                        f"  · keep radius={radius:.4f}: move the ends "
+                        f"{moved[0]:.4f} and {moved[1]:.4f} mm onto that circle, "
+                        "and the corner keeps its radius and shifts slightly.\n"
+                        f"R{chord / 2.0:.4f} - half the chord - is NOT one of "
+                        "them: that is the half circle through the two ends, and "
+                        "it would turn this corner into a 180-degree one. Every "
+                        "arc of the profile is checked this way, so the message "
+                        "names the first one that disagrees.",
+                        code="ARC_RADIUS_MISMATCH", stage="validate",
+                        modified=False,
+                        data={"segment": number,
+                              "centre": list(center),
+                              "radius_given_mm": radius,
+                              "radius_keeping_centre_mm": max(radials),
+                              "radius_from_each_end_mm": list(radials),
+                              "endpoint_moves_mm": list(moved),
+                              "semicircle_radius_mm": chord / 2.0,
+                              "centre_move_to_keep_radius_mm": (
+                                  fitted[1] if fitted else None),
+                              "endpoint_1": list(first),
+                              "endpoint_2": list(second)})
         else:
             raise ArgumentRejected(
                 f"Segment {number} (arc) needs either start_angle and end_angle "

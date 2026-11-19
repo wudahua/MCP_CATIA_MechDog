@@ -2,7 +2,7 @@
 
 > **中文入口见 [README.md](README.md)。** This file is the full English reference: every tool, every measurement behind it, and every known limit.
 
-**0.3.150** · [what changed](CHANGELOG.md) ·
+**0.3.151** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1377,7 +1377,54 @@ Two facts about real drawings that this had to accept:
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
 
-0.3.150 answers the 2026-11-19 report: one P0, eight P1s, five P2s - twelve
+0.3.151 answers the acceptance of 0.3.150: 8 closed, 3 partial, 1 untouched,
+2 declined, and no regression. Two of the three findings share one cause -
+**something computed from the caller's input was fed back as if it had been
+measured.**
+
+The arc rebuild did exactly that. To close profiles whose endpoints were
+fitted a few hundredths off, 0.3.120 fitted a circle through the two ends and
+the arc's MIDPOINT - and that midpoint is computed FROM the radius. It added
+no information and froze the wrong degree of freedom, so the whole residual
+came out as a radius change, amplified by 1/(1-cos(sweep/2)): 34x at 28
+degrees, 3.4x at 90. The report's web arc (R72.367, ends 0.0027 mm off) became
+R72.4594 with the centre 0.0924 mm away, and two faces the drawing calls
+coaxial ended up 0.09 mm apart. The radius is now KEPT and the centre moves by
+the size of the error itself - measured on B30 2026-11-19: R72.3670, centre
+0.0028 mm away, `radius_mm: 72.367` read back from the sketch.
+
+`ARC_RADIUS_MISMATCH` used to recommend 0.1768 on the dog-bone arc, and 0.1768
+was half the chord - the HALF CIRCLE through the two ends, which turns a 90
+degree corner into a 180 degree one. It now names the two real fixes (keep the
+centre and take R0.2500, or keep R0.3500 and move each end 0.1000 mm) and says
+the half circle is neither.
+
+The 10 s that a single-edge chamfer spent in `edges resolved` was
+`GetMeasurable`: 91 ms per edge on the first pass over 288 edges (26.2 s),
+3.6 ms on the second, because SPA caches measurables itself. `Length`, the
+only thing the table wanted, was 312 ms of it. So the table no longer reads
+lengths it is not asked for, and naming an edge is 34.1 s -> 4.5 s. The
+anchored path cannot skip the pass, so it reports it: `over 288 edge(s),
+105 ms each`, plus the hint. Caching the table between calls was declined -
+it saves the enumeration and risks handing back pre-rebuild references, which
+fail by filleting whatever edge now has that index.
+
+`catia_screenshot` can set the resolution after all: 0.3.103 measured
+`Window.Width/Height` on a MAXIMIZED window, where the setter is a no-op, and
+generalised to "cannot be done". Measured: 600x877 / 1100x900 / 1600x900
+requested, exactly those written, window restored afterwards. A resized window
+is not yet a resized VIEW - on a document created in the same call, a capture
+0.25 s later still writes the old frame - so the written size is verified and
+the capture retried. `crop=[x,y,w,h]` cuts the file with Pillow when it is
+installed, and says the image was NOT cropped when it is not. The spec tree
+and the axis triad still cannot be suppressed, and that is final.
+
+The face count the 0.3.150 notes blamed on the split extrude was retracted by
+the same reporter: one pad and two pads both give 72/191/120. `limit1`/
+`limit2` stay for the tree and the volume; the schema no longer claims a face
+count.
+
+0.3.150 answered the 2026-11-19 report: one P0, eight P1s, five P2s - twelve
 of the fourteen, with the other two named in the changelog rather than
 dropped.
 
@@ -2118,6 +2165,25 @@ Place the result with `catia_get_component_transform`.
 
 ## Known limits
 
+* **A quantity computed from the input is not an observation.** The arc rebuild
+  fitted a circle through the ends and the arc's midpoint, and that midpoint is
+  computed from the radius - so the fit spent the entire residual on the radius,
+  amplified by 1/(1-cos(sweep/2)). The tell is the AMPLIFICATION: 0.0027 mm of
+  input error became 0.09 mm of output, which is a statement about which
+  degree of freedom was frozen, not about arithmetic. Keep the quantity that
+  carries meaning (the radius, the coaxial axis) and move the one that does not
+  (the centre); two points plus a radius leave one branch to choose.
+* **The expensive call is usually not the one you are reading.** `edges
+  resolved` was `GetMeasurable` at 91 ms per edge, not `Length` at 1 ms. The
+  whole-body pass existed so a fingerprint could carry a length, so the path
+  that does not need a fingerprint stopped paying for it. The cache the report
+  suggested was declined: a stale reference does not fail loudly, it rounds the
+  edge that now has that index.
+* **"Cannot" needs the state it was measured in.** "Window size does not
+  change the capture" was true on a maximized window, where the setter is a
+  no-op - and false on a normal one. And after resizing, the VIEW lags the
+  window by one paint: 0.25 s was not enough, 1 s was, and `Reframe()` did not
+  help - so a capture verifies its own size and retries.
 * **A plane is not a datum, just as "the south side" is not a street address.**
   A `frame` plane is infinite, so two sketches lying on one plane says nothing
   about standing on one support: measured on z = 0, two datums 50 mm apart
