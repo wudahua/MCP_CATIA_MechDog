@@ -1,8 +1,8 @@
-# MCP_CATIA_MechDog 0.3.151
+# MCP_CATIA_MechDog 0.3.152
 
-![version](https://img.shields.io/badge/version-0.3.151-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![CATIA](https://img.shields.io/badge/CATIA-V5%20R30%20(B30)-orange) ![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20http-purple)
+![version](https://img.shields.io/badge/version-0.3.152-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![CATIA](https://img.shields.io/badge/CATIA-V5%20R30%20(B30)-orange) ![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20http-purple)
 
-当前正式版 **0.3.151**——按 0.3.150 的验收报告处理，两条主因都是**同一个错误**：把「由你的输入算出来的东西」当成「观测到的东西」再喂回去。**弧的圆不该被重建**：上一版用一个过两端点和**弧中点**的圆去闭合轮廓，而那个中点是**由半径算出来的**，等于把误差全挤进半径，浅弧上放大 `1/(1−cos(θ/2))`——报告的腹板弧端点只偏 0.0027 mm，却被改成 R72.4594、圆心挪 0.0924 mm，两处「设计上同轴」的 R72.367 变成差 0.09 mm。现在**保住半径、圆心只移误差本身**（实测 0.0028 mm，草图回读 `radius_mm: 72.367`）。`ARC_RADIUS_MISMATCH` 也不再建议「传半径=弦长的一半」——那是**半圆**，会把 90° 圆角画成 180°；改为给出两个真解法（保圆心 R0.2500 / 保半径各移 0.1 mm）。**「选边 10 s」的真相是一次全表 `GetMeasurable`**：288 条边首次 26.2 s（91 ms/条，SPA 自己第二次只要 3.6 ms），而 `Length` 只占 312 ms——所以名字选边不再为全表建 Measurable，**34.1 s → 4.5 s**；锚点路径省不掉，于是回执报「288 边 × 105 ms」并提示改用 `Edge.N`。**截图分辨率其实可以设**：0.3.103 的「不可改」是在最大化窗口上测的；实测 600×877 / 1100×900 / 1600×900 请求即所得，`crop=[x,y,w,h]` 用 Pillow 裁剪（未装则明说未裁）。 · [变更日志](CHANGELOG.md) · [Releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases)
+当前正式版 **0.3.152**——按 0.3.151 的验收报告处理，P0 是「装配约束全路径不可用」，这一版把它从「试了不行」变成「量出来是**哪一层**不行」。`Application.GetWorkbenchId()` 在装配文档激活时返回 **'Assembly'**——工作台一直是开的，`StartWorkbench` 在这版上是**空操作**（连不存在的名字都返回 None，要 Part Design 也不换 id），所以前两轮把「工作台没激活」当嫌疑是错的；工作台开着，`AddMonoEltCst` 仍然对**全部 14 个约束类型码**报 E_FAIL——根集合与子件集合、就地新建的零件与从磁盘装的零件、元素给组件/`ReferenceProduct`/根产品/以及**前几轮没试过的**`Selection.Item(1).Reference` 都一样，`Product.CreateReferenceFromObject` 不存在。让这些失败有意义的是一格对照：**同一会话、同一 CATIA**，同一个 `AddMonoEltCst(0, Reference)` 在**草图**上建出 `固定的.1`；而 UI 命令 `'Fix'`/`'CreateFix'` 都答「未知命令」、`'Update'` 正常——即约束命令根本没注册进来。于是四个 mate 工具的描述直接写 **UNAVAILABLE IN THIS BUILD**，`catia_diagnose` 发一条 `capability_ceilings`（含同样证据），**没有**加「假装是约束的变换层」。P1：`transform_13` + `translation_unit` 直接吃列主序 13 元组（CATIA 原生九个数**就是**列，所以只换单位、校验 scale=1，**不做转置**——第一版转了，被验收第 A 格抓住：90° 转向装成 180°），读回还报 `if_read_transposed.differs_by_deg`。P2/P3：截断的顶点扫描**不是下界而是样本的盒子**——582 顶点只读 200，max y 报 3.1941 而零件到 46.1033（短 42.9 mm），还花了 41 054 ms；同一零件 `mesh` 用 181 ms 给到46.1033。P4：`save_as_copy(part_number=...)` 让副本自带新编号（实例名从 `P05_legrod.6` 变成 `P06_mir_legrod.1`）。P5：`strict_arc` 拒绝那次 0.0028 mm 的圆心移动。 · [变更日志](CHANGELOG.md) · [Releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases)
 
 > 让 AI 客户端通过 MCP，在 CATIA V5 里建**原生可编辑的实体特征**——并且每一步都能量回来。
 
@@ -20,7 +20,7 @@ MCP_CATIA_MechDog 是运行在你自己 Windows 电脑上的本地 MCP 服务（
 - **草图可回改**：`catia_sketch_edit` 重开已关闭的草图，`catia_sketch_delete_element` 删掉画错的一条，零件随之重建——错一条线不必整件重做。
 - **量不到就说量不到**：超范围、超能力或读数失败时，回执以 `UNVERIFIED:` 开头并说明哪一个测量失败，不会把失败写成成功。
 - **能力可发现**：诊断文字旁边给一行能直接粘贴的调用；「有工具但没人知道怎么调」和「没有这个工具」一样是缺陷。
-- **离线可测**：**2423** 个测试不需要 CATIA，`pytest` 在本机就能跑全绿；真机验收脚本在 `scripts/b30_*`。
+- **离线可测**：**2448** 个测试不需要 CATIA，`pytest` 在本机就能跑全绿；真机验收脚本在 `scripts/b30_*`。
 
 ## 环境要求
 

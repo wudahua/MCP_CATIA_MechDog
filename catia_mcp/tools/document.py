@@ -316,6 +316,19 @@ class DocumentTools:
                             "description": "Replace the target if it exists (default true).",
                             "default": True,
                         },
+                        "part_number": {
+                            "type": "string",
+                            "description": (
+                                "Also rewrite the COPY's 零件编号 to this. Without "
+                                "it the copy carries the original's part number, "
+                                "so inserting it produces instances named after the "
+                                "ORIGINAL part (copy P05_legrod -> P06_mir_legrod "
+                                "and the tree says P05_legrod.6), which is also "
+                                "what a {part_number, occurrence} lookup then "
+                                "matches. Costs one open/save/close of the copy. "
+                                "Omit to leave the copy byte-identical."
+                            ),
+                        },
                     },
                     "required": ["file_path"],
                 },
@@ -488,7 +501,8 @@ class DocumentTools:
                                            arguments.get("ascii_name"))
             case "catia_save_as_copy":
                 return self._save_as_copy(
-                    arguments["file_path"], bool(arguments.get("overwrite", True)))
+                    arguments["file_path"], bool(arguments.get("overwrite", True)),
+                    arguments.get("part_number"))
             case "catia_close_document":
                 return self._close_document(arguments.get("save", False),
                                             arguments.get("document"),
@@ -954,21 +968,28 @@ class DocumentTools:
     #: constraint count staying at 0. GenerateConstraints does not exist on the
     #: type. So the answer is said up front instead of 8 calls later.
     _CONSTRAINT_CEILING = (
-        " ASSEMBLY CONSTRAINTS ARE NOT AVAILABLE IN THIS ENVIRONMENT: every "
-        "route this surface offers was tried on V5-6R2020 B30 (2026-10-23 and "
-        "again 2026-11-19) and all of them answer E_FAIL with the constraint "
-        "count staying at 0 - Fix (AddMonoEltCst) with the component, its "
-        "ReferenceProduct and the root product; coincidence/offset/angle "
-        "(AddBiEltCst); ApplyWorkMode 0/1/2; StartWorkbench under four assembly "
-        "workbench names; and CreateReferenceFromName with three path shapes. "
+        " ASSEMBLY CONSTRAINTS ARE NOT AVAILABLE IN THIS ENVIRONMENT, and this "
+        "is now measured to the point of knowing WHY it is not our arguments: on "
+        "V5-6R2020 B30 (2026-10-23, and twice on 2026-11-19) AddMonoEltCst "
+        "answers E_FAIL for all 14 constraint type codes, on the root product's "
+        "collection and a child's, in an assembly built in place and one built "
+        "from saved parts, with the element given as the component, its "
+        "ReferenceProduct, the root, and the Reference that "
+        "Selection.Item(1).Reference returns - while the SAME call, same code, "
+        "same Reference, SUCCEEDS ON A SKETCH in that session. The assembly "
+        "workbench is active (GetWorkbenchId() = 'Assembly'), StartWorkbench is a "
+        "no-op on this build, ApplyWorkMode(0/1/2) on the root and the child "
+        "changes nothing, and the Fix command itself is not registered ('Fix' "
+        "and 'CreateFix' answer 'unknown command' where 'Update' is accepted). "
         "Product.GenerateConstraints does not exist on this type. "
         "WHAT TO DO INSTEAD: place components with catia_set_component_transform "
         "from a table of transforms - one call sets many, and the reply reports "
         "the residual it read back (a 24-instance quadcopter landed at 5e-7 mm, "
-        "and the 2026-11-19 report's 8 instances at 3.88e-10 mm). The tree then "
-        "shows the root as not fixed, which affects nothing: the positions are "
-        "absolute. catia_fix_constraint and the three mate tools will refuse with "
-        "this same explanation - do not plan around them."
+        "and the 2026-11-19 report's 17 instances at 4.45e-10 mm). What you get "
+        "is absolute placement, NOT a parameterised assembly: the tree shows the "
+        "root as not fixed, and moving one part will not carry any other. "
+        "catia_fix_constraint and the three mate tools refuse with this same "
+        "explanation - do not plan around them."
     )
 
     def _constraint_ceiling_note(self) -> str:
@@ -1803,12 +1824,21 @@ class DocumentTools:
         stamp = datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
         return f"{amount}, last modified {stamp}"
 
-    def _save_as_copy(self, file_path: str, overwrite: bool = True) -> str:
+    def _save_as_copy(self, file_path: str, overwrite: bool = True,
+                      part_number: str | None = None) -> str:
         """Save, then copy the file - the only way to snapshot a finished model.
 
         SaveAs is refused once the document holds geometry, so copying the saved
         file through CATIA's own FileSystem service is what is left. The open
         document keeps its path.
+
+        ``part_number`` rewrites the COPY's 零件编号 after the copy exists, by
+        opening it, writing the number, saving and closing it again. Without that
+        the copy is a file with a new name and the OLD number inside, so
+        inserting it produces instances called after the original part: the
+        2026-11-19 report copied P05_legrod.CATPart to P06_mir_legrod.CATPart and
+        got ``P05_legrod.6`` in the tree, which is also what a
+        ``{part_number, occurrence}`` lookup would then match (reported P4).
         """
         import os
 
@@ -1840,10 +1870,69 @@ class DocumentTools:
             import shutil
 
             shutil.copyfile(source, target)
-        return (
+        reply = (
             f"Copied '{os.path.basename(source)}' -> '{target}'. "
             f"The open document still points at '{source}'."
         )
+        wanted = (part_number or "").strip()
+        if not wanted:
+            return reply
+        return reply + " " + self._rewrite_part_number(target, wanted, doc)
+
+    def _rewrite_part_number(self, path: str, part_number: str,
+                             reactivate: Any) -> str:
+        """Open the copy, write its 零件编号, save, close, re-activate ``reactivate``.
+
+        A copy made by the operating system is a file; the number that names its
+        instances lives INSIDE it, and only CATIA can change that. So the copy is
+        opened exactly once, rewritten and closed - and the original is
+        re-activated even if that fails, because leaving a caller's session on a
+        different document than it started on is the kind of side effect that
+        makes a later, unrelated tool call wrong.
+        """
+        docs = self.conn.documents
+        opened = None
+        try:
+            opened = docs.Open(path)
+            product = None
+            try:
+                product = opened.Product
+            except Exception:  # noqa: BLE001 - a product document answers here
+                product = self.conn.product_of(opened)
+            was = str(product.PartNumber)
+            product.PartNumber = part_number
+            opened.Save()
+        except Exception as error:  # noqa: BLE001 - the copy exists; say what failed
+            if opened is not None:
+                try:
+                    opened.Close()
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                reactivate.Activate()
+            except Exception:  # noqa: BLE001
+                pass
+            raise RuntimeError(
+                f"The copy exists at '{path}' but its part number could not be "
+                f"rewritten to '{part_number}': {str(error).splitlines()[0][:160]}. "
+                "The file is a usable copy of the original with the ORIGINAL part "
+                "number inside it, so instances inserted from it will be named "
+                f"after '{os.path.basename(path)}'s old number. Call "
+                "catia_set_part_number on it after opening it, or delete it and "
+                "copy again."
+            ) from error
+        try:
+            opened.Close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            reactivate.Activate()
+        except Exception:  # noqa: BLE001
+            pass
+        return (
+            f"The copy's part number is now '{part_number}' (it was '{was}'), so "
+            "instances inserted from it are named after that; the file itself is "
+            f"still '{os.path.basename(path)}'.")
 
     def _document_names(self) -> list[str]:
         """Every open document name, read defensively."""

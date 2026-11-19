@@ -7,6 +7,7 @@ Contact, Offset, Angle), move components, and manage the product tree.
 from __future__ import annotations
 
 import json
+import math
 import os
 from typing import Any
 
@@ -163,8 +164,28 @@ class AssemblyTools:
             {
                 "name": "catia_fix_constraint",
                 "description": (
-                    "Fix a component in place (remove all degrees of freedom). "
-                    "Typically applied to the base/reference component."
+                    "UNAVAILABLE IN THIS BUILD - do not plan around it. CATIA "
+                    "V5-6R2020 on B30 refuses every constraint route this server "
+                    "can reach, measured three times (2026-10-23, 2026-11-19 twice "
+                    "more): AddMonoEltCst answers E_FAIL for all 14 constraint type "
+                    "codes, on the root product's collection and on a child's, for "
+                    "products created in place and products loaded from disk, with "
+                    "the element given as the product, as its ReferenceProduct, as "
+                    "the root, and as the Reference the visible selection returns "
+                    "(Selection.Item(1).Reference - a route the earlier rounds had "
+                    "not tried). In the same session and the same CATIA, "
+                    "AddMonoEltCst(0, Reference) on a SKETCH works, so the method "
+                    "and the marshalling are fine and the assembly collection is "
+                    "what refuses. The assembly workbench IS active "
+                    "(Application.GetWorkbenchId() = 'Assembly'), and StartWorkbench "
+                    "is a no-op on this build: it returns None even for a name that "
+                    "does not exist and does not change the id even when asked for "
+                    "Part Design. The Fix UI command is not registered either: "
+                    "'Fix' and 'CreateFix' both answer 'unknown command' (未知命令) "
+                    "while 'Update' is known. Build the assembly from a table of "
+                    "(catia_set_component_transform) and read the reply's "
+                    "`parameterised: false` as the honest description of what you "
+                    "get."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -180,8 +201,12 @@ class AssemblyTools:
             {
                 "name": "catia_coincidence_constraint",
                 "description": (
-                    "Create a Coincidence constraint between two components. "
-                    "Aligns axes, planes, or points of two components."
+                    "UNAVAILABLE IN THIS BUILD - same measured refusal as "
+                    "catia_fix_constraint (AddBiEltCst answers E_FAIL too: tested "
+                    "with code 2 between two instance references on a disk-built "
+                    "assembly, 2026-11-19). Use catia_set_component_transform with "
+                    "absolute placements instead; there is no constraint to read "
+                    "back because none can be created."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -213,8 +238,11 @@ class AssemblyTools:
             {
                 "name": "catia_offset_constraint",
                 "description": (
-                    "Create an Offset constraint between two faces/planes of two components. "
-                    "Maintains a constant distance between the reference elements."
+                    "UNAVAILABLE IN THIS BUILD - same measured refusal as "
+                    "catia_fix_constraint. An offset is a translation, so put the "
+                    "component where the offset would have put it with "
+                    "catia_set_component_transform; the difference is that nothing "
+                    "keeps it there when the other component moves."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -237,7 +265,12 @@ class AssemblyTools:
             },
             {
                 "name": "catia_angle_constraint",
-                "description": "Create an Angle constraint between two components.",
+                "description": (
+                    "UNAVAILABLE IN THIS BUILD - same measured refusal as "
+                    "catia_fix_constraint. An angle is part of the placement "
+                    "matrix: build it with rotation_rows (or transform_13) in "
+                    "catia_set_component_transform."
+                ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -530,8 +563,13 @@ class AssemblyTools:
                     "Pass either screenshot-verified form verbatim; picking the wrong one "
                     "yields a valid-looking placement that is the transpose of what you "
                     "asked for. `position_components` takes CATIA's raw 12 numbers instead. "
+                    "`transform_13` takes the 13-number column-major form SolidWorks and "
+                    "most spec tables emit (plus `translation_unit`), and converts it here. "
                     "Reads the placement back and reports deviation, det, orthogonality and "
-                    "where each local axis actually ended up. Pass `placements` - a "
+                    "where each local axis actually ended up - including "
+                    "`if_read_transposed.differs_by_deg`, the angle a transposed feed would "
+                    "have introduced, so a convention error is visible in the reply instead "
+                    "of in the model. Pass `placements` - a "
                     "list of {component_name, rotation_rows, translation, ...} - to "
                     "place many components in ONE call with one display refresh; "
                     "the reply reports each component's max deviation, so a batch "
@@ -596,6 +634,38 @@ class AssemblyTools:
                             "type": "array",
                             "description": "Translation (Tx, Ty, Tz) in mm; defaults to 0,0,0",
                             "items": {"type": "number"},
+                        },
+                        "transform_13": {
+                            "type": "array",
+                            "description": (
+                                "13 numbers in the order SolidWorks and most spec "
+                                "tables write them: [0..8] are the COLUMNS of the "
+                                "rotation (values 0-2 = the image of local x, 3-5 "
+                                "of local y, 6-8 of local z), [9..11] the "
+                                "translation in `translation_unit`, [12] the scale, "
+                                "which must be 1. This is the transpose of what "
+                                "`rotation_rows` with rotation_convention='matrix' "
+                                "expects, and the conversion is done here so a "
+                                "13-tuple can be passed verbatim - the 2026-11-19 "
+                                "report fed one to a row-major tool and got 17 "
+                                "instances with correct positions and transposed "
+                                "orientations, 20.3-180.0 deg out. Pass either "
+                                "this or rotation_rows/position_components, not "
+                                "both."
+                            ),
+                            "items": {"type": "number"},
+                            "minItems": 13,
+                            "maxItems": 13,
+                        },
+                        "translation_unit": {
+                            "type": "string",
+                            "enum": ["mm", "cm", "m"],
+                            "default": "mm",
+                            "description": (
+                                "Unit of transform_13's translation only (the "
+                                "rotation is dimensionless). SolidWorks writes "
+                                "metres, so 'm' multiplies by 1000."
+                            ),
                         },
                         "verify": {
                             "type": "boolean",
@@ -1019,28 +1089,43 @@ class AssemblyTools:
         return f"Component '{before}' renamed to '{after}'."
 
     _CONSTRAINT_EXPLAIN = (
-        "CATIA refused the constraint. Measured on V5-6R2020 B30 (2026-10-23, "
-        "re-probed 2026-11-19 with the routes the 2026-11-19 report suggested), "
-        "constraints cannot be created through this automation surface at all:\n"
-        "  · AddMonoEltCst (Fix) returns E_FAIL for a component whether it came "
-        "from AddComponentsFromFiles or from add_new_part, and whether or not it "
-        "is put in the selection first - five argument forms tried, including "
-        "the component's ReferenceProduct and the root product;\n"
-        "  · CreateReferenceFromName returns E_FAIL for all three path shapes "
-        "tried ('A1.1', '<part>.1', '<product>/<part>.1'), so there is no way to "
-        "build the reference a mate needs;\n"
-        "  · ApplyWorkMode(0/1/2) changes nothing, and StartWorkbench answers OK "
-        "for 'Assembly', 'Assembly Design', 'ASD' and 'AssemblyDesign' alike "
-        "(including names that do not exist) yet the next AddMonoEltCst still "
-        "fails - so that OK is not evidence of anything;\n"
+        "CATIA refused the constraint. Measured on V5-6R2020 B30, three rounds "
+        "(2026-10-23, and twice on 2026-11-19 after the second report asked for "
+        "the routes the first one suggested), constraints cannot be created "
+        "through this automation surface at all:\n"
+        "  · AddMonoEltCst returns E_FAIL for EVERY constraint type code 0-13, on "
+        "the root product's 'CATIAConstraints' collection and on a child "
+        "product's, in an assembly whose part was created in place and in one "
+        "built from saved .CATPart files, with the element given as the product, "
+        "as its ReferenceProduct, as the root product, and as the Reference the "
+        "visible selection returns (Selection.Item(1).Reference - this route "
+        "works and had not been tried before);\n"
+        "  · the same call WITH THE SAME CODE 0 AND A REFERENCE SUCCEEDS ON A "
+        "SKETCH in the same session ('固定的.1' created), so the method, the "
+        "argument type and the marshalling are not the problem - the assembly "
+        "collection is;\n"
+        "  · the workbench is not the problem either: Application.GetWorkbenchId() "
+        "answers 'Assembly' with this document active, and StartWorkbench is a "
+        "no-op on this build (it returns None for a name that does not exist and "
+        "does not change the id even when asked for 'Part Design'), so the older "
+        "wording that read its 'OK' as meaningless was right about the return "
+        "value and wrong about the reason;\n"
+        "  · AddBiEltCst fails the same way (code 2, coincidence, between two "
+        "instance references);\n"
+        "  · the UI command is missing as well: 'Fix' and 'CreateFix' both answer "
+        "'unknown command' while 'Update' is accepted, i.e. the constraint "
+        "commands are not registered in this session's command set - which points "
+        "at the Assembly Design constraint package rather than at our arguments, "
+        "and is the one thing here that a licence/configuration change could "
+        "alter;\n"
         "  · Product.GenerateConstraints does not exist on the type.\n"
         "What to do instead: place components with absolute transforms. "
         "catia_set_component_transform writes the position directly, which is "
         "how a 24-instance quadcopter assembly was placed with a 5e-7 mm "
-        "residual and the 2026-11-19 report's 8 instances at 3.88e-10 mm; the "
-        "tree then shows the root as not fixed, and nothing moves because of it. "
-        "If you need a parameterised assembly, build it from a spec table of "
-        "transforms rather than from constraints."
+        "residual and the 2026-11-19 report's 17 instances at 4.45e-10 mm. The "
+        "tree then shows the root as not fixed and nothing moves because of it: "
+        "that is not a parameterised assembly, and no tool on this surface can "
+        "make it one. Build it from a spec table of transforms instead."
     )
 
     def _constraint_failed(self, kind: str, exc: Exception) -> RuntimeError:
@@ -1243,13 +1328,14 @@ class AssemblyTools:
             for a in range(3)
             for c in range(3)
         )
+        transposed = AssemblyTools._transposed_reading_deg(components9)
         return {
             "basis_columns": {
                 "local_x_maps_to": [round(v, 9) for v in i_vec],
                 "local_y_maps_to": [round(v, 9) for v in j_vec],
                 "local_z_maps_to": [round(v, 9) for v in k_vec],
             },
-            "basis_rows": [[round(v, 9) for v in vec] for vec in (i_vec, j_vec, k_vec)],
+            "basis_rows": [[round(v, 9) for v in row] for row in (i_vec, j_vec, k_vec)],
             "rotation_rows": [[round(v, 9) for v in row] for row in rows],
             "matrix_a": [[round(v, 9) for v in row] for row in rows],
             "checks": {
@@ -1258,7 +1344,95 @@ class AssemblyTools:
                 "orthogonality_error": round(ortho, 12),
                 "orthogonal": ortho < 1e-6,
             },
+            # The 2026-11-19 report's P1: a transposed feed is invisible in the
+            # reply, because every number in it is then self-consistent. It is
+            # visible HERE - the angle between this placement and its transpose -
+            # so a caller can check a 13-tuple before trusting a whole table. 0
+            # deg means the placement is symmetric (180 deg rotations, mirrors)
+            # and the convention cannot be verified from this instance at all.
+            "if_read_transposed": {
+                "differs_by_deg": round(transposed, 6),
+                "verdict": (
+                    "the two readings coincide for this instance, so it cannot "
+                    "tell you which convention was used - check one that is not "
+                    "symmetric"
+                    if transposed < 1e-6 else
+                    "a transposed feed would have put this instance this many "
+                    "degrees away from the placement reported here"),
+            },
         }
+
+    # ── the 13-number convention other CAD systems write ─────────────────────
+    # SolidWorks and most spec tables hand out THIRTEEN numbers: nine rotation
+    # entries in COLUMN order, then a translation, then a scale. Feeding that to
+    # a tool whose default is row-major produces a placement that is exactly the
+    # transpose of what was meant - positions right, orientations wrong, and
+    # nothing in the reply looks odd. Measured cost of getting it wrong once: 17
+    # instances placed and re-placed, rotation off by 20.3-180.0 deg (2026-11-19
+    # report, P1 and its appendix G). So the conversion lives here, once, and the
+    # reply names which reading was used.
+    _TRANSLATION_UNITS = {"mm": 1.0, "m": 1000.0, "cm": 10.0}
+
+    def _from_transform_13(self, values: Any,
+                           unit: str = "mm") -> tuple[list[float], list[float]]:
+        """``(CATIA's nine placement numbers, translation_mm)`` from a 13-tuple.
+
+        ``values[0:9]`` are the COLUMNS of the rotation, i.e. the images of the
+        local x, y and z axes, in that order; ``values[9:12]`` is the translation
+        in ``unit``; ``values[12]`` is the scale and must be 1.
+
+        Those nine numbers go in VERBATIM: CATIA's own order is the same one -
+        "where does local X point, then Y, then Z" - so a column-major 13-tuple
+        needs a unit conversion and a scale check, not a transpose. Measured on
+        B30 2026-11-19 (acceptance v0486, cell A): transposing here put the
+        instance 180 deg out on a 90 deg turn, and the only reason it was noticed
+        is that the reply reports where local X actually ended up.
+        """
+        if not isinstance(values, (list, tuple)) or len(values) != 13:
+            raise ArgumentRejected(
+                "transform_13 must hold exactly thirteen numbers: nine rotation "
+                "entries in COLUMN order, three translation, one scale"
+            )
+        try:
+            numbers = [float(v) for v in values]
+        except (TypeError, ValueError):
+            raise ArgumentRejected(
+                f"transform_13 must hold numbers, got {values!r}"
+            ) from None
+        if unit not in self._TRANSLATION_UNITS:
+            raise ArgumentRejected(
+                f"translation_unit must be one of "
+                f"{', '.join(sorted(self._TRANSLATION_UNITS))} - got {unit!r}"
+            )
+        scale = numbers[12]
+        if abs(scale - 1.0) > 1e-9:
+            raise ArgumentRejected(
+                f"transform_13 carries scale {scale:g}; this tool places a rigid "
+                "body, so the scale must be 1 (scale the geometry in the part, not "
+                "the instance)"
+            )
+        factor = self._TRANSLATION_UNITS[unit]
+        translation = [round(v * factor, 9) for v in numbers[9:12]]
+        return [round(v, 12) for v in numbers[0:9]], translation
+
+    @staticmethod
+    def _transposed_reading_deg(components9: list[float]) -> float:
+        """How far apart the two readings of these nine numbers are, in degrees.
+
+        The difference between A and Aᵀ is the rotation A·A (A and Aᵀ are both
+        rotations, and A⁻¹·Aᵀ = Aᵀ·Aᵀ = (A·A)ᵀ), so its trace gives the angle: a
+        90 deg turn about Z comes out 180 deg, the identity 0 deg, and a 180 deg
+        turn about Z 0 deg - because that one IS its own transpose, which is the
+        case the reply has to call out rather than report as agreement.
+        """
+        a = [[components9[0], components9[3], components9[6]],
+             [components9[1], components9[4], components9[7]],
+             [components9[2], components9[5], components9[8]]]
+        product = [[sum(a[i][k] * a[k][j] for k in range(3)) for j in range(3)]
+                   for i in range(3)]
+        trace = product[0][0] + product[1][1] + product[2][2]
+        cosine = max(-1.0, min(1.0, (trace - 1.0) / 2.0))
+        return math.degrees(math.acos(cosine))
 
     def _get_component_transform(self, name: str) -> str:
         product = self.conn.get_active_product()
@@ -1343,6 +1517,17 @@ class AssemblyTools:
                 raise ArgumentRejected("position_components must hold exactly twelve numbers")
             values[9:12] = translation
             source = "position_components"
+        elif args.get("transform_13") is not None:
+            rotation, trans13 = self._from_transform_13(
+                args["transform_13"],
+                str(args.get("translation_unit") or "mm").lower())
+            values = rotation + trans13
+            translation = trans13
+            source = (
+                "transform_13 (column-major: values 0-2 / 3-5 / 6-8 are the "
+                "columns of R, i.e. CATIA's own order - where local x, y and z "
+                "point; 9-11 the translation in "
+                f"{args.get('translation_unit') or 'mm'}; 12 the scale)")
         elif rows is not None:
             if len(rows) != 3 or any(len(row) != 3 for row in rows):
                 raise ArgumentRejected("rotation_rows must be a 3x3 array")

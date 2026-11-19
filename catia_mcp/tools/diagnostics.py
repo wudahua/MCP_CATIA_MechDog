@@ -103,6 +103,44 @@ CEILING_STATUSES = frozenset({
 
 _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
     {
+        "member": "CATIAConstraints.AddMonoEltCst / AddBiEltCst (assembly)",
+        "status": "UNSUPPORTED_ON_B30",
+        "detail": (
+            "NO ASSEMBLY CONSTRAINT CAN BE CREATED THROUGH AUTOMATION ON THIS "
+            "BUILD, and the three measurement rounds that establish it are the "
+            "reason catia_fix_constraint, catia_coincidence_constraint, "
+            "catia_offset_constraint and catia_angle_constraint say so before the "
+            "call. Measured on "
+            "V5-6R2020 B30, 2026-10-23 and twice on 2026-11-19: E_FAIL for all "
+            "14 constraint type codes, on the root product's collection and on a "
+            "child's, in an assembly whose part was created in place AND in one "
+            "built from saved .CATPart files; element given as the component, its "
+            "ReferenceProduct, the root product, and the Reference returned by "
+            "Selection.Item(1).Reference. The control that makes those failures "
+            "mean something: in the same session, AddMonoEltCst(0, Reference) on "
+            "a SKETCH creates '固定的.1'. Not the workbench either - "
+            "Application.GetWorkbenchId() answers 'Assembly' with the document "
+            "active, StartWorkbench is a no-op (None for a name that does not "
+            "exist, and no id change even for 'Part Design'), and the UI command "
+            "is not registered ('Fix' and 'CreateFix' answer 'unknown command' "
+            "while 'Update' is accepted). Use catia_set_component_transform: "
+            "absolute placement, not a parameterised assembly - no tool on this "
+            "surface can make it one."
+        ),
+    },
+    {
+        "member": "Product.GenerateConstraints",
+        "status": "UNSUPPORTED_ON_B30",
+        "detail": (
+            "Does not exist on the Product type on this build (AttributeError, "
+            "measured 2026-11-19), so the one documented bulk route is gone, and "
+            "no tool is wrapped for it. Product.CreateReferenceFromObject does not "
+            "exist either - the only way to get a product Reference here is "
+            "Selection.Item(1).Reference, which catia_fix_constraint has been "
+            "measured with."
+        ),
+    },
+    {
         "member": "AddNewSewSurface",
         "status": "UNSUPPORTED_ON_B30",
         "detail": (

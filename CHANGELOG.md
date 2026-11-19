@@ -2,6 +2,87 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.152] — 2026-11-19 · an unavailable capability that now says why, a 13-tuple that no longer needs hand-transposing, and a box that was the box of a sample
+
+The 2026-11-19 report (against 0.3.151) is a hexapod built from a spec table: 7
+parts, 17 instances, placed to 4.45e-10 mm, and five things it could not do.
+P0 is answered by one more round of measurement - which found the reason the
+earlier rounds were looking in the wrong place - and by saying it in the tool
+catalog instead of in the ninth call.
+
+**P0 - assembly constraints: the workbench was never the problem, and that is
+now measurable.** The previous wording said StartWorkbench "answers OK ... so
+that OK is not evidence of anything". True, and not the point:
+`Application.GetWorkbenchId()` answers **'Assembly'** with the product document
+active, so the assembly workbench is up; `StartWorkbench` is a **no-op** on this
+build (it returns None for a name that does not exist and does not change the
+id even when asked for 'Part Design'). With the workbench up, AddMonoEltCst
+still answers E_FAIL for **all 14 constraint type codes** - on the root
+product's collection and on a child's, in an assembly whose part was created in
+place and in one built from saved .CATPart files, with the element given as the
+component, its ReferenceProduct, the root product, and (a route no earlier round
+tried) **`Selection.Item(1).Reference`**, which does return a Reference here.
+`Product.CreateReferenceFromObject` does not exist. AddBiEltCst fails the same
+way.
+
+What makes those failures mean something is a control in the same session:
+`AddMonoEltCst(0, Reference)` **on a sketch** creates `固定的.1`. Same method,
+same code, same argument type, same CATIA. And the UI command is missing too:
+`'Fix'` and `'CreateFix'` both answer "unknown command" while `'Update'` is
+accepted, i.e. the constraint commands are not registered in this session's
+command set. That is the first evidence in three rounds that points at the
+Assembly Design constraint package rather than at our arguments - a licence or
+configuration change could alter it; nothing this server does can.
+
+So the four tools now say `UNAVAILABLE IN THIS BUILD` in their descriptions,
+`catia_diagnose` publishes a `capability_ceilings` entry (status
+`UNSUPPORTED_ON_B30`) carrying the same evidence, and the refusal itself was
+rewritten. No pseudo-constraint layer was added: a tool that silently writes
+transforms and calls the result a constraint is the ambiguity this project keeps
+removing.
+
+**P1 - `transform_13`, and the transpose trap made visible.** The report feeds
+SolidWorks-style 13-tuples (nine rotation entries in COLUMN order, translation,
+scale) and had to transpose by hand; done wrong once, 17 instances came out with
+correct positions and orientations 20.3-180.0 deg off. `catia_set_component_transform`
+now takes `transform_13` + `translation_unit` ('mm'/'cm'/'m', scale must be 1).
+CATIA's own nine numbers ARE "where local x, y, z point", i.e. the columns, so
+the conversion is a unit change and a scale check - **not** a transpose. That
+matters: the first version of this conversion transposed, and the acceptance
+call caught it (a 90 deg turn placed 180 deg out, cell A of
+`scripts/b30_v0486_acceptance.py`). Every read-back now also reports
+`if_read_transposed.differs_by_deg`, the angle a transposed feed would have
+cost, and says so when the instance is symmetric and cannot prove the
+convention at all (0 deg).
+
+**P2/P3 - a capped vertex sweep is not a lower bound, it is the box of a
+sample.** The report measured 178 s over 7 parts and 2.7 mm of error it believed
+was chording. Measured on a 194-point outline with 582 vertices, B30
+2026-11-19: `method='vertices'` reads 200 of 582 and answers max y **3.1941**
+where the part reaches **46.1033** - 42.9 mm short, on a side it never visited -
+in **41 054 ms**. `method='mesh'` on the same part: **46.1033** in **181 ms**.
+Cold measurables cost ~128 ms each (first 677, then 260, 263...) while warm ones
+cost 4 ms, and the cost is per part DOCUMENT, not per session: a second 582-vertex
+part in a new document paid 71 087 ms again; a 24-cell part paid 767 ms. So
+`bounds_code` is now `vertex_sweep_truncated`, with `vertices_missed`,
+`exact_envelope: false`, and a first-sentence `summary` key - the reply's text is
+the JSON, so "message 第一句" had to become the first KEY. The `auto` route
+already took the mesh (0.3.114) and stays.
+
+**P4 - `save_as_copy(part_number=...)`.** A copy made by the operating system
+carries the original's 零件编号 inside it, so inserting it produced
+`P05_legrod.6` for a file called `P06_mir_legrod.CATPart`. The copy is now
+opened once, rewritten, saved and closed, with the original re-activated whether
+that succeeded or not; a failed rewrite says the file exists and still carries
+the OLD number, rather than leaving the caller to discover it in the tree.
+Measured: instances inserted from the copy are named `P06_mir_legrod.1`.
+
+**P5 - `strict_arc`.** The centre move is 0.0028 mm on the report's web arc and
+was 0.0008 mm on each of its four ear arcs - which came back as 0.22 mm³ of
+volume difference. `catia_sketch_profile(strict_arc=true)` refuses it instead:
+`ARC_ENDPOINT_OFF_CIRCLE`, the deviation to 1e-6 mm, both real fixes named, and
+nothing drawn. The default is unchanged.
+
 ## [0.3.151] — 2026-11-19 · the arc that was rebuilt for no reason, and a 27-second pass that only read a length
 
 The 2026-11-19 acceptance of 0.3.150 reports 8 closed / 3 partial / 1 untouched /

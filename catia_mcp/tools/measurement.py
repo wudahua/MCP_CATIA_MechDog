@@ -2257,6 +2257,19 @@ class MeasurementTools:
                                 "bound for curved ones; vertices is the cheap "
                                 "sweep, exact only when every face is planar; mesh "
                                 "is the same as auto, named explicitly. "
+                                "ON A PART WITH MORE THAN 200 VERTICES, "
+                                "method='vertices' STOPS AT 200 and the box comes "
+                                "back short on any side whose extreme lies in the "
+                                "vertices it never read - measured on B30 "
+                                "2026-11-19 on a 194-point outline with 582 "
+                                "vertices: max y 3.1941 where the part reaches "
+                                "46.1033, 42.9 mm short, and 41 054 ms to get it "
+                                "wrong. The reply says so in its first key "
+                                "('summary') and sets bounds_code="
+                                "'vertex_sweep_truncated'. That same part through "
+                                "method='mesh' took 181 ms and gave 46.1033 - on a "
+                                "big part the mesh is both the cheaper and the "
+                                "tighter route, which is why auto takes it. "
                                 "On an ASSEMBLY they differ, and it matters: auto "
                                 "reads each component's VERTICES and falls back to "
                                 "a mesh only for a part with no vertices at all, "
@@ -4023,7 +4036,32 @@ class MeasurementTools:
             bounds = (f"mixed: {len(from_mesh)} instance(s) are bounded from their "
                       "mesh (a lower bound on curved faces, measured 0.47-0.73 % "
                       "small), the rest from vertices")
-        payload = json.loads(self._bbox_json(corners, note, bounds=bounds))
+        # The first thing a caller reads. Same reason as the single-part route:
+        # on this route the number that is wrong is a WHOLE SIDE of a part whose
+        # extremum sits on a curved face (2.392 mm on a drum end cap, 8.99 mm on
+        # a spherical boss, measured 2026-11-01), and the 2026-11-19 report acted
+        # on 1.7-2.7 mm errors believing they were the true envelope.
+        if from_mesh and len(from_mesh) == len(entries):
+            summary = ("LOWER BOUND, by the chord tolerance only: every instance "
+                       "was bounded from its mesh (0.47-1.5 % small on curved faces, "
+                       "exact where the extreme point is a triangle vertex)")
+        elif from_mesh:
+            summary = (
+                f"LOWER BOUND: {len(entries) - len(from_mesh)} of {len(entries)} "
+                "instance(s) were bounded from VERTICES, so a part whose extremum "
+                "sits on a curved face is short by however far the surface bulges "
+                "(measured 2.392 mm on a drum end cap and 8.99 mm on a spherical "
+                "boss) - use method='mesh' for the tighter box")
+        else:
+            summary = (
+                f"LOWER BOUND: all {len(entries)} instance(s) were bounded from "
+                "VERTICES, so a part whose extremum sits on a curved face is short "
+                "by however far the surface bulges (measured 2.392 mm on a drum end "
+                "cap and 8.99 mm on a spherical boss) - use method='mesh' for the "
+                "tighter box")
+        payload = json.loads(self._bbox_json(corners, note, bounds=bounds,
+                                            summary=summary))
+        payload["exact_envelope"] = False
         payload["components"] = entries
         # What this call cost, measured. The box is exact and single-threaded, so a
         # caller that budgets "seconds" for a 70-instance assembly waits three
@@ -5250,16 +5288,35 @@ class MeasurementTools:
             stats: dict[str, Any] = {}
             points, truncated, total, dropped = self._vertex_points(body, stats)
             if points:
+                # A SWEEP THAT STOPPED AT THE CAP IS NOT A LOWER BOUND, it is the
+                # envelope of a sample: on a 194-point outline with 582 vertices
+                # the cap of 200 returned max y 3.1941 where the part reaches
+                # 46.1033 - 42.9 mm short, on a side that was simply not visited
+                # (measured on B30 2026-11-19). 'exact: false' does not say that,
+                # and the 2026-11-19 report acted on 2.7 mm errors believing they
+                # were chording. So truncation gets its own code and the first
+                # sentence the caller reads.
+                headline = (
+                    f"NOT THE ENVELOPE: only {len(points)} of {total} vertices were "
+                    f"read, so any side whose extreme sits in the {total - len(points)} "
+                    "unread ones is short - it is the box of a sample, not a lower "
+                    "bound on the part"
+                    if truncated else
+                    "LOWER BOUND: a vertex sweep cannot see an extremum that sits on "
+                    "a curved face, so the true envelope may be larger; exact only "
+                    "when every face is planar")
                 return self._bbox_json(
                     points,
                     f"vertex sweep over {len(points)} of {total} vertices of "
                     f"'{part.Parent.Name}'; exact for planar-faced solids, curved "
                     "faces may extend beyond these bounds"
-                    + (" (capped at 200)" if truncated else "")
+                    + (f" (STOPPED AT THE {len(points)}-vertex cap: {total - len(points)} "
+                       "vertices were never read)" if truncated else "")
                     + (f"; {dropped} construction point(s) ignored" if dropped else ""),
                     bounds="exact for a planar-faced solid; a curved face has no "
                            "vertex at its extremum, so read 'bounds' as a lower "
                            "bound there - use method='mesh' for those",
+                    summary=headline,
                     extra={
                         # Which reader ran, and what the filter walked - the same
                         # two facts the assembly reply publishes per part, so a
@@ -5275,11 +5332,23 @@ class MeasurementTools:
                         # publishes, so one question ("are these the envelope?")
                         # has one answer shape on both routes.
                         "exact": False,
-                        "bounds_code": "vertex_sweep",
+                        # The 2026-11-19 report asked for one boolean it could
+                        # test instead of reading the note: 'exact_envelope' is
+                        # false whenever any part of the route is approximate,
+                        # which on this route is always.
+                        "exact_envelope": False,
+                        "bounds_code": ("vertex_sweep_truncated" if truncated
+                                        else "vertex_sweep"),
+                        "vertices_missed": (total - len(points)) if truncated else 0,
                         "exact_note": (
                             "a vertex sweep cannot see an extremum that sits on a "
                             "curved face, and it cannot know whether this part has "
-                            "one - method='mesh' can, at the cost of an STL export"),
+                            "one - method='mesh' can, at the cost of an STL export"
+                            + (" (and on a part this size the mesh is the FASTER "
+                               "route too: 181 ms against 41 054 ms cold on B30 "
+                               "2026-11-19, because a cold measurable costs ~128 ms "
+                               "per vertex and the mesh is one export)"
+                               if truncated else "")),
                         **_nls_fields(stats),
                         **regime_fields(TOPOLOGY),
                     },
@@ -5335,6 +5404,10 @@ class MeasurementTools:
                     "an R12 cylinder - the tolerance scales with the feature, so "
                     "treat the figure as an order. Exact for a solid whose "
                     "diameter runs through a planar edge or a vertex"),
+            summary=("LOWER BOUND: the STL chords curved faces, so the true envelope "
+                     "is up to ~1.5 % larger on them (exact where the extreme point "
+                     "is a triangle vertex) - this is the TIGHTER route of the two, "
+                     "not the exact one"),
             extra={"points_route": "mesh", "mesh_vertices": triangles,
                    # What these numbers describe. "the solid" was never true on
                    # this route, and on a 10 mm pad the difference was 25 mm.
@@ -5344,6 +5417,7 @@ class MeasurementTools:
                    # tolerance rather than by a factor. `exact: false` on both
                    # routes is the honest answer; the CODE says which way.
                    "exact": False,
+                   "exact_envelope": False,
                    "bounds_code": "mesh_chord",
                    # Whether this answer was reused from the per-part cache. On
                    # this route the same file can answer in 0.6 ms instead of a
@@ -6471,11 +6545,21 @@ class MeasurementTools:
     @staticmethod
     def _bbox_json(points: list[list[float]], method_note: str,
                    bounds: str | None = None,
-                   extra: dict[str, Any] | None = None) -> str:
+                   extra: dict[str, Any] | None = None,
+                   summary: str | None = None) -> str:
         xs = [p[0] for p in points]
         ys = [p[1] for p in points]
         zs = [p[2] for p in points]
-        result = {
+        result = {}
+        # FIRST key on purpose. The reply's text IS this JSON, so "the first
+        # sentence" a caller reads was the opening brace and then a number: the
+        # 2026-11-19 report measured 15/17 instances bounded by a vertex sweep,
+        # acted on the numbers as an envelope, and only found the caveat behind
+        # several thousand characters of note. A summary key cannot be missed by
+        # anything that reads the reply at all.
+        if summary:
+            result["summary"] = summary
+        result.update({
             "min": {"x": round(min(xs), 4), "y": round(min(ys), 4), "z": round(min(zs), 4)},
             "max": {"x": round(max(xs), 4), "y": round(max(ys), 4), "z": round(max(zs), 4)},
             "dimensions": {
@@ -6489,7 +6573,7 @@ class MeasurementTools:
             # by 0.47-0.73 % (reported 2026-10-25, P02 Y 219.6278 against 220).
             "bounds": bounds or "exact (no curved-face chording involved)",
             "method": method_note,
-        }
+        })
         if extra:
             result.update(extra)
         return json.dumps(result, indent=2)

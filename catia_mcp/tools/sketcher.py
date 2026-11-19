@@ -1388,6 +1388,24 @@ class SketcherTools:
                                 "(2026-11-13 report, problem 6)."
                             ),
                         },
+                        "strict_arc": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When an arc is given as centre + radius + p1/p2 and "
+                                "the ends are not exactly on that circle, the default "
+                                "KEEPS THE RADIUS and moves the centre by the size of "
+                                "the endpoint error, saying so in the reply (a "
+                                "0.0027 mm endpoint error moved the centre 0.0028 mm "
+                                "on the 2026-11-19 report's web arc, and its R72.367 "
+                                "was kept). strict_arc=true refuses that edit instead: "
+                                "the call fails with ARC_ENDPOINT_OFF_CIRCLE, names "
+                                "the deviation to 1e-6 mm, and draws nothing. Use it "
+                                "when the geometry has to be the geometry you wrote - "
+                                "the report's 4 ear arcs each moved 0.0008 mm, which "
+                                "surfaced later as 0.22 mm3 of volume difference."
+                            ),
+                        },
                     },
                     "required": ["segments"],
                 },
@@ -1656,7 +1674,8 @@ class SketcherTools:
             case "catia_sketch_profile":
                 return self._draw_profile(
                     arguments["segments"],
-                    float(arguments.get("tolerance", 0.05)))
+                    float(arguments.get("tolerance", 0.05)),
+                    bool(arguments.get("strict_arc", False)))
             case "catia_text_strokes":
                 return self._draw_text(arguments)
             case _:
@@ -3774,7 +3793,8 @@ class SketcherTools:
             "smoothed, so corners stay corners."
         )
 
-    def _draw_profile(self, segments: list[dict], tolerance: float = 0.05) -> str:
+    def _draw_profile(self, segments: list[dict], tolerance: float = 0.05,
+                      strict_arc: bool = False) -> str:
         """Draw a MIXED profile - straight runs and arcs - in one call.
 
         The gap this fills, from the 2026-11-11 eighth report §2.1: "a profile
@@ -3814,7 +3834,7 @@ class SketcherTools:
         # Plan before drawing: a bad third segment must not leave the first two
         # in the sketch. Every endpoint this needs is arithmetic, so nothing has
         # to be probed to validate.
-        plan = [self._plan_segment(index, raw)
+        plan = [self._plan_segment(index, raw, strict_arc)
                 for index, raw in enumerate(segments, start=1)]
 
         for segment in plan:
@@ -3875,7 +3895,8 @@ class SketcherTools:
                      "mm, so the elements form a closed loop." + seam_text)
         return head + adjust_text + " NEXT: catia_close_sketch, then catia_pad."
 
-    def _plan_segment(self, number: int, raw: Any) -> dict[str, Any]:
+    def _plan_segment(self, number: int, raw: Any,
+                      strict_arc: bool = False) -> dict[str, Any]:
         """Validate one segment and work out both of its endpoints."""
         if not isinstance(raw, dict):
             raise ArgumentRejected(
@@ -3948,6 +3969,37 @@ class SketcherTools:
                 # is nothing to report. Saying "rebuilt (R20 -> R20)" would be
                 # noise in every well-formed call.
                 pass
+            elif strict_arc:
+                # 2026-11-19 report, P5: the centre move is a silent edit of
+                # geometry the caller gave, and 4 pairs of ear arcs moved 0.0008
+                # mm each, which came back as 0.22 mm3 of volume difference
+                # later. A tolerance is fine until somebody needs the geometry
+                # to be the geometry they wrote - so strict mode refuses instead,
+                # and says by how much and which of the two real fixes to take.
+                raise ArgumentRejected(
+                    f"Segment {number} (arc) is off its own circle by "
+                    f"{deviation:.6f} mm: the ends are {radials[0]:.6f} and "
+                    f"{radials[1]:.6f} mm from the centre {_fmt_point(center)} "
+                    f"while 'radius' says R{radius:.6f}. strict_arc=true asks for "
+                    "the geometry as written, and an arc is drawn from "
+                    "centre+radius+angles, so the ends have to lie on that "
+                    "circle exactly. Nothing was drawn. Either\n"
+                    f"  · move the ends onto R{radius:.6f} yourself (they would "
+                    f"shift {(radials[0] - radius):+.6f} and "
+                    f"{(radials[1] - radius):+.6f} mm along their radii), or\n"
+                    "  · pass strict_arc=false (the default) and this call moves "
+                    f"the CENTRE by {deviation:.6f} mm instead, keeping the "
+                    "radius - which is what happens without strict mode.",
+                    code="ARC_ENDPOINT_OFF_CIRCLE", stage="validate",
+                    modified=False,
+                    next_actions=[
+                        "Recompute the arc's p1/p2 from the centre and radius "
+                        "you meant, so the three agree to within 1e-9 mm, and "
+                        "call again with strict_arc=true",
+                        "Or drop strict_arc: the default keeps the radius and "
+                        "moves the centre by the size of the endpoint error, "
+                        "and says so in the reply",
+                    ])
             else:
                 fitted = _circle_at_radius(first, second, center, radius)
                 if fitted is not None and fitted[1] <= max(

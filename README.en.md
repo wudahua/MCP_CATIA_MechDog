@@ -2,7 +2,7 @@
 
 > **中文入口见 [README.md](README.md)。** This file is the full English reference: every tool, every measurement behind it, and every known limit.
 
-**0.3.151** · [what changed](CHANGELOG.md) ·
+**0.3.152** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1376,6 +1376,61 @@ Two facts about real drawings that this had to accept:
   whole; one with live text imports the geometry and says how many runs it
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
+
+0.3.152 answers the 2026-11-19 report against 0.3.151 - a hexapod built from a
+spec table, 17 instances placed to 4.45e-10 mm, and five things it could not do.
+Its P0 was "assembly constraints are unavailable through every route", and this
+round found which layer refuses instead of trying a sixth argument shape.
+
+`Application.GetWorkbenchId()` answers **'Assembly'** with the product document
+active, so the assembly workbench is up, and `StartWorkbench` is a **no-op** on
+this build (None for a name that does not exist; no id change even for 'Part
+Design'). So "the workbench was not activated" - a suspicion two earlier rounds
+carried - is wrong. With it up, `AddMonoEltCst` still answers E_FAIL for **all 14
+constraint type codes**, on the root collection and a child's, in an assembly
+built in place and one built from saved .CATPart files, with the element given
+as the component, its `ReferenceProduct`, the root product, and
+`Selection.Item(1).Reference` - a route the earlier rounds had not tried, and the
+only one that returns a Reference here (`Product.CreateReferenceFromObject` does
+not exist). `AddBiEltCst` fails the same way.
+
+What makes those failures mean something is a control in the same session:
+`AddMonoEltCst(0, Reference)` **on a sketch** creates `固定的.1`. Same method, same
+code, same CATIA. And the UI command is not registered either: `'Fix'` and
+`'CreateFix'` answer "unknown command" while `'Update'` is accepted. That is the
+first evidence in three rounds that points at the Assembly Design constraint
+package rather than at this server's arguments.
+
+The four mate tools now say `UNAVAILABLE IN THIS BUILD` in their descriptions,
+`catia_diagnose` publishes a `capability_ceilings` entry with the same evidence,
+and no pseudo-constraint layer was added: a tool that writes transforms and
+calls the result a constraint would blur the one distinction this project spends
+its replies on.
+
+P1 - `catia_set_component_transform` takes `transform_13` (nine rotation entries
+in COLUMN order, translation, scale) plus `translation_unit`. CATIA's own nine
+numbers ARE the columns, so the conversion is a unit change and a scale check,
+not a transpose - the first version of it transposed, and the acceptance call
+caught it (cell A: a 90 degree turn placed 180 degrees out). Read-backs now also
+report `if_read_transposed.differs_by_deg`, and say when the instance is
+symmetric and cannot prove the convention at all.
+
+P2/P3 - a vertex sweep that stops at its cap is **the box of a sample, not a
+lower bound**. On a 582-vertex part, `method='vertices'` reads 200 and answers
+max y **3.1941** where the part reaches **46.1033** - 42.9 mm short, on a side it
+never visited - in **41 054 ms**; `method='mesh'` reaches 46.1033 in **181 ms**.
+Cold measurables cost ~128 ms each and warm ones 4 ms, per part DOCUMENT (a
+second 582-vertex part in a new document paid 71 087 ms again; a 24-cell part
+paid 767 ms). Replies now carry `bounds_code: vertex_sweep_truncated`,
+`vertices_missed`, `exact_envelope: false`, and a `summary` FIRST key, because
+the reply's text is the JSON and "the first sentence" had to become a key.
+
+P4 - `save_as_copy(part_number=...)` rewrites the copy's 零件编号, so inserting
+`P06_mir_legrod.CATPart` gives `P06_mir_legrod.1` instead of `P05_legrod.6`.
+
+P5 - `catia_sketch_profile(strict_arc=true)` refuses the silent centre move
+(`ARC_ENDPOINT_OFF_CIRCLE`, deviation to 1e-6 mm, both real fixes named) instead
+of moving geometry 0.0008 mm per arc.
 
 0.3.151 answers the acceptance of 0.3.150: 8 closed, 3 partial, 1 untouched,
 2 declined, and no regression. Two of the three findings share one cause -
