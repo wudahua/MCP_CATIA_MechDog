@@ -2,6 +2,34 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.155] — 2026-11-20 · a budget in the description, because the cost does not shrink
+
+The 2026-11-20 report's P2 - a 17-instance assembly measuring its box in 200 s -
+went to 87 s in 0.3.153, and 0.3.154 measured that scene to say so. Neither
+version told a caller what to expect BEFORE the call: the description quoted
+"minutes" for a 70-instance assembly and nothing about the parts that make it up.
+
+This adds the budget, taken from that measurement: 7 parts, 17 instances, the
+first touch of a part costing 1.8 s (small frame), 3.9-13.6 s (crank arms, leg
+rod) and 19.0 s (link, which also paid an STL export) - so 87 s cold and 13 s
+warm on `method='vertices'`, and 128 s cold on the default mesh route, where
+every part pays an export instead of a topology build.
+
+It also states why there is nothing cheaper to switch to, so the next round does
+not re-probe the same dead ends: `Measurable`, `Part`, `Body` and `SPAWorkbench`
+expose no bounding-box member on this build (probed through the real dispatch),
+and the STL precision `ExportData` uses is a global CATIA setting that cannot be
+passed per call - changing it would mean changing the user's configuration.
+
+The model a caller can act on is in the same sentence: instances are free once
+their part is bounded, so the number to plan with is distinct parts, not
+instances; and `component=` measures only what is needed.
+
+No behaviour changed - same routes, same numbers, same refusals. Four tests pin
+the budget, the route each number belongs to (87 s is `vertices`, 128 s is the
+DEFAULT, which is the slower one), and the two reasons it cannot be optimised.
+2 473 tests.
+
 ## [0.3.154] — 2026-11-20 · the evidence that could not carry the conclusion
 
 0.3.153 closed P0 with a sentence it had no right to: *"the Fix UI command is not

@@ -2,7 +2,7 @@
 
 > **中文入口见 [README.md](README.md)。** This file is the full English reference: every tool, every measurement behind it, and every known limit.
 
-**0.3.154** · [what changed](CHANGELOG.md) ·
+**0.3.155** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1376,6 +1376,30 @@ Two facts about real drawings that this had to accept:
   whole; one with live text imports the geometry and says how many runs it
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
+
+0.3.155 changes one tool description and no behaviour. 0.3.153 took the
+2026-11-20 report's 17-instance assembly from 200 s to 87 s, and 0.3.154 measured
+that scene - but neither version told a caller what to expect BEFORE the call.
+
+The budget, from that measurement: 7 parts / 17 instances, the first touch of a
+part costing 1.8 s (small frame), 3.9-13.6 s (crank arms and leg rod) and 19.0 s
+(link, which also paid an STL export); 87 s cold and 13 s warm on
+`method='vertices'`; 128 s cold on the DEFAULT mesh route, where every part pays
+an export instead of a topology build. Note which is which: the default is the
+slower one.
+
+The same paragraph says why nothing cheaper exists to switch to -
+`Measurable`, `Part`, `Body` and `SPAWorkbench` expose no bounding-box member on
+this build (probed through the real dispatch), and the STL precision `ExportData`
+uses is a global CATIA setting that cannot be passed per call. That is written
+down so the next round does not re-probe the same three dead ends.
+
+What a caller can act on is in the same sentence: instances are free once their
+part is bounded, so the number to plan with is distinct parts; and `component=`
+measures only what is needed.
+
+Four tests pin the budget, the route each number belongs to, and those two
+reasons. 2 473 tests.
 
 0.3.154 withdraws one sentence from 0.3.153. That version closed P0 with
 "the Fix UI command is not registered either: 'Fix' and 'CreateFix' both answer
