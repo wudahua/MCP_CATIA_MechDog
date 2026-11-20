@@ -1,8 +1,8 @@
-# MCP_CATIA_MechDog 0.3.153
+# MCP_CATIA_MechDog 0.3.154
 
-![version](https://img.shields.io/badge/version-0.3.153-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![CATIA](https://img.shields.io/badge/CATIA-V5%20R30%20(B30)-orange) ![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20http-purple)
+![version](https://img.shields.io/badge/version-0.3.154-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![CATIA](https://img.shields.io/badge/CATIA-V5%20R30%20(B30)-orange) ![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20http-purple)
 
-当前正式版 **0.3.153**——0.3.152 的复测确认了 P1/P3/P4/P5，P0 与 P2 仍未动，还查出一处**文档自相矛盾**（P6）。这一版的转折点是把「不可用」从**描述文字**变成**拒答**：复测报告说得对——「工具仍可被调到并返回 COM_ERROR」，而一句写在描述里的声明，在调用者真正需要它的那一刻什么也没告诉他。现在四个 mate 工具在 **validate 阶段**就返回 `UNSUPPORTED_CAPABILITY`、`modified: false`，**一次 COM 都不发**（实测 0 ms），并给出 `force: true` 这条回来测的路（实测仍能到 CATIA，拿回它自己的「方法 AddMonoEltCst 失败」）。新增 **`catia_probe_assembly_constraints`**：一次调用建两个**临时**文档（即用即关、不碰你的模型），试 Fix / 重合 / UI 命令 `Fix`（对话框在调用飞行中由看门线程点掉，不会冻住会话），再跑**对照**——同一个 `AddMonoEltCst(0, Reference)` 在**草图**上；实测 15 s 给出 **ENVIRONMENT_LIMITED**，工作台 id 读到 `Assembly`、草图建出 `固定的.1`、`'Fix'` 答「未知命令」。P2：超过 200 顶点的零件**不再**返回「样本的盒子」而是直接走 mesh——582 顶点零件 **41 054 ms / max y 3.1941 → 1.0-1.6 s / 46.1033**；含 2 个该零件的装配 **约 140 s → 19.5 s（冷）/ 1.5 s（热）**，剩下的 19.5 s 是 STL 导出不是扫描，`allow_truncated: true` 仍可取回那个被标注的样本。P6：`auto` 在装配上**就是 mesh**（代码自 0.3.114 起 `force_mesh = method in ('mesh', 'auto')`），参数说明却写着读顶点——已改，并加一条测试把这句话和它描述的源码行钉在一起。 · [变更日志](CHANGELOG.md) · [Releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases)
+当前正式版 **0.3.154**——这一版只做一件事：**撤回上一版里那句承载不了结论的证据**。0.3.153 写过「`'Fix'` 答「未知命令」而 `'Update'` 正常，所以装配约束命令没注册，指向许可」——这一轮补了它一直缺的**负对照**：`Application.StartCommand` 在这版上**根本不校验参数**，`Update`、`Fit All In`、`Hide/Show`、`Fix`、`CATAssembly.CreateFix`、`CATAssembly.CreateFixT` 和**故意瞎编的 `ZzzNoSuchCommand`** 全部返回 `None`、全部弹同一个「未知命令」框。那个框对「命令存不存在」零信息量。更要紧的是：**这个事实项目在 0.3.151 就写进了 `export.py`**（"StartCommand does NOT validate the command name"）——同一件事在一处写对、四处写反，所以这是**一致性缺陷**，不只是猜错。四处文案与探针判决全部改为 `WHICH LAYER REFUSES IS NOT ESTABLISHED`。顺带把许可查到底（B30 就是本机）：`SystemConfiguration` 在这版上**没有** `Licenses`/`License`/`Licence` 成员，`%ProgramData%\Dassault Systemes` 下没有 nodelock 文件，`CATConstraintModeler*.dll`、`CATAssemblyCommands.dll` 一个不缺——**许可与配置同样可能，这一层从这里看不到**。探针第 4 步改成负对照，并标 `ok: null`（既不通过也不失败：写成 false 会被读成「命令不存在」，那正是要纠正的错），回执发布 `StartCommand_validates_names: false` 与 `informative: false`。新增 **7 条反回归测试**，其中一条钉住「描述 `StartCommand` 的两个文件必须说同一句话」——那条测试若 0.3.152 就在，这个错不会发出去。 · [变更日志](CHANGELOG.md) · [Releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases)
 
 > 让 AI 客户端通过 MCP，在 CATIA V5 里建**原生可编辑的实体特征**——并且每一步都能量回来。
 
@@ -20,7 +20,7 @@ MCP_CATIA_MechDog 是运行在你自己 Windows 电脑上的本地 MCP 服务（
 - **草图可回改**：`catia_sketch_edit` 重开已关闭的草图，`catia_sketch_delete_element` 删掉画错的一条，零件随之重建——错一条线不必整件重做。
 - **量不到就说量不到**：超范围、超能力或读数失败时，回执以 `UNVERIFIED:` 开头并说明哪一个测量失败，不会把失败写成成功。
 - **能力可发现**：诊断文字旁边给一行能直接粘贴的调用；「有工具但没人知道怎么调」和「没有这个工具」一样是缺陷。
-- **离线可测**：**2462** 个测试不需要 CATIA，`pytest` 在本机就能跑全绿；真机验收脚本在 `scripts/b30_*`。
+- **离线可测**：**2469** 个测试不需要 CATIA，`pytest` 在本机就能跑全绿；真机验收脚本在 `scripts/b30_*`。
 
 ## 环境要求
 

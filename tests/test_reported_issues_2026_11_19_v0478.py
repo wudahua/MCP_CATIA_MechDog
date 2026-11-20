@@ -144,8 +144,12 @@ def test_the_ceiling_entry_carries_the_evidence_not_just_the_verdict() -> None:
     assert entry["status"] == "UNSUPPORTED_ON_B30"
     assert set(entry) == {"member", "status", "detail"}
     for said in ("Selection.Item(1).Reference", "SKETCH", "GetWorkbenchId",
-                 "unknown command", "14 constraint type codes"):
+                 "未知命令", "14 constraint type codes"):
         assert said in entry["detail"], said
+    # 0.3.154: the box is NOT evidence of anything - StartCommand does not
+    # validate its argument here - so the entry has to withdraw the earlier
+    # reading instead of repeating it.
+    assert "withdrawn" in entry["detail"]
 
 
 def test_the_new_product_note_names_the_workbench_reading_and_the_sketch_control() -> None:

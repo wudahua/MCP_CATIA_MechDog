@@ -2,7 +2,7 @@
 
 > **中文入口见 [README.md](README.md)。** This file is the full English reference: every tool, every measurement behind it, and every known limit.
 
-**0.3.153** · [what changed](CHANGELOG.md) ·
+**0.3.154** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1376,6 +1376,54 @@ Two facts about real drawings that this had to accept:
   whole; one with live text imports the geometry and says how many runs it
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
+
+0.3.154 withdraws one sentence from 0.3.153. That version closed P0 with
+"the Fix UI command is not registered either: 'Fix' and 'CreateFix' both answer
+'unknown command' while 'Update' is known", and read it as proof that the
+Assembly Design constraint package was missing. It never ran a control.
+
+The control: `Application.StartCommand` does not validate its argument on this
+build. Measured in one session on B30, 2026-11-20: `Update`, `Fit All In`,
+`Hide/Show`, `Fix`, `CATAssembly.CreateFix`, `CATAssembly.CreateFixT` and the
+deliberately impossible `ZzzNoSuchCommand` ALL return None, and all but `Update`
+open the same `未知命令` box. An unknown name is accepted exactly like a real one,
+so the box says nothing about whether a command exists.
+
+That makes this a consistency defect rather than a bad guess: `export.py` has
+said since 0.3.151 that StartCommand "does NOT validate the command name (an
+unknown one is accepted and then opens a modal 未知命令 dialog ... re-measured
+2026-11-19, it hangs the caller)". One file had it right and four had it
+inverted.
+
+So the claim and the inference it supported are gone from the
+`catia_fix_constraint` description, `_CONSTRAINT_EXPLAIN`, `_CONSTRAINT_CEILING`,
+the `capability_ceilings` entry and the probe's verdict. Each now says `WHICH
+LAYER REFUSES IS NOT ESTABLISHED`: the assembly constraint collection refuses,
+the sketch collection accepts, and that is the whole of what this surface can
+see. A licence and a configuration remain equally possible.
+
+With B30 being the machine under test, the licence was checked rather than
+described, and it settles nothing: `SystemConfiguration` exposes no
+`Licenses`/`License`/`Licence` member on this build (probed through the real
+dispatch - `Licenses` raises `AttributeError`, not an empty collection);
+`C://ProgramData//Dassault Systemes` holds only `DraftSight`, with no `Licenses`
+directory and no nodelock file; and every binary is present
+(`CATConstraintModeler.dll`, `CATConstraintModelerItf.dll`,
+`CATConstraintModelerUI.dll`, `CATAssemblyCommands.dll`), so an incomplete
+install is ruled out.
+
+`catia_probe_assembly_constraints` now runs `'Fix'` and `'ZzzNoSuchCommand'`
+together and publishes `ui_command.StartCommand_validates_names`,
+`negative_control` and `informative: false`, marking the step `ok: null` -
+neither pass nor fail, because a `false` would be read as "the command is
+missing", which is the mistake being corrected. Measured: both names return, both
+open one box, constraints 0 -> 0, `INDISTINGUISHABLE`.
+
+Seven tests pin the withdrawal, including one that requires the two files
+describing StartCommand to state the same fact - the test that, had it existed in
+0.3.152, would have kept the sentence from shipping. Nothing changed for callers:
+the four mate tools still refuse at the validate stage with `modified: false`,
+and `force: true` still reaches CATIA.
 
 0.3.153 answers the 2026-11-20 re-test of 0.3.152. It confirms P1/P3/P4/P5,
 leaves P0 and P2 open, and finds one new defect (P6) in a description. Its

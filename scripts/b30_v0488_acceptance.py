@@ -8,8 +8,10 @@ The report's three open items, each measured rather than described:
   B  P0 - `force: true` still reaches CATIA and returns what CATIA says, which
      is what to use after a licence change.
   C  P0 - `catia_probe_assembly_constraints` answers with a verdict in one call:
-     ENVIRONMENT_LIMITED here, with the sketch control passing, the UI command
-     unregistered, and the caller's documents untouched.
+     ENVIRONMENT_LIMITED here, with the sketch control passing, and the
+     caller's documents untouched. Its UI-command step now ships the negative
+     control that showed why the step cannot be read at all: StartCommand
+     accepts a name that cannot exist (0.3.154 withdrew 0.3.152's inference).
   D  P2 - `method='vertices'` on a 582-vertex part now answers from the MESH
      (tighter and ~200x cheaper) instead of returning the box of a 200-vertex
      sample; `allow_truncated=true` still gives that sample, labelled.
@@ -155,8 +157,8 @@ def main() -> int:
     took = (time.perf_counter() - started) * 1000
     say(f"  {took:.0f} ms -> verdict={probe.get('verdict')}")
     for step in probe["data"]["steps"]:
-        say(f"    [{'PASS' if step['ok'] else 'FAIL'}] {step['step']}: "
-            f"{step['detail'][:90]}")
+        flag = {True: "PASS", False: "FAIL", None: "INFO"}[step["ok"]]
+        say(f"    [{flag}] {step['step']}: {step['detail'][:90]}")
     check("C the verdict is ENVIRONMENT_LIMITED",
           probe.get("verdict") == "ENVIRONMENT_LIMITED", str(probe.get("verdict")))
     check("C the sketch control passes",
@@ -164,8 +166,21 @@ def main() -> int:
     check("C the workbench id was read with the product active",
           probe["data"]["evidence"].get("workbench_id") == "Assembly",
           str(probe["data"]["evidence"].get("workbench_id")))
-    check("C the UI command is reported unregistered",
-          probe["data"]["evidence"]["ui_command_fix"]["registered"] is False)
+    # The UI-command step is now a CONTROL, not a reading: StartCommand accepts
+    # any string on this build, so the thing to pin is that the probe says so
+    # instead of calling a message box "the command is not registered" (which is
+    # what 0.3.152 did, and what this round withdraws).
+    ui = probe["data"]["evidence"].get("ui_command", {})
+    check("C the UI-command step ships a negative control",
+          ui.get("negative_control") == "ZzzNoSuchCommand", str(ui)[:120])
+    check("C and reports that StartCommand does not validate names",
+          ui.get("StartCommand_validates_names") is False, str(ui)[:120])
+    check("C so the step is marked not informative",
+          ui.get("informative") is False, str(ui)[:120])
+    check("C the conclusion no longer blames the licence",
+          "not established" in probe["message"].lower()
+          and "not registered" not in probe["message"].lower(),
+          probe["message"][:160])
     check("C it says the model is untouched",
           probe["data"].get("model_untouched") is True)
     after_docs = [conn.documents.Item(i).Name

@@ -121,9 +121,15 @@ _CAPABILITY_CEILINGS: list[dict[str, Any]] = [
             "a SKETCH creates '固定的.1'. Not the workbench either - "
             "Application.GetWorkbenchId() answers 'Assembly' with the document "
             "active, StartWorkbench is a no-op (None for a name that does not "
-            "exist, and no id change even for 'Part Design'), and the UI command "
-            "is not registered ('Fix' and 'CreateFix' answer 'unknown command' "
-            "while 'Update' is accepted). Use catia_set_component_transform: "
+            "exist, and no id change even for 'Part Design'). The UI command "
+            "route cannot narrow it: StartCommand does not validate its argument "
+            "on this build - 'Update', 'Fix', 'CATAssembly.CreateFix' and the "
+            "nonsense name 'ZzzNoSuchCommand' all return None and all open a "
+            "'未知命令' box (measured 2026-11-20), so the box says nothing about "
+            "the command set. 0.3.152 read it as 'the commands are not "
+            "registered' and pointed at the licence; that is withdrawn, because "
+            "nothing measured here separates a licence from a configuration. "
+            "Use catia_set_component_transform: "
             "absolute placement, not a parameterised assembly - no tool on this "
             "surface can make it one."
         ),
@@ -1376,9 +1382,11 @@ class DiagnosticsTools:
                     "components in a temporary document, tries Fix "
                     "(AddMonoEltCst with the Reference from "
                     "Selection.Item(1).Reference), tries a coincidence between "
-                    "the two, tries the registered UI command 'Fix' (a message "
-                    "box is answered while the call is in flight, so an unknown "
-                    "command cannot freeze the session), then runs the CONTROL "
+                    "the two, tries the UI command 'Fix' NEXT TO a nonsense name "
+                    "('ZzzNoSuchCommand'), because StartCommand does not validate "
+                    "its argument on this build and one name alone proves nothing "
+                    "- both boxes are answered while the call is in flight, so "
+                    "neither can freeze the session - then runs the CONTROL "
                     "that makes the answer mean something: the same "
                     "AddMonoEltCst(0, Reference) on a sketch in a second "
                     "throwaway part. Closes both without saving, so the caller's "
@@ -1484,12 +1492,19 @@ class DiagnosticsTools:
              from the visible selection (the route the earlier rounds had not
              tried);
           3  ``AddBiEltCst`` between two components;
-          4  the UI command 'Fix'. A message box means "unknown command"; the
-             box is answered from a watcher thread while the call is in flight,
-             because an unanswered one freezes this worker for good;
+          4  the UI command 'Fix', run NEXT TO a nonsense name. StartCommand
+             does not validate its argument on this build, so this step can only
+             report whether the two behave differently - and it says so instead
+             of calling a box "unknown command";
           5  the CONTROL: the same AddMonoEltCst on a SKETCH. Without it, a
              failure at 2 only says "something here refuses", and that is the
              state this project was stuck in for three rounds.
+
+        What this probe deliberately does NOT claim is a cause. It can show the
+        refusal is not the method, not the marshalling and not the workbench;
+        it cannot see a licence, and 0.3.152 was wrong to read a message box as
+        one (2026-11-20: StartCommand answers the same way for a command that
+        does not exist).
         """
         import catia_mcp.dialogs as dialogs
 
@@ -1567,38 +1582,59 @@ class DiagnosticsTools:
                         evidence["coincidence"] = {"ok": False,
                                                    "error": self._short_com(exc)}
 
-            # The UI command. 'Fix' is one click with no dialog when it is
-            # registered, so the only box that can appear is "unknown command" -
-            # and that box is the reading, not a nuisance.
+            # The UI command, WITH A NEGATIVE CONTROL. StartCommand does NOT
+            # validate its argument on this build (measured 2026-11-20): the
+            # nonsense name 'ZzzNoSuchCommand' is accepted and opens the same
+            # '未知命令' box as 'Fix', so a box here says nothing about the
+            # command set - which is exactly what 0.3.152 got wrong when it read
+            # that box as "the command is not registered". Both names are run
+            # for that reason and the step reports the only thing it can: whether
+            # the two are distinguishable at all.
             selection.Clear()
             selection.Add(first)
             before = int(collection.Count)
-            answered = 0
-            command_state = ""
-            try:
-                with dialogs.watch(interval=0.2) as watcher:
-                    try:
-                        app.StartCommand("Fix")
-                        command_state = "returned"
-                    except Exception as exc:  # noqa: BLE001
-                        command_state = self._short_com(exc)
-                answered = watcher.clicks
-            finally:
-                selection.Clear()
+            runs: dict[str, dict[str, Any]] = {}
+            for command in ("Fix", "ZzzNoSuchCommand"):
+                state = ""
+                boxes = 0
+                try:
+                    with dialogs.watch(interval=0.2) as watcher:
+                        try:
+                            app.StartCommand(command)
+                            state = "returned"
+                        except Exception as exc:  # noqa: BLE001
+                            state = self._short_com(exc)
+                    boxes = int(watcher.clicks)
+                finally:
+                    selection.Clear()
+                    selection.Add(first)
+                runs[command] = {"call": state, "message_boxes": boxes,
+                                 "constraints_after": int(collection.Count)}
             after = int(collection.Count)
-            registered = answered == 0 and after > before
-            evidence["ui_command_fix"] = {
-                "call": command_state,
-                "message_boxes_answered": answered,
+            created = after > before
+            distinguishable = created or (
+                runs["Fix"]["message_boxes"]
+                != runs["ZzzNoSuchCommand"]["message_boxes"])
+            evidence["ui_command"] = {
+                "StartCommand_validates_names": distinguishable,
+                "negative_control": "ZzzNoSuchCommand",
+                "runs": runs,
                 "constraints_before": before,
                 "constraints_after": after,
-                "registered": registered,
+                "informative": distinguishable,
             }
-            step("UI command 'Fix' is registered", registered,
-                 f"call {command_state}, {answered} message box(es), "
-                 f"constraints {before} -> {after}"
-                 + ("" if registered else
-                    " - the command is not in this session's command set"))
+            step("UI command 'Fix', with a nonsense name as the control",
+                 True if created else None,
+                 "'Fix' {0!r} / 'ZzzNoSuchCommand' {1!r}, boxes {2} and {3}, "
+                 "constraints {4} -> {5}: the two are {6}".format(
+                     runs["Fix"]["call"], runs["ZzzNoSuchCommand"]["call"],
+                     runs["Fix"]["message_boxes"],
+                     runs["ZzzNoSuchCommand"]["message_boxes"],
+                     before, after,
+                     "DISTINGUISHABLE, so a refusal here would be a reading"
+                     if distinguishable else
+                     "INDISTINGUISHABLE - this step carries no information "
+                     "about whether 'Fix' exists"))
         except Exception as exc:  # noqa: BLE001 - the probe reports, never dies
             step("product probe", False, self._short_com(exc))
         finally:
@@ -1664,11 +1700,15 @@ class DiagnosticsTools:
                 "ENVIRONMENT LIMITATION, NOT AN MCP DEFECT: the same "
                 "AddMonoEltCst(0, Reference) succeeds on a SKETCH in this session "
                 "and answers E_FAIL on the assembly's CATIAConstraints "
-                "collection, and the UI command 'Fix' is not registered while "
-                "'Update' is. This installation is missing the Assembly Design "
-                "constraint commands. Use catia_set_component_transform for "
-                "absolute placement; nothing in this server can create a "
-                "parameterised assembly on this machine.")
+                "collection. WHICH LAYER REFUSES IS NOT ESTABLISHED, and this "
+                "reply does not pretend otherwise: a licence and a CATIA "
+                "configuration are both still possible, and nothing this probe "
+                "can reach separates them - StartCommand does not validate its "
+                "argument here (the nonsense name in the control behaves exactly "
+                "like 'Fix'), SystemConfiguration exposes no licence list on this "
+                "build, and there is no nodelock file to read. Use "
+                "catia_set_component_transform for absolute placement; nothing in "
+                "this server can create a parameterised assembly on this machine.")
         else:
             verdict = "INCONCLUSIVE"
             conclusion = (

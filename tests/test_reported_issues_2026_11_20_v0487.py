@@ -42,7 +42,8 @@ def test_the_mate_tools_refuse_before_catia(tool, args) -> None:
     assert "NOT AVAILABLE ON THIS BUILD" in text
     assert "nothing was changed" in text
     for said in ("Selection.Item(1).Reference", "GetWorkbenchId", "SKETCH",
-                 "unknown command", "catia_probe_assembly_constraints"):
+                 "未知命令", "catia_probe_assembly_constraints",
+                 "NOT ESTABLISHED"):
         assert said in text, said
     assert any("force: true" in action for action in error.next_actions)
 
@@ -81,7 +82,7 @@ def test_the_probe_is_registered_and_costs_nothing_to_run() -> None:
     assert probe["inputSchema"]["properties"] == {}
     text = probe["description"]
     for said in ("verdict", "THROWAWAY", "model_untouched", "sketch",
-                 "message box"):
+                 "ZzzNoSuchCommand"):
         assert said in text, said
 
 

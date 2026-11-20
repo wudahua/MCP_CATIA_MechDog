@@ -2,6 +2,75 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.154] — 2026-11-20 · the evidence that could not carry the conclusion
+
+0.3.153 closed P0 with a sentence it had no right to: *"the Fix UI command is not
+registered either: 'Fix' and 'CreateFix' both answer 'unknown command' while
+'Update' is known"*, read as proof that the Assembly Design constraint package
+was missing. The round that produced it never ran a control. This one did, and
+the sentence is gone.
+
+**The control.** `Application.StartCommand` does not validate its argument on this
+build. Measured on B30 2026-11-20, one session, nine names:
+
+| name | what it is | StartCommand | message boxes |
+|---|---|---|---|
+| `Update` | a known global command | returned None | 0 |
+| `Fit All In` | the doc's own example | returned None | 1 |
+| `Hide/Show` | another readable name | returned None | 1 |
+| `Fix` | 0.3.152's string | returned None | 1 |
+| `CATAssembly.CreateFix` | the exact key in `CATAssembly.CATRsc` | returned None | 1 |
+| `CATAssembly.CreateFixT` | Fix Together | returned None | 1 |
+| `ZzzNoSuchCommand` | **negative control** | returned None | 1 |
+
+An unknown name is accepted and opens the same `未知命令` box as `Fix`, so the box
+carries no information about the command set - only about the string. The
+resource file also names `CATAssembly.CreateFix` and `CATAssembly.CreateFixT`,
+which is what `Fix` and `CreateFix` were probably meant to be; neither changes the
+answer, because the validation that would make it meaningful does not happen.
+
+**This was a consistency defect, not a new discovery.** `export.py` has said
+since 0.3.151 that "`Application.StartCommand` does NOT validate the command name
+(an unknown one is accepted and then opens a modal 未知命令 dialog on the
+automation thread; re-measured 2026-11-19, it hangs the caller)". The same fact
+was written correctly in one file and inverted in four others.
+
+**What is withdrawn.** The claim, and the inference it supported, from
+`catia_fix_constraint`'s description, `_CONSTRAINT_EXPLAIN`, `_CONSTRAINT_CEILING`
+in `document.py`, the `capability_ceilings` entry, and the probe's verdict text.
+Every one of them now says `WHICH LAYER REFUSES IS NOT ESTABLISHED` and stops
+there: the assembly collection refuses and the sketch collection accepts, and
+that is everything this surface can see.
+
+**What the licence probe found, and why it settles nothing.** With B30 being the
+machine under test, the licence was checked directly rather than described:
+`SystemConfiguration` exposes no `Licenses`/`License`/`Licence` member on this
+build (probed through the real dispatch - `Licenses` raises `AttributeError`, not
+an empty collection); `C://ProgramData//Dassault Systemes` holds only `DraftSight`
+and no `Licenses` directory or nodelock file to read; and the binaries are all
+present (`CATConstraintModeler.dll`, `CATConstraintModelerItf.dll`,
+`CATConstraintModelerUI.dll`, `CATAssemblyCommands.dll`), so "incomplete install"
+is out. A licence and a configuration remain equally possible, and nothing here
+separates them.
+
+**The probe now reports the control instead of resting on it.**
+`catia_probe_assembly_constraints` runs `'Fix'` and `'ZzzNoSuchCommand'` together,
+publishes `ui_command.StartCommand_validates_names`, `negative_control` and
+`informative: false`, and marks the step `ok: null` - neither pass nor fail,
+because a `false` there would be read as "the command is missing", which is
+exactly the mistake being corrected. Measured: both names return, both open one
+box, constraints 0 → 0, `INDISTINGUISHABLE`.
+
+Seven tests pin the withdrawal: the asserting sentences may not return, each file
+must say what is left instead, the probe must ship the control and publish
+whether names are validated, the step may not pass or fail, and the two files that
+describe `StartCommand` must agree. The last one is the test that would have
+caught 0.3.152.
+
+Nothing about the tool surface changed for callers: the four mate tools still
+refuse at the validate stage with `modified: false`, and `force: true` still
+reaches CATIA. What changed is the reason they give.
+
 ## [0.3.153] — 2026-11-20 · a capability that refuses instead of failing, and a box that stops paying for a sample
 
 The 2026-11-20 re-test of 0.3.152 confirms P1/P3/P4/P5 and leaves P0 and P2
