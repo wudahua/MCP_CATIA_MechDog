@@ -1,12 +1,12 @@
-# MCP_CATIA_MechDog 0.3.152
+# MCP_CATIA_MechDog 0.3.153
 
-![version](https://img.shields.io/badge/version-0.3.152-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![CATIA](https://img.shields.io/badge/CATIA-V5%20R30%20(B30)-orange) ![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20http-purple)
+![version](https://img.shields.io/badge/version-0.3.153-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![CATIA](https://img.shields.io/badge/CATIA-V5%20R30%20(B30)-orange) ![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20http-purple)
 
-当前正式版 **0.3.152**——按 0.3.151 的验收报告处理，P0 是「装配约束全路径不可用」，这一版把它从「试了不行」变成「量出来是**哪一层**不行」。`Application.GetWorkbenchId()` 在装配文档激活时返回 **'Assembly'**——工作台一直是开的，`StartWorkbench` 在这版上是**空操作**（连不存在的名字都返回 None，要 Part Design 也不换 id），所以前两轮把「工作台没激活」当嫌疑是错的；工作台开着，`AddMonoEltCst` 仍然对**全部 14 个约束类型码**报 E_FAIL——根集合与子件集合、就地新建的零件与从磁盘装的零件、元素给组件/`ReferenceProduct`/根产品/以及**前几轮没试过的**`Selection.Item(1).Reference` 都一样，`Product.CreateReferenceFromObject` 不存在。让这些失败有意义的是一格对照：**同一会话、同一 CATIA**，同一个 `AddMonoEltCst(0, Reference)` 在**草图**上建出 `固定的.1`；而 UI 命令 `'Fix'`/`'CreateFix'` 都答「未知命令」、`'Update'` 正常——即约束命令根本没注册进来。于是四个 mate 工具的描述直接写 **UNAVAILABLE IN THIS BUILD**，`catia_diagnose` 发一条 `capability_ceilings`（含同样证据），**没有**加「假装是约束的变换层」。P1：`transform_13` + `translation_unit` 直接吃列主序 13 元组（CATIA 原生九个数**就是**列，所以只换单位、校验 scale=1，**不做转置**——第一版转了，被验收第 A 格抓住：90° 转向装成 180°），读回还报 `if_read_transposed.differs_by_deg`。P2/P3：截断的顶点扫描**不是下界而是样本的盒子**——582 顶点只读 200，max y 报 3.1941 而零件到 46.1033（短 42.9 mm），还花了 41 054 ms；同一零件 `mesh` 用 181 ms 给到46.1033。P4：`save_as_copy(part_number=...)` 让副本自带新编号（实例名从 `P05_legrod.6` 变成 `P06_mir_legrod.1`）。P5：`strict_arc` 拒绝那次 0.0028 mm 的圆心移动。 · [变更日志](CHANGELOG.md) · [Releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases)
+当前正式版 **0.3.153**——0.3.152 的复测确认了 P1/P3/P4/P5，P0 与 P2 仍未动，还查出一处**文档自相矛盾**（P6）。这一版的转折点是把「不可用」从**描述文字**变成**拒答**：复测报告说得对——「工具仍可被调到并返回 COM_ERROR」，而一句写在描述里的声明，在调用者真正需要它的那一刻什么也没告诉他。现在四个 mate 工具在 **validate 阶段**就返回 `UNSUPPORTED_CAPABILITY`、`modified: false`，**一次 COM 都不发**（实测 0 ms），并给出 `force: true` 这条回来测的路（实测仍能到 CATIA，拿回它自己的「方法 AddMonoEltCst 失败」）。新增 **`catia_probe_assembly_constraints`**：一次调用建两个**临时**文档（即用即关、不碰你的模型），试 Fix / 重合 / UI 命令 `Fix`（对话框在调用飞行中由看门线程点掉，不会冻住会话），再跑**对照**——同一个 `AddMonoEltCst(0, Reference)` 在**草图**上；实测 15 s 给出 **ENVIRONMENT_LIMITED**，工作台 id 读到 `Assembly`、草图建出 `固定的.1`、`'Fix'` 答「未知命令」。P2：超过 200 顶点的零件**不再**返回「样本的盒子」而是直接走 mesh——582 顶点零件 **41 054 ms / max y 3.1941 → 1.0-1.6 s / 46.1033**；含 2 个该零件的装配 **约 140 s → 19.5 s（冷）/ 1.5 s（热）**，剩下的 19.5 s 是 STL 导出不是扫描，`allow_truncated: true` 仍可取回那个被标注的样本。P6：`auto` 在装配上**就是 mesh**（代码自 0.3.114 起 `force_mesh = method in ('mesh', 'auto')`），参数说明却写着读顶点——已改，并加一条测试把这句话和它描述的源码行钉在一起。 · [变更日志](CHANGELOG.md) · [Releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases)
 
 > 让 AI 客户端通过 MCP，在 CATIA V5 里建**原生可编辑的实体特征**——并且每一步都能量回来。
 
-MCP_CATIA_MechDog 是运行在你自己 Windows 电脑上的本地 MCP 服务（stdio，可选 HTTP）。它把 CATIA V5 的 **COM Automation** 封装成 **154 个工具**（14 组），供 WorkBuddy、Claude Desktop、Cursor 等支持 MCP 的客户端调用：从一句需求出发，生成带草图、拉伸、切除、圆角、曲面与装配关系的 `.CATPart` / `.CATProduct`，保存到磁盘，再把体积、面积、面/边/顶点数读回来核对。
+MCP_CATIA_MechDog 是运行在你自己 Windows 电脑上的本地 MCP 服务（stdio，可选 HTTP）。它把 CATIA V5 的 **COM Automation** 封装成 **155 个工具**（14 组），供 WorkBuddy、Claude Desktop、Cursor 等支持 MCP 的客户端调用：从一句需求出发，生成带草图、拉伸、切除、圆角、曲面与装配关系的 `.CATPart` / `.CATProduct`，保存到磁盘，再把体积、面积、面/边/顶点数读回来核对。
 
 本仓库是 [daiemon12/catia-v5-mcp-server](https://github.com/daiemon12/catia-v5-mcp-server)（MIT，Adam M'HAMDI）的 **lite fork**：只保留「按书面规格把实体建出来、并且自己验证」这一条主线，只做加法与修补，不重写 COM 层。上游注释里那些实机验证过的坑，是本项目最大的资产。
 
@@ -20,7 +20,7 @@ MCP_CATIA_MechDog 是运行在你自己 Windows 电脑上的本地 MCP 服务（
 - **草图可回改**：`catia_sketch_edit` 重开已关闭的草图，`catia_sketch_delete_element` 删掉画错的一条，零件随之重建——错一条线不必整件重做。
 - **量不到就说量不到**：超范围、超能力或读数失败时，回执以 `UNVERIFIED:` 开头并说明哪一个测量失败，不会把失败写成成功。
 - **能力可发现**：诊断文字旁边给一行能直接粘贴的调用；「有工具但没人知道怎么调」和「没有这个工具」一样是缺陷。
-- **离线可测**：**2448** 个测试不需要 CATIA，`pytest` 在本机就能跑全绿；真机验收脚本在 `scripts/b30_*`。
+- **离线可测**：**2462** 个测试不需要 CATIA，`pytest` 在本机就能跑全绿；真机验收脚本在 `scripts/b30_*`。
 
 ## 环境要求
 
@@ -120,7 +120,7 @@ python -m venv .venv
 | Knowledge | 6 | 参数、公式、关系、设计表；长度列不带单位会按**米**读，回执会说明 |
 | Drawing | 13 | 新建图纸、生成视图（平面/面/实体）、投影、剖视、局部放大、文字、表格、自动与手动标注、图幅、图框与标题栏 |
 | Planner | 2 | `catia_run_plan`（含断言与回滚）、`catia_measure_topology` |
-| Diagnostics | 2 | `catia_diagnose`（工厂、类型库、能力边界全探针）、`catia_server_info`（版本、工具数、CATIA 版本，不连接） |
+| Diagnostics | 3 | `catia_diagnose`（工厂、类型库、能力边界全探针）、`catia_server_info`（版本、工具数、CATIA 版本，不连接）、`catia_probe_assembly_constraints`（一次性判定这台机器能不能建装配约束，临时文档即用即关、不碰你的模型） |
 | Blueprint | 2 | `catia_read_drawing`（DXF/SVG/矢量 PDF → 轮廓，离线）、`catia_import_drawing`（1:1 画进草图，支持多视图与样条模式） |
 | Sheet Metal | 2 | 钣金参数读写（厚度、折弯半径、K 因子、止裂槽）、新建带参数的零件；**几何不在其中**：没有壁、翻边、折弯、展开，因为 `SheetMetalFactory` 不提供 `AddNew*` |
 

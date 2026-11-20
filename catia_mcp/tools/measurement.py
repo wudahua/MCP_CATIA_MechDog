@@ -1521,6 +1521,12 @@ MESH_SOURCES = frozenset({"mesh", "mesh_fallback"})
 # guess from the source string. That guess is exactly what 0.3.45 got wrong.
 MESH_ASKED_FOR = "method_mesh"
 MESH_NO_VERTEX = "no_vertex_at_extremum"
+#: Why an assembly's part was bounded from its mesh although vertices were asked
+#: for: it has more vertices than the cap that bounds the sweep, and a capped
+#: sweep is the box of a SAMPLE (0.3.153). The 2026-11-20 report paid 200 s for
+#: that route over 17 instances; the same parts through their meshes cost
+#: seconds, and the mesh box is the tighter of the two.
+MESH_VERTEX_COUNT = "more_vertices_than_the_cap"
 
 
 def _from_mesh(source: Any) -> bool:
@@ -2270,23 +2276,27 @@ class MeasurementTools:
                                 "method='mesh' took 181 ms and gave 46.1033 - on a "
                                 "big part the mesh is both the cheaper and the "
                                 "tighter route, which is why auto takes it. "
-                                "On an ASSEMBLY they differ, and it matters: auto "
-                                "reads each component's VERTICES and falls back to "
-                                "a mesh only for a part with no vertices at all, "
-                                "so a part whose extremum sits on a curved face "
-                                "(a drum-shaped end cap, a spherical boss) is "
-                                "under-reported by however far the surface bulges "
-                                "- measured 2.392 mm and 8.99 mm on a 20-part "
-                                "bracket, in the two directions its acceptance was "
-                                "being checked in. mesh takes every part's mesh, "
-                                "one per distinct part rather than per instance, "
-                                "which is exact on curved faces and slower - and "
-                                "cached: the box is keyed to the part FILE, so a "
+                                "On an ASSEMBLY they differ, and it matters - AND "
+                                "THEY DIFFER IN THE OPPOSITE WAY FROM WHAT 0.3.152's "
+                                "TEXT SAID, which the 2026-11-20 report caught (P6): "
+                                "auto is the MESH route on an assembly "
+                                "(code: force_mesh = method in ('mesh', 'auto'), "
+                                "since 0.3.114), one STL per distinct part rather "
+                                "than per instance, cached by the part FILE so a "
                                 "second call over an unchanged assembly answers "
-                                "from that cache instead of exporting again "
-                                "(4.2 s of window switching per part per call "
-                                "before 0.3.72). A part with unsaved edits is "
-                                "never answered from the cache. Read 'exact' and "
+                                "from the cache instead of exporting again (4.2 s "
+                                "of window switching per part per call before "
+                                "0.3.72; a part with unsaved edits is never "
+                                "answered from the cache). method='vertices' is the "
+                                "route that reads each component's VERTICES and "
+                                "falls back to a mesh only for a part with no "
+                                "vertices at all, so a part whose extremum sits on "
+                                "a curved face (a drum-shaped end cap, a spherical "
+                                "boss) would be under-reported by however far the "
+                                "surface bulges - measured 2.392 mm and 8.99 mm on "
+                                "a 20-part bracket, in the two directions its "
+                                "acceptance was being checked in - which is exactly "
+                                "why auto does not take it. Read 'exact' and "
                                 "'bounds_code' in the reply: 'complete' only says "
                                 "every instance got a box."
                             ),
@@ -2313,6 +2323,24 @@ class MeasurementTools:
                                 "another body answered 'That part has no solid "
                                 "shape yet' while catia_get_inertia read its volume "
                                 "(2026-11-15 report C3)."
+                            ),
+                        },
+                        "allow_truncated": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "PART mode only. A vertex sweep reads at most 200 "
+                                "vertices, and 200 of 582 is not a lower bound - "
+                                "it is the box of a sample, short on any side "
+                                "whose extreme lies in the ones not read "
+                                "(measured 3.1941 against 46.1033, 42.9 mm, "
+                                "2026-11-19). So by default a part with more than "
+                                "200 vertices is bounded from its MESH instead "
+                                "(tighter, and 181 ms against 41 054 ms on that "
+                                "part), and the reply says so in 'method'. Set "
+                                "this true to get the 200-vertex sample anyway; "
+                                "it is still labelled bounds_code="
+                                "'vertex_sweep_truncated' with vertices_missed."
                             ),
                         },
                         "include_curved": {
@@ -2688,7 +2716,8 @@ class MeasurementTools:
                     arguments.get("component"),
                     arguments.get("document") or arguments.get("document_name"),
                     bool(arguments.get("include_curved", True)),
-                    arguments.get("body"))
+                    arguments.get("body"),
+                    bool(arguments.get("allow_truncated", False)))
                 # warm_up runs the same measurement and throws the geometry away:
                 # the point is to make CATIA pay its first-read cost now rather
                 # than inside the call that needs the answer (reported 2026-10-27).
@@ -3631,8 +3660,15 @@ class MeasurementTools:
             self._lookup_ms = round(lookup_seconds * 1000, 1)
         return rows
 
+    #: How many vertices a sweep may read before the mesh route is cheaper AND
+    #: tighter. 200 is the single-part cap that has been in place since the cap
+    #: existed; measured cold, 200 vertices cost 25-41 s while the mesh of the
+    #: same part cost 0.18-1.0 s (B30 2026-11-19/20).
+    _VERTEX_SWEEP_CAP = 200
+
     def _local_box(self, part: Any, body: Any,
-                   stats: dict[str, Any] | None = None
+                   stats: dict[str, Any] | None = None,
+                   allow_truncated: bool = False,
                    ) -> tuple[list[list[float]], int]:
         """The part's own bounding corners and the number of points used.
 
@@ -3644,6 +3680,11 @@ class MeasurementTools:
         form is 60x, not the 6x that 8 vertices suggested). ``stats`` receives
         ``cells`` and ``points_route`` so a caller can see which reader ran and
         how much work the construction filter had to do.
+
+        Past ``_VERTEX_SWEEP_CAP`` this returns NO points and records
+        ``stats["refused_vertices"]`` instead of reading them all: the caller
+        then bounds that part from its mesh. Cheap to decide - the topology
+        search that answers "how many" has already run.
         """
         doc = part.Parent
         sel = doc.Selection
@@ -3654,6 +3695,18 @@ class MeasurementTools:
             sel.Clear()
             sel.Add(body)
             search_topology(sel, "Vertex")
+            total_cells = int(sel.Count)
+            if total_cells > self._VERTEX_SWEEP_CAP and not allow_truncated:
+                # The assembly route reads every cell, which is why it never lied
+                # about truncation - and why a 582-vertex part cost 68-74 s per
+                # part in the 2026-11-20 report. Past the cap the mesh is both
+                # tighter and two orders cheaper, so take it and say which reason
+                # it was (the caller asked for vertices; this part has too many).
+                if stats is not None:
+                    stats["refused_vertices"] = (
+                        f"{total_cells} vertices, cap {self._VERTEX_SWEEP_CAP}")
+                    stats["cells"] = total_cells
+                return [], 0
             spa = doc.GetWorkbench("SPAWorkbench")
             swept = batch_vertex_sweep(self.conn.app, sel, spa)
             if swept is not None:
@@ -3740,7 +3793,8 @@ class MeasurementTools:
 
     def _part_box_entry(self, part: Any, body: Any,
                         include_curved: bool,
-                        force_mesh: bool = False) -> dict[str, Any]:
+                        force_mesh: bool = False,
+                        allow_truncated: bool = False) -> dict[str, Any]:
         """One part's local box: vertices when possible, mesh when not.
 
         The mesh fallback is what makes ``complete`` mean something. A fully
@@ -3778,7 +3832,12 @@ class MeasurementTools:
                 + (f" ({stats['mesh_error']})" if stats.get("mesh_error") else "")
                 + ", so its box is the vertex sweep - a LOWER bound on curved faces")
         try:
-            points, used = self._local_box(part, body, stats)
+            # Same rule as the assembly call above: the extra keyword is passed
+            # only when it is true, so a three-argument test double keeps working
+            # and the default path stays the shape every caller already had.
+            points, used = (
+                self._local_box(part, body, stats, allow_truncated=True)
+                if allow_truncated else self._local_box(part, body, stats))
         except Exception as exc:  # noqa: BLE001 - reported per component
             return {"error": f"local box: {str(exc).splitlines()[0][:80]}"}
         if points:
@@ -3801,11 +3860,14 @@ class MeasurementTools:
         if not cloud:
             return {"error": "no vertices and no mesh: neither route could bound "
                              "this part"}
+        refused = stats.get("refused_vertices")
         return {"points": cloud, "used": len(cloud) // 3,
-                "source": "mesh_fallback", "mesh_reason": MESH_NO_VERTEX,
+                "source": "mesh_fallback",
+                "mesh_reason": (MESH_VERTEX_COUNT if refused else MESH_NO_VERTEX),
                 "mesh_vertices": mesh_vertices,
                 "truncated": mesh_vertices > len(cloud) // 3,
                 "mesh_cache": self._mesh_last_cache,
+                "refused_vertices": refused,
                 "copy_note": copy_note or ""}
 
     @staticmethod
@@ -3824,7 +3886,8 @@ class MeasurementTools:
 
     def _assembly_box(self, doc: Any, method: str,
                       only: str | None = None,
-                      include_curved: bool = True) -> str:
+                      include_curved: bool = True,
+                      allow_truncated: bool = False) -> str:
         started = time.perf_counter()
         self._poses_route = None
         self._lookup_ms = None
@@ -3872,6 +3935,10 @@ class MeasurementTools:
             # The cost is one STL per DISTINCT part (not per instance), cached per
             # part file; 'vertices' is still there for the fast route.
             "force_mesh": method in ("mesh", "auto"),
+            # Reaches _part_box_entry through the context: the walk recurses, so
+            # a parameter would have to be threaded through every level for a
+            # flag that comes from one tool argument.
+            "allow_truncated": allow_truncated,
         }
         self._box_walk(rows, [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
                        [0.0, 0.0, 0.0], 1, "", ctx)
@@ -4461,12 +4528,17 @@ class MeasurementTools:
                 part_started = time.perf_counter()
                 first_measure = _BOOKS.is_new(BOOK_TOPOLOGY, key)
                 # The fourth argument is passed only when a mesh was asked for,
-                # so the default call keeps the three-argument signature every
-                # caller and test double already has.
+                # and allow_truncated only when the caller asked for the sample
+                # back, so the default call keeps the three-argument signature
+                # every caller and test double already has.
                 local_boxes[key] = (
                     self._part_box_entry(row["part"], body, include_curved, True)
                     if ctx.get("force_mesh")
-                    else self._part_box_entry(row["part"], body, include_curved))
+                    else (self._part_box_entry(row["part"], body, include_curved,
+                                               allow_truncated=True)
+                          if ctx.get("allow_truncated")
+                          else self._part_box_entry(row["part"], body,
+                                                    include_curved)))
                 local_boxes[key]["first_measure"] = first_measure
                 if "error" not in local_boxes[key]:
                     # The reason is only known once the route is: a part bounded
@@ -4527,6 +4599,13 @@ class MeasurementTools:
                                for k, mn, mx in zip("xyz", entry_min, entry_max)},
                 "source": cached["source"],
             }
+            if cached.get("mesh_reason"):
+                # WHY this instance's box came from a mesh when a method was
+                # named: 'more_vertices_than_the_cap' (0.3.153 - the sweep would
+                # have returned a sample) or 'no_vertex_at_extremum'. Without it
+                # the entry says "mesh" and the reader has to guess whether the
+                # caller asked for it.
+                entry["mesh_reason"] = cached["mesh_reason"]
             if not _from_mesh(cached["source"]):
                 # Per-instance, machine-readable: this instance's extremes came
                 # from a vertex sweep, so its box can be short wherever a face is
@@ -4548,6 +4627,10 @@ class MeasurementTools:
                     "local_dimensions": self._local_dimensions(cached["points"],
                                                                cached["source"]),
                 }
+                if cached.get("mesh_reason"):
+                    detail["mesh_reason"] = cached["mesh_reason"]
+                if cached.get("refused_vertices"):
+                    detail["refused_vertices"] = cached["refused_vertices"]
                 if cached.get("elapsed_ms") is not None:
                     detail["elapsed_ms"] = cached["elapsed_ms"]
                 # This part's own two regimes, when both have been seen. The
@@ -5218,10 +5301,12 @@ class MeasurementTools:
         return main, "main_body"
 
     def _part_bbox(self, part: Any, method: str,
-                   body_name: str | None = None) -> str:
+                   body_name: str | None = None,
+                   allow_truncated: bool = False) -> str:
         """Bounding box of a Part, on the body a measurement means."""
         body, scope = self._measurable_body(part, body_name)
-        reply = self._part_bbox_of_body(part, method, body)
+        reply = self._part_bbox_of_body(part, method, body,
+                                        allow_truncated=allow_truncated)
         try:
             payload = json.loads(reply)
         except Exception:  # noqa: BLE001 - then it is already the answer
@@ -5230,7 +5315,8 @@ class MeasurementTools:
         payload["scope"] = scope
         return json.dumps(payload, indent=2)
 
-    def _part_bbox_of_body(self, part: Any, method: str, body: Any) -> str:
+    def _part_bbox_of_body(self, part: Any, method: str, body: Any,
+                           allow_truncated: bool = False) -> str:
         """Bounding box of one body, reported as the part's box.
 
         Split from ``_part_bbox`` so the body decision is made in ONE place for
@@ -5284,9 +5370,11 @@ class MeasurementTools:
             return fields
 
         method, auto_note = self._auto_method(method, body)
+        switch_note = ""   # set when the vertex route was refused for its cap
         if method in ("auto", "vertices"):
             stats: dict[str, Any] = {}
-            points, truncated, total, dropped = self._vertex_points(body, stats)
+            points, truncated, total, dropped = self._vertex_points(
+                body, stats, allow_truncated=allow_truncated)
             if points:
                 # A SWEEP THAT STOPPED AT THE CAP IS NOT A LOWER BOUND, it is the
                 # envelope of a sample: on a 194-point outline with 582 vertices
@@ -5353,7 +5441,21 @@ class MeasurementTools:
                         **regime_fields(TOPOLOGY),
                     },
                 )
-            if method == "vertices":
+            refused = stats.get("refused_vertices")
+            if refused:
+                # Too many vertices for the cap that bounds the cost. The mesh
+                # route is BOTH cheaper and tighter here (measured 181 ms against
+                # 41 054 ms on the same 582-vertex part), so the answer is a mesh
+                # box with a sentence saying why - not a sample's box, and not a
+                # refusal that leaves the caller with nothing.
+                switch_note = (
+                    f" (this part has {refused}, so the vertex sweep would have "
+                    "returned the box of a SAMPLE: 0.3.152 did exactly that and "
+                    "reported max y 3.1941 where the part reaches 46.1033 - 42.9 "
+                    "mm short on a side it never visited, for 41 054 ms. The mesh "
+                    "above is both tighter and ~200x cheaper. Pass "
+                    "allow_truncated=true if you really want the sample.)")
+            if method == "vertices" and not refused:
                 raise CodedError(
                     "UNSUPPORTED_CAPABILITY: that part exposes no vertices (fully "
                     "curved solid), so a vertex sweep cannot bound it. Use "
@@ -5398,7 +5500,7 @@ class MeasurementTools:
             "vertices; the mesh chords curved faces, so these bounds are a LOWER "
             "bound on the true envelope (0.47-0.73 % small on the parts this was "
             "first measured on; 1.52 % on a bare R12 cylinder, 2026-11-01)"
-            + copy_note + auto_note,
+            + copy_note + auto_note + switch_note,
             bounds=("lower bound: mesh chording, 0.47-0.73 % small on the curved "
                     "faces of the parts this was first measured on and 1.52 % on "
                     "an R12 cylinder - the tolerance scales with the feature, so "
@@ -5534,7 +5636,8 @@ class MeasurementTools:
         return json.dumps(payload, indent=2)
 
     def _assembly_box_checked(self, doc: Any, method: str, component: str | None,
-                              include_curved: bool) -> str:
+                              include_curved: bool,
+                              allow_truncated: bool = False) -> str:
         """`_assembly_box` with the one refusal that belongs to every caller."""
         # This used to refuse method='mesh' outright, on the reasoning that a
         # world box needs every component's own mesh and the aggregated path only
@@ -5545,7 +5648,10 @@ class MeasurementTools:
         # their box came out 2.392 mm and 8.99 mm short exactly where the
         # acceptance criterion was measured (reported 2026-11-01, P5). A mesh per
         # PART (not per instance) is what it costs now.
-        return self._assembly_box(doc, method, component, include_curved)
+        return (self._assembly_box(doc, method, component, include_curved,
+                                   allow_truncated=True)
+                if allow_truncated else
+                self._assembly_box(doc, method, component, include_curved))
 
     def _assemblies_with_component(self, component: str) -> list[Any]:
         """Open assemblies that hold a component with that name (or part number)."""
@@ -5995,7 +6101,8 @@ class MeasurementTools:
                           component: str | None = None,
                           document: str | None = None,
                           include_curved: bool = True,
-                          body_name: str | None = None) -> str:
+                          body_name: str | None = None,
+                          allow_truncated: bool = False) -> str:
         # Measurable has no bounding-box method in any V5 release. Two sources
         # are available instead: the final shape's vertices (exact for
         # planar-faced solids) and an exported STL mesh (the only thing that
@@ -6014,14 +6121,16 @@ class MeasurementTools:
                 # the same CATIA can invalidate between two calls (reported
                 # 2026-10-26, twice).
                 return self._assembly_box(doc, method, component,
-                                          include_curved)
+                                          include_curved,
+                                          allow_truncated=allow_truncated)
             try:
                 part = self.conn.part_of(doc)
             except Exception as exc:  # noqa: BLE001
                 raise RuntimeError(
                     f"'{document}' is neither a Part nor a Product document ({exc})."
                 ) from exc
-            reply = self._part_bbox(part, method, body_name)
+            reply = self._part_bbox(part, method, body_name,
+                                    allow_truncated=allow_truncated)
             if self.opened_for_measurement:
                 payload = json.loads(reply)
                 payload["opened"] = (
@@ -6033,7 +6142,8 @@ class MeasurementTools:
             return self._stamp_elapsed(reply, started)
         if self._document_kind() == "assembly":
             return self._assembly_box_checked(self.conn.active_document, method,
-                                              component, include_curved)
+                                              component, include_curved,
+                                              allow_truncated=allow_truncated)
         if component:
             # `component` used to be accepted and IGNORED here: the call returned
             # the active part's box, with no error, no warning and no mention of
@@ -6044,7 +6154,8 @@ class MeasurementTools:
             candidates = self._assemblies_with_component(str(component))
             if len(candidates) == 1:
                 reply = self._assembly_box_checked(candidates[0], method,
-                                                   component, include_curved)
+                                                   component, include_curved,
+                                                   allow_truncated=allow_truncated)
                 payload = json.loads(reply)
                 payload["measured_in"] = (
                     f"'{candidates[0].Name}' - the active document is not an "
@@ -6094,7 +6205,9 @@ class MeasurementTools:
         # without them when it measured the active one - two field sets for one
         # question, and the cost regime was invisible on the path most callers take
         # (reported 2026-10-27, §3.2 and §P3-3).
-        return self._stamp_elapsed(self._part_bbox(part, method, body_name), started)
+        return self._stamp_elapsed(
+            self._part_bbox(part, method, body_name,
+                            allow_truncated=allow_truncated), started)
 
     # A wireframe element's "infinite" end point is stored as 1e7 mm. Sweeping
     # the body's vertices therefore picks up coordinates that belong to an axis
@@ -6104,9 +6217,25 @@ class MeasurementTools:
     _UNBOUNDED = 1.0e6
 
     def _vertex_points(self, body: Any,
-                       stats: dict[str, Any] | None = None
+                       stats: dict[str, Any] | None = None,
+                       limit: int = 200,
+                       allow_truncated: bool = False,
                        ) -> tuple[list[list[float]], bool, int, int]:
-        """Reference vertex coordinates, capped at 200 points.
+        """Reference vertex coordinates, capped at ``limit`` points.
+
+        A CAP OF 200 POINTS IS NOT A SAMPLE OF A BOUND, and 0.3.152 learned that
+        the expensive way: on a 582-vertex part the first 200 read gave max y
+        3.1941 where the part reaches 46.1033 - 42.9 mm short, on a side that was
+        never visited - and cost 41 054 ms to produce (B30 2026-11-19). The
+        2026-11-20 report then paid 200 s for the same route on 17 instances.
+
+        So the cap no longer produces a box by default: when the body has more
+        vertices than ``limit``, this returns NO points and records
+        ``stats["refused_vertices"]``, which makes the caller take the mesh route
+        (181 ms for that same part, and it reaches the side the sample missed).
+        ``allow_truncated=True`` restores the old behaviour for a caller who
+        explicitly wants the cheap sample - the reply then still says
+        ``vertex_sweep_truncated`` and how many vertices were missed.
 
         Returns ``(points, capped, total, dropped)`` where ``dropped`` counts the
         points that were filtered out - two kinds of them: unbounded wireframe
@@ -6130,14 +6259,22 @@ class MeasurementTools:
             sel.Add(body)
             search_topology(sel, "Vertex")
             total = sel.Count
+            if total > limit and not allow_truncated:
+                # Decide BEFORE reading: the sweep is the expensive part, and
+                # the search that just told us the count cost ~0.5 s.
+                if stats is not None:
+                    stats["refused_vertices"] = (
+                        f"{total} vertices, cap {limit}")
+                    stats["cells"] = total
+                return [], False, total, 0
             swept = batch_vertex_sweep(self.conn.app, sel, self._spa_workbench(),
-                                       limit=200)
+                                       limit=limit)
             if swept is not None:
                 kept, cells, chars = swept
                 points, unbounded = self._bounded(kept)
                 # The cap is applied INSIDE the script, so "more cells than points"
                 # means the limit stopped it, not that the rest was construction.
-                capped = len(kept) >= 200 and cells > len(kept)
+                capped = len(kept) >= limit and cells > len(kept)
                 if stats is not None:
                     stats["route"] = "batch"
                     stats["sweep_route"] = "one_call"
@@ -6146,7 +6283,7 @@ class MeasurementTools:
                     stats["nls_chars_cells"] = cells
                 ignored = unbounded if capped else max(cells - len(kept), 0) + unbounded
                 return points, capped, cells, ignored
-            count = min(total, 200)
+            count = min(total, limit)
             for i in range(1, count + 1):
                 cell = sel.Item(i)
                 nls = nls_of(cell)

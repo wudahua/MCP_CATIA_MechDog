@@ -109,7 +109,7 @@ def test_authenticated_client_lists_tools_and_gets_structured_errors(monkeypatch
             # Lite fork: 151 (see test_server_runtime for the arithmetic)
             # - 143 plus catia_measure_deviation in 0.3.119, plus
             # catia_surface_probe in 0.3.140.
-            assert len(tools.tools) == 154
+            assert len(tools.tools) == 155
             result = await session.call_tool("catia_list_documents", {})
             assert result.isError is True
             assert result.structuredContent["code"] == "COM_ERROR"

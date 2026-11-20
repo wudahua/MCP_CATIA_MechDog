@@ -2,7 +2,7 @@
 
 > **中文入口见 [README.md](README.md)。** This file is the full English reference: every tool, every measurement behind it, and every known limit.
 
-**0.3.152** · [what changed](CHANGELOG.md) ·
+**0.3.153** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -14,7 +14,7 @@ defects that make that loop lie to you. Most of the work since 0.3.0 came from
 people rebuilding real assemblies with it: the changelog is a list of things that
 produced a plausible number, a wrong number, or no explanation at all.
 
-**154 tools** (upstream 98 + 56 added, and nothing dropped any more: knowledge
+**155 tools** (upstream 98 + 57 added, and nothing dropped any more: knowledge
 came back in 0.3.63 and drafting in 0.3.64, each after its tools were measured on
 B30 rather than trusted). Nothing in the COM layer was rewritten — the value of upstream is
 the field-verified knowledge in its comments, so this fork is strictly add /
@@ -1377,6 +1377,41 @@ Two facts about real drawings that this had to accept:
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
 
+0.3.153 answers the 2026-11-20 re-test of 0.3.152. It confirms P1/P3/P4/P5,
+leaves P0 and P2 open, and finds one new defect (P6) in a description. Its
+sharpest sentence is about the declaration 0.3.152 already carried: the tools were
+described as unavailable and still went to CATIA and came back with a COM_ERROR,
+so the caller learned nothing at the moment they needed it.
+
+P0 is now answered by refusing: `catia_fix_constraint`, `catia_coincidence_constraint`,
+`catia_offset_constraint` and `catia_angle_constraint` return
+UNSUPPORTED_CAPABILITY at the **validate** stage with `modified: false`, **0 ms**
+and no COM call at all (measured on B30 2026-11-20), and `force: true` is the
+documented way back in - it still reaches CATIA and reports CATIA's own
+`方法 AddMonoEltCst 失败`.
+
+`catia_probe_assembly_constraints` answers the question once instead of four
+times: it builds two THROWAWAY documents (a product with two components and a
+part with a sketch), tries Fix, coincidence and the UI command `Fix` - a message
+box is answered from a watcher thread while the call is in flight - then runs the
+CONTROL, the same AddMonoEltCst on a sketch, and closes both without saving.
+Measured: ENVIRONMENT_LIMITED in ~15 s, workbench id `Assembly`, sketch control
+creating `固定的.1`, `'Fix'` answering "unknown command" where `'Update'` is
+accepted, and the caller's documents untouched.
+
+P2: a part with more than 200 vertices is now bounded from its MESH instead of
+from a 200-vertex sample. A 582-vertex part went from **41 054 ms / max y 3.1941**
+to **1.0-1.6 s / 46.1033**, and an assembly holding two instances of it from
+~140 s to **19.5 s cold, 1.5 s warm** - the rest is the STL export, not the
+sweep. `allow_truncated: true` still returns the labelled sample. The route that
+would have avoided all of it does not exist on this build: `Measurable` has no
+bounding-box member, and neither do `Part`, `Body` or `SPAWorkbench` (probed
+through the real dispatch, 2026-11-20).
+
+P6: the `method` parameter said `auto` reads each component's VERTICES on an
+assembly; the code has said `force_mesh = method in ('mesh', 'auto')` since
+0.3.114. Fixed, with a test that pins the sentence and the source line together.
+
 0.3.152 answers the 2026-11-19 report against 0.3.151 - a hexapod built from a
 spec table, 17 instances placed to 4.45e-10 mm, and five things it could not do.
 Its P0 was "assembly constraints are unavailable through every route", and this
@@ -1917,7 +1952,7 @@ asks, on that same file (297.011 x 210.016 mm per page, as a PDF reader reports)
 | Knowledge | 6 | parameters, formulas, relations, design tables - upstream's five, measured and corrected, plus `catia_apply_design_table` |
 | Drawing | 13 | upstream's drafting module, measured, plus `catia_drawing_set_sheet` and `catia_drawing_add_frame`: new drawing, generative view (plane / face / body), projection, section, detail, text, table, generated and manual dimensions, paper size, border and title block |
 | Planner | **2** | `run_plan`, `measure_topology` |
-| Diagnostics | 2 | `catia_diagnose` (full probe: factories, type libraries, ceilings), `catia_server_info` (0.3.127 - name, version, tool count, CATIA release; no probes, never connects) |
+| Diagnostics | 3 | `catia_diagnose` (full probe: factories, type libraries, ceilings), `catia_server_info` (0.3.127 - name, version, tool count, CATIA release; no probes, never connects), `catia_probe_assembly_constraints` (0.3.152 - one call that answers "can this machine create assembly constraints at all?", with a verdict, using two throwaway documents it closes again) |
 | Blueprint | 2 | `catia_read_drawing` (0.3.128 - DXF/SVG/vector-PDF to contours, counts, layers, bounds in mm, and since 0.3.135 `curves` / `loft_ready` per contour; never connects), `catia_import_drawing` (0.3.128 - the same, drawn into a sketch at 1:1 and closed; since 0.3.135 `profile_mode="spline"` for ONE curve per contour and a frame `plane`; since 0.3.136 `views=[...]` for several views on ONE sheet frame with `deviation_mm`; since 0.3.137 each view takes `placement`/`align`, and the alignment check only reports axes that really overlap) |
 | Sheet Metal | 2 | `catia_sheetmetal_parameters` (0.3.133 - read and set thickness / bend radius / K factor / relief through `part.Parameters`, cross-checked against `GetThickness()`), `catia_new_sheetmetal` (0.3.133 - a part that carries the set). Geometry is NOT here: no wall, flange, bend, unfold or flat pattern, because `SheetMetalFactory` exposes no `AddNew*` |
 

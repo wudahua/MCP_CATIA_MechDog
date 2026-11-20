@@ -279,7 +279,7 @@ def test_the_single_part_box_publishes_the_route_too():
     # delegates to _part_bbox, so both single-part routes publish the same
     # fields, including the cost regime the active path used to drop.
     active = __import__("inspect").getsource(M.MeasurementTools._get_bounding_box)
-    assert "_part_bbox(part, method, body_name)" in active
+    assert "_part_bbox(part, method, body_name," in active
     # 0.3.39: the regime fields are not assembled here any more, they come from
     # the one implementation every route shares. Asserting the CALL is stronger
     # than listing field names: a name can be present in a dead branch (it was,

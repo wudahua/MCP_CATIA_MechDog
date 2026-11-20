@@ -372,7 +372,10 @@ def test_coincidence_no_longer_declares_elements_it_never_reads():
     from catia_mcp.server import CATIAMCPServer
 
     props = CATIAMCPServer()._schemas["catia_coincidence_constraint"]["properties"]
-    assert set(props) == {"component1", "component2"}, (
+    # `force` is the 2026-11-20 addition: the tool refuses by declaration
+    # unless the caller says force, so it is read - not a declared-and-ignored
+    # argument like element1/element2 were.
+    assert set(props) == {"component1", "component2", "force"}, (
         "element1/element2 were declared and never read - AddBiEltCst aligns two "
         "whole components and never touches an element")
 

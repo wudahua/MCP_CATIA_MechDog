@@ -1363,6 +1363,37 @@ class DiagnosticsTools:
                 },
             },
             {
+                "name": "catia_probe_assembly_constraints",
+                "description": (
+                    "ONE CALL THAT ANSWERS 'CAN THIS MACHINE CREATE ASSEMBLY "
+                    "CONSTRAINTS AT ALL?' - with a verdict, not a COM error. The "
+                    "2026-11-20 re-test of 0.3.152 asked for exactly this: four "
+                    "tools described as unavailable still reached CATIA and came "
+                    "back with '方法 AddMonoEltCst 失败', which reads like a bad "
+                    "argument, and the same question was re-asked in three "
+                    "reports. "
+                    "WHAT IT DOES: builds a THROWAWAY product with two part "
+                    "components in a temporary document, tries Fix "
+                    "(AddMonoEltCst with the Reference from "
+                    "Selection.Item(1).Reference), tries a coincidence between "
+                    "the two, tries the registered UI command 'Fix' (a message "
+                    "box is answered while the call is in flight, so an unknown "
+                    "command cannot freeze the session), then runs the CONTROL "
+                    "that makes the answer mean something: the same "
+                    "AddMonoEltCst(0, Reference) on a sketch in a second "
+                    "throwaway part. Closes both without saving, so the caller's "
+                    "model is never touched - 'model_untouched: true' in the "
+                    "reply, and nothing is written to disk. "
+                    "COSTS a few seconds and needs no open document. Use it once "
+                    "per session (or after a licence change) instead of trying "
+                    "the four tools to find out."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
                 "name": "catia_server_info",
                 "description": (
                     "The cheap answer to 'what am I talking to': server name, "
@@ -1433,10 +1464,255 @@ class DiagnosticsTools:
         match tool_name:
             case "catia_diagnose":
                 return self._diagnose()
+            case "catia_probe_assembly_constraints":
+                return self._probe_assembly_constraints()
             case "catia_server_info":
                 return self._server_info_tool()
             case _:
                 raise ArgumentRejected(f"Unknown diagnostics tool: {tool_name}")
+
+    def _probe_assembly_constraints(self) -> dict[str, Any]:
+        """Measure whether assembly constraints can be created on THIS machine.
+
+        Everything happens in two temporary documents that are created here and
+        closed without saving, so the answer cannot depend on - or damage - what
+        the caller has open. The four steps are deliberately ordered so that each
+        one narrows the verdict:
+
+          1  the workbench id, read rather than inferred from StartWorkbench;
+          2  ``AddMonoEltCst(0, Reference)`` on a component, the Reference taken
+             from the visible selection (the route the earlier rounds had not
+             tried);
+          3  ``AddBiEltCst`` between two components;
+          4  the UI command 'Fix'. A message box means "unknown command"; the
+             box is answered from a watcher thread while the call is in flight,
+             because an unanswered one freezes this worker for good;
+          5  the CONTROL: the same AddMonoEltCst on a SKETCH. Without it, a
+             failure at 2 only says "something here refuses", and that is the
+             state this project was stuck in for three rounds.
+        """
+        import catia_mcp.dialogs as dialogs
+
+        app = self.conn.app
+        evidence: dict[str, Any] = {}
+        steps: list[dict[str, Any]] = []
+
+        def step(name: str, ok: bool | None, detail: str) -> None:
+            steps.append({"step": name, "ok": ok, "detail": detail})
+
+        previous = None
+        try:
+            previous = self.conn.active_document
+        except Exception:  # noqa: BLE001 - no window open is fine
+            previous = None
+
+        product_doc = None
+        part_doc = None
+        try:
+            product_doc = app.Documents.Add("Product")
+            product = product_doc.Product
+            # Read it HERE, with the product document active: read before, on
+            # whatever document the caller happened to have open, it answers
+            # about that document ('PrtCfg' for a part) and says nothing about
+            # the assembly workbench the report asked about.
+            try:
+                evidence["workbench_id"] = str(app.GetWorkbenchId())
+            except Exception as exc:  # noqa: BLE001 - the absence is the reading
+                evidence["workbench_id"] = (
+                    f"<unreadable: {str(exc).splitlines()[0][:60]}>")
+            first = product.Products.AddNewProduct("Part")
+            second = product.Products.AddNewProduct("Part")
+            collection = product.Connections("CATIAConstraints")
+            evidence["constraints_collection"] = (
+                f"resolves; Count={int(collection.Count)}")
+
+            selection = product_doc.Selection
+            selection.Clear()
+            selection.Add(first)
+            try:
+                reference = selection.Item(1).Reference
+                evidence["reference_route"] = (
+                    "Selection.Item(1).Reference returned a Reference")
+            except Exception as exc:  # noqa: BLE001
+                reference = None
+                evidence["reference_route"] = (
+                    f"unavailable: {str(exc).splitlines()[0][:70]}")
+            if reference is not None:
+                try:
+                    constraint = collection.AddMonoEltCst(0, reference)
+                    step("fix via AddMonoEltCst(0, selection Reference)", True,
+                         f"created '{constraint.Name}'")
+                    evidence["fix"] = {"ok": True, "name": str(constraint.Name)}
+                except Exception as exc:  # noqa: BLE001
+                    step("fix via AddMonoEltCst(0, selection Reference)", False,
+                         self._short_com(exc))
+                    evidence["fix"] = {"ok": False, "error": self._short_com(exc)}
+                selection.Clear()
+                selection.Add(second)
+                try:
+                    second_reference = selection.Item(1).Reference
+                except Exception:  # noqa: BLE001
+                    second_reference = None
+                if second_reference is not None:
+                    try:
+                        created = collection.AddBiEltCst(2, reference,
+                                                          second_reference)
+                        step("coincidence via AddBiEltCst(2, two References)",
+                             True, f"created '{created.Name}'")
+                        evidence["coincidence"] = {"ok": True,
+                                                  "name": str(created.Name)}
+                    except Exception as exc:  # noqa: BLE001
+                        step("coincidence via AddBiEltCst(2, two References)",
+                             False, self._short_com(exc))
+                        evidence["coincidence"] = {"ok": False,
+                                                   "error": self._short_com(exc)}
+
+            # The UI command. 'Fix' is one click with no dialog when it is
+            # registered, so the only box that can appear is "unknown command" -
+            # and that box is the reading, not a nuisance.
+            selection.Clear()
+            selection.Add(first)
+            before = int(collection.Count)
+            answered = 0
+            command_state = ""
+            try:
+                with dialogs.watch(interval=0.2) as watcher:
+                    try:
+                        app.StartCommand("Fix")
+                        command_state = "returned"
+                    except Exception as exc:  # noqa: BLE001
+                        command_state = self._short_com(exc)
+                answered = watcher.clicks
+            finally:
+                selection.Clear()
+            after = int(collection.Count)
+            registered = answered == 0 and after > before
+            evidence["ui_command_fix"] = {
+                "call": command_state,
+                "message_boxes_answered": answered,
+                "constraints_before": before,
+                "constraints_after": after,
+                "registered": registered,
+            }
+            step("UI command 'Fix' is registered", registered,
+                 f"call {command_state}, {answered} message box(es), "
+                 f"constraints {before} -> {after}"
+                 + ("" if registered else
+                    " - the command is not in this session's command set"))
+        except Exception as exc:  # noqa: BLE001 - the probe reports, never dies
+            step("product probe", False, self._short_com(exc))
+        finally:
+            try:
+                if product_doc is not None:
+                    product_doc.Close()
+            except Exception:  # noqa: BLE001
+                pass
+
+        # ── the control: the same method on a sketch ─────────────────────
+        control_ok = None
+        try:
+            part_doc = app.Documents.Add("Part")
+            # The control goes through the same code path a caller uses, not a
+            # hand-rolled one: my first version referenced a Factory2D line the
+            # way the repo does NOT (sketch.GeometricElements is the reference
+            # source, and the sketch has to be in edition), and it failed on a
+            # sketch where catia_sketch_constraint succeeds - i.e. the control
+            # would have accused the wrong thing (measured 2026-11-20).
+            from catia_mcp.tools.sketcher import SketcherTools
+
+            sketcher = SketcherTools(self.conn)
+            sketcher.execute("catia_create_sketch", {"plane": "xy",
+                                                     "name": "PROBE"})
+            sketcher.execute("catia_sketch_line", {"x1": 0, "y1": 0,
+                                                   "x2": 20, "y2": 0})
+            reply = sketcher.execute("catia_sketch_constraint",
+                                     {"type": "fix", "geometry_index_1": 2})
+            control_ok = True
+            step("control: AddMonoEltCst(0, Reference) on a SKETCH", True,
+                 str(reply)[:120])
+            evidence["sketch_control"] = {"ok": True, "reply": str(reply)[:160]}
+        except Exception as exc:  # noqa: BLE001
+            control_ok = False
+            step("control: AddMonoEltCst(0, Reference) on a SKETCH", False,
+                 self._short_com(exc))
+            evidence["sketch_control"] = {"ok": False,
+                                          "error": self._short_com(exc)}
+        finally:
+            try:
+                if part_doc is not None:
+                    part_doc.Close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                if previous is not None:
+                    previous.Activate()
+            except Exception:  # noqa: BLE001
+                pass
+
+        fix_ok = bool(evidence.get("fix", {}).get("ok"))
+        if fix_ok:
+            verdict = "AVAILABLE"
+            conclusion = (
+                "Assembly constraints WORK on this machine: AddMonoEltCst created "
+                "a constraint from a selection Reference. The three rounds that "
+                "reported E_FAIL were measured on a different installation or "
+                "state - the four mate tools refuse by declaration, so pass "
+                "force: true to use them here.")
+        elif control_ok:
+            verdict = "ENVIRONMENT_LIMITED"
+            conclusion = (
+                "ENVIRONMENT LIMITATION, NOT AN MCP DEFECT: the same "
+                "AddMonoEltCst(0, Reference) succeeds on a SKETCH in this session "
+                "and answers E_FAIL on the assembly's CATIAConstraints "
+                "collection, and the UI command 'Fix' is not registered while "
+                "'Update' is. This installation is missing the Assembly Design "
+                "constraint commands. Use catia_set_component_transform for "
+                "absolute placement; nothing in this server can create a "
+                "parameterised assembly on this machine.")
+        else:
+            verdict = "INCONCLUSIVE"
+            conclusion = (
+                "INCONCLUSIVE: the sketch control failed as well, so the failure "
+                "is not specific to the assembly collection - AddMonoEltCst may be "
+                "unavailable for every collection here. Read 'steps' before "
+                "concluding anything; a broken install or a session in a bad "
+                "state looks like this too.")
+        return {
+            "ok": True,
+            "code": "ASSEMBLY_CONSTRAINT_PROBE",
+            "tool": "catia_probe_assembly_constraints",
+            "verdict": verdict,
+            "message": conclusion,
+            # The caller's documents and the disk are untouched: the two
+            # documents this probe needed were created here and closed without
+            # saving. `modified` speaks about the model, so it is a known no.
+            "modified": False,
+            "data": {
+                "verdict": verdict,
+                "conclusion": conclusion,
+                "evidence": evidence,
+                "steps": steps,
+                "model_untouched": True,
+                "documents_used": (
+                    "one temporary Product and one temporary Part, both created "
+                    "here and closed WITHOUT saving; the caller's documents are "
+                    "untouched and nothing was written to disk"),
+                "what_to_do_instead": [
+                    "Place components with catia_set_component_transform "
+                    "(transform_13, or rotation_rows + translation) from a table "
+                    "of transforms",
+                    "Treat the result as absolute placement, not a parameterised "
+                    "assembly: moving one part will not carry any other",
+                    "If the licence or the CATIA configuration changes, run this "
+                    "probe again - it is the only thing that needs to change",
+                ],
+            },
+        }
+
+    @staticmethod
+    def _short_com(exc: Exception) -> str:
+        text = " ".join(str(exc).split())
+        return text[:160]
 
     def _diagnose(self) -> str:
         self.conn.ensure_connected()

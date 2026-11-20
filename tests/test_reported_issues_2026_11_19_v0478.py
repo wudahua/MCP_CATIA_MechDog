@@ -133,7 +133,8 @@ def test_every_mate_tool_says_it_is_unavailable_before_the_call() -> None:
     for name in ("catia_fix_constraint", "catia_coincidence_constraint",
                  "catia_offset_constraint", "catia_angle_constraint"):
         text = definitions[name]["description"]
-        assert "UNAVAILABLE IN THIS BUILD" in text, name
+        assert "UNAVAILABLE_ON_THIS_BUILD" in text, name
+        assert "force" in text, name
         assert "catia_set_component_transform" in text, name
 
 
@@ -175,11 +176,24 @@ def test_a_reply_without_a_summary_still_starts_with_the_numbers() -> None:
     assert list(reply)[0] == "min"
 
 
-def _fake_vertex_route(monkeypatch, points, truncated, total):
+def _fake_vertex_route(monkeypatch, points, truncated, total,
+                       refused: str | None = None):
     tools = MeasurementTools.__new__(MeasurementTools)
-    monkeypatch.setattr(MeasurementTools, "_vertex_points",
-                        lambda self, body, stats=None: (
-                            points, truncated, total, 0))
+    tools._mesh_last_cache = None
+
+    def vertex_points(self, body, stats=None, limit=200, allow_truncated=False):
+        if refused:
+            stats["refused_vertices"] = refused
+            stats["cells"] = total
+            return [], False, total, 0
+        return points, truncated, total, 0
+
+    monkeypatch.setattr(MeasurementTools, "_vertex_points", vertex_points)
+    monkeypatch.setattr(MeasurementTools, "_mesh_corners",
+                        lambda self, part: ([[0.0, 0.0, 0.0],
+                                             [1.0, 46.1033, 0.0]], 2316, ""))
+    monkeypatch.setattr(MeasurementTools, "_visible_hybrid_sets",
+                        lambda self, part: (0, 0))
     monkeypatch.setattr(MeasurementTools, "_auto_method",
                         lambda self, method, body: ("vertices", ""))
     monkeypatch.setattr(MeasurementTools, "_part_identity",
@@ -201,18 +215,34 @@ class _Part:
     Name = "Heavy"
 
 
-def test_a_capped_sweep_says_truncated_and_how_many_vertices_were_missed(
+def test_a_truncated_sweep_is_labelled_when_the_caller_asks_for_it(
         monkeypatch) -> None:
+    """allow_truncated=true is the ONLY way to get a sample's box now."""
     tools = _fake_vertex_route(monkeypatch,
                                [[0.0, 0.0, 0.0], [1.0, 3.1941, 0.0]],
                                True, 582)
-    reply = json.loads(tools._part_bbox_of_body(_Part(), "vertices", _Shapes()))
+    reply = json.loads(tools._part_bbox_of_body(_Part(), "vertices", _Shapes(),
+                                               allow_truncated=True))
     assert reply["bounds_code"] == "vertex_sweep_truncated"
     assert reply["vertices_missed"] == 580
     assert reply["exact_envelope"] is False
     assert reply["summary"].startswith("NOT THE ENVELOPE")
     assert "581 unread" in reply["summary"] or "580 unread" in reply["summary"]
     assert "STOPPED AT THE 2-vertex cap" in reply["method"]
+
+
+def test_too_many_vertices_means_the_mesh_route_not_a_sample(
+        monkeypatch) -> None:
+    """The 2026-11-20 report's 200 s: the default must not pay it."""
+    tools = _fake_vertex_route(monkeypatch, [], False, 582,
+                               refused="582 vertices, cap 200")
+    reply = json.loads(tools._part_bbox_of_body(_Part(), "vertices", _Shapes()))
+    assert reply["points_route"] == "mesh"
+    assert reply["max"]["y"] == pytest.approx(46.1033)
+    assert "582 vertices, cap 200" in reply["method"]
+    assert "42.9" in reply["method"]      # the size of the miss it avoided
+    assert "allow_truncated=true" in reply["method"]
+    assert reply["bounds_code"] == "mesh_chord"
 
 
 def test_an_uncapped_sweep_is_a_lower_bound_and_says_so(monkeypatch) -> None:

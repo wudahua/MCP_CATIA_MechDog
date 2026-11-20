@@ -91,7 +91,7 @@ def _part_box_reply():
     tools._part_identity = lambda part: part.Name
     tools._auto_method = lambda method, body: ("vertices", "")
 
-    def _vertices(body, stats):
+    def _vertices(body, stats, limit=200, allow_truncated=False):
         stats.update({"route": "batch", "cells": 60, "nls_chars": 2388,
                       "sweep_route": "one_call"})
         return [[0.0, 0.0, 0.0], [10.0, 6.0, 4.0]], False, 8, 0

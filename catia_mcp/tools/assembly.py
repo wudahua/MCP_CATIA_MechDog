@@ -164,7 +164,9 @@ class AssemblyTools:
             {
                 "name": "catia_fix_constraint",
                 "description": (
-                    "UNAVAILABLE IN THIS BUILD - do not plan around it. CATIA "
+                    "UNAVAILABLE_ON_THIS_BUILD - do not plan around it, and do not expect the "
+                    "call to reach CATIA: without force: true it refuses here with "
+                    "UNSUPPORTED_CAPABILITY and modified: false. CATIA "
                     "V5-6R2020 on B30 refuses every constraint route this server "
                     "can reach, measured three times (2026-10-23, 2026-11-19 twice "
                     "more): AddMonoEltCst answers E_FAIL for all 14 constraint type "
@@ -194,6 +196,21 @@ class AssemblyTools:
                             "type": "string",
                             "description": "Name of the component to fix",
                         },
+                        "force": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Try the real CATIA call anyway. Without it this "
+                                "tool refuses before CATIA is touched "
+                                "(modified: false) and returns "
+                                "UNSUPPORTED_CAPABILITY. Use it only after a "
+                                "licence/CATIA configuration change, or to "
+                                "capture what CATIA says for a bug report - the "
+                                "2026-11-20 re-test showed that a bare "
+                                "COM_ERROR from here reads like a bad "
+                                "argument, which it is not."
+                            ),
+                        },
                     },
                     "required": ["component_name"],
                 },
@@ -201,8 +218,9 @@ class AssemblyTools:
             {
                 "name": "catia_coincidence_constraint",
                 "description": (
-                    "UNAVAILABLE IN THIS BUILD - same measured refusal as "
-                    "catia_fix_constraint (AddBiEltCst answers E_FAIL too: tested "
+                    "UNAVAILABLE_ON_THIS_BUILD - same measured refusal as "
+                    "catia_fix_constraint, and the same declaration-first refusal "
+                    "(force: true to reach CATIA). AddBiEltCst answers E_FAIL: tested "
                     "with code 2 between two instance references on a disk-built "
                     "assembly, 2026-11-19). Use catia_set_component_transform with "
                     "absolute placements instead; there is no constraint to read "
@@ -231,6 +249,21 @@ class AssemblyTools:
                         # Coincidence takes components, not elements. Aligning two
                         # specific faces is catia_offset_constraint with an offset
                         # of 0, or catia_gsd_* for the geometry itself.
+                        "force": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Try the real CATIA call anyway. Without it this "
+                                "tool refuses before CATIA is touched "
+                                "(modified: false) and returns "
+                                "UNSUPPORTED_CAPABILITY. Use it only after a "
+                                "licence/CATIA configuration change, or to "
+                                "capture what CATIA says for a bug report - the "
+                                "2026-11-20 re-test showed that a bare "
+                                "COM_ERROR from here reads like a bad "
+                                "argument, which it is not."
+                            ),
+                        },
                     },
                     "required": ["component1", "component2"],
                 },
@@ -238,11 +271,13 @@ class AssemblyTools:
             {
                 "name": "catia_offset_constraint",
                 "description": (
-                    "UNAVAILABLE IN THIS BUILD - same measured refusal as "
+                    "UNAVAILABLE_ON_THIS_BUILD - same measured refusal as "
                     "catia_fix_constraint. An offset is a translation, so put the "
                     "component where the offset would have put it with "
                     "catia_set_component_transform; the difference is that nothing "
-                    "keeps it there when the other component moves."
+                    "keeps it there when the other component moves. Without force: "
+                    "true this tool refuses here (modified: false) instead of "
+                    "reaching CATIA - three rounds measured why."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -259,6 +294,21 @@ class AssemblyTools:
                             "type": "number",
                             "description": "Offset distance in mm",
                         },
+                        "force": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Try the real CATIA call anyway. Without it this "
+                                "tool refuses before CATIA is touched "
+                                "(modified: false) and returns "
+                                "UNSUPPORTED_CAPABILITY. Use it only after a "
+                                "licence/CATIA configuration change, or to "
+                                "capture what CATIA says for a bug report - the "
+                                "2026-11-20 re-test showed that a bare "
+                                "COM_ERROR from here reads like a bad "
+                                "argument, which it is not."
+                            ),
+                        },
                     },
                     "required": ["component1", "component2", "offset"],
                 },
@@ -266,10 +316,11 @@ class AssemblyTools:
             {
                 "name": "catia_angle_constraint",
                 "description": (
-                    "UNAVAILABLE IN THIS BUILD - same measured refusal as "
+                    "UNAVAILABLE_ON_THIS_BUILD - same measured refusal as "
                     "catia_fix_constraint. An angle is part of the placement "
                     "matrix: build it with rotation_rows (or transform_13) in "
-                    "catia_set_component_transform."
+                    "catia_set_component_transform. Without force: true this tool "
+                    "refuses here (modified: false) instead of reaching CATIA."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -285,6 +336,21 @@ class AssemblyTools:
                         "angle": {
                             "type": "number",
                             "description": "Angle in degrees",
+                        },
+                        "force": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Try the real CATIA call anyway. Without it this "
+                                "tool refuses before CATIA is touched "
+                                "(modified: false) and returns "
+                                "UNSUPPORTED_CAPABILITY. Use it only after a "
+                                "licence/CATIA configuration change, or to "
+                                "capture what CATIA says for a bug report - the "
+                                "2026-11-20 re-test showed that a bare "
+                                "COM_ERROR from here reads like a bad "
+                                "argument, which it is not."
+                            ),
                         },
                     },
                     "required": ["component1", "component2", "angle"],
@@ -710,12 +776,16 @@ class AssemblyTools:
             case "catia_add_new_part":
                 return self._add_new_part(arguments.get("name"))
             case "catia_fix_constraint":
+                self._refuse_constraint("Fix", arguments)
                 return self._fix_constraint(arguments["component_name"])
             case "catia_coincidence_constraint":
+                self._refuse_constraint("Coincidence", arguments)
                 return self._coincidence_constraint(arguments)
             case "catia_offset_constraint":
+                self._refuse_constraint("Offset", arguments)
                 return self._offset_constraint(arguments)
             case "catia_angle_constraint":
+                self._refuse_constraint("Angle", arguments)
                 return self._angle_constraint(arguments)
             case "catia_move_component":
                 return self._move_component(arguments)
@@ -1130,6 +1200,59 @@ class AssemblyTools:
 
     def _constraint_failed(self, kind: str, exc: Exception) -> RuntimeError:
         return RuntimeError(f"{kind}: {self._CONSTRAINT_EXPLAIN} Original error: {exc}")
+
+    #: Tools that create assembly constraints, by the name a caller reads.
+    CONSTRAINT_TOOLS = ("catia_fix_constraint", "catia_coincidence_constraint",
+                        "catia_offset_constraint", "catia_angle_constraint")
+
+    def _refuse_constraint(self, kind: str, args: dict[str, Any]) -> None:
+        """Refuse BEFORE reaching CATIA unless the caller says ``force: true``.
+
+        The 2026-11-20 re-test of 0.3.152 made the point sharply: the tool
+        DESCRIPTIONS said "unavailable", and the tools still went to CATIA and
+        came back with a bare ``COM_ERROR`` / ``方法 AddMonoEltCst 失败`` - which
+        reads like a bad argument or a broken model, not like a machine that
+        cannot do it. A caller who did not read the description learns nothing
+        from the tenth call that the first one could have told it.
+
+        So the refusal is now a DECISION this server makes, with
+        ``modified: false`` (nothing was touched, because CATIA was never asked)
+        and the way to re-test written down: ``force: true`` runs the old path
+        and reports what CATIA says, which is what to use after a licence or
+        configuration change. Three independent measurements are behind it; the
+        probe tool re-checks the machine instead of trusting them.
+        """
+        if args.get("force"):
+            return
+        raise CodedError(
+            f"{kind} constraint: NOT AVAILABLE ON THIS BUILD - refused here, "
+            "before CATIA was called, so nothing was changed. Three measurement "
+            "rounds on V5-6R2020 B30 (2026-10-23, 2026-11-19 twice, and the "
+            "2026-11-20 re-test of 0.3.152) all answer E_FAIL for every route: "
+            "all 14 constraint type codes, the root product's collection and a "
+            "child's, parts created in place and parts loaded from disk, and the "
+            "element given as the component, its ReferenceProduct, the root, or "
+            "the Reference from Selection.Item(1).Reference. The same call on a "
+            "SKETCH works in the same session, the assembly workbench IS active "
+            "(GetWorkbenchId() = 'Assembly'), and the Fix command is not even "
+            "registered ('Fix' and 'CreateFix' answer 'unknown command' while "
+            "'Update' is accepted) - so this machine is missing the Assembly "
+            "Design constraint commands, not an argument. WHAT TO DO: place "
+            "components with catia_set_component_transform from a table of "
+            "transforms - that is absolute placement, NOT a parameterised "
+            "assembly, and no tool here can make it one. To re-test the machine "
+            "after a licence/config change, call "
+            "catia_probe_assembly_constraints, or pass force: true to this tool.",
+            code="UNSUPPORTED_CAPABILITY", stage="validate", modified=False,
+            next_actions=[
+                "Use catia_set_component_transform (transform_13 or "
+                "rotation_rows + translation) to place the component where the "
+                "constraint would have put it - nothing was changed here",
+                "Call catia_probe_assembly_constraints once to confirm this "
+                "machine's verdict, and paste its 'conclusion' into a bug report",
+                "If the licence or the CATIA configuration changed, pass "
+                "force: true to let this tool try the real call again",
+            ])
 
     def _fix_constraint(self, component_name: str) -> str:
         """Fix (reference) one component so the assembly is not floating.

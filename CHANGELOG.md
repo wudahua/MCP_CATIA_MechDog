@@ -2,6 +2,82 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.153] — 2026-11-20 · a capability that refuses instead of failing, and a box that stops paying for a sample
+
+The 2026-11-20 re-test of 0.3.152 confirms P1/P3/P4/P5 and leaves P0 and P2
+open, plus one new documentation defect (P6). Its sharpest sentence is about the
+declaration that was already there: *"现在描述里虽有文字声明，但工具仍可被调到并返回
+COM_ERROR"*. A tool that says it is unavailable and then goes to CATIA anyway
+teaches the caller nothing at the moment they need it.
+
+**P0.1 - the four mate tools refuse BEFORE CATIA is called.** `catia_fix_constraint`,
+`catia_coincidence_constraint`, `catia_offset_constraint` and
+`catia_angle_constraint` now answer `UNSUPPORTED_CAPABILITY` at the **validate**
+stage with `modified: false`, naming the three rounds of measurement, the sketch
+control that makes them mean something, and the way back in: `force: true` runs
+the old path and reports what CATIA says, which is what to use after a licence or
+configuration change. Measured on B30 2026-11-20: the refusal happens in **0 ms**
+(the first COM call is never made), `force: true` still reaches CATIA and gets
+CATIA's own `方法 AddMonoEltCst 失败`.
+
+**P0.2 - `catia_probe_assembly_constraints`: one call, one verdict.** It builds a
+THROWAWAY product with two part components plus a THROWAWAY part, tries Fix
+(AddMonoEltCst with the Reference from `Selection.Item(1).Reference`), tries a
+coincidence between the two, tries the UI command `Fix` - a message box is
+answered from a watcher thread while the call is in flight, so an unknown command
+cannot freeze the worker - and then runs the CONTROL: the same
+AddMonoEltCst(0, Reference) on a sketch. Both documents are closed without
+saving, so the caller's model and the disk are untouched. Measured on B30
+2026-11-20: **ENVIRONMENT_LIMITED** in ~15 s, with the workbench id read as
+`Assembly`, the sketch control creating `固定的.1`, and `'Fix'` answering
+"unknown command" where `'Update'` is accepted.
+
+Two things this round establishes that the earlier rounds did not: the workbench
+was **never** the problem (`GetWorkbenchId()` = 'Assembly' with the product
+active, and `StartWorkbench` is a no-op on this build), and the refusal is
+**not ours** - the same call on a sketch succeeds in the same session. The
+ceiling entry now says both, with the third independent report as the source.
+
+**P0.3 - the pseudo-constraint API is still declined, and now for a stated
+reason.** The report asks for a third time for `coincident(a,b)` / `offset(...)`
+that silently becomes absolute transforms. It is not built: a tool that writes a
+placement and calls the result a constraint would erase the one distinction this
+project's replies spend their words on. What the report actually needs - a
+caller who knows, before committing to an assembly, that this machine cannot
+constrain one - is now one tool call away.
+
+**P2 - a part with more vertices than the cap is bounded from its MESH, not from
+a sample.** Measured on B30:
+
+| | before (0.3.152) | now |
+|---|---|---|
+| 582-vertex part, `method='vertices'` | 41 054 ms, max y **3.1941** | **1.0-1.6 s**, max y **46.1033** |
+| assembly, 2 instances of it + 1 small part | ~140 s of sweeps | **19.5 s** cold, **1.5 s** warm |
+
+The route is decided before the expensive part: the topology search that answers
+"how many vertices" has already run, so a part over the 200-vertex cap goes
+straight to its mesh (`source: mesh_fallback`,
+`mesh_reason: more_vertices_than_the_cap`, and the part entry carries
+`refused_vertices`). `allow_truncated: true` restores the old sample, still
+labelled `vertex_sweep_truncated` with `vertices_missed`.
+
+The remaining 19.5 s is the STL export of the heavy part, not the sweep; the
+second call over the same assembly answers in 1.5 s. And the route that would
+have made all of this moot does not exist: `Measurable` exposes **no**
+bounding-box member on this build (`GetBoundingBox`, `GetBox`, `GetExtents`,
+`GetEnvelope`, `GetDimensions`, `BoundingBox` - all absent through the real
+dispatch, measured 2026-11-20), and neither does `Part`, `Body` or
+`SPAWorkbench`. So the choice is between the vertex sweep and the mesh, and on a
+heavy part the mesh is both cheaper and tighter.
+
+**P6 - the `auto` description said the opposite of the code.** One paragraph said
+"on an assembly 'auto' is the mesh route" and the `method` parameter said "auto
+reads each component's VERTICES". The code has said `force_mesh = method in
+('mesh', 'auto')` since 0.3.114, so the parameter text was simply stale - and it
+is the text a caller reads while choosing. Fixed, and a test now pins both the
+sentence and the source line it describes, because the next edit that moves the
+code must move the sentence with it.
+
 ## [0.3.152] — 2026-11-19 · an unavailable capability that now says why, a 13-tuple that no longer needs hand-transposing, and a box that was the box of a sample
 
 The 2026-11-19 report (against 0.3.151) is a hexapod built from a spec table: 7
