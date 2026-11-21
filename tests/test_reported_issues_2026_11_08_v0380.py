@@ -417,9 +417,16 @@ def test_replace_component_is_registered_and_documented_as_a_rebuild():
     text = tool["description"]
     assert "NO native replace" in text
     assert "constraint" in text.lower()
-    source = inspect.getsource(AssemblyTools._replace_component)
+    source = inspect.getsource(AssemblyTools._replace_one)
     assert "products.Remove(target)" in source
     assert "REPLACE_POSE_MISMATCH" in source
+    # 0.3.157 moved the swap into _replace_one (the batch form needs the same
+    # steps per instance), so the ORDER is asserted where the steps now live:
+    # nothing is removed until the new instance's reference has been read back.
+    assert source.index("self._reference_path(new)") < source.index(
+        "products.Remove(target)")
+    assert source.index("REPLACE_POSE_MISMATCH") < source.index(
+        "products.Remove(target)")
 
 
 # ── the documentation the report asked for (P2-1, 7-2) ───────────────────

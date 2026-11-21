@@ -2,7 +2,7 @@
 
 > **中文入口见 [README.md](README.md)。** This file is the full English reference: every tool, every measurement behind it, and every known limit.
 
-**0.3.156** · [what changed](CHANGELOG.md) ·
+**0.3.157** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1376,6 +1376,28 @@ Two facts about real drawings that this had to accept:
   whole; one with live text imports the geometry and says how many runs it
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
+
+0.3.157 answers P1-11/P1-12 of the same report: rebuilding a part file leaves
+every instance that pointed at it unreadable - the pose still reads, `PartNumber`
+throws, and closing and reopening the assembly does NOT mend them. Measured on B30
+2026-11-21 on a scene built from nothing (a 100x60x20 block, an assembly with four
+posed instances, the file rebuilt as 120x80x30): 4 of 4 broken with every pose
+intact, then ONE `catia_replace_component(component_name=[...], keep_name=true)`
+call restored all four at `max_pose_difference_mm: 0.0` with their names and a
+readable `PartNumber`. `keep_name` is not cosmetic: once the old name is free,
+CATIA hands the next insert `.1` again, so all four repairs would have landed as
+`A1_Piston_v3.1`.
+
+The warning the report asked for could not go where it asked. With an assembly
+open, the parts it references are in `Application.Documents`
+(`component_of=<assembly>`) and closing one answers "STILL OPEN ... the close
+request was accepted and deferred" - so `catia_new_part(overwrite=true)` is
+refused with DOCUMENT_ALREADY_OPEN before any file is written. The sentence lives
+in that refusal, because it is both the moment a caller is about to do it and the
+last moment the instance names can still be read. `catia_list_components` now
+publishes `broken_instances` / `broken_by_part` and names the one call that
+repairs each part; the old advice pointed at `catia_add_component`, which keeps
+neither the pose nor the name.
 
 0.3.156 answers four of the 2026-11-21 report's twenty items, each measured
 before and after; the changelog lists the rest with the reason they are not here.
@@ -2976,6 +2998,18 @@ Place the result with `catia_get_component_transform`.
   self-contained is therefore TWO steps: copy the files, **close the originals**
   (`catia_close_document(document=<full path>)`), then replace. A copy that is
   not open in the session resolves to its own path and works in one step.
+* **Rebuilding a part file gives it a new internal document id**, so every instance
+  that pointed at it becomes unreadable: the pose still reads, `PartNumber` and
+  `ReferenceProduct` throw, and closing and reopening the assembly does not mend
+  them (measured on B30 2026-11-21, 4 of 4). The file cannot be freed while its
+  assembly is open - CATIA keeps the referenced part in `Documents` and answers
+  "STILL OPEN ... the close request was accepted and deferred", which is why
+  `catia_new_part(overwrite=true)` is refused with DOCUMENT_ALREADY_OPEN and that
+  refusal names the instances that would be affected. The repair is ONE call per
+  part: `catia_replace_component(component_name=[...], file_path=<the rebuilt
+  file>, keep_name=true)` - it rebuilds each instance at its own pose and takes
+  the old name back. The constraints that referenced the old instances are NOT
+  restored; nothing on this surface can.
 * The watchdog answers `#32770` message boxes only; CATIA's own `CATDlgDialog`
   panels are left alone so a human working alongside the agent is not interrupted.
 

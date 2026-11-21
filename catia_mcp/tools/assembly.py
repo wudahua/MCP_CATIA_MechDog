@@ -102,6 +102,65 @@ def batch_positions(app: Any, products: Any,
     return poses
 
 
+def assemblies_referencing(path: str, documents: Any) -> list[dict[str, Any]]:
+    """Which OPEN assemblies hold instances of ``path``, and which instances.
+
+    The 2026-11-21 report (P1-11) is the reason this exists: rebuilding a part
+    with ``catia_new_part(overwrite=true)`` gives the file a new internal document
+    id, and this build resolves an instance by that id - so every instance that
+    pointed at the file keeps its pose and throws on ``PartNumber``. The caller
+    only found out by listing components afterwards, eight times over.
+
+    Read-only and best-effort by design: an assembly is listed only when at least
+    one instance resolved to ``path`` (or when an instance could not be READ at
+    all, which is the state this warning is trying to prevent - those are counted
+    in ``unreadable`` rather than guessed at). Scope is the documents open in this
+    session; a closed .CATProduct cannot be inspected without opening it.
+
+    The document-type check is the AssemblyTools one, not a fourth copy of it: the
+    three copies that already exist are three places that can disagree.
+    """
+    wanted = os.path.normcase(os.path.abspath(path))
+    found: list[dict[str, Any]] = []
+    try:
+        count = int(documents.Count)
+    except Exception:  # noqa: BLE001 - no documents, nothing to warn about
+        return found
+    for i in range(1, count + 1):
+        try:
+            doc = documents.Item(i)
+        except Exception:  # noqa: BLE001
+            continue
+        if not AssemblyTools._is_product_document(doc):
+            continue
+        try:
+            products = doc.Product.Products
+            total = int(products.Count)
+        except Exception:  # noqa: BLE001 - an unsaved product with no root
+            continue
+        instances: list[str] = []
+        unreadable = 0
+        for j in range(1, total + 1):
+            try:
+                component = products.Item(j)
+            except Exception:  # noqa: BLE001
+                continue
+            try:
+                full = str(component.ReferenceProduct.Parent.FullName or "")
+            except Exception:  # noqa: BLE001 - a dead link is data here
+                unreadable += 1
+                continue
+            if full and os.path.normcase(os.path.abspath(full)) == wanted:
+                try:
+                    instances.append(str(component.Name))
+                except Exception:  # noqa: BLE001 - the count still matters
+                    instances.append("?")
+        if instances or unreadable:
+            found.append({"document": str(doc.Name), "instances": instances,
+                          "unreadable": unreadable})
+    return found
+
+
 class AssemblyTools:
     """Tools for assembly (Product) operations in CATIA V5."""
 
@@ -442,7 +501,13 @@ class AssemblyTools:
                     "against. The reply also states 'occurrence_scope'. "
                     "'include_color=true' adds each component's colour and whether it "
                     "matches this build's uncoloured default - one COM read per "
-                    "instance, so it is off by default."
+                    "instance, so it is off by default. A component whose part "
+                    "cannot be resolved is marked 'broken' (its pose is still "
+                    "readable); the reply then also carries 'broken_instances' and "
+                    "'broken_by_part', and its note names the ONE call per part that "
+                    "repairs them - catia_replace_component with a list. Rebuilding a "
+                    "part file over one an assembly already references is what "
+                    "usually breaks them."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -506,7 +571,18 @@ class AssemblyTools:
                 "description": (
                     "Point an existing instance at a DIFFERENT file and keep its "
                     "placement - the way to make an assembly self-contained after the "
-                    "parts were copied to another folder.\n"
+                    "parts were copied to another folder, and the way to REPAIR the "
+                    "instances a rebuilt part file leaves behind (they keep their "
+                    "pose but throw on PartNumber/ReferenceProduct, and reopening the "
+                    "assembly does not mend them).\n"
+                    "PASS A LIST to repair every instance of one part in a SINGLE "
+                    "call: component_name=['P01_Piston.1', 'P01_Piston.2', ...] with "
+                    "one file_path. Every name is resolved BEFORE the first insert, "
+                    "so a typo in the last entry changes nothing; the swaps then run "
+                    "one after another, and the call STOPS at the first failure, "
+                    "naming what was already replaced and what was not attempted (a "
+                    "failed replace can leave both instances in the tree, so carrying "
+                    "on would pile up unknown state).\n"
                     "This build has NO native replace: measured on B30 2026-11-08, "
                     "Product and ProductDocument expose no ReplaceComponent / Replace "
                     "/ Relink / Repath at all, while Products.Remove and "
@@ -528,19 +604,27 @@ class AssemblyTools:
                     "catia_list_components(include_reference=true) asks the same "
                     "question for an assembly you did not just build.\n"
                     "WHAT IS LOST: the constraints that referenced the old instance "
-                    "(CATIA stores them on the component) and its occurrence name. "
-                    "The colour is carried over when the old instance had a "
-                    "non-default one. The reply states what was removed, what the new "
-                    "pose measured, and what the caller has to redo."
+                    "(CATIA stores them on the component) and - unless "
+                    "keep_name=true - the instance name, because the insert lands "
+                    "under the next free suffix (P05.1 becomes P05.5). keep_name "
+                    "renames it back AFTER the old instance is gone, which is the "
+                    "only moment that name is free, and reads the result back. The "
+                    "colour is carried over when the old instance had a non-default "
+                    "one. The reply states what was removed, what the new pose "
+                    "measured, and what the caller has to redo."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "component_name": {
-                            "type": ["string", "object"],
+                            "type": ["string", "object", "array"],
                             "description": (
-                                "The instance to replace: a name, a 1-based index, or "
-                                "{\"part_number\": ..., \"occurrence\": n}."
+                                "The instance to replace: a name, a 1-based index, "
+                                "{\"part_number\": ..., \"occurrence\": n}, or a LIST "
+                                "of those to replace several instances of the same "
+                                "part in one call. A list is resolved in full before "
+                                "anything is inserted, so one bad name changes "
+                                "nothing."
                             ),
                         },
                         "file_path": {
@@ -548,6 +632,18 @@ class AssemblyTools:
                             "description": (
                                 "Full path of the .CATPart or .CATProduct that should "
                                 "take the instance's place."
+                            ),
+                        },
+                        "keep_name": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Give the new instance the OLD instance's name, and "
+                                "read it back. Without it every replace ends in "
+                                "P05.5 where P05.1 was, so the tree stops matching "
+                                "the call table the caller planned with, and one "
+                                "catia_rename_component per instance is needed to "
+                                "undo that (reported 2026-11-21, P1-12)."
                             ),
                         },
                     },
@@ -1934,12 +2030,29 @@ class AssemblyTools:
         ``Relink`` / ``Repath`` on Product or ProductDocument, but ``Products.Remove``
         works and the twelve placement numbers can be written onto a fresh instance
         with no drift (read back identical). So: add, pose, verify, then remove.
+
+        0.3.157 adds the two shapes the 2026-11-21 report (P1-11/P1-12) asked for:
+        a LIST of instances swapped in one call (a rebuilt part breaks every
+        instance that pointed at it, so the repair is naturally a batch), and
+        ``keep_name`` (the insert lands under the next free suffix, so the caller
+        otherwise needs one more call per instance to get the tree's names back).
         """
         self.conn.ensure_connected()
         product = self.conn.get_active_product()
-        products = product.Products
-        target = self._resolve_component(product, args.get("component_name"))
         path = str(args.get("file_path") or "").strip()
+        wanted = args.get("component_name")
+        keep_name = bool(args.get("keep_name"))
+        if isinstance(wanted, (list, tuple)):
+            self._check_replace_target(path)
+            return self._replace_components(product, list(wanted), path, keep_name)
+        target = self._resolve_component(product, wanted)
+        self._check_replace_target(path)
+        return self._replace_sentence(
+            self._replace_one(product, target, path, keep_name), path)
+
+    @staticmethod
+    def _check_replace_target(path: str) -> None:
+        """The file must exist before anything is inserted - no partial swaps."""
         if not path:
             raise ArgumentRejected("file_path is required - the file the instance "
                                    "should reference instead.")
@@ -1950,6 +2063,105 @@ class AssemblyTools:
                 "there first - catia_save_as_copy writes a part, it does not move one."
             )
 
+    def _replace_components(self, product: Any, refs: list[Any], path: str,
+                            keep_name: bool) -> str:
+        """Swap several instances of one part in a single call.
+
+        EVERY name is resolved before the first insert. Two reasons, both measured
+        in the 2026-11-21 report's scene: the collection changes under the loop
+        (so an index resolved later can name a different instance), and a typo in
+        the last entry would otherwise only surface after three inserts had already
+        landed.
+
+        A failure STOPS the batch instead of skipping to the next entry. A replace
+        that fails at the pose check leaves BOTH instances in the tree (that is by
+        design - nothing is removed on a guess), so carrying on would pile up
+        unknown state that the reply then has to describe from memory. What landed
+        and what was not attempted are both named.
+        """
+        if not refs:
+            raise ArgumentRejected(
+                "component_name was an empty list, so there is no instance to "
+                "replace (the assembly was not changed).")
+        names: list[str] = []
+        for position, ref in enumerate(refs, start=1):
+            name = str(self._resolve_component(product, ref).Name)
+            if name in names:
+                raise ArgumentRejected(
+                    f"component_name lists '{name}' twice (entry {position}). The "
+                    "second replace would resolve that name to whatever instance "
+                    "holds it by then, which is not the instance you listed. "
+                    "Nothing was changed - name each instance once.")
+            names.append(name)
+
+        done: list[dict[str, Any]] = []
+        for index, name in enumerate(names):
+            try:
+                target = self._resolve_component(product, name)
+                done.append(self._replace_one(product, target, path, keep_name))
+            except Exception as error:  # noqa: BLE001 - reported with what landed
+                error_modified = getattr(error, "modified", None)
+                raise CodedError(
+                    f"Replaced {len(done)} of {len(names)} instance(s) from "
+                    f"'{path}', then '{name}' failed: {error} The remaining "
+                    f"{len(names) - index - 1} instance(s) were NOT attempted "
+                    f"({', '.join(names[index + 1:]) or 'none'}). The batch stops "
+                    "there on purpose: a replace that fails its pose check leaves "
+                    "BOTH instances in the tree, so continuing would add more "
+                    "unknown state. catia_list_components shows what is there now.",
+                    code="REPLACE_BATCH_INCOMPLETE", stage="execute",
+                    modified=(True if done else error_modified),
+                    data={"file_path": path, "requested": names,
+                          "replaced": [fact["component"] for fact in done],
+                          "failed_at": name,
+                          "not_attempted": names[index + 1:],
+                          "components": done,
+                          "error": str(error).splitlines()[0][:200]},
+                    next_actions=[
+                        "Run catia_list_components: a failed replace can leave two "
+                        "instances of the same part, so the tree may hold more than "
+                        "it did before this call",
+                        "Retry with the instances that were not attempted"
+                        + (f": {', '.join(names[index + 1:])}"
+                           if names[index + 1:] else " - there were none"),
+                    ]) from error
+        self.conn.refresh_display()
+        worst = max((fact["max_pose_difference_mm"] for fact in done), default=0.0)
+        reply: dict[str, Any] = {
+            "count": len(names),
+            "replaced": len(done),
+            "failed": 0,
+            "file_path": path,
+            "keep_name": keep_name,
+            "max_pose_difference_mm": worst,
+            "components": [
+                {"component": fact["component"],
+                 "replaced_by": fact["replaced_by"],
+                 "inserted_as": fact["inserted_as"],
+                 "name_kept": fact["name_kept"],
+                 "max_pose_difference_mm": fact["max_pose_difference_mm"],
+                 "reference_path": fact["reference_path"],
+                 "colour_note": fact["colour_note"]}
+                for fact in done
+            ],
+            "note": ("One call, one display refresh, and one isolated insert per "
+                     "instance. Every pose was read back before its old instance "
+                     "was removed, so 'replaced' means the new instance sits where "
+                     "the old one did. The constraints that referenced the old "
+                     "instances went with them: this is a rebuild, not a re-point. "
+                     "Not saved yet: call catia_save_document."),
+        }
+        return json.dumps(reply, indent=2, ensure_ascii=False)
+
+    def _replace_one(self, product: Any, target: Any, path: str,
+                     keep_name: bool) -> dict[str, Any]:
+        """Swap one instance, and return what was measured rather than a sentence.
+
+        The batch needs the same numbers per instance, and a sentence is not
+        something to parse back out; :meth:`_replace_sentence` is the only place
+        that words them for the single-instance reply.
+        """
+        products = product.Products
         old_name = str(target.Name)
         before = self._position_components(target.Position)
         doc = self.conn.active_document
@@ -2091,23 +2303,77 @@ class AssemblyTools:
                 ],
             ) from error
 
+        # The name the old instance had is free NOW - after Remove, not before -
+        # so this is the only safe moment to take it back. Reported 2026-11-21
+        # (P1-12): the insert lands as P01_Piston.5, and restoring '.1' took one
+        # more call per instance. The rename is read back, because this build's
+        # writable Name is a promise CATIA keeps or does not; saying "renamed"
+        # from the assignment alone is the class of claim this file exists to
+        # avoid.
+        name_kept = False
+        rename_note = ""
+        if keep_name:
+            try:
+                new.Name = old_name
+            except Exception as error:  # noqa: BLE001 - the replace still stands
+                rename_note = (f"the rename back to '{old_name}' was refused "
+                               f"({str(error).splitlines()[0][:60]})")
+            else:
+                applied = str(new.Name)
+                if applied == old_name:
+                    name_kept = True
+                else:
+                    rename_note = f"CATIA kept '{applied}' instead of '{old_name}'"
+        final_name = str(new.Name)
         self.conn.refresh_display()
-        if resolved is not None:
+        return {
+            "component": old_name,
+            "replaced_by": final_name,
+            "inserted_as": new_name,
+            "name_kept": name_kept,
+            "keep_name_requested": keep_name,
+            "rename_note": rename_note,
+            "max_pose_difference_mm": drift,
+            "colour_note": colour_note,
+            "reference_path": resolved,
+            "reference_note": reference_note,
+        }
+
+    def _replace_sentence(self, fact: dict[str, Any], path: str) -> str:
+        """The single-instance reply, worded from the facts the swap measured."""
+        if fact["name_kept"]:
+            head = (
+                f"Component '{fact['component']}' replaced IN PLACE from '{path}': "
+                f"the fresh instance was inserted as '{fact['inserted_as']}', the "
+                f"old one was removed, and the name was then set back to "
+                f"'{fact['component']}' and read back (pose copied exactly, largest "
+                f"difference {fact['max_pose_difference_mm']:.2e} mm; "
+                f"{fact['colour_note']}).\n")
+        else:
+            head = (
+                f"Component '{fact['component']}' replaced by "
+                f"'{fact['replaced_by']}' from '{path}' (pose copied exactly, "
+                f"largest difference {fact['max_pose_difference_mm']:.2e} mm; "
+                f"{fact['colour_note']})."
+                + (f" keep_name was asked for but the name was NOT restored: "
+                   f"{fact['rename_note']} - catia_rename_component sets it by hand."
+                   if fact["keep_name_requested"] else "")
+                + "\n")
+        if fact["reference_path"] is not None:
             reference_sentence = (
                 f"  - read back, not assumed: the new instance references "
-                f"'{resolved}', which is the file you named; the assembly is "
-                "self-contained only once every component has been replaced this "
-                "way.\n")
+                f"'{fact['reference_path']}', which is the file you named; the "
+                "assembly is self-contained only once every component has been "
+                "replaced this way.\n")
         else:
             reference_sentence = (
                 "  - the POSE was verified but the REFERENCE was not: "
-                f"{reference_note}. Treat the assembly as still linked to the old "
-                "file until catia_list_components(include_reference=true) shows "
-                "otherwise.\n")
+                f"{fact['reference_note']}. Treat the assembly as still linked to "
+                "the old file until catia_list_components(include_reference=true) "
+                "shows otherwise.\n")
         return (
-            f"Component '{old_name}' replaced by '{new_name}' from '{path}' "
-            f"(pose copied exactly, largest difference {drift:.2e} mm; {colour_note}).\n"
-            "Two things to know:\n"
+            head
+            + "Two things to know:\n"
             "  - any CONSTRAINT that referenced the old instance went with it: this "
             "is a rebuild, not a re-point (this build exposes no replace member). "
             "Re-create the constraints against the new instance.\n"
@@ -2375,13 +2641,52 @@ class AssemblyTools:
         payload: dict[str, Any] = {"components": components, "count": len(components),
                                    "occurrence_scope": "per_part"}
         if broken:
+            # The repair is ONE call per part, not one per instance (2026-11-21
+            # report P1-11: 8 broken instances meant 8 calls, each of which then
+            # lost its instance name and needed a ninth). The prose names the
+            # call; `broken_by_part` is there so a caller does not have to parse
+            # the prose to build it - the same rule as every other listing here.
+            by_part: dict[str, list[str]] = {}
+            unnamed = 0
+            for entry in components:
+                if not entry.get("broken"):
+                    continue
+                name = entry.get("name")
+                if not name:
+                    # A broken instance whose NAME could not be read cannot be
+                    # named in a repair call, so it is counted, not listed.
+                    unnamed += 1
+                    continue
+                stem = entry.get("part_number") or name.rsplit(".", 1)[0]
+                by_part.setdefault(stem, []).append(name)
             payload["broken"] = broken
-            payload["note"] = (
-                "Components marked broken cannot resolve their part "
-                "(the file was moved, or rebuilt and re-referenced). "
-                "Replace them with catia_add_component, or re-create the "
-                "assembly - the good components listed here are intact."
-            )
+            payload["broken_instances"] = [e.get("name") for e in components
+                                           if e.get("broken") and e.get("name")]
+            payload["broken_by_part"] = by_part
+            if not by_part:
+                payload["note"] = (
+                    f"{broken} component(s) are broken, but not one of them could "
+                    "even be NAMED (its Name read failed too), so no repair call "
+                    "can address them. They can still be reached by index; a "
+                    "catia_rename_component makes the tree addressable again.")
+            else:
+                first_names = next(iter(by_part.values()))
+                payload["note"] = (
+                    "Components marked broken cannot resolve their part - the file "
+                    "was rebuilt (a new internal document id) or moved. Their poses "
+                    "are still readable, so repairing them is one call per PART, "
+                    "not one per instance: catia_replace_component(component_name=["
+                    + ", ".join(f"'{n}'" for n in first_names)
+                    + "], file_path='<the current .CATPart of that part>', "
+                    "keep_name=true) inserts a fresh instance, copies the old pose "
+                    "onto it, removes the broken one and takes its name back. "
+                    "Reopening the assembly does NOT mend them. Parts involved: "
+                    + ", ".join(f"{part} ({len(names)})"
+                                for part, names in by_part.items())
+                    + "."
+                    + (f" {unnamed} further broken instance(s) could not even be "
+                       "named, so they are not in that call." if unnamed else "")
+                )
         if names_only:
             payload["read"] = ("index, name, part_number and occurrence only - "
                                "no position, no rotation, no broken-link check, "

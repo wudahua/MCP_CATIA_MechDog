@@ -2,6 +2,84 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.157] — 2026-11-21 · one call for the four instances a rebuild breaks
+
+The 2026-11-21 report's P1-11 / P1-12. Rebuilding two part files left eight
+instances unreadable: each kept its pose, none could read `PartNumber`, reopening
+the assembly did not mend them, and the repair cost one `catia_replace_component`
+call per instance plus one `catia_rename_component` per instance to get the `.1`
+names back - sixteen calls for two parts.
+
+**Reproduced from nothing, on B30 2026-11-21.** A 100x60x20 block; an assembly
+holding four instances of it at four poses; save; close (the assembly takes its
+part with it); rebuild the file as 120x80x30; reopen. Result: **4 of 4 broken**,
+`part_number: null` for every one, and all four poses intact (0, 150, 200 and
+150/200/40) - and a second close/reopen cycle left them broken. Then ONE call -
+`catia_replace_component(component_name=[...4 names...], file_path=..., keep_name=true)`
+- put all four back: `replaced: 4`, `max_pose_difference_mm: 0.0`, every entry
+`name_kept: true`, `PartNumber` reading `A1_Piston_v3` again, the assembly at 4
+components with nothing broken.
+
+**The warning had to move.** The report asked `catia_new_part(overwrite=true)` to
+warn when the file is referenced by an open assembly. It cannot be reached there:
+measured first, with an assembly open the parts it references ARE in
+`Application.Documents` (`component_of=<assembly>`), and closing one answers
+"STILL OPEN ... the close request was accepted and deferred" - so the overwrite is
+REFUSED with `DOCUMENT_ALREADY_OPEN` before any file is written. That refusal is
+where the sentence now lives, because it is both the moment a caller is about to
+do it and the last moment the instance names can still be read:
+
+> ... Nothing was created. It is also pointed at by 4 instance(s) in 1 open
+> assembly document(s): A1_Asm.CATProduct ('A1_Piston.1', 'A1_Piston.2',
+> 'A1_Piston.3', 'A1_Piston.4'). Overwriting the file gives it a NEW internal
+> document id, and this build resolves an instance by that id, so those instances
+> would keep their poses and would throw on PartNumber/ReferenceProduct - closing
+> and reopening the assembly does NOT repair them ... The repair is ONE call per
+> part: catia_replace_component(component_name=[the names above], file_path=...,
+> keep_name=true) ...
+
+The same sentence appears in the present tense on a successful overwrite, for the
+state where the file is not loaded (an assembly whose instances are ALREADY broken
+does not keep its part open): `total: 0, unreadable: 4` in the measured run.
+
+**What changed in the tools.**
+
+- `catia_replace_component` takes a LIST of instances. Every name is resolved
+  BEFORE the first insert - measured: a list of `[P05.1, NoSuchInstance.9]`
+  leaves the assembly at 2 components - duplicates are refused, and a failure
+  mid-batch STOPS the run and answers `REPLACE_BATCH_INCOMPLETE` with `replaced`,
+  `failed_at` and `not_attempted`. It stops rather than skips because a replace
+  that fails its pose check leaves BOTH instances in the tree, so continuing would
+  pile up unknown state.
+- `keep_name: true` renames the new instance back after the old one is removed.
+  Measured to be necessary rather than cosmetic: with the name free again, CATIA
+  gives the next insert `.1` again, so all four repairs landed as
+  `A1_Piston_v3.1` and only the rename kept the tree matching the call table. The
+  rename is READ BACK; a name CATIA does not take is reported, not assumed.
+- `catia_list_components` publishes `broken_instances` and `broken_by_part` beside
+  the `broken` count, and its note names the one-call repair with the actual
+  instance names. It used to say "replace them with catia_add_component", which
+  cannot keep a pose and cannot take a name - the wrong tool for this repair. A
+  broken instance whose NAME cannot be read is counted, not listed: no call can
+  address it, and saying otherwise would send the caller to a dead end.
+
+**Not done.** Warning on the overwrite itself (measured unreachable - the file
+cannot be freed while its assembly is open), and P1-13 / P2-15 / P2-8 / P2-19 /
+P2-20, queued as before. `keep_name` does not save the constraints that
+referenced the old instance; nothing on this surface can.
+
+### Verification
+
+B30 2026-11-21, `scripts/b30_v0494_acceptance.py` **29/29**, one run: A the
+refusal names all four instances, the assembly and the repair; B close - rebuild -
+reopen gives 4 broken with poses intact, and a second reopen does not mend them;
+C one call restores all four at 0.0 mm with their names; D the second rebuild goes
+through and warns with `unreadable: 4`; E without `keep_name` the repairs land as
+`E1_Piston_v2.1` / `.2`; F a bad name in the list changes nothing.
+`scripts/b30_v0494_state_probe.py` is the state machine the placement rests on
+(when a referenced part can be closed, and what CATIA answers at each step).
+**2 508 tests.**
+
 ## [0.3.156] — 2026-11-21 · a bevel that was always possible, and a residual you can read
 
 The 2026-11-21 report carries twenty items from three rounds of rebuilding an

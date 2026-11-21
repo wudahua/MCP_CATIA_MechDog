@@ -664,11 +664,22 @@ class DocumentTools:
         if file_path:
             holder = self._document_at_path(str(file_path))
             if holder is not None:
+                # WHERE THE WARNING ABOUT BREAKING AN ASSEMBLY BELONGS, measured
+                # on B30 2026-11-21: with an assembly open, the parts it references
+                # are in Application.Documents (catia_list_documents reports them
+                # with component_of=<assembly>), and closing one is answered
+                # "STILL OPEN ... the close request was accepted and deferred".
+                # So this refusal - not a successful overwrite - is the ONLY moment
+                # a caller is about to rebuild a file an assembly is using, and the
+                # only moment the instances can still be read to name them.
+                referenced = self._referenced_assemblies(str(file_path), docs)
                 raise CodedError(
                     f"'{file_path}' is already open as '{holder.Name}', so this "
                     "call would leave a SECOND document with the same name and no "
                     "path, and the geometry would go into that one while the file "
-                    "on disk stayed empty. Nothing was created.",
+                    "on disk stayed empty. Nothing was created."
+                    + self._reference_warning(str(file_path), referenced,
+                                              occurred=False),
                     code="DOCUMENT_ALREADY_OPEN",
                     modified=False,
                     next_actions=[
@@ -678,9 +689,23 @@ class DocumentTools:
                         "To start over on this file: catia_close_document(save=false) "
                         "first (or close it in CATIA), then call catia_new_part again",
                         "To write a second part beside it: pass a different file_path",
-                    ],
-                    data={"path": str(file_path), "open_document": str(holder.Name)},
+                    ] + ([
+                        "A part an OPEN assembly references cannot be closed on its "
+                        "own - close the assembly first, rebuild the part, then "
+                        "reopen it and repair the instances in one call per part",
+                    ] if referenced else []),
+                    data={"path": str(file_path), "open_document": str(holder.Name),
+                          **({"referenced_by": referenced} if referenced else {})},
                     stage="validate")
+        # Reachable when the file is NOT loaded: an assembly whose instances are
+        # already broken does not keep the part open, so this is the "rebuilding
+        # the same file again" case. Same facts, past tense - the overwrite is
+        # about to happen rather than blocked.
+        overwrite_note = ""
+        if file_path and overwrite and os.path.isfile(str(file_path)):
+            overwrite_note = self._reference_warning(
+                str(file_path), self._referenced_assemblies(str(file_path), docs),
+                occurred=True)
         doc = docs.Add("Part")
         # A fresh part has no sketches; carrying the previous part's would make
         # the first pad/pocket in this document use the wrong profile.
@@ -823,7 +848,86 @@ class DocumentTools:
         return (f"Created new Part document: '{part_name}'"
                 + (f" [{part_number}]" if part_number else "")
                 + f".{note}{saved}{hint}{fallback_note}"
-                + self._name_collision_note(doc))
+                + self._name_collision_note(doc)
+                + overwrite_note)
+
+    def _referenced_assemblies(self, path: str, docs: Any) -> dict[str, Any] | None:
+        """The open assemblies that hold instances of ``path``, or ``None``.
+
+        Returns the FACTS only - total, unreadable, and per document the instance
+        names - so the two places that word them (the refusal and the successful
+        rebuild) cannot disagree about the numbers. Best-effort by design: a
+        warning is not worth failing a build over.
+        """
+        try:
+            from catia_mcp.tools.assembly import assemblies_referencing
+            found = assemblies_referencing(path, docs)
+        except Exception:  # noqa: BLE001 - a warning must never block the build
+            return None
+        if not found:
+            return None
+        return {
+            "total": sum(len(item["instances"]) for item in found),
+            "unreadable": sum(item["unreadable"] for item in found),
+            "assemblies": found,
+        }
+
+    def _reference_warning(self, path: str, referenced: dict[str, Any] | None,
+                           occurred: bool) -> str:
+        """What a rewrite of ``path`` does to the instances pointing at it.
+
+        One template, two tenses: ``occurred=False`` is the refusal (the rewrite
+        was blocked, so the instances are still readable and the sentence is
+        "would"), ``occurred=True`` is the rebuilt file (the damage is done). The
+        sentence after that is identical on purpose - the advice does not depend
+        on whether the call was stopped.
+
+        Measured on B30 2026-11-21 by rebuilding a part over its own file and
+        reopening the assembly: 4 of 4 instances kept their poses and answered
+        None for PartNumber, a second close/reopen cycle changed nothing, and one
+        catia_replace_component call per part put them back with their names (a
+        two-instance probe answered the same way).
+        """
+        if not referenced:
+            return ""
+        total = referenced["total"]
+        unreadable = referenced["unreadable"]
+        found = referenced["assemblies"]
+        parts = []
+        for item in found:
+            names = item["instances"]
+            listed = ", ".join(f"'{name}'" for name in names[:6])
+            if len(names) > 6:
+                listed += f", +{len(names) - 6} more"
+            parts.append(f"{item['document']} ({listed})" if listed
+                         else f"{item['document']} (no readable instance name)")
+        listing = "; ".join(parts)
+        # "referenced by 0 instance(s)" is what a broken-only match produces, and
+        # it reads like nothing is at stake exactly when four instances are. The
+        # three cases say what they found instead of pouring it into one number.
+        if total and unreadable:
+            who = (f"{total} instance(s) in {len(found)} open assembly "
+                   f"document(s): {listing}, plus {unreadable} more whose reference "
+                   "cannot be read at all")
+        elif total:
+            who = (f"{total} instance(s) in {len(found)} open assembly "
+                   f"document(s): {listing}")
+        else:
+            who = (f"{unreadable} instance(s) in {len(found)} open assembly "
+                   f"document(s), not one of whose references can be read any more "
+                   f"(their parts are already broken): {listing}")
+        return (
+            f" It is also pointed at by {who}. Overwriting the file gives it a NEW "
+            "internal document id, and this build resolves an instance by that id, "
+            "so those instances " + ("keep" if occurred else "would keep")
+            + " their poses and " + ("throw" if occurred else "would throw")
+            + " on PartNumber/ReferenceProduct - closing and reopening the assembly "
+            "does NOT repair them (measured on B30 2026-11-21, report P1-11). The "
+            "repair is ONE call per part: catia_replace_component(component_name=["
+            + ("the names above" if total
+               else "the instance names catia_list_components lists")
+            + "], file_path='" + path + "', keep_name=true) - it rebuilds each "
+            "instance at its own pose and takes its name back.")
 
     def _new_product(self, name: str | None = None,
                      file_path: str | None = None) -> str:
