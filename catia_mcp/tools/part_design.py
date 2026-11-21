@@ -534,7 +534,21 @@ class PartDesignTools:
                                 "'凹槽.1' and '凹槽.2' and the reply says 'two "
                                 "one-sided cuts' (measured the same day, offset=5 on "
                                 "a 10 mm block). Bookkeeping by feature count is off "
-                                "by one in that case; catia_list_features shows both."
+                                "by one in that case; catia_list_features shows both. "
+                                "THE SECOND COST IS TOPOLOGY, AND IT DEPENDS ON THE "
+                                "GEOMETRY - measured in both directions. The "
+                                "2026-11-21 report's P01 skirt window came back with "
+                                "37 faces against the source's 33, the extras "
+                                "arriving as duplicate pairs at the sketch plane "
+                                "(Face.4/Face.26 at 28.901 mm2, Face.5/Face.25 at "
+                                "1191.621 mm2). A controlled through-cut from the "
+                                "mid-plane of a 100x60x20 block did NOT split "
+                                "anything on B30 the same day: 10 faces, exactly the "
+                                "same as the same window cut one-sided from the top. "
+                                "So neither 'it always splits' nor 'it never does' "
+                                "is true; if a face count is your acceptance "
+                                "criterion, cut ONE side from a sketch on an offset "
+                                "plane (reported 2026-11-21, P1-13)."
                             ),
                             "enum": ["normal", "reverse", "both"],
                             "default": "normal",
@@ -3147,9 +3161,19 @@ class PartDesignTools:
             extent = self._pocket_extent(through_all, depth, symmetric)
             names = f"'{pocket.Name}'" if mirror is None else \
                 f"'{pocket.Name}' + '{mirror.Name}' (two one-sided cuts)"
+            # The second cost of a mid-plane cut, said where the second feature
+            # appears (2026-11-21 report P1-13). It is not a guess: `mirror` only
+            # exists when the OTHER side also removed material, which means the
+            # sketch plane is inside the solid - and then every face the profile
+            # crosses has a seam at that plane. The reported part is the evidence:
+            # 37 faces against the source's 33, the extra ones arriving in pairs.
+            topology_note = (
+                "" if mirror is None
+                else self._midplane_topology_note(mirror))
             return (
                 f"Pocket {names} created: {extent}{flip_note}. "
                 f"Removed {removed:.1f} mm3 ({before:.1f} -> {after:.1f})."
+                + topology_note
                 + self._pocket_area_note(sketch, depth, through_all, symmetric,
                                          single_sided)
             )
@@ -3165,6 +3189,32 @@ class PartDesignTools:
              "crosses itself is the usual reason a cut will not rebuild",
              "a through_all cut whose sketch sits on a datum plane can come back "
              "empty while the same profile cuts with an explicit depth"])
+
+    @staticmethod
+    def _midplane_topology_note(mirror: Any) -> str:
+        """What the second one-sided cut can cost in FACES - measured both ways.
+
+        The 2026-11-21 report (P1-13) counted faces as its acceptance criterion
+        and got 37 where the source had 33, all of the excess arriving as
+        duplicate pairs at the sketch plane. That is the report's number. What
+        this build does NOT do is split on every mid-plane cut: the same window
+        cut through from the mid-plane of a 100x60x20 block answered 10 faces on
+        B30 2026-11-21, exactly like the one-sided cut from the top. Both
+        measurements are here because a note that promises a split would be as
+        wrong as one that denies it.
+        """
+        if mirror is None:
+            return ""
+        return (
+            " Two one-sided cuts is what a mid-plane cut has to be on this build "
+            "(Pocket + IsSymmetric is ignored), and the pair CAN cost faces: the "
+            "2026-11-21 report's P01 skirt window came back with 37 faces against "
+            "the source's 33, the extras arriving as duplicate pairs (28.901 and "
+            "1191.621 mm2). A controlled through-cut from the mid-plane of a "
+            "100x60x20 block did NOT split anything when measured here - 10 faces, "
+            "the same as the one-sided cut - so the split depends on the geometry "
+            "rather than on 'both' alone. If a face count is your yardstick, cut "
+            "one side from an offset plane instead.")
 
     def _pocket_two_sided(self, args: dict[str, Any]) -> str:
         """A pocket with two different depths - one feature, two limits.
@@ -6598,12 +6648,53 @@ class PartDesignTools:
             # Kept OUT of `done`: that list is counted as elements removed, and a
             # sentence about the update is not one.
             scaffold_note = ""
-            if removed_features:
-                for name in removed_features:
+            # A SKETCH TAKEN BY ITS OWN FEATURE NEEDS THE SAME CLEANUP. The first
+            # version of this loop only walked `removed_features`, so the very
+            # call the reply recommends for a consumed sketch - names=["凸台.1",
+            # "SK"] - cascaded the sketch, left its `_FRAME` + 3 points in the
+            # tree and said NOTHING: `quiet=True` swallowed the refusal and the
+            # cascade meant no cleanup was even attempted (measured 2026-11-21
+            # while writing the P2-15 acceptance cell). Cascaded sketches have no
+            # captured axes (`_deleted_sketch_datums` only knows what THIS call
+            # deleted directly), so 'auto' refuses on them by design - which is
+            # exactly what the sentence below has to say.
+            gone_sketches = list(removed_features) + [
+                name for name in went_with if name not in removed_features]
+            if gone_sketches:
+                for name in gone_sketches:
                     scaffold_note += self._cleanup_after_sketch(
                         name, args.get("cleanup_frame_datum", "auto"),
                         update=False, quiet=True,
                         datum=self._deleted_sketch_datums.pop(name, None))
+                # WHAT IS STILL THERE, said out loud (2026-11-21 report P2-15).
+                # `quiet=True` above suppresses every refusal, so a batch that
+                # deleted a frame sketch and left its datum+3 points said nothing
+                # at all - the caller found out by looking at the tree. The
+                # inventory is read AFTER the deletes, so it reports what actually
+                # remained rather than what this code believes it decided.
+                leftovers = self._frame_leftovers(gone_sketches)
+                if leftovers:
+                    listed = ", ".join(f"'{owner}' ({count} element(s))"
+                                       for owner, count in sorted(leftovers.items()))
+                    owner = sorted(leftovers)[0]
+                    # The by-name route is the ONLY one left once the sketch is
+                    # gone: its name no longer resolves, so a second call cannot
+                    # pass it again with cleanup_frame_datum=true.
+                    by_name = (f"catia_delete_feature(names=['{owner}_FRAME', "
+                               f"'{owner}_FRAME.O', '{owner}_FRAME.U', "
+                               f"'{owner}_FRAME.V'])")
+                    scaffold_note += (
+                        f" Frame scaffolding stayed in the tree for "
+                        f"{len(leftovers)} of the deleted or cascaded sketch(es): "
+                        f"{listed}. "
+                        "'auto' will not take a datum that another sketch may be "
+                        "standing on (measured on B30 2026-11-18: deleting it "
+                        "leaves that sketch unsupported and the part's update "
+                        "failing), and it will not take one whose axes were never "
+                        "read - a sketch that went with its feature has no axes on "
+                        "record. They are NAMED, so they can be removed without the "
+                        f"sketch: {by_name}. cleanup_frame_datum=true on this call "
+                        "would have forced it.")
 
             update_note = (self._final_update_note(removed_features)
                            if removed_features else "")
@@ -7986,6 +8077,32 @@ class PartDesignTools:
         if notes:
             payload["note"] = " ".join(notes)
         return json.dumps(payload, indent=2)
+
+    def _frame_leftovers(self, sketch_names: list[str]) -> dict[str, int]:
+        """Scaffold elements still in the tree for ``sketch_names``, by owner.
+
+        Read after the deletes, by name: ``<sketch>_FRAME`` and ``.O/.U/.V`` are
+        the only handle CATIA gives (measured 2026-11-18 - ``Sketch.Plane`` and
+        ``Sketch.Support`` do not exist), and it is also the question the caller
+        asks - "is anything left of that sketch".
+        """
+        wanted = set(sketch_names)
+        left: dict[str, int] = {}
+        try:
+            bodies = self.conn.get_active_part().Bodies
+            count = int(bodies.Count)
+        except Exception:  # noqa: BLE001 - nothing to report, nothing to claim
+            return left
+        for index in range(1, count + 1):
+            try:
+                inventory = self._frame_scaffold_inventory(bodies.Item(index))
+            except Exception:  # noqa: BLE001 - one unreadable body
+                continue
+            for entry in inventory.get("sketches") or []:
+                owner = entry.get("sketch")
+                if owner in wanted:
+                    left[owner] = left.get(owner, 0) + int(entry.get("elements") or 0)
+        return left
 
     def _frame_scaffold_inventory(self, body: Any) -> dict[str, Any]:
         """How many frame-datum elements the body holds, grouped by owner.

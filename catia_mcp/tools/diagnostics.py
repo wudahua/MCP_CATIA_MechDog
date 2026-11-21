@@ -1361,11 +1361,51 @@ class DiagnosticsTools:
                     "NOT_IN_TYPELIB means the member or parameter is absent, "
                     "DECLARED_NOT_MEASURED means nobody has tried and it is not an "
                     "answer either way, and AVAILABLE_WITH_LIMIT means it works "
-                    "but the limit is easy to get wrong."
+                    "but the limit is easy to get wrong.\n"
+                    "IT IS A BIG REPLY, AND THAT IS MEASURABLE: the full report "
+                    "was 80 219 characters on B30 2026-11-21, of which "
+                    "capability_ceilings was 63 752 and factories 6 115 - enough "
+                    "that a client truncated it and had to grep a saved "
+                    "tool-result file (reported 2026-11-21, P2-8). Two ways to "
+                    "ask for less, both opt-in so a bug report still carries every "
+                    "measurement: brief=true keeps every section but replaces each "
+                    "ceiling's prose with 'detail_chars' (the STATUSES all stay - "
+                    "dropping entries would read as 'no such member'); "
+                    "sections=['mcp','session'] returns only those keys (3 584 "
+                    "characters, measured the same day) - brief as a whole came to "
+                    "23 011. The exact length moves by a few characters with the "
+                    "session, and the numbers are there to size the decision. The section names are "
+                    "mcp, python, catia, session, workbenches, sheetmetal, "
+                    "factories, capability_ceilings, notes."
                 ),
                 "inputSchema": {
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "brief": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Cut the measurement prose out of "
+                                "capability_ceilings (79 % of the reply: 63 752 of "
+                                "80 219 characters measured on B30 2026-11-21; the "
+                                "whole brief report came to 23 011) and "
+                                "keep every member with its status plus "
+                                "'detail_chars'. Sections are otherwise unchanged."),
+                        },
+                        "sections": {
+                            "type": "array",
+                            "items": {"type": "string",
+                                      "enum": ["mcp", "python", "catia", "session",
+                                               "workbenches", "sheetmetal",
+                                               "factories", "capability_ceilings",
+                                               "notes"]},
+                            "description": (
+                                "Return only these top-level blocks, in this "
+                                "order. Use it instead of reading past 60 000 "
+                                "characters of ceilings when the question is "
+                                "about the session or the version."),
+                        },
+                    },
                 },
             },
             {
@@ -1471,7 +1511,8 @@ class DiagnosticsTools:
     def execute(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         match tool_name:
             case "catia_diagnose":
-                return self._diagnose()
+                return self._diagnose(bool(arguments.get("brief", False)),
+                                      arguments.get("sections"))
             case "catia_probe_assembly_constraints":
                 return self._probe_assembly_constraints()
             case "catia_server_info":
@@ -1754,7 +1795,13 @@ class DiagnosticsTools:
         text = " ".join(str(exc).split())
         return text[:160]
 
-    def _diagnose(self) -> str:
+    #: The report's top-level keys, in the order they are built. `sections` picks
+    #: from these, so the list is also the thing a refusal quotes.
+    _SECTIONS = ("mcp", "python", "catia", "session", "workbenches", "sheetmetal",
+                 "factories", "capability_ceilings", "notes")
+
+    def _diagnose(self, brief: bool = False,
+                  sections: list[str] | None = None) -> str:
         self.conn.ensure_connected()
         app = self.conn.app
 
@@ -1785,7 +1832,71 @@ class DiagnosticsTools:
         report["capability_ceilings"] = _CAPABILITY_CEILINGS
         report["notes"] = self._notes(report)
 
+        # THE SIZE, MEASURED (2026-11-21 report P2-8). A full report on B30 was
+        # 80 200 characters, of which capability_ceilings was 63 752 and
+        # factories 6 115: the caller's client truncated it and the answer had to
+        # be grepped out of a saved tool-result file. Both shapes below are
+        # opt-in, so a bug report still carries every measurement by default.
+        if brief:
+            report = self._brief(report)
+        if sections:
+            report = self._select_sections(report, sections)
         return json.dumps(report, indent=2)
+
+    def _select_sections(self, report: dict[str, Any],
+                         sections: list[Any]) -> dict[str, Any]:
+        """The named blocks, in the report's own order, or a refusal.
+
+        Order comes from ``_SECTIONS`` and not from the caller's list: the report
+        is read top-down (mcp first, notes last) and a slice that reordered it
+        would read as a different document. A repeated name is not an error -
+        JSON keys would collide anyway.
+        """
+        wanted = [str(name).strip() for name in sections]
+        unknown = [name for name in wanted if name not in self._SECTIONS]
+        if unknown:
+            raise ArgumentRejected(
+                f"Unknown diagnose section(s): {', '.join(unknown)}. The report "
+                f"has: {', '.join(self._SECTIONS)}. Nothing was measured beyond "
+                "the sections listed here.",
+                code="BAD_ARGUMENT", stage="validate", modified=False)
+        return {name: report[name] for name in self._SECTIONS if name in wanted}
+
+    def _brief(self, report: dict[str, Any]) -> dict[str, Any]:
+        """The same report with the measurement PROSE cut, not the findings.
+
+        ``capability_ceilings`` is a list of members with a several-hundred-word
+        ``detail`` each - the evidence behind UNSUPPORTED_ON_B30 - and it is 79 %
+        of the reply. Brief keeps every member and its STATUS (the part a caller
+        branches on) and replaces each detail with its length, so the caller can
+        see what was withheld and ask for it by section. Dropping the entries
+        instead would turn "this member is refused on this build" into "no such
+        member", which is the misreading this tool exists to prevent.
+        """
+        briefed = dict(report)
+        ceilings = report.get("capability_ceilings")
+        if isinstance(ceilings, list):
+            entries = []
+            withheld = 0
+            for entry in ceilings:
+                if not isinstance(entry, dict):
+                    continue
+                detail = entry.get("detail") or ""
+                withheld += len(str(detail))
+                entries.append({key: value for key, value in entry.items()
+                                if key != "detail"}
+                               | {"detail_chars": len(str(detail))})
+            briefed["capability_ceilings"] = {
+                "count": len(entries),
+                "entries": entries,
+                "detail_withheld_chars": withheld,
+                "note": (
+                    f"brief=true: {withheld} characters of measurement detail are "
+                    "withheld here - one paragraph per member, the evidence behind "
+                    "each status. Pass sections=['capability_ceilings'] (without "
+                    "brief) to read them."),
+            }
+        return briefed
 
     def _session_info(self) -> dict[str, Any]:
         """Document state: which document, which in-work object, which body, what

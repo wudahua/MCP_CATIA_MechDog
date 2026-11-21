@@ -207,6 +207,44 @@ def edge_fingerprint(faces: list[str], length: float | None) -> str:
     return "L" + stamp + "|" + "|".join(faces)
 
 
+def vertex_references(conn: Any, body: Any
+                      ) -> tuple[list[Any], dict[str, list[Any]]]:
+    """The solid's vertex references, and the construction ones by reason.
+
+    The counting path (``topology_cells``) throws the excluded cells away, which
+    is right for a count and useless for the question the 2026-11-21 report
+    (P2-20) asked: "33 faces / 65 edges match the source part, three vertices do
+    not - which points are you counting, and what did you drop?" Both groups come
+    back here as REFERENCES, so a caller can read their coordinates and compare
+    them with another kernel's list instead of arguing about a total.
+    """
+    sel = conn.hso
+    for attempt in (1, 2):
+        kept: list[Any] = []
+        excluded: dict[str, list[Any]] = {}
+        try:
+            sel.Clear()
+            sel.Add(body)
+            search_topology(sel, "Vertex")
+            for index in range(1, sel.Count + 1):
+                cell = sel.Item(index)
+                reason = construction_reason(nls_of(cell))
+                if reason is None:
+                    kept.append(cell.Reference)
+                else:
+                    excluded.setdefault(reason, []).append(cell.Reference)
+        except Exception:  # noqa: BLE001 - a busy selection, retried once
+            if attempt == 1:
+                try:
+                    sel.Clear()
+                except Exception:  # noqa: BLE001
+                    pass
+                continue
+            raise
+        return kept, excluded
+    return [], {}
+
+
 def topology_cells(conn: Any, body: Any, kind: str,
                    stats: dict[str, Any] | None = None) -> list[Any]:
     """Every *solid* cell of ``kind`` on the body's final shape, in CATIA order.

@@ -2,7 +2,7 @@
 
 > **中文入口见 [README.md](README.md)。** This file is the full English reference: every tool, every measurement behind it, and every known limit.
 
-**0.3.157** · [what changed](CHANGELOG.md) ·
+**0.3.158** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1376,6 +1376,46 @@ Two facts about real drawings that this had to accept:
   whole; one with live text imports the geometry and says how many runs it
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
+
+0.3.158 closes the rest of that report: three answers, one refusal, and one note
+that now carries a control.
+
+P2-8: `catia_diagnose` was 80 219 characters (capability_ceilings 63 752 of them)
+and a client truncated it. `brief=true` keeps every section and every ceiling
+member with its STATUS, replacing the evidence with `detail_chars` (23 011
+characters measured); `sections=['mcp','session']` returned 3 584. Entries are not
+dropped in brief mode - a missing member reads as "no such member", which is the
+misreading this tool exists to prevent.
+
+P2-20: the reporter's P01 reproduces exactly (33 faces / 65 edges / 30 vertices).
+Their hypothesis was that a consumed sketch wire coincides with a solid edge and
+the rule discards the real vertex with it; `include_vertex_points=true` answers
+with coordinates, and on their own part the answer is no - all 26 dropped
+sketch-wire corners are at least 5.0 mm from every counted vertex. A pocket whose
+profile corners land exactly ON a block's bottom edge counts the new corners
+(10/24/16), the same check from the other side. Both point lists are now published
+so a disagreement with another kernel is settled point by point.
+
+P1-13: the mid-plane note is in the reply, but not as the mechanism proposed. The
+report's part split into duplicate pairs (37 faces against 33, 28.901 and
+1191.621 mm2); a controlled through-cut from the mid-plane of a 100x60x20 block
+here gave 10 faces - exactly what the one-sided cut gave. Both numbers are in the
+note, because "always splits" and "never splits" are equally wrong.
+
+P2-15: a batch delete of a consumed sketch left its `_FRAME` and three points
+without a word - the cleanup loop only walked sketches this call deleted itself,
+and quiet mode swallowed the refusal. Cascaded sketches are now in the same loop,
+and the reply states what remained, why `auto` refused, and the by-name route that
+still works once the sketch's name stops resolving.
+
+P2-19: `hide_spec_tree` cannot exist and neither can an automatic crop. Measured:
+18 plausible members on Application/Window/Viewer3D (SpecTreeWidth,
+SpecTreeVisible, DisplaySpecifications, ViewportWidth, Layout, ...) all answer
+"not found"; Viewer3D.Width/Height answer the CAPTURE size; Window.Width/Height
+answer 116/0 for the same 300x400 window; Viewpoint3D exposes no Eye or
+SightDirection, so no projection is possible. Hiding the solid and diffing two
+captures fails too - the whole viewport redraws, grid included. `crop` stays the
+route and the description now carries the measurements.
 
 0.3.157 answers P1-11/P1-12 of the same report: rebuilding a part file leaves
 every instance that pointed at it unreadable - the pose still reads, `PartNumber`
@@ -3010,6 +3050,16 @@ Place the result with `catia_get_component_transform`.
   file>, keep_name=true)` - it rebuilds each instance at its own pose and takes
   the old name back. The constraints that referenced the old instances are NOT
   restored; nothing on this surface can.
+* **The specification tree cannot be hidden from automation, and its width cannot
+  be measured** (B30 2026-11-21). `catia_screenshot` therefore takes `crop` in
+  pixels: `Viewer3D.Width/Height` report the capture size rather than the viewport,
+  `Window.Width/Height` report 116/0 for a 300x400 capture, `Viewpoint3D` exposes no
+  Eye/SightDirection (so the model's box cannot be projected into pixels), and 18
+  plausible members across Application / Window / Viewer3D (SpecTreeWidth,
+  SpecTreeVisible, DisplaySpecifications, ViewportWidth, Layout, ...) all answer
+  "not found". Hiding the solid and diffing two frames does not isolate it either -
+  the whole viewport redraws. The tree band depends on the language pack and font
+  size, so it is a caller decision.
 * The watchdog answers `#32770` message boxes only; CATIA's own `CATDlgDialog`
   panels are left alone so a human working alongside the agent is not interrupted.
 

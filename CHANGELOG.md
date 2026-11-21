@@ -2,6 +2,80 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.158] — 2026-11-21 · the four that were left, and one that cannot be built
+
+The rest of the 2026-11-21 report's list. Three are answers, one is a refusal with
+the measurement behind it, and one is a note that now carries a control.
+
+**P2-8 - a diagnosis you can read.** The full `catia_diagnose` was **80 222
+characters** on B30 (capability_ceilings 63 752 of them, 79 %), so a client
+truncated it and the answer had to be grepped out of a saved tool-result file.
+`brief=true` keeps every section and every ceiling MEMBER WITH ITS STATUS, and
+replaces each paragraph of evidence with `detail_chars` - **23 011 characters**
+measured. `sections=["mcp","session"]` returned **3 584**. Dropping the entries in
+brief mode was rejected on purpose: a missing member reads as "no such member",
+which is the misreading this tool exists to prevent. An unknown section name is
+refused with the list.
+
+**P2-20 - which vertices, and what was dropped.** The reporter's P01 reproduces
+exactly here: **33 faces / 65 edges / 30 vertices**. Their hypothesis was that a
+consumed sketch wire coincides with a solid edge and the rule throws the real
+vertex away with the sketch's; the new `include_vertex_points=true` answers the
+question with coordinates instead of a total, and on their own part the answer is
+**no**: all **26** dropped sketch-wire corners are at least **5.0 mm** from every
+counted vertex, so nothing was merged. A scene built for it - a 20x30 pocket whose
+profile corners land exactly ON the block's bottom edge - counts the new corners
+(10 faces / 24 edges / **16** vertices), which is the same check from the other
+side. So the count is not losing coincident corners, and the missing three are a
+difference between the two kernels that a total cannot settle: the tool now
+publishes both point lists (and says how many datum-plane "corners" at 1e6 mm were
+left out) so the comparison is point by point.
+
+**P1-13 - the mid-plane cut's face count, measured both ways.** The note the
+report asked for is now in the reply, but not as the mechanism it proposed: on
+their P01 the split produced 37 faces against the source's 33 with duplicate
+pairs (28.901 and 1191.621 mm2), and a controlled through-cut from the mid-plane
+of a 100x60x20 block here produced **10 faces - exactly what the one-sided cut
+from the top produced**. So "each face the profile crosses is split in two" is
+false as a law; the reply carries both measurements and the advice (cut one side
+from an offset plane if faces are the yardstick).
+
+**P2-15 - the scaffolding a batch delete leaves, said out loud.** Two defects, one
+cause: the cleanup loop only walked the sketches this call deleted *itself*, and
+`quiet=True` swallowed every refusal. Deleting a consumed sketch the way the tool
+recommends - `names=["凸台.1","FR_A"]` - cascades the sketch, so no cleanup ran and
+the reply said nothing at all; the `_FRAME` plane and its three points stayed
+behind silently (measured on B30 2026-11-21). Cascaded sketches are now in the
+same loop, and the reply states what remained per sketch, why `auto` refused, and
+the by-name route that still works once the sketch's own name has stopped
+resolving (`catia_delete_feature(names=['FR_A_FRAME','FR_A_FRAME.O',...])`).
+
+**P2-19 - `hide_spec_tree` cannot be built, and neither can an automatic crop.**
+Measured on B30 2026-11-21, a 300x400 capture: **no member reports the viewport
+rectangle or the tree's width** - 18 plausible names on Application / Window /
+Viewer3D (SpecTreeWidth, SpecTreeVisible, DisplaySpecifications, ViewportWidth,
+Layout, ...) all answer "not found"; `Viewer3D.Width/Height` answer the CAPTURE
+size; `Window.Width/Height` answer **116/0** for that same window; `Viewpoint3D`
+exposes no `Eye`/`SightDirection`/`UpDirection` (only Zoom, ProjectionMode,
+FieldOfView), so the model's box cannot be projected into pixels either. Hiding
+the solid to diff it out was tried and does not work: with the body hidden the
+whole viewport is redrawn (the ground grid goes with it) and the two frames differ
+from y=143 to the bottom edge. `crop=[x,y,w,h]` stays the route, and the
+description now carries these measurements so the next caller does not ask again -
+the tree band is a caller decision, and it does change with language pack and font
+size, as the reporter observed.
+
+### Verification
+
+B30 2026-11-21, `scripts/b30_v0495_acceptance.py` **25/25**, one run: A the full
+report 80 219 / brief 23 011 / two sections 3 584 characters, all 49 ceiling
+entries and their statuses kept, a bad section refused; B P01 33/65/30 with 30
+points and the nearest dropped corner 5.000 mm away, and the purpose-built notch
+counting 10/24/16; C the mid-plane reply carrying both measurements while its own
+control reads 10 faces against the one-sided cut's 10; D the batch delete naming
+`'FR_A' (4 element(s))` and the by-name route, with the four elements still in the
+tree afterwards. **2 524 tests.**
+
 ## [0.3.157] — 2026-11-21 · one call for the four instances a rebuild breaks
 
 The 2026-11-21 report's P1-11 / P1-12. Rebuilding two part files left eight

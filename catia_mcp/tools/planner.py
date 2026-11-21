@@ -235,7 +235,16 @@ class PlannerTools:
                     "catia_get_bounding_box take, and the reason checking nine parts used "
                     "to cost nine open + activate pairs (reported 2026-10-25). A part "
                     "that exists only as a component of an open assembly is not in "
-                    "Documents and cannot be counted this way: open it first."
+                    "Documents and cannot be counted this way: open it first. "
+                    "'include_vertex_points=true' adds the coordinates behind the "
+                    "vertex count - the counted ones and, separately by reason, "
+                    "the construction cells the counting rule dropped. That is "
+                    "what settles a count that disagrees with another kernel: on "
+                    "the 2026-11-21 report's P01 (33 faces / 65 edges matching, "
+                    "30 vertices against the source's 33) the 26 dropped "
+                    "sketch-wire corners were all at least 5.0 mm from every "
+                    "counted vertex, so the rule was not merging coincident "
+                    "corners - the totals alone could not show that."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -247,7 +256,20 @@ class PlannerTools:
                                 "(e.g. 'P01' or 'P01.CATPart'). Default: the "
                                 "active document."
                             ),
-                        }
+                        },
+                        "include_vertex_points": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Add 'vertex_points' (the counted vertices, mm, 4 "
+                                "decimals) and 'construction_vertex_points' (the "
+                                "dropped cells grouped by reason). One batched "
+                                "read - measured at 424 ms for 335 points - so it "
+                                "is off by default. Truncated at 500 points with "
+                                "'vertex_points_truncated' saying so; the count "
+                                "itself is never truncated."
+                            ),
+                        },
                     },
                 },
             },
@@ -258,8 +280,11 @@ class PlannerTools:
             case "catia_run_plan":
                 return self._run_plan(arguments)
             case "catia_measure_topology":
-                return json.dumps(self._count_topology(arguments.get("document")),
-                                 indent=2, ensure_ascii=False)
+                return json.dumps(
+                    self._count_topology(arguments.get("document"),
+                                         bool(arguments.get("include_vertex_points",
+                                                            False))),
+                    indent=2, ensure_ascii=False)
             case _:
                 raise ArgumentRejected(f"Unknown planner tool: {tool_name}")
 
@@ -1143,6 +1168,84 @@ class PlannerTools:
         # message should not have to handle two grammars (reported 2026-10-27).
         return f"{len(failed)} of {len(report)} steps failed: {listed}"
 
+    #: Above this many vertex cells the coordinate listing stops, and says so.
+    #: The COUNT is unaffected - this only bounds a diagnostic dump.
+    _VERTEX_POINT_CAP = 500
+
+    def _vertex_point_lists(self, body: Any) -> dict[str, Any]:
+        """Where the counted vertices are, and which cells were dropped.
+
+        The 2026-11-21 report (P2-20) had 33 faces and 65 edges that matched its
+        source part and three vertices that did not, with no way to ask which
+        points were being counted - a total cannot answer that, coordinates can.
+        Measured on that part on B30 2026-11-21: 30 counted points, 26 dropped
+        sketch-wire corners, and **not one of the 26 was within 5.0 mm of a
+        counted vertex**, so the rule was not merging coincident corners. That
+        result is why this list exists: it is the measurement a caller needs to
+        make the same check on their own part instead of trusting a count.
+        """
+        from catia_mcp.tools.measurement import (MeasurementTools,
+                                                 read_measurable_points)
+        from catia_mcp.topo_search import vertex_references
+
+        kept_refs, excluded = vertex_references(self.conn, body)
+        tools = MeasurementTools(self.conn)
+        spa = tools._spa_workbench()
+
+        # A datum plane has no border, so its "corners" read 1e6 mm out (the
+        # same artefact `_bounded` filters in the bounding-box path). Listing
+        # them would send a reader looking for vertices that are not there, so
+        # they are counted and left out, not silently dropped.
+        omitted = {"unbounded": 0}
+
+        def read(refs: list[Any]) -> list[list[float]]:
+            points = read_measurable_points(
+                self.conn.app, spa, refs,
+                fallback=lambda ref: tools._read_measurable_array(
+                    spa.GetMeasurable(ref), "GetPoint", 3))
+            kept: list[list[float]] = []
+            for point in points:
+                if any(abs(float(value)) >= tools._UNBOUNDED for value in point):
+                    omitted["unbounded"] += 1
+                    continue
+                kept.append([round(float(value), 4) for value in point])
+            return kept
+
+        kept = kept_refs
+        truncated = None
+        if len(kept_refs) > self._VERTEX_POINT_CAP:
+            kept = kept_refs[:self._VERTEX_POINT_CAP]
+            truncated = f"{self._VERTEX_POINT_CAP} of {len(kept_refs)}"
+        result: dict[str, Any] = {
+            "vertex_points": read(kept),
+            "vertex_points_note": (
+                "The SOLID's vertices, in mm with 4 decimals, as the Vertex "
+                "search returns them - 'vertices' is this list's length. "
+                "'construction_vertex_points' is what the counting rule dropped, "
+                "by reason: sketch-wire corners and datum-plane borders, which "
+                "are not vertices of the solid. A count that disagrees with "
+                "another kernel is settled by comparing these coordinates, not "
+                "by comparing totals; a point that appears in BOTH lists is one "
+                "the rule would have to keep, and on the part that raised this "
+                "question none did."),
+        }
+        if truncated:
+            result["vertex_points_truncated"] = truncated
+        if excluded:
+            listed = {}
+            for reason, refs in sorted(excluded.items()):
+                points = read(refs)
+                if points:                      # a group can be all-unbounded
+                    listed[reason] = points
+            if listed:
+                result["construction_vertex_points"] = listed
+            if omitted["unbounded"]:
+                result["construction_points_omitted"] = (
+                    f"{omitted['unbounded']} point(s) omitted: their coordinates "
+                    "read at or beyond 1e6 mm, which is how this build reports the "
+                    "border of an infinite datum plane, not a vertex")
+        return result
+
     def _topology_target(self, document: str | None) -> tuple[Any, Any]:
         """The part and body to count: the named open document, or the active one."""
         if not document:
@@ -1304,7 +1407,8 @@ class PlannerTools:
             return False
         return isinstance(name, str) and name.startswith("Selection_Wire")
 
-    def _count_topology(self, document: str | None = None) -> dict[str, Any]:
+    def _count_topology(self, document: str | None = None,
+                        include_vertex_points: bool = False) -> dict[str, Any]:
         part, body = self._topology_target(document)
         counts: dict[str, Any] = {}
         try:
@@ -1393,6 +1497,8 @@ class PlannerTools:
             )
         if document:
             counts["document"] = document
+        if include_vertex_points:
+            counts.update(self._vertex_point_lists(body))
         try:
             # "0 faces" and "this part holds no solid" are different answers, and
             # only the second one means the counts cannot be used at all. Empty
