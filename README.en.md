@@ -2,7 +2,7 @@
 
 > **中文入口见 [README.md](README.md)。** This file is the full English reference: every tool, every measurement behind it, and every known limit.
 
-**0.3.155** · [what changed](CHANGELOG.md) ·
+**0.3.156** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1376,6 +1376,30 @@ Two facts about real drawings that this had to accept:
   whole; one with live text imports the geometry and says how many runs it
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
+
+0.3.156 answers four of the 2026-11-21 report's twenty items, each measured
+before and after; the changelog lists the rest with the reason they are not here.
+
+P0-1: `catia_chamfer` gains `length2` for a two-distance bevel. The capability
+was never missing - `AddNewChamfer`'s third argument has always selected
+catLengthLength (mode 0), where the sixth argument is a second length. Measured
+on a 100 mm cube edge: 25/20 removes exactly 25 000 mm3, against 11 374 mm3 for
+25 mm at 20 deg.
+
+P1-14/P1-16: a 1.4e-9 mm gap used to print as `0.000000` while the message said
+the arc was off its circle, and the tolerance was a flat 1e-9 mm - 2.5e-11 of
+relative accuracy at R40, past what a double holds, so a p1/p2 computed outside
+CATIA failed on arithmetic. The tolerance now scales with the radius, small gaps
+print in scientific notation, and the refusal states the threshold.
+
+P1-17: a Part-vs-Product refusal names `catia_activate_document`.
+P1-18: `catia_get_inertia` accepts the scope words its own reply publishes.
+
+Not done, and why: feature-level mirror (`AddNewMirror.Object` is read-only on
+this build), assembly constraints (environment), making `through_all` default to
+both directions (it would change geometry for existing callers), edge-table
+caching (a stale reference fails silently), and the broken-instance batch repair,
+which is the next thing to build.
 
 0.3.155 changes one tool description and no behaviour. 0.3.153 took the
 2026-11-20 report's 17-instance assembly from 200 s to 87 s, and 0.3.154 measured

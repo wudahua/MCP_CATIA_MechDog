@@ -613,10 +613,25 @@ class CATIAConnection:
                 continue
         noun = {"Part": "Part", "Product": "Assembly (Product)",
                 "Sheets": "Drawing"}.get(name, name)
-        raise PreconditionRejected(
-            f"Active document '{getattr(doc, 'Name', '?')}' exposes no '{name}'. "
+        doc_name = str(getattr(doc, "Name", "?"))
+        message = (
+            f"Active document '{doc_name}' exposes no '{name}'. "
             f"Open or create a {noun} document first."
         )
+        # An assembly is not a Part, and the feature tools that land here act on
+        # a Part only. The old message stated the fact and stopped, so a caller
+        # who had just looked at an assembly had to work out the remedy
+        # (2026-11-21 report, P1-17).
+        if name == "Part" and doc_name.upper().endswith(".CATPRODUCT"):
+            message += (
+                " This document IS an assembly, and feature tools (pad, pocket, "
+                "fillet, chamfer, delete_feature...) only act on a Part: call "
+                "catia_activate_document(document='<part>.CATPart') first. The "
+                "measurement tools that take document= (get_inertia, "
+                "measure_topology, get_bounding_box) do not need that - they "
+                "measure the part by name without moving your active document."
+            )
+        raise PreconditionRejected(message)
 
     def part_of(self, doc: Any) -> Any:
         """The Part behind a PartDocument, robust to the gen_py cache state."""

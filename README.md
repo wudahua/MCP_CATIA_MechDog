@@ -1,8 +1,8 @@
-# MCP_CATIA_MechDog 0.3.155
+# MCP_CATIA_MechDog 0.3.156
 
-![version](https://img.shields.io/badge/version-0.3.155-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![CATIA](https://img.shields.io/badge/CATIA-V5%20R30%20(B30)-orange) ![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20http-purple)
+![version](https://img.shields.io/badge/version-0.3.156-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![CATIA](https://img.shields.io/badge/CATIA-V5%20R30%20(B30)-orange) ![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20http-purple)
 
-当前正式版 **0.3.155**——只改一段工具描述，不改行为：把 17 实例装配的冷启动**预算**写进 `catia_get_bounding_box` 的说明里。0.3.153 把它从 200 s 降到 87 s，0.3.154 量了这个场景，但两版都没告调用者**动手之前该预期多久**——旧文只对 70 实例说「分钟级」，对撑起这个数的零件只字未提。现在写实：7 个零件 / 17 实例，每件首次 1.8 s（小框）、3.9–13.6 s（曲柄臂、腿杆）、19.0 s（连杆，还付了一次 STL 导出），合计 `method='vertices'` **冷 87 s / 暖 13 s**；默认 mesh 路线 **冷 128 s**（每件付的是导出而不是建拓扑）。同时写明**没有更便宜的路可换**：`Measurable`/`Part`/`Body`/`SPAWorkbench` 都没有包围盒成员，`ExportData` 的 STL 精度是 CATIA **全局设置**、不能按次传参（改了等于改用户配置）——免得下一轮再撞死三次。可操作的说法也在同一句里：**按零件预算、不按实例**（零件量过，实例免费），只量需要的就用 `component=`。 · [变更日志](CHANGELOG.md) · [Releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases)
+当前正式版 **0.3.156**——2026-11-21 的报告有 20 条，这一版答了其中 **4 条**，每条都先量后改。**P0-1 双距离倒角**：`catia_chamfer` 只有 length+angle，报告只好切两个三角形草图做 25/20 倒角；而 `AddNewChamfer` 的第 3 个参数一直是 mode（0 = **catLengthLength**），那时第 6 个参数**就是第二距离**。实测 100 mm 棱：25/20 正好去掉 **25 000 mm³**（25×20/2×100），而 25 mm @20° 只去掉 **11 374 mm³**——差 2.2 倍，所以判据是体积不是面数。新参数 `length2`，默认调用与拒绝语义不变。**P1-14/P1-16 残差可读**：1.4e-9 mm 原来被 `%.6f` 打成 `0.000000`，报文一边说「不在圆上」一边显示 0；而容差是**固定 1e-9 mm**，在 R40 上等于要求 2.5e-11 的**相对**精度——超出双精度，外部算出的 p1/p2 必然失败，报告只能「补位数直到通过」。现在容差随半径（`1e-9 × max(1 mm, R)`，R40 即 4e-8 mm，仍比 CATIA 的 1e-3 低 5 个数量级），小于 1e-4 mm 的残差用科学计数法，拒绝时报文直接给出容差值。**P1-17**：装配激话时用特征工具，报错现在直接给出 `catia_activate_document` 这条解法。**P1-18**：`catia_get_inertia` 一边用 `must NOT have additional properties` 拒绝 `scope`，一边在回执里发 `scope: "active_body"`——两个词现在都合法且同义，其它值给出理由。未做的条目（特征级镜像=API object 只读、装配约束=环境、中面 through_all=改默认会改几何、断链实例批量修复=下一版做）在变更日志里逐条写了原因。 · [变更日志](CHANGELOG.md) · [Releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases)
 
 > 让 AI 客户端通过 MCP，在 CATIA V5 里建**原生可编辑的实体特征**——并且每一步都能量回来。
 
@@ -20,7 +20,7 @@ MCP_CATIA_MechDog 是运行在你自己 Windows 电脑上的本地 MCP 服务（
 - **草图可回改**：`catia_sketch_edit` 重开已关闭的草图，`catia_sketch_delete_element` 删掉画错的一条，零件随之重建——错一条线不必整件重做。
 - **量不到就说量不到**：超范围、超能力或读数失败时，回执以 `UNVERIFIED:` 开头并说明哪一个测量失败，不会把失败写成成功。
 - **能力可发现**：诊断文字旁边给一行能直接粘贴的调用；「有工具但没人知道怎么调」和「没有这个工具」一样是缺陷。
-- **离线可测**：**2473** 个测试不需要 CATIA，`pytest` 在本机就能跑全绿；真机验收脚本在 `scripts/b30_*`。
+- **离线可测**：**2484** 个测试不需要 CATIA，`pytest` 在本机就能跑全绿；真机验收脚本在 `scripts/b30_*`。
 
 ## 环境要求
 

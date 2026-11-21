@@ -798,7 +798,20 @@ class PartDesignTools:
                     "reading a partial result as a bad argument. Omit every edge "
                     "argument to bevel all of them: that path still answers in "
                     "prose, because a short edge refusing a large bevel is "
-                    "arithmetic rather than a failed request."
+                    "arithmetic rather than a failed request.\n"
+                    "TWO-DISTANCE (ASYMMETRIC) BEVEL: pass `length2` and the bevel "
+                    "is built in CATIA's catLengthLength mode instead of "
+                    "length+angle - `length` on one adjacent face, `length2` on "
+                    "the other, `angle` ignored. Measured on B30 2026-11-21 on a "
+                    "100 mm cube edge: 25/20 removes exactly 25*20/2*100 = "
+                    "25 000 mm3, where 25 mm at 20 deg removes 11 374 mm3 - so "
+                    "read the volume, not the face count, when checking this. "
+                    "WHICH face gets which distance follows the edge's own "
+                    "direction, not the caller's naming: check the first result "
+                    "and swap the two values if it comes out the other way "
+                    "round. This is what the "
+                    "2026-11-21 report (P0-1) needed and had to cut two triangle "
+                    "sketches for."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -811,6 +824,19 @@ class PartDesignTools:
                             "type": "number",
                             "description": "Chamfer angle in degrees (default: 45)",
                             "default": 45,
+                        },
+                        "length2": {
+                            "type": "number",
+                            "description": (
+                                "Second distance in mm - selects a TWO-DISTANCE "
+                                "(asymmetric) bevel: `length` on one adjacent "
+                                "face, `length2` on the other, and `angle` is "
+                                "then ignored. Measured on B30 2026-11-21: 25/20 "
+                                "on a 100 mm edge removes exactly 25 000 mm3 "
+                                "(25*20/2*100), against 11 374 mm3 for 25 mm at "
+                                "20 deg. Omit it for the usual length+angle "
+                                "bevel. Must be > 0."
+                            ),
                         },
                         "edge_name": {
                             "anyOf": [{"type": "string"}, {"type": "object"}],
@@ -4260,7 +4286,8 @@ class PartDesignTools:
     def _edges_by_anchor(self, value: float, specs: list[Any],
                          anchors: list[list[float]], tol: float,
                          propagation: int, kind: str = "fillet",
-                         angle: float = 45.0, on_miss: str = "fail") -> str:
+                         angle: float = 45.0, on_miss: str = "fail",
+                         length2: float | None = None) -> str:
         """Fillet/chamfer a list of coordinate anchors instead of edge names."""
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
@@ -4280,14 +4307,20 @@ class PartDesignTools:
                                    "edge_count": len(table)}
 
         if kind == "chamfer":
+            # mode 0 = catLengthLength, so the 6th argument is a SECOND LENGTH.
+            # That is the only way to get a two-distance bevel from this API
+            # (measured 2026-11-21: 25/20 on a 100 mm edge removes exactly
+            # 25*20/2*100 = 25 000 mm3, against 11 374 for 25 mm at 20 deg).
+            mode, sixth = (0, length2) if length2 else (1, angle)
+
             def add(ref: Any) -> Any:
                 return sf.AddNewChamfer(
                     ref,
                     1,        # catTangencyChamferPropagation
-                    1,        # catLengthAngleChamfer mode
+                    mode,     # 0 = length/length, 1 = length/angle
                     0,        # catNoReverseChamfer
                     value,
-                    angle,
+                    sixth,
                 )
             label = "Chamfer"
         else:
@@ -4804,6 +4837,20 @@ class PartDesignTools:
         return note
 
     def _chamfer(self, args: dict[str, Any]) -> str:
+        # 0.3.156: a two-distance bevel. AddNewChamfer's 3rd argument selects
+        # catLengthLength (0) or catLengthAngle (1), and in mode 0 the 6th
+        # argument IS the second length. Measured on B30 2026-11-21: on a 100 mm
+        # cube, mode 0 with 25 and 20 removes exactly 25*20/2*100 = 25 000 mm3,
+        # against 11 374 mm3 for mode 1 at 25 mm / 20 deg. So the capability was
+        # always there and only the parameter was missing - the 2026-11-21 report
+        # (P0-1) had to cut two triangle sketches instead.
+        length2 = args.get("length2")
+        if length2 is not None:
+            length2 = float(length2)
+            if length2 <= 0:
+                raise ArgumentRejected(
+                    f"length2 must be a positive distance in mm - got {length2:g}. "
+                    "Nothing was created.")
         anchors, tol = self._anchor_args(args)
         if anchors:
             specs = []
@@ -4813,10 +4860,13 @@ class PartDesignTools:
             specs.extend(names)
             if args.get("edge_name"):
                 specs.append(args["edge_name"])
+            # Only passed when it is set: the default call keeps the shape every
+            # test double already has (the same rule the measurement code uses).
+            extra = {"length2": length2} if length2 else {}
             return self._edges_by_anchor(
                 float(args["length"]), specs, anchors, tol, 1,
                 kind="chamfer", angle=float(args.get("angle", 45)),
-                on_miss=str(args.get("on_anchor_miss") or "fail"))
+                on_miss=str(args.get("on_anchor_miss") or "fail"), **extra)
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
         body = self._prepare_body(part)
@@ -4826,16 +4876,27 @@ class PartDesignTools:
         if isinstance(names, str):
             names = [names]
         if len(names) > 1 or (names and not args.get("edge_name")):
-            return self._chamfer_many(args["length"], args.get("angle", 45),
-                                      list(names))
+            return (self._chamfer_many(args["length"], args.get("angle", 45),
+                                       list(names), length2=length2)
+                    if length2 else
+                    self._chamfer_many(args["length"], args.get("angle", 45),
+                                       list(names)))
         if args.get("edge_name") is None:
-            return self._chamfer_all_edges(
-                args["length"], args.get("angle", 45), self._edge_budget(args))
-        return self._chamfer_one(args["length"], args.get("angle", 45),
-                                 args.get("edge_name"))
+            return (self._chamfer_all_edges(
+                        args["length"], args.get("angle", 45),
+                        self._edge_budget(args), length2=length2)
+                    if length2 else
+                    self._chamfer_all_edges(
+                        args["length"], args.get("angle", 45),
+                        self._edge_budget(args)))
+        return (self._chamfer_one(args["length"], args.get("angle", 45),
+                                  args.get("edge_name"), length2=length2)
+                if length2 else
+                self._chamfer_one(args["length"], args.get("angle", 45),
+                                  args.get("edge_name")))
 
     def _chamfer_all_edges(self, length: float, angle: float,
-                           limit: int) -> str:
+                           limit: int, length2: float | None = None) -> str:
         """Chamfer every edge of the body by enumerating them.
 
         The same dead end as the fillet, measured separately on B30 2026-11-12
@@ -4866,8 +4927,12 @@ class PartDesignTools:
         too_short = [value for value in lengths if value < 2 * length]
 
         started = time.perf_counter()
-        reply = self._chamfer_many(length, angle, specs,
-                                   sequential_retry=sequential, strict=False)
+        reply = (self._chamfer_many(length, angle, specs,
+                                    sequential_retry=sequential, strict=False,
+                                    length2=length2)
+                 if length2 else
+                 self._chamfer_many(length, angle, specs,
+                                    sequential_retry=sequential, strict=False))
         elapsed = time.perf_counter() - started
         head = (f"Every edge of '{body.Name}' ({total} edge(s)): enumerated "
                 "rather than taken from the feature, because CATIA's "
@@ -4898,7 +4963,8 @@ class PartDesignTools:
 
     def _chamfer_many(self, length: float, angle: float, specs: list[Any],
                       sequential_retry: bool = True,
-                      strict: bool = True) -> str:
+                      strict: bool = True,
+                      length2: float | None = None) -> str:
         """Same batching rule as ``_fillet_many``: resolve all, build all, rebuild once."""
         self.conn.ensure_connected()
         part = self.conn.get_active_part()
@@ -4907,14 +4973,17 @@ class PartDesignTools:
 
         names, refs = self._resolve_edge_specs(body, specs)
 
+        # mode 0 = catLengthLength, 6th argument = second length (see _chamfer).
+        mode, sixth = (0, length2) if length2 else (1, angle)
+
         def add(ref: Any) -> Any:
             return sf.AddNewChamfer(
                 ref,
                 1,       # catTangencyChamferPropagation
-                1,       # catLengthAngleChamfer mode (0 = length-length)
+                mode,    # 0 = length/length, 1 = length/angle
                 0,       # catNoReverseChamfer orientation
                 length,
-                angle,   # degrees
+                sixth,   # second length in mode 0, degrees in mode 1
             )
 
         try:
@@ -4942,7 +5011,8 @@ class PartDesignTools:
         except Exception:
             pass
 
-    def _chamfer_one(self, length: float, angle: float, edge_name: Any) -> str:
+    def _chamfer_one(self, length: float, angle: float, edge_name: Any,
+                     length2: float | None = None) -> str:
         if not edge_name:
             # Same dead end as the fillet: the whole-feature Reference never
             # built (see _chamfer_all_edges). Checked before touching CATIA.
@@ -4963,14 +5033,16 @@ class PartDesignTools:
         # iMode matters: 0 is catLengthLength, so the 6th argument is read as a
         # second length. Passing 45 there asked CATIA for a 2 x 45 mm bevel,
         # which can never build - every chamfer failed at UpdateObject until
-        # this was measured (2026-10-23). Mode 1 is catLengthAngle.
+        # this was measured (2026-10-23). Mode 1 is catLengthAngle, and that is
+        # the default; length2 selects mode 0 (measured 2026-11-21).
+        mode, sixth = (0, length2) if length2 else (1, angle)
         chamfer = sf.AddNewChamfer(
             target,
             1,       # catTangencyChamferPropagation
-            1,       # catLengthAngleChamfer mode
+            mode,    # 0 = length/length, 1 = length/angle
             0,       # catNoReverseChamfer orientation
             length,
-            angle,   # degrees, verified: 2 mm / 45 deg removes 20.00 mm3 on a 10 mm edge
+            sixth,   # second length in mode 0, degrees in mode 1
         )
 
         update_error = self._try_update(part, chamfer)
@@ -4978,16 +5050,20 @@ class PartDesignTools:
         self._clear_selection()
         if update_error is not None:
             gone = self._remove_feature(part, chamfer, body)
+            size = (f"{length:g} x {length2:g} mm (two distances)"
+                    if length2 else f"{length} mm at {angle} deg")
             raise CodedError(
                 "CATIA rejected the chamfer"
                 + (" and it was removed from the tree" if gone else
                    " (the dead feature could NOT be deleted - close the document "
                    "without saving)")
-                + f". {length} mm at {angle} deg on {scope}. A chamfer longer "
+                + f". {size} on {scope}. A chamfer longer "
                 "than the adjacent face, or an edge shared with an existing "
                 f"fillet, cannot build. Original error: {update_error}"
             , code="FEATURE_REJECTED", stage="execute") from update_error
-        return f"Chamfer created: {length} mm at {angle} deg on {scope}. Feature: '{chamfer.Name}'"
+        size = (f"{length:g} x {length2:g} mm (two distances)"
+                if length2 else f"{length} mm at {angle} deg")
+        return f"Chamfer created: {size} on {scope}. Feature: '{chamfer.Name}'"
 
     def _hole(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()

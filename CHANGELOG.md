@@ -2,6 +2,86 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.156] — 2026-11-21 · a bevel that was always possible, and a residual you can read
+
+The 2026-11-21 report carries twenty items from three rounds of rebuilding an
+inline-four engine assembly. Four are answered here, each measured before and
+after; the rest are listed at the end with the reason they are not.
+
+**P0-1 - two-distance chamfer, which was never missing.** `catia_chamfer` offered
+length+angle only, so the report cut two triangle sketches to get a 25/20 bevel
+on its P04 cover. `AddNewChamfer`'s third argument has always selected
+catLengthLength (mode 0), where the sixth argument IS a second length. Measured
+on a 100 mm cube edge: 25/20 removes exactly **25 000 mm3** (25*20/2*100), against
+**11 374 mm3** for 25 mm at 20 deg - a factor of 2.2, which is why the volume is
+the judge and the face count is not. `length2` is now a parameter; the default
+call and its refusals are unchanged, and the keyword is passed only when it is
+set, so every existing test double keeps its shape.
+
+**P1-14 / P1-16 - a residual written so it can be read.** A 1.4e-9 mm gap was
+printed as `0.000000` while the message said the arc was "off its own circle": a
+reply that asserts a disagreement and then shows zero. And the tolerance was a
+FLAT 1e-9 mm, which on R40 demands 2.5e-11 of RELATIVE accuracy - past what a
+double holds - so a p1/p2 computed outside CATIA failed on arithmetic rather
+than on geometry, and the caller's only recourse was to add digits until it
+passed. The tolerance now scales with the radius (`1e-9 x max(1 mm, R)`: 6e-9 mm
+at R6, 4e-8 mm at R40, still six orders below CATIA's own 1e-3 mm modelling
+precision), gaps below 1e-4 mm are printed in scientific notation, and the
+refusal states the tolerance it was compared against.
+
+**P1-17 - an assembly is not a Part, and the refusal says what to do.** "Active
+document 'X.CATProduct' exposes no 'Part'" now continues with the remedy
+(`catia_activate_document`) and with the fact that the measurement tools taking
+`document=` do not need it.
+
+**P1-18 - `catia_get_inertia` accepts the words its own reply uses.** It rejected
+`scope` with "must NOT have additional properties" while answering with
+`scope: "active_body"` (the no-argument route) or `"main_body"` (`document=`
+naming a part). Both are now legal and mean the same thing; anything else is
+refused with the reason rather than silently dropped.
+
+### Not in this release, and why
+
+- **P0-2 feature-level mirror** - `ShapeFactory.AddNewMirror` takes a plane and
+  nothing else; its `Object` property (the seed) was measured **read-only** on
+  B30 2026-11-18 ("Property 'AddNewMirror.Object' can not be set", for the
+  feature, for a reference to it, before and after an update). The tool refuses
+  with `MIRROR_SEED_UNSUPPORTED` and names two working recipes. A
+  `mirror_features()` wrapper cannot exist on this API.
+- **P0-3 assembly constraints** - environment, unchanged since 0.3.154: the four
+  mate tools refuse at the validate stage, `catia_probe_assembly_constraints`
+  answers the machine, and nothing here can name a licence or a configuration as
+  the cause.
+- **P1-4 mid-plane `through_all` cutting one side** - the report found the
+  correct call (`direction='both'`); making it the default would change geometry
+  for every caller who relied on the one-sided result, so the fix belongs in the
+  description, which already says the sketch is split into two one-sided cuts.
+- **P1-6 isolated sketches that would not delete** - the report itself reports
+  it did not reproduce in round three, and suspects address-by-auto-name
+  (`草图.5`) rather than isolation. Not changed without a reproduction.
+- **P1-7 edge-anchor cost** - caching the edge table was measured and rejected in
+  0.3.151: a stale reference does not fail loudly, it puts the fillet on whatever
+  edge now holds that index.
+- **P1-11 / P1-12 broken instances after `new_part(overwrite=true)`** - real, and
+  the next thing to do: a `keep_name` for `replace_component` plus a batch form,
+  which turns the report's 8 calls into 1, and a warning when `overwrite` hits a
+  file an open assembly references.
+- **P2-8 `catia_diagnose` output size**, **P1-13 face-split note**, **P2-15
+  FRAME leftovers**, **P2-19 `auto_crop_to_part`**, **P2-20 vertex exclusion** -
+  queued; P2-20 needs the report's part to reproduce before its rule is touched.
+- **P2-9 sketch coordinates** - CATIA's `Point2D` has no readable X/Y on this
+  build; the reply already says which coordinates come from the session's draw
+  log and which from the model.
+
+### Verification
+
+B30 2026-11-21, `scripts/b30_v0493_acceptance.py` **13/13**: 25/20 removes
+25 000.0 mm3 and the 20-degree control removes 11 374.07; R6 at 1.4e-9 mm is
+accepted while R40 at 4e-4 mm is refused with `0.000400` and `4.000e-08` both in
+the message; `scope='main_body'` answers the same 24 000.0 as no scope and the
+reply echoes `active_body`; `delete_feature` on an active assembly names
+`catia_activate_document`. **2 484 tests**.
+
 ## [0.3.155] — 2026-11-20 · a budget in the description, because the cost does not shrink
 
 The 2026-11-20 report's P2 - a 17-instance assembly measuring its box in 200 s -

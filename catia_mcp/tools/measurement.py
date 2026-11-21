@@ -2152,6 +2152,23 @@ class MeasurementTools:
                                 "a matrix."
                             ),
                         },
+                        "scope": {
+                            "type": "string",
+                            "enum": ["main_body", "active_body"],
+                            "description": (
+                                "Both values mean the same thing - mass "
+                                "properties of the whole solid - and the reply "
+                                "echoes which word this call ended up using "
+                                "('active_body' on the no-argument route, "
+                                "'main_body' when document= names a part). "
+                                "Accepted because the reply already published "
+                                "these words while the schema refused them with "
+                                "'must NOT have additional properties' "
+                                "(2026-11-21 report, P1-18). There is no other "
+                                "scope to ask for: inertia is defined for the "
+                                "whole body, never for a face or a sketch."
+                            ),
+                        },
                         "document_name": {
                             "type": "string",
                             "description": (
@@ -2726,7 +2743,8 @@ class MeasurementTools:
             case "catia_get_inertia":
                 return self._get_inertia(arguments.get("density"),
                                          arguments.get("document")
-                                         or arguments.get("document_name"))
+                                         or arguments.get("document_name"),
+                                         arguments.get("scope"))
             case "catia_get_bounding_box":
                 reply = self._get_bounding_box(
                     arguments.get("method", "auto"),
@@ -3339,7 +3357,19 @@ class MeasurementTools:
         )
 
     def _get_inertia(self, density: float | None = None,
-                     document: str | None = None) -> str:
+                     document: str | None = None,
+                     scope: str | None = None) -> str:
+        # The schema restricts scope to the two words the reply itself uses;
+        # this repeats it because a caller reaching the tool through a path that
+        # skips validation should get the reason, not a silently ignored
+        # argument. 'active_body' and 'main_body' name the same thing - which one
+        # comes back depends on the call shape, not on the request.
+        if scope is not None and scope not in ("main_body", "active_body"):
+            raise ArgumentRejected(
+                f"scope={scope!r} is not available for mass properties: they are "
+                "defined for the whole solid, so the only values are 'main_body' "
+                "and 'active_body' (both mean the same thing; the reply echoes "
+                "whichever this call used). Nothing was measured.")
         self.conn.ensure_connected()
         # The assembly route has published elapsed_ms since 0.3.26; the two PART
         # routes did not, so the field's presence depended on which document

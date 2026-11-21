@@ -257,6 +257,27 @@ def _fmt_point(point: Sequence[float]) -> str:
     return f"({point[0]:.4f}, {point[1]:.4f})"
 
 
+def _fmt_gap(value: float) -> str:
+    """A residual written at a precision that can still be read.
+
+    0.3.156: ``{deviation:.6f}`` printed a 1.4e-9 mm gap as ``0.000000`` while the
+    message said the arc was "off its own circle" - i.e. the reply asserted a
+    disagreement and then showed zero, which reads as a broken check. The
+    2026-11-21 report (P1-16) hit exactly that and could not tell how many digits
+    to add. Below 1e-4 mm the number is written in scientific notation instead.
+    """
+    if value == 0:
+        return "0"
+    if 1e-4 <= abs(value) < 1e4:
+        return f"{value:.6f}"
+    return f"{value:.3e}"
+
+
+def _fmt_gap_signed(value: float) -> str:
+    """``_fmt_gap`` with an explicit sign - "%+.3e" on a string would raise."""
+    return ("+" if value >= 0 else "-") + _fmt_gap(abs(value))
+
+
 def _mm(value: float) -> str:
     """Three decimals, and never ``-0.000``: a round-off just below zero is zero.
 
@@ -3964,7 +3985,17 @@ class SketcherTools:
             # and the centre moves by the minimum that puts both ends on it.
             radials = (_point_gap(first, center), _point_gap(second, center))
             deviation = max(abs(radials[0] - radius), abs(radials[1] - radius))
-            if deviation <= 1e-9:
+            # THE TOLERANCE SCALES WITH THE RADIUS. A flat 1e-9 mm asked for
+            # 2.5e-11 of RELATIVE accuracy on the report's R40 arc - the edge of
+            # what a double holds, so a p1/p2 computed outside CATIA failed on
+            # arithmetic rather than on geometry (2026-11-21 report, P1-16: a
+            # 1.4e-9 mm gap was refused, and the caller's only recourse was to
+            # add digits until it passed). 1e-9 of the radius is 4e-8 mm at R40,
+            # still six orders below CATIA's own 1e-3 mm modelling precision, and
+            # it is the SAME rule at R6 (6e-9) - which the 2026-11-21 tangent
+            # fillet case needed.
+            tolerance = max(1e-9, 1e-9 * abs(radius))
+            if deviation <= tolerance:
                 # Both ends already lie on the circle: nothing moved and there
                 # is nothing to report. Saying "rebuilt (R20 -> R20)" would be
                 # noise in every well-formed call.
@@ -3978,24 +4009,30 @@ class SketcherTools:
                 # and says by how much and which of the two real fixes to take.
                 raise ArgumentRejected(
                     f"Segment {number} (arc) is off its own circle by "
-                    f"{deviation:.6f} mm: the ends are {radials[0]:.6f} and "
-                    f"{radials[1]:.6f} mm from the centre {_fmt_point(center)} "
-                    f"while 'radius' says R{radius:.6f}. strict_arc=true asks for "
+                    f"{_fmt_gap(deviation)} mm: the ends are "
+                    f"{_fmt_gap(radials[0])} and {_fmt_gap(radials[1])} mm from "
+                    f"the centre {_fmt_point(center)} while 'radius' says "
+                    f"R{radius:.6f}. That is past the {_fmt_gap(tolerance)} mm "
+                    "this build accepts as 'on the circle' (1e-9 x max(1 mm, R)), "
+                    "so it is a real gap, not floating-point noise. "
+                    "strict_arc=true asks for "
                     "the geometry as written, and an arc is drawn from "
                     "centre+radius+angles, so the ends have to lie on that "
                     "circle exactly. Nothing was drawn. Either\n"
                     f"  · move the ends onto R{radius:.6f} yourself (they would "
-                    f"shift {(radials[0] - radius):+.6f} and "
-                    f"{(radials[1] - radius):+.6f} mm along their radii), or\n"
+                    f"shift {_fmt_gap_signed(radials[0] - radius)} and "
+                    f"{_fmt_gap_signed(radials[1] - radius)} mm along their "
+                    "radii), or\n"
                     "  · pass strict_arc=false (the default) and this call moves "
-                    f"the CENTRE by {deviation:.6f} mm instead, keeping the "
+                    f"the CENTRE by {_fmt_gap(deviation)} mm instead, keeping the "
                     "radius - which is what happens without strict mode.",
                     code="ARC_ENDPOINT_OFF_CIRCLE", stage="validate",
                     modified=False,
                     next_actions=[
                         "Recompute the arc's p1/p2 from the centre and radius "
-                        "you meant, so the three agree to within 1e-9 mm, and "
-                        "call again with strict_arc=true",
+                        "you meant, so the three agree to within "
+                        f"{_fmt_gap(tolerance)} mm on R{radius:.3f}, and call "
+                        "again with strict_arc=true",
                         "Or drop strict_arc: the default keeps the radius and "
                         "moves the centre by the size of the endpoint error, "
                         "and says so in the reply",
