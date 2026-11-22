@@ -2,6 +2,58 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.160] — 2026-11-22 · a coordinate you can address, a document you can name, and a mirror that stays shut
+
+The four items the 2026-11-22 reports left open. Two are new capability, one is a
+correction of a claim this project had been repeating, and one is a refusal that
+now carries the measurements which close it.
+
+**P2-9 - a sketch element carries the coordinates it was drawn with.**
+`catia_sketch_get_geometry` has published a `drawn_this_session` block for
+several releases, and its own note said the opposite - "a line is known by its
+index and its neighbours, not by its coordinates" - so "which line is index 3"
+had no answer even when the coordinates were in the same reply (reported
+2026-11-22, P2-9). Every element now carries `drawn` = the values the drawing
+tool was given, matched to the LIVE index through the span that draw created: the
+four lines of a rectangle answer with that rectangle's corners, a circle with
+`cx`, `cy` and `radius`, and the sketch's own frame with nothing. Measured on
+B30: 7 elements, indices 2-5 = `rectangle`, 6 = `line`, 7 = `circle`, 1 = none.
+The note now states what the record IS - keyed by document name + sketch name, so
+it survives a close/reopen inside one process (measured) and is absent in a fresh
+process or for a sketch another client drew - and that it holds what was PASSED
+IN, not what CATIA solved to.
+
+**P1-17 - name the document instead of activating it first.** `catia_list_features`
+and `catia_delete_feature` take `document=`. The reader does **not** activate
+anything (measured: active `P17B` before and after, listing `P17A`); the writer
+does, because every delete step resolves names in the active part - and the
+switch is **verified**, with the holder named when a part held by an open
+assembly refuses to come forward. A delete that silently resolved names in the
+wrong tree would remove something nobody named; the reply says when the active
+document moved. Naming a Product is refused with the way out
+(`NOT_A_PART_DOCUMENT`), an unknown name with `DOCUMENT_NOT_FOUND` and "nothing
+was measured or changed".
+
+**P0-2 - the feature mirror is not expressible, and now that is three
+measurements instead of one.** The shipped description said
+`ShapeFactory.AddNewMirror` "takes only a plane". The 2026-11-22 report asked
+whether another route existed, so the whole surface was read on B30:
+
+| reading | result |
+|---|---|
+| `AddNewMirror(plane)` | 121 000 -> **242 000 mm3** |
+| `AddNewMirror(feature_ref)` | 121 000 -> **242 000 mm3** (identical) |
+| `AddObjectToMirror(seed)` | accepted, body still mirrored: 112 000 -> 224 000 |
+| symmetric body + off-centre pocket | 232 000 -> **240 000**: the pocket is FILLED |
+| `Object`, `MirroringObject` | both "can not be set" (only `MirroringPlane` is) |
+
+So the single argument's kind does not matter and no seed route exists. The
+refusal, the `feature` parameter and the description now say that, and the
+two-call recipe points at the new per-element coordinates so the mirrored profile
+can be typed from numbers.
+
+B30 2026-11-22: `scripts/b30_v0497_acceptance.py` **22/22**, **2 552 tests**.
+
 ## [0.3.159] — 2026-11-22 · one message per refusal, and a tensor without a takeover
 
 The 2026-11-22 pair of reports. The most important item is not a capability: it is

@@ -1192,16 +1192,26 @@ class PartDesignTools:
                 "description": (
                     "MIRROR THE WHOLE BODY about a plane and UNION the copy with it "
                     "- Transform > Mirror, not 'mirror this one feature'. The "
-                    "distinction is not cosmetic and it is measured (B30 "
-                    "2026-11-18): ShapeFactory.AddNewMirror takes only a plane, and "
-                    "its Object property - the seed that would make it a feature "
-                    "mirror - answers \"Property 'AddNewMirror.Object' can not be "
-                    "set\", for the feature itself and for a reference to it, before "
-                    "and after the first update. On a 60x40x50 box with a 20x40 "
-                    "pocket (80000 mm3) this call answers 160000; on the 2026-11-17 "
-                    "report's groove it turned 26228730.962 mm3 into 42188262.4593 - "
-                    "the pre-groove volume - because the mirror image's solid lands "
-                    "exactly where the cut removed material. "
+                    "distinction is not cosmetic, and it is measured FOUR ways on "
+                    "B30 2026-11-22 (the 2026-11-22 report asked whether another "
+                    "route existed, so the whole surface was read): "
+                    "(1) ShapeFactory.AddNewMirror takes ONE argument and ignores "
+                    "what kind of reference it is - passed a plane reference and "
+                    "passed a FEATURE reference, a 60x40x50 box with a 10x10x10 pad "
+                    "on top answered 121 000 -> 242 000 mm3 both times, the whole "
+                    "body twice; "
+                    "(2) the feature's Object AND MirroringObject both raise "
+                    "\"can not be set\"; only MirroringPlane is writable; "
+                    "(3) Mirror.AddObjectToMirror(reference) is accepted, but it "
+                    "appends to a list that already holds the BODY and nothing "
+                    "removes the body - 112 000 mm3 became 224 000; "
+                    "(4) on a body symmetric about the plane (232 000 mm3, one "
+                    "off-centre pocket) the same call gave 240 000: the mirrored "
+                    "body's material lands in the pocket and FILLS it. "
+                    "Earlier rounds measured the same operation's cost on real "
+                    "parts: a 60x40x50 box with a 20x40 pocket (80000 mm3) answers "
+                    "160000, and the 2026-11-17 report's groove went 26228730.962 -> "
+                    "42188262.4593 mm3 (the pre-groove volume). "
                     "SO IT IS REFUSED WHEN THE LAST FEATURE IS A CUT (pocket, "
                     "groove, hole, split, shell, thickness): MIRROR_WOULD_FILL_CUT, "
                     "nothing created, and the volume in the payload. "
@@ -1231,11 +1241,14 @@ class PartDesignTools:
                             "description": (
                                 "A feature name from catia_list_features, if what you "
                                 "want is one FEATURE mirrored. Refused with "
-                                "MIRROR_SEED_UNSUPPORTED and the two-call recipe: the "
-                                "underlying Mirror feature has no writable seed, so "
-                                "the call could only answer with the whole-body "
-                                "operation - which is a different shape, not a "
-                                "narrower one."),
+                                "MIRROR_SEED_UNSUPPORTED and the two-call recipe. "
+                                "Measured on B30 2026-11-22: no seed route exists - "
+                                "Object/MirroringObject are read-only, AddNewMirror "
+                                "mirrors the whole body whichever reference is "
+                                "passed, and AddObjectToMirror only appends to a list "
+                                "that already holds the body. Answering with the "
+                                "whole-body operation would be a different shape, "
+                                "not a narrower one."),
                         },
                         "allow_body_mirror": {
                             "type": "boolean",
@@ -1438,11 +1451,28 @@ class PartDesignTools:
                     "answer .Sketch, so the profile of '凸台.1' is known, and "
                     "deleting that sketch is either refused by CATIA or leaves "
                     "the pad in error - measured both ways on B30 2026-11-18. "
-                    "Delete the feature instead, or pass both names to 'names'."
+                    "Delete the feature instead, or pass both names to 'names'. "
+                    "document='<name>' deletes in ANOTHER open part without the "
+                    "caller having to activate it first - and it DOES activate it, "
+                    "because every step here resolves names through the active "
+                    "part; a delete that silently resolved them in the wrong tree "
+                    "would remove something nobody named. The switch is "
+                    "verified, and the reply says the active document moved."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
+                        "document": {
+                            "type": "string",
+                            "description": (
+                                "Name or full path of an open Part to delete in. "
+                                "This ACTIVATES that document (a delete resolves "
+                                "names in the active part); if CATIA will not put "
+                                "it in front - a part held by an open assembly - "
+                                "the call is refused rather than run against the "
+                                "wrong document."
+                            ),
+                        },
                         "feature_name": {
                             "type": "string",
                             "description": "Feature to delete (see catia_list_features)",
@@ -1547,10 +1577,24 @@ class PartDesignTools:
                     "'count' is 0 and 'features' is empty then, and the sketches "
                     "are still listed (a body holding only sketches used to answer "
                     "with a bare string, which broke every caller reading "
-                    "['sketches'] in exactly the situation this tool exists for)."),
+                    "['sketches'] in exactly the situation this tool exists for). "
+                    "document='<name>' reads another OPEN part's tree without "
+                    "changing the active document (its MainBody, since a named "
+                    "document has no 'work body' of its own): useful straight after "
+                    "opening an assembly, when the next feature call would "
+                    "otherwise land on the product."),
                 "inputSchema": {
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "document": {
+                            "type": "string",
+                            "description": (
+                                "Name or full path of an open Part to list "
+                                "instead of the active one. Reading it does NOT "
+                                "activate it. Omit to list the active part."
+                            ),
+                        },
+                    },
                 },
             },
             {
@@ -2054,9 +2098,20 @@ class PartDesignTools:
             case "catia_thickness":
                 return self._thickness(arguments)
             case "catia_delete_feature":
-                return self._delete_feature(arguments)
+                reply = self._delete_feature(arguments)
+                # A delete that was given a document SWITCHED the active one, and
+                # that is a change outside the model, so it is said in the reply -
+                # unless the reply is a JSON payload, where appending prose would
+                # break the shape the caller parses.
+                switched = getattr(self, "_document_switched", "")
+                self._document_switched = ""
+                if switched and isinstance(reply, str) and not reply.lstrip().startswith("{"):
+                    reply += (f" The active document is now '{switched}': this call "
+                              "switched it, because 'document' named it and every "
+                              "delete step resolves names in the active part.")
+                return reply
             case "catia_list_features":
-                return self._list_features()
+                return self._list_features(arguments.get("document"))
             case "catia_new_body":
                 return self._new_body(arguments.get("name"))
             case "catia_solid_loft":
@@ -6271,11 +6326,17 @@ class PartDesignTools:
             after mirror(xy)      42188262.4593 mm3   <- the pre-groove volume
 
         The tool reported success. So a cut seed is refused here rather than
-        answered with a wrong number (the reporter asked for exactly this), and
-        ``Mirror.Object`` - the one property that could have made it a feature
-        mirror - was measured to be read-only: "Property 'AddNewMirror.Object' can
-        not be set", for the feature itself and for a reference to it, before and
-        after the first update.
+        answered with a wrong number (the reporter asked for exactly this).
+
+        The seed routes were re-read on B30 2026-11-22 because the 2026-11-22
+        report asked whether another one existed, and the answer is no - with
+        three measurements instead of one: ``Object`` and ``MirroringObject``
+        both raise "can not be set" (only ``MirroringPlane`` is writable);
+        ``AddNewMirror`` accepts a feature reference as readily as a plane and
+        mirrors the whole body either way (121 000 -> 242 000); and
+        ``AddObjectToMirror`` appends to a list that already holds the body, with
+        nothing to remove it (112 000 -> 224 000, and 232 000 -> 240 000 on a
+        symmetric body, where the mirrored material FILLS the off-centre pocket).
 
         ``allow_body_mirror=true`` says "I know, I want the body operation" and is
         what the old behaviour is now behind.
@@ -6317,13 +6378,17 @@ class PartDesignTools:
                 part, shapes.Item(names.index(seed) + 1))
             raise CodedError(
                 f"A mirror of the single feature '{seed}' ({seed_kind}) is not "
-                "expressible through this API: ShapeFactory.AddNewMirror takes a "
-                "plane and nothing else, and its Object property - the seed - was "
-                "measured read-only on B30 2026-11-18 (\"Property "
-                "'AddNewMirror.Object' can not be set\", for the feature and for a "
-                "reference to it, before and after the first update). What the call "
-                "CAN do is mirror the whole body and union it, which is a different "
-                "operation and not what you asked for. Nothing was created.",
+                "expressible through this API, and that is measured rather than "
+                "inferred from one read-only property (B30 2026-11-22): "
+                "AddNewMirror takes ONE argument and mirrors the WHOLE BODY "
+                "whichever reference is passed - a plane reference and a feature "
+                "reference both took a 121 000 mm3 body to 242 000; "
+                "AddObjectToMirror(reference) is accepted but only APPENDS to a "
+                "list that already holds the body, and nothing removes the body "
+                "(112 000 -> 224 000); and on a body symmetric about the plane it "
+                "FILLS an off-centre pocket (232 000 -> 240 000). Mirroring a CUT "
+                "this way is the exact opposite of what it looks like. Nothing was "
+                "created.",
                 code="MIRROR_SEED_UNSUPPORTED",
                 stage="validate",
                 modified=False,
@@ -6335,9 +6400,14 @@ class PartDesignTools:
                     "exactly that for its two annular cavities - frame u negated, "
                     "second catia_groove(360) - and landed on 9855303.187 mm3 "
                     "against a 9855329.47 source (-0.00027%)",
-                    "mirror the SKETCH rather than the feature "
-                    "(catia_sketch_copy onto the mirrored frame, then "
-                    "catia_pocket/catia_groove with the same depth)",
+                    "the profile you need to redraw is now readable per element: "
+                    "catia_sketch_get_geometry carries 'drawn' (x1,y1,x2,y2 and the "
+                    "kind) on every element this session drew, so the mirrored "
+                    "copy can be typed from numbers instead of from memory. Negate "
+                    "the coordinate that runs across the mirror plane",
+                    "catia_sketch_copy puts a recorded profile on another plane "
+                    "unchanged; it has no mirror option, so negate the coordinate "
+                    "in the copy arguments rather than expecting it to flip",
                     "allow_body_mirror=true mirrors the WHOLE body and unions it: "
                     "right for completing a symmetric half built from pads, wrong "
                     "for duplicating a cut",
@@ -6737,6 +6807,15 @@ class PartDesignTools:
         of waiting for a job that is one request.
         """
         self.conn.ensure_connected()
+        # A NAMED DOCUMENT IS SWITCHED TO, and that is a side effect on the
+        # session (reported 2026-11-22, P1-17). It is switched rather than reached
+        # around because every step below - dry run included - resolves names
+        # through the ACTIVE part; a delete that silently resolved them in the
+        # wrong tree would remove something the caller never named.
+        _, switched = self._target_part(args.get("document"),
+                                        activate=not args.get("dry_run"))
+        if switched and not args.get("dry_run"):
+            self._document_switched = switched
         if args.get("dry_run"):
             return self._delete_dry_run(args)
         many = args.get("names")
@@ -8090,10 +8169,110 @@ class PartDesignTools:
                 return prefix
         return None
 
-    def _list_features(self) -> str:
+    def _target_part(self, document: str | None,
+                     activate: bool) -> tuple[Any, str]:
+        """The Part to act on: the active one, or the one the caller named.
+
+        Reported 2026-11-22 (P1-17): every feature tool works on the ACTIVE
+        document, so after opening an assembly the next call either lands on the
+        product or has to be preceded by ``catia_activate_document``. The two
+        tools that only needed to READ a tree, and the one that deletes by name,
+        now take the document instead - which also removes a silent-wrong-target
+        failure mode, not just a round trip.
+
+        ``activate=False`` is for readers: ``part_of(doc)`` gives the part and
+        nothing the caller sees moves. ``activate=True`` switches first and
+        CHECKS that it switched, because a part held by an open product accepts
+        ``Activate()`` and stays in the background (measured 0.3.74) - a write
+        tool that silently wrote to the previous document would be worse than
+        refusing.
+
+        The body is NOT chosen here: the callers differ (the active body may be a
+        side body the caller set up; a named document gets its MainBody).
+        """
+        if not document:
+            return self.conn.get_active_part(), ""
+        doc, matches = self.conn.resolve_document(str(document))
+        if doc is None:
+            rows = self.conn.describe_matches(matches)
+            detail = (" It matches " + str(len(rows)) + " open documents: "
+                      + self.conn.format_matches(rows)
+                      + " Pass the full path of the one you mean." if rows else
+                      " catia_list_documents lists what is open.")
+            raise CodedError(
+                f"No open document matches '{document}', so nothing was measured "
+                "or changed." + detail,
+                code="DOCUMENT_NOT_FOUND", stage="validate", modified=False,
+                next_actions=[
+                    "Pass a name from catia_list_documents (with its extension), "
+                    "or the full path when two documents share a name",
+                ])
+        try:
+            part = self.conn.part_of(doc)
+        except Exception as exc:  # noqa: BLE001 - a Product, most likely
+            raise CodedError(
+                f"'{doc.Name}' is not a Part document, so this tool has nothing to "
+                f"act on ({str(exc).splitlines()[0][:90]}). Nothing was changed.",
+                code="NOT_A_PART_DOCUMENT", stage="validate", modified=False,
+                next_actions=[
+                    "Point this tool at a .CATPart - catia_list_documents shows "
+                    "which open documents are Parts",
+                    "To work inside an assembly, open the part on its own with "
+                    "catia_open_document(name=<its file>) and pass that name",
+                ]) from exc
+        name = str(doc.Name)
+        if not activate:
+            return part, name
+        try:
+            before = str(self.conn.app.ActiveDocument.Name)
+        except Exception:  # noqa: BLE001 - nothing active at all
+            before = ""
+        if before != name:
+            try:
+                doc.Activate()
+            except Exception as exc:  # noqa: BLE001 - reported below
+                raise CodedError(
+                    f"CATIA refused to activate '{name}' ({str(exc).splitlines()[0][:80]}), "
+                    "so this call would have acted on the wrong document. Nothing "
+                    "was changed.",
+                    code="ACTIVATION_FAILED", stage="validate", modified=False,
+                ) from exc
+            try:
+                after = str(self.conn.app.ActiveDocument.Name)
+            except Exception:  # noqa: BLE001
+                after = ""
+            if after != name:
+                holders = []
+                try:
+                    holders = self.conn.component_usage(deep=True).get(name) or []
+                except Exception:  # noqa: BLE001 - the sentence survives
+                    holders = []
+                raise CodedError(
+                    f"CATIA did not switch to '{name}': ActiveDocument is still "
+                    f"'{after}', so this call would have acted on that document "
+                    "instead. Nothing was changed. "
+                    + (f"'{name}' is a component of "
+                       + ", ".join(f"'{user}'" for user in holders)
+                       + ", which keeps it in the background. "
+                       if holders else
+                       "'" + name + "' has no window of its own. ")
+                    + "Close what holds it (or call catia_activate_document and "
+                      "check the answer), then retry without 'document'.",
+                    code="ACTIVATION_FAILED", stage="validate", modified=False,
+                    data={"requested_document": name, "active_document": after,
+                          "held_by": holders})
+        return part, name
+
+    def _list_features(self, document: str | None = None) -> str:
         self.conn.ensure_connected()
-        part = self.conn.get_active_part()
-        body = self.conn.get_active_part_body()
+        part, named = self._target_part(document, activate=False)
+        if named:
+            # A READER does not need the session's remembered body: the caller
+            # asked about a document, and its MainBody is the only body this call
+            # can claim to know.
+            body = part.MainBody
+        else:
+            body = self.conn.get_active_part_body()
         shapes = body.Shapes
 
         features = []
@@ -8122,8 +8301,9 @@ class PartDesignTools:
             # catia_get_active_document_info answered with the active one - two
             # tools, same moment, different documents, and nothing in either
             # reply said so. The name costs nothing and settles it.
-            "document": str(getattr(getattr(self.conn, "active_document", None),
-                                    "Name", "") or ""),
+            "document": named or str(
+                getattr(getattr(self.conn, "active_document", None), "Name", "")
+                or ""),
             "body": str(body.Name),
             "count": len(features),
             "bodies": part.Bodies.Count,
@@ -8134,6 +8314,11 @@ class PartDesignTools:
                 "the active body holds no Part Design feature yet, so 'features' "
                 "is empty and 'count' is 0 - this is not an error, and the "
                 "sketches in it are listed below")
+        if named:
+            notes.append(
+                f"read from '{named}' by name, so the ACTIVE document was not "
+                "changed and its own work body (which may be a side body) is not "
+                "what this lists: these are the features of this part's MainBody.")
         # count == body.Shapes.Count, and it is published so a caller can tell
         # "my feature was created" from "a dead feature is still hanging around".
         # A failed fillet used to show up here as a normal-looking row and as a

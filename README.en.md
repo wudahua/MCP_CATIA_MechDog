@@ -2,7 +2,7 @@
 
 > **中文入口见 [README.md](README.md)。** This file is the full English reference: every tool, every measurement behind it, and every known limit.
 
-**0.3.159** · [what changed](CHANGELOG.md) ·
+**0.3.160** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1377,8 +1377,45 @@ Two facts about real drawings that this had to accept:
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
 
-0.3.159 answers the 2026-11-22 pair of reports. The most important item is not a
-capability.
+0.3.160 closes the four items those reports left open: two are new capability,
+one corrects a claim this project kept repeating, one is a refusal that now
+carries the measurements closing it.
+
+P2-9: `catia_sketch_get_geometry` had published `drawn_this_session` for several
+releases while its own note said the opposite - "a line is known by its index and
+its neighbours, not by its coordinates" - so "which line is index 3" had no
+answer even when the coordinates were in the same reply. Every element now
+carries `drawn`, matched to the LIVE index through the span that draw created:
+the four lines of a rectangle answer with its corners, a circle with cx/cy/radius,
+the sketch's own frame with nothing. Measured on B30: indices 2-5 rectangle,
+6 line, 7 circle, 1 none. The note states what the record is keyed by (document
+name + sketch name, so it survives a close/reopen in one process and is absent in
+a fresh one) and that it holds what was PASSED IN, not what CATIA solved to.
+
+P1-17: `catia_list_features` and `catia_delete_feature` take `document=`. The
+reader does not activate anything (measured: active stayed P17B while listing
+P17A); the writer does, because every delete step resolves names in the active
+part, and the switch is VERIFIED - a part held by an open assembly refuses, the
+holder is named, and nothing is deleted. A delete that silently resolved names in
+the wrong tree would remove something nobody named.
+
+P0-2: the feature mirror is still not expressible, but the old description said
+`AddNewMirror` "takes only a plane", which is measurably false. Read on B30:
+`AddNewMirror(plane)` and `AddNewMirror(feature_ref)` give the SAME answer
+(121 000 -> 242 000 mm3, the whole body twice); `AddObjectToMirror` is accepted
+but only appends to a list that already holds the body (112 000 -> 224 000); on
+a symmetric body it FILLS an off-centre pocket (232 000 -> 240 000); `Object` and
+`MirroringObject` both refuse to be set. The refusal and the description now say
+that, and the two-call recipe points at the new per-element coordinates, so the
+mirrored profile can be typed from numbers instead of from memory.
+
+0.3.159 answers the 2026-11-22 pair: a refusal that argued with its own schema
+(P8), the inertia tensor without taking the front window (P2-22), a bevel that
+reads its mode back (P1-21), grouped warnings (P9), a close that says what it
+checked (P2-23), a probe that counts what it left open (P7), and a rule for 30
+against 33 (P2-20).
+
+The most important item there was not a capability.
 
 P8 was a reply that argued with itself. `catia_fix_constraint` refuses at
 `validate` with a message that names three measurement rounds and ends "WHICH

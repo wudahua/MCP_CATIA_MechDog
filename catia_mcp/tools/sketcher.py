@@ -1153,11 +1153,16 @@ class SketcherTools:
                     "the last sketch created in this session. Each curve reports "
                     "its own DIMENSION: radius_mm for a circle, major_radius_mm and "
                     "minor_radius_mm for an ellipse; the sketch's constraints are "
-                    "listed with their values. What is NOT returned is a LINE'S "
-                    "ENDPOINTS - a CATIA Point2D exposes no readable X/Y through "
-                    "automation on this build - which is a limit of Point2D and not "
-                    "of sketches: the curve dimensions above were measured on B30 "
-                    "2026-11-14 (circle 6.0, ellipse 9.0 / 4.5)."
+                    "listed with their values. EACH ELEMENT ALSO CARRIES the "
+                    "coordinates it was DRAWN with, under 'drawn' (a line: x1,y1,"
+                    "x2,y2; a rectangle: its corners, shared by the four elements it "
+                    "created). They come from this session's record, not from CATIA - "
+                    "a Point2D exposes no readable X/Y on this build (measured on B30 "
+                    "2026-11-14 for the dimensions above) - so an element with no "
+                    "'drawn' belongs to a sketch this session did not draw (reopened "
+                    "from disk, or made by another client) and is known by index and "
+                    "neighbours only. 'drawn' is what was passed IN, not what CATIA "
+                    "solved to."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -5672,13 +5677,35 @@ class SketcherTools:
                       hide_construction: bool = True) -> str:
         """List a sketch's elements, open or closed.
 
-        Coordinates are deliberately absent: a CATIA Point2D exposes no readable
-        X/Y through automation on this build (GetCoordinates needs a by-ref array
-        it never fills), so promising them would be a lie. The element list plus
-        the profile echo at close time is what can actually be checked.
+        A CATIA Point2D answers no X/Y (GetCoordinates needs a by-ref array it
+        never fills), so the coordinates here come from THIS SESSION's record of
+        what the drawing tools were given - and they are attached to the live
+        ELEMENT, not left in a separate block: without the link, "index 3 is the
+        line from (10,0) to (20,0)" was unanswerable even when both halves were
+        in the same reply (reported 2026-11-22, P2-9: the note said a line is
+        known "by its index and its neighbours, not by its coordinates" while
+        `drawn_this_session` carried exactly those coordinates).
+
+        What the link cannot do is survive a sketch this session did not draw:
+        reopened from disk, or drawn by another client, there is no record and
+        the element carries no `drawn` - which is said per element, not hidden.
         """
         sketch, how = self._locate_sketch(sketch_name)
         geom = sketch.GeometricElements
+
+        # Live index -> the draw that produced it. ``_span`` is [first, last]
+        # inclusive, maintained by catia_sketch_delete_element, so a rectangle
+        # (ONE draw, four elements) answers all four indices with its corners.
+        drawn_entries = self._drawn.get(self._sketch_key(str(sketch.Name))) or []
+
+        def drawn_for(index: int) -> dict[str, Any] | None:
+            for entry in drawn_entries:
+                span = entry.get("_span")
+                if (isinstance(span, list) and len(span) == 2
+                        and int(span[0]) <= index <= int(span[1])):
+                    return {key: value for key, value in entry.items()
+                            if key != "_span"}
+            return None
 
         elements: list[dict[str, Any]] = []
         construction_count = 0
@@ -5693,6 +5720,11 @@ class SketcherTools:
                 info["type"] = str(elem.GeometricType)
             except Exception:
                 pass
+            # What was DRAWN here, in the coordinates it was drawn with. This is
+            # the only answer to "which line is this" on this build.
+            drawn_here = drawn_for(i)
+            if drawn_here is not None:
+                info["drawn"] = drawn_here
             # THE CURVES ANSWER their own dimensions, even though a Point2D does
             # not answer its coordinates. Measured on B30 2026-11-14: 圆.1.Radius
             # = 6.0, 椭圆.1.MajorRadius = 9.0 and MinorRadius = 4.5. The old note
@@ -5766,11 +5798,21 @@ class SketcherTools:
             "note": (
                 "A CURVE'S DIMENSION IS READABLE: radius_mm on a circle, "
                 "major_radius_mm / minor_radius_mm on an ellipse (measured on B30 "
-                "2026-11-14). What is NOT readable is a straight line's ENDPOINTS - "
-                "a CATIA Point2D exposes no X/Y through automation on this build - "
-                "so a line is known by its index and its neighbours, not by its "
-                "coordinates. Use catia_sketch_edit to reopen it and append, or "
-                "catia_sketch_delete_element to remove one element. "
+                "2026-11-14). CATIA cannot read a Point2D's X/Y back on this build, "
+                "so the COORDINATES come from this session's record: every element "
+                "this session drew carries 'drawn' = the values the drawing tool was "
+                "given (a line: x1,y1,x2,y2; a rectangle: its two corners, shared by "
+                "all four of its elements). An element with NO 'drawn' came from a "
+                "sketch this session drew nothing into under that name (a fresh "
+                "process, another client), and then it is known by its index and its "
+                "neighbours only. The record is keyed by DOCUMENT NAME + SKETCH "
+                "NAME, not by the document object: it therefore survives a close "
+                "and reopen of the same name inside one server process (it still "
+                "describes what was drawn, not what the file now holds), and it is "
+                "absent in a fresh process, for a sketch another client drew, or "
+                "after a rename. 'drawn' is what was PASSED IN, not what CATIA "
+                "solved to: a constraint that moved a point changes the geometry, "
+                "not this record. "
                 "drives names what a dimensional constraint moves - 'radius', "
                 "'major_radius' or 'minor_radius' - because CATIA calls both "
                 "semi-axes '\u534a\u5f84.N' and a formula attached to the wrong one "
