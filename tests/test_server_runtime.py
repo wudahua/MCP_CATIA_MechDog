@@ -195,9 +195,17 @@ def test_missing_api_keeps_guidance_and_logs_exception(monkeypatch, caplog):
                 result = await server.call_tool("catia_new_part", {})
             message = result.structuredContent["message"]
             assert result.isError and result.structuredContent["code"] == "UNSUPPORTED_CAPABILITY"
+            # 0.3.159: the guidance is still there for a member that really did
+            # not resolve (gen_py cache, absent from the release, and where to
+            # look). The "a missing workbench licence can also lock methods"
+            # clause is gone from THIS message on purpose: three measurement
+            # rounds ended with "which layer refuses is not established", so the
+            # generic envelope may not name a cause it never measured
+            # (reported 2026-11-22, P8).
             assert all(
-                text in message for text in ("gen_py", "workbench", "catia_diagnose", "absent")
+                text in message for text in ("gen_py", "catia_diagnose", "absent")
             )
+            assert "licence" not in message and "license" not in message
             assert any(
                 record.exc_info and "Missing AddNewPad" in record.getMessage()
                 for record in caplog.records

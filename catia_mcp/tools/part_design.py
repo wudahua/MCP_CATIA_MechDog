@@ -821,11 +821,18 @@ class PartDesignTools:
                     "25 000 mm3, where 25 mm at 20 deg removes 11 374 mm3 - so "
                     "read the volume, not the face count, when checking this. "
                     "WHICH face gets which distance follows the edge's own "
-                    "direction, not the caller's naming: check the first result "
-                    "and swap the two values if it comes out the other way "
-                    "round. This is what the "
-                    "2026-11-21 report (P0-1) needed and had to cut two triangle "
-                    "sketches for."
+                    "direction, not the caller's naming, and this build cannot "
+                    "read the two lengths back: Chamfer.Length and "
+                    "Chamfer.SecondLength both raise 'Item.Length' (measured on "
+                    "B30 2026-11-22, typed and dynamic dispatch alike), while "
+                    "Chamfer.Mode DOES read back. So the reply quotes the mode it "
+                    "read, says plainly that the lengths are the values that were "
+                    "sent, and reports the volume it removed against the ideal "
+                    "L*a*b/2 - which is the check the 2026-11-21 report did by "
+                    "hand. If the bevel landed on the wrong side, repeat with "
+                    "swap_distances=true instead of deleting and rebuilding by "
+                    "hand. This is what the 2026-11-21 report (P0-1) needed and "
+                    "had to cut two triangle sketches for."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -860,6 +867,20 @@ class PartDesignTools:
                                 "edge_anchors to bevel EVERY edge of the body - the "
                                 "tool enumerates them and builds one feature per "
                                 "edge (see max_edges)."
+                            ),
+                        },
+                        "swap_distances": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Exchange `length` and `length2` before building. "
+                                "For the case the reply cannot decide for you: a "
+                                "two-distance bevel landed with the long side on "
+                                "the face you did not mean, and this build cannot "
+                                "read the lengths back to prove it. Needs "
+                                "length2; refused (nothing created) without it. "
+                                "Delete the wrong feature first - this builds a "
+                                "new one rather than editing the old."
                             ),
                         },
                         "edge_names": {
@@ -4901,6 +4922,24 @@ class PartDesignTools:
                 raise ArgumentRejected(
                     f"length2 must be a positive distance in mm - got {length2:g}. "
                     "Nothing was created.")
+        if args.get("swap_distances"):
+            # Which adjacent face takes `length` and which takes `length2` is
+            # decided by CATIA from the edge's own direction, and this build does
+            # NOT expose either length for read-back (measured 2026-11-22:
+            # Chamfer.Length and Chamfer.SecondLength both raise 'Item.Length'),
+            # so the first attempt can land the wrong way round and the caller
+            # cannot tell from the reply. Swapping the two arguments is the whole
+            # repair - said here instead of leaving the caller to delete the
+            # feature, re-read the docs and rebuild by hand (2026-11-22 report,
+            # P1-21). Refused rather than ignored when there is nothing to swap.
+            if length2 is None:
+                raise ArgumentRejected(
+                    "swap_distances=true needs length2: a length/angle bevel has "
+                    "no second distance to swap. Send length2 as well, or drop "
+                    "this flag. Nothing was created.")
+            args = dict(args)
+            args["length"], length2 = length2, float(args["length"])
+            length2 = float(length2)
         anchors, tol = self._anchor_args(args)
         if anchors:
             specs = []
@@ -5011,6 +5050,106 @@ class PartDesignTools:
                      "catia_list_edges shows length and bounding faces.")
         return head + reply + f" Took {elapsed:.1f} s."
 
+    def _chamfer_readback(self, feature: Any, length: float,
+                          length2: float | None, angle: float,
+                          before_mm3: float | None, after_mm3: float | None,
+                          scopes: list[str]) -> str:
+        """What the FEATURE says, next to what was asked for (report P1-21).
+
+        The 2026-11-22 report built a 25/20 bevel, saw the right volume, and
+        still could not answer "is 25 on the face I meant?" from the reply - the
+        tool's own description tells the caller to "do one and look at the
+        result", so the reply is where that look belongs.
+
+        What this build can and cannot answer, measured on B30 2026-11-22 on a
+        two-distance bevel of a 100 mm cube edge:
+
+        * ``Chamfer.Mode`` reads back (0 = catLengthLength for a two-distance
+          bevel, 1 = catLengthAngle) - and stays 0 after ``part.Update()``.
+        * ``Chamfer.Length`` and ``Chamfer.SecondLength`` do NOT read back:
+          both answer ``Item.Length`` / ``Item.SecondLength``, through the
+          typed dispatcher AND through a dynamic one. So the two numbers in
+          this sentence are what was SENT, and it says so instead of printing
+          them as if they had been confirmed.
+        * ``Chamfer.Angle`` reads 45 in mode 0 as well - the default, not a
+          bevel angle - so quoting it there would be a reading of something
+          that does not apply.
+
+        The removed volume is the physical confirmation: an a x b bevel over L
+        mm of edge removes L*a*b/2, which is how the 2026-11-21 report and this
+        one both checked the same feature (25 000 mm3 for 25/20 on 100 mm
+        against 11 374 for 25 mm at 20 deg).
+        """
+        try:
+            mode = int(feature.Mode)
+        except Exception:  # noqa: BLE001 - a removed feature answers nothing
+            return ""
+        mode_words = {0: "catLengthLength (two distances)",
+                      1: "catLengthAngle (length + angle)"}.get(mode, "unknown")
+        size = (f"{length:g} x {length2:g} mm" if length2
+                else f"{length:g} mm at {angle:g} deg")
+        read: list[str] = []
+        for name in ("Length", "SecondLength"):
+            try:
+                value = getattr(feature, name)
+                read.append(f"{name}={float(value.Value):g}")
+            except Exception:  # noqa: BLE001 - measured absent on this build
+                read.append(f"{name}=unreadable")
+        lengths_note = (
+            "; the feature reads back " + ", ".join(read) + "."
+            if all("unreadable" not in item for item in read) else
+            f"; the LENGTHS are not readable on this build (measured 2026-11-22: "
+            f"Chamfer.Length and .SecondLength both raise 'Item.Length'), so "
+            f"{size} are the values that were SENT, not a re-read.")
+        text = (f" Read back from '{getattr(feature, 'Name', 'the feature')}': "
+                f"Mode={mode} ({mode_words})" + lengths_note)
+
+        removed = None
+        if before_mm3 is not None and after_mm3 is not None:
+            removed = before_mm3 - after_mm3
+        if removed is not None:
+            text += f" Removed {removed:.1f} mm3."
+            ideal = self._chamfer_ideal(length, length2, angle, scopes)
+            if ideal:
+                text += (f" An ideal {size} bevel over the {sum(ideal[1]):.1f} mm "
+                         f"of edge named here removes {ideal[0]:.1f} mm3; a "
+                         "difference means part of the edge was already consumed "
+                         "(a neighbouring bevel, a fillet, a corner radius).")
+        if length2:
+            text += (" Which adjacent face takes which distance follows the edge's "
+                     "own direction and cannot be read back here; if the bevel is "
+                     "on the wrong side, catia_delete_feature it and repeat with "
+                     "swap_distances=true.")
+        return text
+
+    @staticmethod
+    def _chamfer_ideal(length: float, length2: float | None, angle: float,
+                       scopes: list[str]) -> tuple[float, list[float]] | None:
+        """Ideal removed volume and the edge lengths it was computed over.
+
+        The scope labels this module builds carry the edge length as
+        ``L100.0000`` (see ``_resolve_edge_specs``), which is where the numbers
+        come from. When a label does not carry one, the arithmetic is skipped
+        rather than guessed - a wrong "expected" value would read as a defect
+        in CATIA.
+        """
+        lengths: list[float] = []
+        for scope in scopes:
+            match = re.search(r"\bL([0-9.]+)", scope)
+            if match is None:
+                return None
+            try:
+                lengths.append(float(match.group(1)))
+            except ValueError:
+                return None
+        if not lengths:
+            return None
+        total = sum(lengths)
+        if length2:
+            return (total * length * length2 / 2.0, lengths)
+        return (total * length * length * math.tan(math.radians(angle)) / 2.0,
+                lengths)
+
     def _chamfer_many(self, length: float, angle: float, specs: list[Any],
                       sequential_retry: bool = True,
                       strict: bool = True,
@@ -5025,9 +5164,10 @@ class PartDesignTools:
 
         # mode 0 = catLengthLength, 6th argument = second length (see _chamfer).
         mode, sixth = (0, length2) if length2 else (1, angle)
+        created: list[Any] = []
 
         def add(ref: Any) -> Any:
-            return sf.AddNewChamfer(
+            feature = sf.AddNewChamfer(
                 ref,
                 1,       # catTangencyChamferPropagation
                 mode,    # 0 = length/length, 1 = length/angle
@@ -5035,16 +5175,29 @@ class PartDesignTools:
                 length,
                 sixth,   # second length in mode 0, degrees in mode 1
             )
+            # Kept for the read-back below: Mode is readable on this build even
+            # though the two lengths are not (measured 2026-11-22).
+            created.append(feature)
+            return feature
 
+        before_volume = self._mass_probe(part, body)[0]
         try:
-            return self._apply_fillets(length, names, refs, add, part=part,
-                                       label="Chamfer",
-                                       resolve=lambda: self._resolve_edge_specs(body, specs),
-                                       sequential_retry=sequential_retry,
-                                       strict=strict)
+            reply = self._apply_fillets(length, names, refs, add, part=part,
+                                        label="Chamfer",
+                                        resolve=lambda: self._resolve_edge_specs(body, specs),
+                                        sequential_retry=sequential_retry,
+                                        strict=strict)
         finally:
             self._clear_selection()
             self.conn.refresh_display()
+        # A feature that was rolled back answers nothing, and the helper returns
+        # "" for it - so a failed batch gains no sentence about a bevel that is
+        # not in the tree.
+        after_volume = self._mass_probe(part, body)[0] if created else None
+        if created:
+            reply += self._chamfer_readback(created[0], length, length2, angle,
+                                            before_volume, after_volume, names)
+        return reply
 
     def _remove_created(self, features: list[Any]) -> None:
         """Delete features that were created but left the body unbuildable."""
@@ -5086,6 +5239,7 @@ class PartDesignTools:
         # this was measured (2026-10-23). Mode 1 is catLengthAngle, and that is
         # the default; length2 selects mode 0 (measured 2026-11-21).
         mode, sixth = (0, length2) if length2 else (1, angle)
+        before_volume = self._mass_probe(part, body)[0]
         chamfer = sf.AddNewChamfer(
             target,
             1,       # catTangencyChamferPropagation
@@ -5113,7 +5267,10 @@ class PartDesignTools:
             , code="FEATURE_REJECTED", stage="execute") from update_error
         size = (f"{length:g} x {length2:g} mm (two distances)"
                 if length2 else f"{length} mm at {angle} deg")
-        return f"Chamfer created: {size} on {scope}. Feature: '{chamfer.Name}'"
+        after_volume = self._mass_probe(part, body)[0]
+        return (f"Chamfer created: {size} on {scope}. Feature: '{chamfer.Name}'"
+                + self._chamfer_readback(chamfer, length, length2, angle,
+                                         before_volume, after_volume, [scope]))
 
     def _hole(self, args: dict[str, Any]) -> str:
         self.conn.ensure_connected()

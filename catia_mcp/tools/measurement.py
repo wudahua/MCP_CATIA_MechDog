@@ -1571,6 +1571,56 @@ _MESH_CACHE_NOTE = {
 _BOOKS = SessionBooks()
 
 
+def _group_same_warnings(warnings: list[str]) -> list[str]:
+    """One line per DISTINCT statement, naming every part it applies to.
+
+    ``warnings`` is built per part, so four in-context parts of one assembly
+    produced four copies of one long sentence differing only in the label - and
+    a reader counts four problems (reported 2026-11-22, P9: "去重为一个汇总
+    提示"). Grouping here rather than at each append site keeps the producers
+    simple and gives one place to test.
+
+    A line is only grouped when it LOOKS like ``<label>: <statement>`` and the
+    statement is the same text: two parts that share a sentence share a fact,
+    while two different sentences never merge. Order follows first appearance,
+    so a reader still meets the warnings in the order the walk found them.
+    """
+    order: list[str] = []
+    labels: dict[str, list[str]] = {}
+    passthrough: dict[str, list[str]] = {}
+    for line in warnings:
+        label, sep, rest = line.partition(": ")
+        if not sep or len(rest) < 40 or len(label) > 40:
+            passthrough.setdefault(line, [line])
+            order.append(line)
+            continue
+        key = rest
+        if key not in labels:
+            labels[key] = []
+            order.append(key)
+        labels[key].append(label)
+    out: list[str] = []
+    for key in order:
+        if key in labels:
+            names = labels[key]
+            if len(names) == 1:
+                out.append(f"{names[0]}: {key}")
+            else:
+                # Two parts can carry the SAME part number (P05_legrod and
+                # P06_mir_legrod both answer 'P05_legrod' on the 2026-11-22
+                # assembly), and a list that repeats a name reads as a typo.
+                # The count says the truth: two documents, one part number.
+                counted: dict[str, int] = {}
+                for name in names:
+                    counted[name] = counted.get(name, 0) + 1
+                listed = ", ".join(f"{name} x{count}" if count > 1 else name
+                                   for name, count in counted.items())
+                out.append(f"{len(names)} parts ({listed}): {key}")
+        else:
+            out.extend(passthrough[key])
+    return out
+
+
 def reset_session_books() -> None:
     """Forget every first-reading and every warm time. Tests call this."""
     _BOOKS.reset()
@@ -2821,6 +2871,35 @@ class MeasurementTools:
         "End Function\n"
     )
 
+    # Same measurement, but the workbench comes from the DOCUMENT THAT HANDED THE
+    # BODY IN instead of from CATIA.ActiveDocument. That difference is the whole
+    # of report P2-22 (2026-11-22): the `document=` route used to answer
+    # `tensor: null` with `not_on_this_route`, and the only documented way to get
+    # a matrix was to borrow the activation - which a part loaded in context
+    # cannot give up (see `_tensor_for`).
+    #
+    # Measured on B30 2026-11-22 on a 40x40x40 block: the tensor read through its
+    # OWN document's workbench is identical to the one read while that document
+    # was active (0.064 mass, 1.7e-05 diagonal), and ActiveDocument was left on
+    # the other document both before and after the call. So no activation is
+    # needed at all - which is better than the `borrow_focus` the report
+    # suggested, because it moves nothing the caller can see.
+    _VBS_INERTIA_DOC = (
+        "Public Function catia_mcp_inertia_doc(oDoc, oBody)\n"
+        "    Dim oSPA, oInertia, i\n"
+        "    Dim m(8)\n"
+        "    Dim a(9)\n"
+        "    Set oSPA = oDoc.GetWorkbench(\"SPAWorkbench\")\n"
+        "    Set oInertia = oSPA.Inertias.Add(oBody)\n"
+        "    oInertia.GetInertiaMatrix m\n"
+        "    a(0) = oInertia.Mass\n"
+        "    For i = 0 To 8\n"
+        "        a(i + 1) = m(i)\n"
+        "    Next\n"
+        "    catia_mcp_inertia_doc = a\n"
+        "End Function\n"
+    )
+
     def _spa_workbench(self) -> Any:
         """Get the SPAWorkbench measurement workbench.
 
@@ -3067,39 +3146,50 @@ class MeasurementTools:
             payload["mass_kg"] = round(density * volume_mm3 / 1e9, 6)
             payload["mass_g"] = round(density * volume_mm3 / 1e6, 3)
             payload["density_kg_m3"] = density
-        # The tensor is only computed for the ACTIVE document, so this route used
-        # to return volume/area/centroid without one - and getting nine parts'
-        # tensors took 18 calls (open + activate each). CATIA's activation is
-        # temporary here: activate, read, restore (reported 2026-10-24).
+        # The tensor, WITHOUT borrowing the activation (2026-11-22 report,
+        # P2-22). Until this release the route answered `tensor: null` with
+        # `not_on_this_route`, and the documented way to get a matrix was to
+        # call again with no `document` so that the part happened to be active -
+        # which a caller checking nine parts in the background cannot arrange,
+        # and which a part loaded in context cannot be made to do at all.
         #
-        # 0.3.71: this route does not TRY. Measuring `document=` never returns a
-        # matrix by design (`tensor_partial_route.does_not_answer` says so), so
-        # the attempt could only fail - and then the WHY walked every open
-        # document to explain it. Measured on B32 2026-11-06: 11 ms with one
-        # document open, 790 ms with three, for an answer already known. Asking
-        # whether any Product is open was the wrong gate: the cost tracks the
-        # number of open documents, not the number of assemblies.
+        # The fix is not `borrow_focus` (the report's suggestion): the VBScript
+        # takes the document as a parameter and asks THAT document for its SPA
+        # workbench, so nothing is activated and ActiveDocument is the same
+        # before and after. Measured on B30 2026-11-22 on a 40x40x40 block: the
+        # matrix is identical to the active-document reading, and the focus did
+        # not move.
         t_tensor = time.perf_counter()
         payload["tensor"] = None
-        payload["tensor_reason_code"] = "not_on_this_route"
-        payload["tensor_reason"] = (
-            "this route measures the named Part without borrowing CATIA's focus, "
-            "and does not compute the inertia tensor by design. For the 3x3 matrix, "
-            "call catia_get_inertia() with no 'document' (the tensor is only "
-            "defined for the ACTIVE document).")
-        payload["tensor_partial_route"] = {
-            "code": "plan_expect_document",
-            "tool": "catia_run_plan",
-            "shape": {"expect": [{"document": "<name>"}]},
-            "borrows_activation": False,
-            "answers": ["volume_mm3", "volume_cm3", "area_mm2", "area_cm2",
-                        "center_of_gravity_mm", "mass_kg/mass_g (with density)"],
-            "does_not_answer": ["inertia_tensor"],
-        }
+        try:
+            values = self._evaluate_floats(self._VBS_INERTIA_DOC,
+                                           "catia_mcp_inertia_doc", [doc, body])
+            payload.update(self._matrix_fields(values))
+            # `tensor` was ALWAYS null on this route - a field named after the
+            # answer that never held it, while the matrix sat under
+            # `inertia_matrix_kg_m2`. A caller reading `tensor` had no way to
+            # learn that (reported 2026-11-22, P2-22 quoted "tensor: null" as
+            # the symptom). Both keys now carry the same matrix.
+            payload["tensor"] = payload["inertia_matrix_kg_m2"]
+            payload["tensor_route"] = (
+                "read through THIS document's own SPA workbench, so no document "
+                "was activated - ActiveDocument is the same before and after "
+                "this call")
+        except Exception as exc:  # noqa: BLE001 - the reading is reported
+            payload["tensor_why"] = (
+                "the inertia matrix could not be read from this document's own "
+                f"SPA workbench: {str(exc).splitlines()[0][:120]}")
+            payload["tensor_reason_code"] = "unreadable"
+            payload["tensor_reason"] = (
+                "volume / area / centre of gravity are complete; only the 3x3 "
+                "matrix failed. Calling catia_get_inertia() with no 'document' "
+                "measures whichever document CATIA has in front - this part is "
+                "not it, so that route is not equivalent.")
         payload["note"] = (
             "measured on this document's own Part, independent of which document "
-            "CATIA reports as active. The inertia tensor is not part of this route "
-            "- see tensor_reason.")
+            "CATIA reports as active. The 3x3 matrix comes from this document's "
+            "own SPA workbench, so asking for a document by name neither needs "
+            "nor changes the active one.")
         tensor_ms = round((time.perf_counter() - t_tensor) * 1000, 1)
         # What this route cost, in the vocabulary the assembly route already uses,
         # so "174.3 ms here, 2 117.3 ms there, same tool" has an answer inside the
@@ -4429,7 +4519,7 @@ class MeasurementTools:
             payload["mesh_fallback"] = sorted(set(from_mesh))
             payload["mesh_fallback_instances"] = len(from_mesh)
         if fallback_warnings:
-            payload["warnings"] = fallback_warnings
+            payload["warnings"] = _group_same_warnings(fallback_warnings)
         payload["instances"] = {"total": len(entries) + len(skipped),
                                 "measured": len(entries),
                                 "skipped": len(skipped)}
@@ -4763,6 +4853,14 @@ class MeasurementTools:
                 # the same 180-character sentence four times. The note is written
                 # to be appended to a sentence, so its leading "; " is dropped
                 # here - "drone fin capp: ; measured from a copy" read as a typo.
+                #
+                # 0.3.159 groups PARTS that share the same note into ONE line
+                # (`_group_same_warnings`, applied where the payload is built):
+                # an assembly of four in-context parts repeated one long
+                # sentence four times with only the label changing, which reads
+                # as four separate problems (reported 2026-11-22, P9). The
+                # per-part `source_note` below is untouched - that one belongs
+                # to its part.
                 warned.add(key)
                 fallback_warnings.append(
                     f"{label}: " + cached["copy_note"].lstrip("; ").strip())
@@ -6520,8 +6618,21 @@ class MeasurementTools:
                 # the copy route always reads the file, but a caller who just
                 # edited this part in memory gets the same bytes as last time and
                 # no hint that they did. Say it only when it is true.
-                + (" - and this part has UNSAVED edits, which are not in these "
-                   "numbers: save it (catia_save_document) and measure again"
+                #
+                # WHAT `Saved = False` ACTUALLY MEANS, measured rather than
+                # assumed (2026-11-22 report, P9: four identical warnings on an
+                # assembly whose parts "came from disk"). Loading a part inside
+                # an open assembly does NOT set the flag - measured on B30
+                # 2026-11-22, a part reopened through its assembly answered
+                # Saved=true - so a false here is a real difference between the
+                # document and its file. A colour counts as a difference and
+                # cannot move this box, and so does an edit; this call cannot
+                # tell those apart, so it says which question it cannot answer.
+                + (" - and this part's document differs from its file in memory "
+                   "(CATIA reports Saved=false), so these numbers are the "
+                   "FILE's. A colour change sets that flag and cannot move this "
+                   "box; an edit sets it and could. Save the part and measure "
+                   "again to settle which one it was"
                    if unsaved else ""))
         except EmptyMesh:
             # Its own message already names the cause and the fix. Wrapping it in

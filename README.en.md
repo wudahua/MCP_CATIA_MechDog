@@ -2,7 +2,7 @@
 
 > **中文入口见 [README.md](README.md)。** This file is the full English reference: every tool, every measurement behind it, and every known limit.
 
-**0.3.158** · [what changed](CHANGELOG.md) ·
+**0.3.159** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -1377,8 +1377,46 @@ Two facts about real drawings that this had to accept:
   skipped. DWG and raster images are refused with the way out - re-save as DXF,
   and a scan has no geometry to read.
 
-0.3.158 closes the rest of that report: three answers, one refusal, and one note
-that now carries a control.
+0.3.159 answers the 2026-11-22 pair of reports. The most important item is not a
+capability.
+
+P8 was a reply that argued with itself. `catia_fix_constraint` refuses at
+`validate` with a message that names three measurement rounds and ends "WHICH
+LAYER REFUSES IS NOT ESTABLISHED" - and the server envelope then REWROTE it with
+"a stale pywin32 gen_py cache may be blocking resolution ... delete the
+%TEMP%\gen_py folder ... a missing workbench licence can also lock methods". That
+is the paragraph that led the previous report to a licence theory it had to
+retract publicly. The schema was corrected in 0.3.154; the runtime constant was
+not, because the envelope treated every UNSUPPORTED_CAPABILITY as its own to
+explain. It now only explains a failure nobody explained - a bare AttributeError -
+and that paragraph no longer names a cause it never measured.
+
+P2-22: `catia_get_inertia(document=...)` answered `tensor: null`. The fix is not
+the `borrow_focus` the report suggested - the VBScript takes the DOCUMENT and asks
+that document for its SPA workbench, so nothing is activated. Measured on B30
+2026-11-22 on a 40x40x40 block: the matrix is identical to the active-document
+reading (1.70667e-05 on the diagonal) and ActiveDocument did not move.
+
+P1-21: a 25/20 bevel now reads its feature back. `Mode=0` (catLengthLength) is a
+real reading; `Chamfer.Length` and `Chamfer.SecondLength` are NOT - both raise
+`Item.Length` through the typed and the dynamic dispatcher - so the reply says the
+numbers are what was SENT and reports the volume removed against the ideal
+L*a*b/2 (25 000.0 mm3 removed, 25 000.0 ideal on a 100 mm edge). `swap_distances`
+flips the two, and is refused before CATIA is touched when there is no length2.
+
+P9: seven in-context parts repeated one 300-character warning seven times; warnings
+are now grouped per statement (1 line naming all seven). The note also states what
+the flag means, measured: loading a part through its assembly does NOT set
+`Saved=false`, so a false flag is a real difference - but a colour sets it too.
+
+P2-23: an unconfirmed close now says what it CHECKED, with a deep walk into open
+sub-assemblies, and admits when that walk could not be completed. P7: the probe
+reports `documents_left_open` (0 on B30) instead of promising "closed WITHOUT
+saving". P2-20: `distinct_vertex_positions` is 30 of 30 on the reporter's P01, so
+"30 against 33" is three fewer places, not one place counted twice.
+
+0.3.158 closes the rest of the 2026-11-21 report: three answers, one refusal, and
+one note that now carries a control.
 
 P2-8: `catia_diagnose` was 80 219 characters (capability_ceilings 63 752 of them)
 and a client truncated it. `brief=true` keeps every section and every ceiling
@@ -3060,6 +3098,22 @@ Place the result with `catia_get_component_transform`.
   "not found". Hiding the solid and diffing two frames does not isolate it either -
   the whole viewport redraws. The tree band depends on the language pack and font
   size, so it is a caller decision.
+* **A message that contradicts itself is worse than a short one.** The envelope
+  used to rewrite every `UNSUPPORTED_CAPABILITY` with the gen_py-cache and
+  workbench-licence paragraph, including the four assembly-constraint tools whose
+  own message ends "which layer refuses is not established". A site that declares
+  its code now keeps its message; only a bare `AttributeError` gets the generic
+  explanation, and that one names no unmeasured cause (measured on B30
+  2026-11-22, P8).
+* **The inertia tensor does not need the active document.** `Inertias.Add(body)`
+  through the part's OWN `GetWorkbench("SPAWorkbench")` returns the same 3x3
+  matrix as the active-document route; `CATIA.ActiveDocument` was the only reason
+  the `document=` route said it could not (B30 2026-11-22, `1.70667e-05` on the
+  diagonal, focus unchanged).
+* **`Chamfer.Mode` reads back; `Chamfer.Length` and `.SecondLength` do not** (both
+  raise `Item.Length`, typed and dynamic dispatch, B30 2026-11-22). So a
+  two-distance bevel is confirmed by its mode and by the volume it removed, and
+  the two distances in the reply are what was sent - which the reply now says.
 * The watchdog answers `#32770` message boxes only; CATIA's own `CATDlgDialog`
   panels are left alone so a human working alongside the agent is not interrupted.
 

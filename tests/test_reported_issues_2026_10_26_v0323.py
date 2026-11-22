@@ -527,7 +527,11 @@ def test_a_part_with_a_window_is_not_told_it_has_none():
     with pytest.raises(RuntimeError) as error:
         tools._activate_document("P09_skin.CATPart")
     text = str(error.value)
-    assert "HAS a window of its own" in text
+    # 0.3.159: the sentence quotes the READING ("the window list DOES include
+    # it") instead of converting it into a cause. Measured on B30 2026-11-22: a
+    # part held by an open product is listed there and still refuses
+    # Activate(), so "a window exists" does not make this a focus refusal.
+    assert "window list DOES include" in text
     assert "has no window of its own" not in text
     assert "no usable window list" not in text
 
@@ -584,10 +588,14 @@ def test_a_short_name_is_not_matched_inside_a_longer_caption():
 # 7. A missing tensor points at the route that does work.
 # --------------------------------------------------------------------------
 
-def test_the_tensor_reason_points_at_the_plan_route():
+def test_the_document_route_does_not_need_to_borrow_the_activation():
     from catia_mcp.tools.measurement import MeasurementTools
 
     source = inspect.getsource(MeasurementTools._part_inertia)
-    # Since 0.3.24 the route is a structured field, not a seventh prose line.
-    assert '"tensor_partial_route"' in source
-    assert '"borrows_activation"' in source
+    # 0.3.159 (report P2-22): the old answer was a structured "you cannot have
+    # the tensor here" block pointing at catia_run_plan. The route answers it
+    # now, by handing the DOCUMENT to the script instead of reading
+    # CATIA.ActiveDocument, so there is nothing to point at.
+    assert "_VBS_INERTIA_DOC" in source
+    assert '"tensor_partial_route"' not in source
+    assert "Activate()" not in source

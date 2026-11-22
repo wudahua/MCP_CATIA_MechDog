@@ -1229,6 +1229,27 @@ class PlannerTools:
                 "the rule would have to keep, and on the part that raised this "
                 "question none did."),
         }
+        # The one number that separates "this build counts fewer PLACES" from
+        # "this build counts the same places twice": the 2026-11-21 and
+        # 2026-11-22 reports both ask for a rule that settles 30 against 33, and
+        # a total cannot. Two vertices at the same coordinate (a seam, a
+        # degenerate face) count twice in `vertices`; here they count once, so
+        # `distinct_vertex_positions` below `vertices` is itself a finding.
+        points = result["vertex_points"]
+        distinct: dict[tuple[float, float, float], int] = {}
+        for point in points:
+            key = (round(float(point[0]), 3), round(float(point[1]), 3),
+                   round(float(point[2]), 3))
+            distinct[key] = distinct.get(key, 0) + 1
+        result["distinct_vertex_positions"] = len(distinct)
+        repeated = [{"point": [k[0], k[1], k[2]], "cells": n}
+                    for k, n in distinct.items() if n > 1]
+        if repeated:
+            result["vertices_sharing_a_position"] = repeated[:20]
+            result["vertices_sharing_a_position_note"] = (
+                f"{len(repeated)} position(s) carry more than one vertex cell "
+                "(rounded to 0.001 mm). That is the difference between counting "
+                "CELLS and counting PLACES, and it is invisible in a total.")
         if truncated:
             result["vertex_points_truncated"] = truncated
         if excluded:

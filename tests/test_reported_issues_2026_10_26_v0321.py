@@ -202,8 +202,39 @@ def test_a_close_that_fails_with_no_referrer_is_still_an_error():
     tools.conn.active_document = _OpenDoc("Mystery.CATPart")
     with pytest.raises(RuntimeError) as error:
         tools._close_document()
-    assert "CLOSE NOT CONFIRMED" in str(error.value)
-    assert "NO open assembly references it" in str(error.value)
+    text = str(error.value)
+    assert "CLOSE NOT CONFIRMED" in text
+    # 0.3.159: the refusal says what was CHECKED. The old wording ("NO open
+    # assembly references it", then "usual cause: a modal dialog") read as a
+    # measurement of the session when it was a top-level-only walk, and a part
+    # held by a sub-assembly got sent to look for a dialog that did not exist
+    # (reported 2026-11-22, P2-23).
+    assert "WHAT WAS CHECKED" in text
+    assert "NO open assembly references it" not in text
+    # This double has no component walk at all, so the honest answer is "the
+    # deeper walk could not be completed" - NOT a claim that nothing holds it.
+    assert "could not be completed" in text
+    assert "TWO levels down was NOT ruled out" in text
+
+
+def test_a_close_with_a_completed_deep_walk_says_so():
+    """The other branch: the walk ran and found no holder (report P2-23)."""
+    tools = _document_tools(["Mystery.CATPart"], {})
+
+    class _OpenDoc(_Doc):
+        def Close(self):
+            return None
+
+    # The helper's stub takes no keyword, so this test replaces it: the branch
+    # under test is "the deep walk ran", which needs a walk that accepts it.
+    tools._component_usage = lambda deep=False: {}
+    tools._product_document_count = lambda: 2
+    tools.conn.active_document = _OpenDoc("Mystery.CATPart")
+    with pytest.raises(RuntimeError) as error:
+        tools._close_document()
+    text = str(error.value)
+    assert "to every level of sub-assembly" in text
+    assert "could not be completed" not in text
 
 
 # --------------------------------------------------------------------------
@@ -362,15 +393,19 @@ def test_the_shell_reply_names_the_side_the_wall_grew_on():
 # 10. tensor_reason carries a one-word code beside the sentence.
 # --------------------------------------------------------------------------
 
-def test_tensor_reason_has_a_code():
+def test_a_tensor_that_could_not_be_read_is_still_a_field():
     from catia_mcp.tools import measurement
 
-    # 0.3.71: the document= route does not attempt the tensor at all - it cannot
-    # return one by design (its own `tensor_partial_route.does_not_answer` says
-    # so), and the attempt plus its diagnosis cost 790 ms on a 3-document session
-    # (reported 2026-11-06). The code is a fact about the ROUTE now.
+    # 0.3.159 (report P2-22): the document= route now ANSWERS the matrix, from
+    # that document's own SPA workbench and without activating anything. The
+    # old rule here - "this route never returns one, and must not try" - was
+    # true of the route as it was written, not of the API: measured on B30
+    # 2026-11-22, `Inertias.Add(body)` through a non-active document's
+    # workbench returns the same matrix as the active-document reading. A
+    # failure is still a FIELD with a code, not a paragraph.
     source = inspect.getsource(measurement.MeasurementTools._part_inertia)
-    assert 'payload["tensor_reason_code"] = "not_on_this_route"' in source
+    assert "_VBS_INERTIA_DOC" in source
+    assert 'payload["tensor_reason_code"] = "unreadable"' in source
     assert "_tensor_for" not in source
     # The active-document route still explains its own refusals.
     refusal = inspect.getsource(measurement.MeasurementTools._tensor_refusal)

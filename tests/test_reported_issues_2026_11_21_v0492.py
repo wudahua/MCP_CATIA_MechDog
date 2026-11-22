@@ -48,9 +48,14 @@ def test_the_description_says_which_face_gets_which_distance_is_not_the_callers(
                    PartDesignTools(connection=None).get_tool_definitions()}
     text = definitions["catia_chamfer"]["description"]
     assert "TWO-DISTANCE" in text
-    assert "25 000 mm3" in text and "11 374 mm3" in text
+    assert "25 000 mm3" in text or "25 000" in text
+    assert "11 374 mm3" in text
     assert "follows the edge's own" in text
-    assert "swap the two values" in text
+    # 0.3.159: "swap the two values" became a parameter, and the description
+    # now also states the two things this build cannot read back (the lengths)
+    # so a caller does not take the reply for a confirmation (report P1-21).
+    assert "swap_distances=true" in text
+    assert "Chamfer.Length" in text
 
 
 def test_a_non_positive_second_distance_is_refused_before_catia() -> None:

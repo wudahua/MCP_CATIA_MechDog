@@ -541,7 +541,8 @@ class CATIAConnection:
             + (" (active)" if row.get("active") else "")
             for row in rows)
 
-    def component_usage(self) -> dict[str, list[str]]:
+    def component_usage(self, deep: bool = False,
+                        max_depth: int = 4) -> dict[str, list[str]]:
         """Part document name -> the open assemblies whose components use it.
 
         The ONE reader of this fact, because two tools now publish it and a
@@ -552,30 +553,65 @@ class CATIAConnection:
         the first about a part that was in no assembly at all, against this very
         reading (reported 2026-10-28, §6.3).
 
-        Top-level children only, like the listing: walking into sub-assemblies
-        means opening documents, which is not something a "which assemblies hold
-        this" lookup may do.
+        ``deep=False`` walks top-level children only, like the listing: the
+        answer is used to LABEL a part, and naming the assembly the caller
+        opened is more useful than naming a sub-assembly they may not know about.
+
+        ``deep=True`` walks into open sub-products as well, and is what a
+        "who holds this document" question needs: ``catia_close_document`` used
+        the shallow reading to decide whether a refused Close() was the ordinary
+        "an assembly holds it" case, and a part two levels down answered "NO open
+        assembly references it" followed by "usual cause: a modal dialog"
+        (reported 2026-11-22, P2-23). The walk stops at ``max_depth`` and never
+        opens a document, so it cannot change the session.
+
+        Every level is still only read where CATIA has it loaded; a component
+        whose link is broken is skipped, exactly as before.
         """
         uses: dict[str, list[str]] = {}
+
+        def record(part_doc: Any, owner: str) -> None:
+            try:
+                name = str(part_doc.Name)
+            except Exception:  # noqa: BLE001 - a dead link
+                return
+            uses.setdefault(name, [])
+            if owner not in uses[name]:
+                uses[name].append(owner)
+
+        def walk(product: Any, owner: str, depth: int) -> None:
+            try:
+                children = product.Products
+                count = int(children.Count)
+            except Exception:  # noqa: BLE001 - not a product
+                return
+            for j in range(1, count + 1):
+                try:
+                    child = children.Item(j)
+                except Exception:  # noqa: BLE001 - a dead link
+                    continue
+                try:
+                    part_doc = child.ReferenceProduct.Parent
+                except Exception:  # noqa: BLE001 - a dead link
+                    continue
+                record(part_doc, owner)
+                if deep and depth < max_depth:
+                    # A child that is itself a product: recurse into it. The
+                    # same object reached twice is stopped by the depth limit,
+                    # which is the only cycle guard that costs nothing.
+                    try:
+                        walk(child, owner, depth + 1)
+                    except Exception:  # noqa: BLE001 - one unreadable branch
+                        continue
+
         docs = self.documents
         for i in range(1, docs.Count + 1):
             product_doc = docs.Item(i)
             try:
                 product = self.product_of(product_doc)
-                children = product.Products
             except Exception:  # noqa: BLE001 - not a product
                 continue
-            for j in range(1, children.Count + 1):
-                try:
-                    child = children.Item(j)
-                    part_doc = child.ReferenceProduct.Parent
-                    name = str(part_doc.Name)
-                except Exception:  # noqa: BLE001 - a dead link
-                    continue
-                uses.setdefault(name, [])
-                owner = str(product_doc.Name)
-                if owner not in uses[name]:
-                    uses[name].append(owner)
+            walk(product, str(product_doc.Name), 0)
         return uses
 
     # ── Document type detection ──

@@ -2180,6 +2180,24 @@ class DocumentTools:
         still = after.count(name) >= max(1, before.count(name))
         if still:
             users = self._component_usage().get(str(name)) or []
+            deep_checked = False
+            if not users:
+                # A SECOND, DEEPER READING BEFORE BLAMING A DIALOG. The shallow
+                # walk sees top-level children only, so a part held by a
+                # sub-assembly was reported as "NO open assembly references it -
+                # usual cause: a modal dialog", which sends the caller off to
+                # dismiss a box that does not exist (reported 2026-11-22, P2-23;
+                # `catia_activate_document` had the true answer in the same
+                # session). Measured while fixing it, on B30 2026-11-22: the
+                # direct and the nested cases both name the holder, so the miss
+                # is a narrow state - which is exactly why the message says what
+                # was CHECKED rather than what is true. If the deep walk itself
+                # fails, that is reported too: an unread tree is not "no holder".
+                try:
+                    users = self._component_usage(deep=True).get(str(name)) or []
+                    deep_checked = True
+                except Exception:  # noqa: BLE001 - reported in the refusal
+                    users, deep_checked = [], False
             if users:
                 # A part that an OPEN assembly references cannot be closed - that
                 # is CATIA's ordinary semantics, not an error, and the caller did
@@ -2219,14 +2237,42 @@ class DocumentTools:
                     "with '方法 SaveAs 失败', and that error looks unrelated to "
                     "the assembly."
                 )
+            products_open = self._product_document_count()
+            checked = (
+                f"every one of the {products_open} open Product document(s), to "
+                "every level of sub-assembly"
+                if deep_checked else
+                "the top-level children of every open Product; the deeper walk "
+                "could not be completed, so an assembly TWO levels down was NOT "
+                "ruled out")
             raise CodedError(
                 f"CLOSE NOT CONFIRMED: '{name}' is still open after Close() "
                 f"({before.count(name)} entry/entries before, {after.count(name)} "
-                "after), and NO open assembly references it - so this is not the "
-                "component case. Usual cause: a modal dialog holding the document "
-                "(a save prompt, or 'document modified'). Answer or cancel it, "
-                "then retry."
-            , code="CLOSE_NOT_CONFIRMED", stage="execute")
+                f"after). WHAT WAS CHECKED: {checked}, and "
+                + ("not one of them resolves a component to this document"
+                   if deep_checked else "that shallow list named no holder")
+                + " - so this is not the 'an assembly holds it' case, and it is "
+                "not the ordinary deferred close either (that one answers STILL "
+                "OPEN and names the assembly). The remaining causes, none of "
+                "which this call can tell apart: a modal dialog holding the "
+                "document (a save prompt, or 'document modified'), a product "
+                "whose component link is BROKEN (a dead link cannot be resolved "
+                "to this document, so it looks like no holder at all), or a "
+                "close CATIA has queued behind something else. Answer or cancel "
+                "any dialog, then retry; catia_list_documents shows whether the "
+                "document is still listed and what else is open.",
+                code="CLOSE_NOT_CONFIRMED", stage="execute",
+                modified=False,
+                next_actions=[
+                    "Look at the CATIA window for a dialog and answer it, then "
+                    "retry - nothing was changed by this call",
+                    "If the part is inside an assembly whose link is broken, "
+                    "catia_list_components(include_reference=true) reports it; "
+                    "close that assembly first",
+                    "catia_list_documents lists what is actually open, which is "
+                    "the state this reply is about",
+                ],
+            )
         return (f"Document '{named or name}' closed"
                 + (" (saved)" if save else ""))
 
@@ -2473,14 +2519,37 @@ class DocumentTools:
             return "[]"
         return json.dumps(result, indent=2, ensure_ascii=False)
 
-    def _component_usage(self) -> dict[str, list[str]]:
+    def _component_usage(self, deep: bool = False) -> dict[str, list[str]]:
         """Part document name -> the open assemblies whose components use it.
 
         Delegated: ``catia_get_inertia`` publishes the same reading (it has to
         tell "nested in an assembly" from "not in front"), and two walkers of one
-        fact drift apart (reported 2026-10-28, §6.3).
+        fact drift apart (reported 2026-10-28, §6.3). ``deep=True`` also walks
+        into open sub-assemblies - the close path needs it, because a part two
+        levels down used to be reported as "no open assembly references it"
+        (reported 2026-11-22, P2-23).
         """
+        # Only passed when it is True: the default call keeps the shape every
+        # test double and every other caller already has (the same rule the
+        # measurement code follows after 0.3.148).
+        if deep:
+            return self.conn.component_usage(deep=True)
         return self.conn.component_usage()
+
+    def _product_document_count(self) -> int:
+        """How many open documents are Products - what the deep walk covered."""
+        try:
+            docs = self.conn.documents
+            count = 0
+            for index in range(1, int(docs.Count) + 1):
+                try:
+                    self.conn.product_of(docs.Item(index))
+                    count += 1
+                except Exception:  # noqa: BLE001 - not a Product
+                    continue
+            return count
+        except Exception:  # noqa: BLE001 - unreadable is reported as 0
+            return 0
 
     def _activate_document(self, name: str) -> str:
         """Activate an open document by name so later calls act on it.
@@ -2666,13 +2735,27 @@ class DocumentTools:
             # the caller had just opened and closed by name (reported
             # 2026-10-26), which sends them off to re-open a document that is
             # already open.
+            #
+            # 0.3.159 stops at what the reading supports. Measured on B30
+            # 2026-11-22: a part loaded as a component of an open product is
+            # LISTED in Application.Windows and still refuses Activate() - so
+            # "a window exists" does not by itself make this a focus refusal,
+            # and the same state answers False on another session (the
+            # 2026-11-22 report's P2-23 saw the no-window wording). The holder
+            # is read instead of guessed.
+            try:
+                holders = self._component_usage(deep=True).get(str(target.Name)) or []
+            except Exception:  # noqa: BLE001 - the sentence survives without it
+                holders = []
+            why = ("it is a component of " + ", ".join(f"'{u}'" for u in holders)
+                   + ", and CATIA will not bring a component forward on its own"
+                   if holders else
+                   "nothing open references it as a component, so the cause is a "
+                   "foreground/focus state this call cannot read")
             return CodedError(
                 f"CATIA did not switch to '{target.Name}': ActiveDocument is "
-                f"still '{active}'. '{target.Name}' HAS a window of its own "
-                "(CATIA lists it), so this is a foreground/focus refusal - most "
-                "often because an open assembly still references it, and CATIA "
-                "refused the close that was asked for just before."
-                + routes,
+                f"still '{active}'. CATIA's window list DOES include "
+                f"'{target.Name}', and {why}." + routes,
                 code="ACTIVATION_FAILED", stage="execute", modified=False)
         if window is False:
             return CodedError(

@@ -357,14 +357,30 @@ class CATIAMCPServer:
             # sites keep being missed" is a guard that fails CI, not a guess
             # made at the envelope layer - see tests/test_argument_envelopes.py).
             stage = getattr(error, "stage", stage)
-            if code == "UNSUPPORTED_CAPABILITY":
+            # ONLY when nobody declared it. This paragraph used to be written over
+            # every UNSUPPORTED_CAPABILITY, including the four assembly-constraint
+            # tools, which refuse at `validate` with a message that names three
+            # measurement rounds and says plainly that no cause is established -
+            # and then had "a stale pywin32 gen_py cache may be blocking
+            # resolution ... a missing workbench licence can also lock methods"
+            # appended underneath it. That is the text a reader acts on, and the
+            # 2026-11-21 report was written from it: `catia_fix_constraint`
+            # answered with two contradictory explanations of one refusal
+            # (reported 2026-11-22, P8 - the schema had been corrected in 0.3.154
+            # and the runtime constant was not).
+            #
+            # `declared` is the raise site's own code. When it is set, the site
+            # knows what it refused and its message already says what to do, so
+            # the envelope only adds the session state below.
+            if code == "UNSUPPORTED_CAPABILITY" and not declared:
                 message = (
-                    f"UNSUPPORTED_CAPABILITY in {name}: the required CATIA automation API "
-                    f"did not resolve ({error}). The API may be absent from this CATIA release, "
-                    "or a stale pywin32 gen_py cache may be blocking resolution. Clearing caches "
-                    "cannot add an absent API. For a stale cache, close CATIA and the server, "
-                    "delete the %TEMP%\\gen_py folder, restart and retry once. A missing "
-                    "workbench licence can also lock methods. Run catia_diagnose for details."
+                    f"UNSUPPORTED_CAPABILITY in {name}: the required CATIA automation "
+                    f"method did not resolve ({error}). This is what CATIA reports when "
+                    "the object exists and the MEMBER does not - either absent from this "
+                    "release, or hidden from a stale pywin32 gen_py cache. Clearing a "
+                    "cache cannot add an absent method, so the two are worth separating "
+                    "before changing anything: catia_diagnose lists which members "
+                    "resolved and which did not, on this machine, right now."
                 )
             elif stage == "execute" and declared:
                 message = f"{error}\n\nSession state: {self._session_state()}"

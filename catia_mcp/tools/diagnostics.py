@@ -1429,9 +1429,14 @@ class DiagnosticsTools:
                     "neither can freeze the session - then runs the CONTROL "
                     "that makes the answer mean something: the same "
                     "AddMonoEltCst(0, Reference) on a sketch in a second "
-                    "throwaway part. Closes both without saving, so the caller's "
-                    "model is never touched - 'model_untouched: true' in the "
-                    "reply, and nothing is written to disk. "
+                    "throwaway part. Both temporary documents are released "
+                    "again, so the caller's model is never touched - "
+                    "'model_untouched: true' in the reply, and nothing is "
+                    "written to disk. The reply also carries "
+                    "'documents_left_open', read from Application.Documents "
+                    "before and after the probe, so that claim is checkable "
+                    "rather than promised: 0 means the session is exactly as "
+                    "you left it. "
                     "COSTS a few seconds and needs no open document. Use it once "
                     "per session (or after a licence change) instead of trying "
                     "the four tools to find out."
@@ -1561,6 +1566,19 @@ class DiagnosticsTools:
             previous = self.conn.active_document
         except Exception:  # noqa: BLE001 - no window open is fine
             previous = None
+
+        def document_names() -> list[str]:
+            """The session's document list, or nothing when it cannot be read."""
+            try:
+                docs = self.conn.documents
+                return [str(docs.Item(i).Name)
+                        for i in range(1, int(docs.Count) + 1)]
+            except Exception:  # noqa: BLE001 - the count is a courtesy
+                return []
+
+        # Taken BEFORE anything is created, so `documents_left_open` below is a
+        # comparison of two lists rather than a claim about what this code did.
+        documents_before = document_names()
 
         product_doc = None
         part_doc = None
@@ -1758,6 +1776,19 @@ class DiagnosticsTools:
                 "unavailable for every collection here. Read 'steps' before "
                 "concluding anything; a broken install or a session in a bad "
                 "state looks like this too.")
+        # Read, not assumed: what the session holds now, compared with what it
+        # held before this call created anything.
+        documents_after = document_names()
+        documents_added = sorted(
+            {name for name in documents_after
+             if documents_after.count(name) > documents_before.count(name)})
+        documents_left_open = sum(
+            documents_after.count(name) - documents_before.count(name)
+            for name in documents_added)
+        if not documents_after and documents_before:
+            documents_left_open = -1          # unreadable, not zero
+        if documents_left_open < 0:
+            documents_added = []
         return {
             "ok": True,
             "code": "ASSEMBLY_CONSTRAINT_PROBE",
@@ -1765,8 +1796,8 @@ class DiagnosticsTools:
             "verdict": verdict,
             "message": conclusion,
             # The caller's documents and the disk are untouched: the two
-            # documents this probe needed were created here and closed without
-            # saving. `modified` speaks about the model, so it is a known no.
+            # documents this probe needed were created here and released again.
+            # `modified` speaks about the model, so it is a known no.
             "modified": False,
             "data": {
                 "verdict": verdict,
@@ -1774,10 +1805,29 @@ class DiagnosticsTools:
                 "evidence": evidence,
                 "steps": steps,
                 "model_untouched": True,
+                # A READ, not a promise. 0.3.158's `documents_used` said the two
+                # documents were "closed WITHOUT saving" while the description
+                # had been reworded to stop saying it - one fact, two voices
+                # (reported 2026-11-22, P7). The count below is taken from
+                # Application.Documents before and after, so a caller can check
+                # it against their own document list instead of believing a
+                # sentence.
                 "documents_used": (
-                    "one temporary Product and one temporary Part, both created "
-                    "here and closed WITHOUT saving; the caller's documents are "
-                    "untouched and nothing was written to disk"),
+                    "two temporary documents (one Product, one Part) created for "
+                    "this probe; the caller's documents are untouched and nothing "
+                    "was written to disk"),
+                "documents_left_open": documents_left_open,
+                "documents_left_open_note": (
+                    "documents this probe added that are still open: 0 means the "
+                    "session is exactly as the caller left it"
+                    if documents_left_open == 0 else
+                    "the document list could not be read after the probe, so this "
+                    "is -1 ('unknown'), not a count - run catia_list_documents"
+                    if documents_left_open < 0 else
+                    "this probe could NOT release what it created - the names are "
+                    "in documents_added; close them before relying on the "
+                    "document list"),
+                "documents_added": documents_added,
                 "what_to_do_instead": [
                     "Place components with catia_set_component_transform "
                     "(transform_13, or rotation_rows + translation) from a table "

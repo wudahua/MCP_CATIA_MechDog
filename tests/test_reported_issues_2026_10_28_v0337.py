@@ -339,13 +339,14 @@ def test_the_part_route_publishes_the_same_two_buckets():
                  1) == stamped["elapsed_ms"]
 
 
-def test_the_tensor_step_costs_nothing_on_the_document_route():
-    """The timer stays - the work it measured is gone.
+def test_the_tensor_step_reads_the_document_it_was_given():
+    """0.3.159, report P2-22: `document=` answers the 3x3 matrix.
 
-    0.3.71: `document=` cannot return a matrix by design, so the attempt and its
-    diagnosis were pure cost (790 ms on a three-document session, reported
-    2026-11-06). `tensor_ms` is still published, and is now ~0, which is the
-    number a caller can assert on.
+    The old test here asserted the step did NO work, because 0.3.71 had decided
+    this route could not answer it. That was true of the route, not of CATIA:
+    asking the part's OWN document for its SPA workbench returns the same matrix
+    as the active-document reading (measured on B30 2026-11-22), so the step
+    works and still moves nothing the caller can see.
     """
     from catia_mcp.tools.measurement import MeasurementTools
 
@@ -354,21 +355,22 @@ def test_the_tensor_step_costs_nothing_on_the_document_route():
                                  component_usage=lambda: {})
     tools._read_measurable_array = (
         lambda measurable, method, count: [0.0, 0.0, 2.5])
-    slept = {"how": 0}
+    seen = {}
 
-    def _slow(part):
-        import time
-        time.sleep(0.02)
-        slept["how"] += 1
-        tools._tensor_why = "activation_refused"
-        return None
+    def _floats(script, func, params):
+        seen["func"] = func
+        seen["params"] = params
+        return [0.064, 1.7e-5, 0.0, 0.0, 0.0, 1.7e-5, 0.0, 0.0, 0.0, 1.7e-5]
 
-    tools._tensor_for = _slow
-    reply = json.loads(tools._part_inertia(_PartForCost(), None, "P37.CATPart"))
-    assert slept["how"] == 0, "this route must not attempt the tensor"
-    assert reply["tensor_ms"] < 5.0
-    assert reply["tensor_reason_code"] == "not_on_this_route"
-    assert "borrowing the activation" in reply["overhead_note"]
+    tools._evaluate_floats = _floats
+    tools._tensor_for = lambda part: pytest.fail("must not borrow the activation")
+    part = _PartForCost()
+    reply = json.loads(tools._part_inertia(part, None, "P37.CATPart"))
+    assert seen["func"] == "catia_mcp_inertia_doc"
+    assert seen["params"][0] is part.Parent, "the DOCUMENT goes to the script"
+    assert reply["tensor"] == reply["inertia_matrix_kg_m2"] is not None
+    assert "no document was activated" in reply["tensor_route"]
+    assert "not_on_this_route" not in json.dumps(reply)
 
 
 # ─────────────── 6. "nested in an assembly" is a claim to check (report 2, §6.3)

@@ -2,6 +2,75 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.159] — 2026-11-22 · one message per refusal, and a tensor without a takeover
+
+The 2026-11-22 pair of reports. The most important item is not a capability: it is
+a **contradiction inside one reply** that a reader had already been misled by once.
+
+**P8 - the refusal no longer argues with itself.** `catia_fix_constraint` refused at
+`validate` with a message that names three measurement rounds and ends "WHICH LAYER
+REFUSES IS NOT ESTABLISHED" - and the server envelope then **rewrote** it with
+"the required CATIA automation API did not resolve (…). The API may be absent …
+a stale pywin32 gen_py cache may be blocking resolution … delete the %TEMP%\gen_py
+folder … A missing workbench licence can also lock methods." The schema had been
+corrected in 0.3.154; the runtime constant was not. Root cause: the envelope
+treated every `UNSUPPORTED_CAPABILITY` as its own to explain. It now only explains
+a failure **nobody explained** (a bare `AttributeError`), and that paragraph no
+longer names a cause it never measured. All four mate tools checked on B30.
+
+**P2-22 - the 3x3 matrix without touching the front window.** `catia_get_inertia
+(document=…)` answered `tensor: null` with `not_on_this_route`, and the documented
+way to get a matrix was to call again with no `document` so that the part happened
+to be active - which a batch check cannot arrange, and a part loaded in context
+cannot do at all. The fix is not `borrow_focus`: the VBScript takes the **document**
+and asks *that* document for its SPA workbench. Measured on B30 2026-11-22 on a
+40x40x40 block: identical matrix to the active-document reading
+(`1.70667e-05` on the diagonal), `ActiveDocument` unchanged before and after.
+`tensor` now carries the matrix instead of staying null while the answer sat under
+`inertia_matrix_kg_m2`.
+
+**P1-21 - a bevel you can check.** A 25/20 two-distance bevel replied with its
+arguments and nothing else. It now reads the feature back: `Mode=0`
+(catLengthLength) is a real reading, and **`Chamfer.Length` /
+`Chamfer.SecondLength` are not** - both raise `Item.Length` through the typed and
+the dynamic dispatcher (measured 2026-11-22) - so the reply says the two numbers
+are what was SENT rather than printing them as confirmed. It reports the volume
+removed against the ideal `L*a*b/2`: **25 000.0 mm3 removed, 25 000.0 ideal** on a
+100 mm edge, which is the check the 2026-11-21 report did by hand. New
+`swap_distances=true` exchanges the two, and is refused (before CATIA is touched)
+when there is no `length2` to exchange.
+
+**P9 - one warning per statement.** An assembly of seven in-context parts repeated
+one 300-character sentence seven times. Warnings are grouped by their statement:
+**1 line naming all seven parts** on `hexapod_assembly`. The note also says what
+the flag means, measured: **loading a part through its assembly does NOT set
+`Saved=false`** (verified by reopening one), so a false flag is a real difference -
+but a colour sets it too, and a colour cannot move a box. Two documents sharing one
+part number are counted (`P05_legrod x2`) rather than repeated.
+
+**P2-23 - a close that is not confirmed says what it checked.** The refusal used to
+assert "NO open assembly references it - usual cause: a modal dialog" on a
+top-level-only walk. The walk is now deep (into open sub-assemblies), and the
+message states what was covered: *"every one of the N open Product document(s), to
+every level of sub-assembly"*, or, when the walk itself failed, that an assembly
+two levels down was **not** ruled out. Reported honestly here: the direct and the
+nested cases both named the holder on B30 while fixing this, so the reporter's
+exact state did not reproduce - which is precisely why the sentence had to stop
+being a claim.
+
+**P7 - the probe counts what it left open.** `documents_used` no longer says "closed
+WITHOUT saving" (the description had already dropped it, the runtime had not).
+`documents_left_open` is read from `Application.Documents` before and after:
+**0** on B30, with the document list identical (41 entries before and after).
+
+**P2-20 - a rule for 30 against 33.** `include_vertex_points=true` now also
+publishes `distinct_vertex_positions`: on the reporter's P01 it is **30 of 30**, so
+the difference from the source's 33 is three fewer PLACES, not one place counted
+twice. `vertices_sharing_a_position` lists any coordinate carrying more than one
+cell.
+
+B30 2026-11-22: `scripts/b30_v0496_acceptance.py` **31/31**, **2 539 tests**.
+
 ## [0.3.158] — 2026-11-21 · the four that were left, and one that cannot be built
 
 The rest of the 2026-11-21 report's list. Three are answers, one is a refusal with
