@@ -208,7 +208,10 @@ def test_dry_run_needs_a_name():
 
 # ── P2-5: frame scaffolding is counted, not invisible ────────────────────
 def test_frame_scaffolding_is_grouped_by_owning_sketch():
-    body = _Body()
+    # Both sketches still exist, so both owners read sketch_present: true - the
+    # key 0.3.165 added (2026-11-23 report, P2-N2: the count alone let a reader
+    # believe the sketch was still there when only its frame was).
+    body = _Body(sketches=[_Node("A"), _Node("B")])
     body.HybridShapes = _Collection([
         _Node("A_FRAME"), _Node("A_FRAME.O"), _Node("A_FRAME.U"),
         _Node("A_FRAME.V"), _Node("B_FRAME"), _Node("B_FRAME.O"),
@@ -216,8 +219,9 @@ def test_frame_scaffolding_is_grouped_by_owning_sketch():
     tools = PartDesignTools(None)
     inventory = tools._frame_scaffold_inventory(body)
     assert inventory["element_count"] == 7
-    assert inventory["sketches"] == [{"sketch": "A", "elements": 4},
-                                     {"sketch": "B", "elements": 2}]
+    assert inventory["sketches"] == [
+        {"sketch": "A", "elements": 4, "sketch_present": True},
+        {"sketch": "B", "elements": 2, "sketch_present": True}]
     assert inventory["legacy"] == 1, (
         "a pre-0.3.146 datum cannot be tied to a sketch and is counted apart")
 

@@ -1,8 +1,8 @@
-# MCP_CATIA_MechDog 0.3.164
+# MCP_CATIA_MechDog 0.3.165
 
-![version](https://img.shields.io/badge/version-0.3.164-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![CATIA](https://img.shields.io/badge/CATIA-V5%20R30%20(B30)-orange) ![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20http-purple)
+![version](https://img.shields.io/badge/version-0.3.165-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![CATIA](https://img.shields.io/badge/CATIA-V5%20R30%20(B30)-orange) ![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20http-purple)
 
-当前正式版 **0.3.164**——上一版说「这个 build 不能重排特征」，这一版补上它真正能做的那一半：**在指定位置新建特征**。`catia_pad` / `catia_pocket` / `catia_hole` 新增 `insert_after='凸台.1'`，新特征直接建在那个特征**之后**，而不是永远追加在树尾。此前每一条 Part Design 调用都被本服务器自己挡在门外：`_prepare_body` 在每次工厂调用前把 `InWorkObject` 归位到 body（那是为了防 GSD 残留——实测过一次，GSD 调用后 pocket/fillet/chamfer 全部失败），于是 InWorkObject 永远是 body，特征永远在末尾；0.3.163 的探针已经证明 CATIA 本身**会插到中间**（InWorkObject 留在第一个特征上，裸调 `AddNewPocket` 得到 `[凸台.1, 凹槽.2, 凹槽.1]`）。本机实测（B30，每格一个新文档）：`catia_pocket(insert_after='凸台.1')` → 树 `[凸台.1, 凹槽.2, 凹槽.1]`、体积 87738.0533→85476.1066，回执写 **“Placed at position 2 of 3”**（读树得到的，不是承诺）并明说尾部被重建；`catia_pad(insert_after='凹槽.1')` → `[凸台.1, 凹槽.1, 凸台.3, 凸台.2]`、位置 3/4。**插入不是建一个特征**：`UpdateObject` 对新插入的节点**不重建它后面的特征**（实测体积要等整份 `part.Update()` 才变），所以这条路径整份重建并为此计时；重建失败时（后面的圆角棱变短、pocket 支撑面移位）新特征被取出，回执回答的是**「这份零件还完整吗」**而不是「特征删掉了吗」——还坏着就抛 `INSERTION_REJECTED`、`rolled_back:false`、`modified:true` 并点名仍在失败的元素。**顺序确实决定几何**：同一个 25×45×30 凸台 + Φ8 通孔 + 20×20×10 板，追加得到 **36242.0355 mm³**（板盖住孔口，孔留在一块料里），插到凸台后得到 **35739.3807 mm³**（孔最后切，也穿过板），差 502.65 = π·4²·10。`insert_after` 指到别的 body 的特征会点名在哪个 body；指到不存在的名字先拒（`FEATURE_NOT_FOUND` + 该 body 按建造顺序的特征表 + 位置）；指到**最后一个**特征则明说这只是一次普通追加。  · [变更日志](CHANGELOG.md) · [Releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases)
+当前正式版 **0.3.165**——2026-11-23 的报告在本版上做了一次回归验收：上一轮 3 个 P0 全部关闭，新发现 1 个 P1 与 2 个 P2，全部在本机复现后修掉。**P1-N1「返回成功但量的是旧件」**：`catia_move_body` 把实体搬进新 body 之后，会话的 active body 还是**源 body**，于是紧接着的 `catia_get_inertia` 回答的是**搬家前**的几何（重心 x=10，而不是 60），`catia_list_bodies` 又把隐藏的源 body 算进总量（6000+6000=12000）。现在 move 成功后**把 active body 切到新 body 并回读**（回执写明 read back 的两个读数与旧行为的代价），`list_bodies` 每件带 `visible` 并分列 `visible_volume_mm3` / `hidden_volume_mm3`（`total_volume_mm3` 语义不变），隐藏件体积非零时给出说明；`get_inertia` 新增 `body_visible` 与 `body_visible_note`，`document=` 路线也不再固定读 MainBody，而是与不带参数时读**同一个** body。**P2-N2 `left` 与 `reply` 互相矛盾**：`_FRAME` 脚手架住在 `body.HybridShapes`，而删除查找只进 `part.HybridBodies`，于是 4 个名字「列得出来、删不掉」（实测：`Deleted 0 element(s) … No feature, sketch, GSD element or body named 'T5_Empty_FRAME.O'`，而 4 个元素就在树里）。现在两个容器都查；批量删除**先删平面再删它的三个点**（合成一次选择会让 update 失败），平面后面强制一次 update；`<sketch>_FRAME` 在它支撑的草图还在时**拒绝删除**（`FRAME_DATUM_IN_USE` 并指名该删哪张草图）；`frame_scaffolding` 标出 `sketch_present` 与 `orphans`，不再让读者以为草图还在。**P2-N3** `reorder_feature` 的建议改成三分叉（改深度 / 有下游就删了重画 + `insert_after` / 没下游才 `move_body`），并写明 `move_body` 的代价是死实体。另加 README 一节「本机做不到的四件事」。  · [变更日志](CHANGELOG.md) · [Releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases)
 
 > 让 AI 客户端通过 MCP，在 CATIA V5 里建**原生可编辑的实体特征**——并且每一步都能量回来。
 
@@ -138,6 +138,16 @@ python -m venv .venv
 | 参与开发 | [CONTRIBUTING.md](CONTRIBUTING.md) |
 
 ## 已知限制
+
+### 本机做不到的四件事（每一条都测过，不要再试）
+
+2026-11-23 的报告说这四项「分散在 5 个工具的正文里，调用方要踩 5 次才知道」，所以在这里并成一节。四项都是 **CATIA V5 这层 API 的限制**，不是本项目缺功能；每一条都给出实测日期与判据。
+
+1. **装配约束 / 固定件** —— `AddMonoEltCst` 对 14 个类型码一律 E_FAIL，而同一个调用在**草图**上成功（`catia_probe_assembly_constraints` 的对照实验，verdict `ENVIRONMENT_LIMITED`）。`Product.IsFixed` / `Move.IsFixed` / `IsInactive` / `IsRoot` / `IsReference` 全部 raise，所以 `catia_list_components` 的 `fixed` 字段是 `null`（读不到，不是没返回）。唯一可行的是装配自己的默认：**第一个插入的组件被固定**。想固定某件，就让它第一个进去。
+2. **特征方向不可改** —— `catia_edit_pad` 只改深度；`Pad.Direction` / `Reversed` / `Symmetric` / `FirstLimit.Type` 在本机全部 raise。方向错了只能删了重建（`insert_after` 可以把新特征插回原位）。
+3. **特征不可重排** —— `catia_reorder_feature` 拒绝，并给出位置与替代方案：改深度用 `edit_pad`；位置错且下游还有特征 → 删了重画 + `insert_after`；位置错且没有下游 → `catia_move_body`（代价是**死实体**）。`insert_after` 只管**新建**特征的位置。
+4. **包围盒没有精确解** —— `Measurable.GetBox` / `GetBoundingBox` / `CenterOfGravity` / `MomentsOfInertia` / `GetPlane` / `GetAxisSystem` 在整体与单个面上**全部 raise**，`Part`/`Body`/`SPAWorkbench` 也没有 bbox 成员。曲面极值只能来自 STL 网格（0.5–0.7 % 下界），`method='exact'` 不是这套 API 能给的东西。
+
 
 - **平面不等于 datum，就像「南边」不等于一个门牌号。** `frame` 平面是无限的，两个草图落在同一平面上不代表它们踩在同一个基准上：实测 z=0 上相距 50 mm 的两个 datum 报出相同 H/V、不同原点，删其一的基准对面另一个毫无影响。判「谁还站在这个 datum 上」要比完原点与两个方向；退化成比平面会把 P06 这类多轮位零件全部误拒。另记一条同源的坑：**`getattr` 成功不代表成员存在**——`Sketch.Reference` / `.Support` / `.Plane` 都会返回一个占位对象，真去用就报 `'NoneType' object has no attribute 'Name'`，所以「能不能读」必须靠用一次来判断。
 - **由输入算出来的量，不是观测。** 上一版用「过两端点和弧中点的圆」去闭合轮廓，而那个中点是**由半径算出来的**——把它当第三个约束喂回去，等于把全部残差挤进半径，浅弧上放大 `1/(1−cos(θ/2))`（28° 弧 34 倍、90° 弧 3.4 倍）。判据就是**放大倍数**本身：端点偏 0.0027 mm 却挪了 0.09 mm，这个倍数在说「哪个自由度被冻结了」。正解是保住那个有物理含义的量（半径/同轴），只移动派生不出来的那个（圆心）——两点 + 半径只剩一个自由度，选离调用方最近的那一支。

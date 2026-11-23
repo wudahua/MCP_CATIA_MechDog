@@ -3128,12 +3128,71 @@ class MeasurementTools:
                 return opened
         return None
 
+    def _active_document_is(self, part: Any) -> bool:
+        """Is this part's document the ACTIVE one? Then its active body is ours.
+
+        The session's active body (``conn.get_active_part_body``) belongs to the
+        active document, so it may only be used for a part whose document is
+        active. Comparing names is enough and avoids activating anything - the same
+        rule the tensor route follows.
+        """
+        try:
+            active = self.conn.active_document
+            document = part.Parent
+            return str(getattr(active, "Name", "")) == str(getattr(document, "Name", ""))
+        except Exception:  # noqa: BLE001 - a document being closed answers nothing
+            return False
+
+    @staticmethod
+    def _body_hidden(part: Any, body: Any) -> bool | None:
+        """``True`` when the body is hidden, ``False`` shown, ``None`` unreadable.
+
+        ``Body.Visible`` / ``.Show`` / ``.IsVisible`` / ``.Hidden`` all raise
+        ``Item.X`` on this build (measured on B30 2026-11-23), and a Part has no
+        visibility member of its own either. The one reading that works is the one
+        ``catia_set_visibility`` writes: select the node and ask
+        ``VisProperties.GetShow()``, which answers ``(0, 1)`` hidden and
+        ``(0, 0)`` shown. It is asked through the PART'S OWN selection, so naming a
+        document that is not the active one does not move the active document -
+        the same rule the inertia tensor route follows.
+        """
+        try:
+            selection = part.Parent.Selection
+        except Exception:  # noqa: BLE001 - a part left behind by a closed doc
+            return None
+        try:
+            selection.Clear()
+            selection.Add(body)
+            state = selection.VisProperties.GetShow()
+            return bool(state[1])
+        except Exception:  # noqa: BLE001 - an unreadable state is not "shown"
+            return None
+        finally:
+            try:
+                selection.Clear()
+            except Exception:  # noqa: BLE001
+                pass
+
     def _part_inertia(self, part: Any, density: float | None,
                       label: str) -> str:
         """Volume / area / centroid of a specific Part, by name or object."""
         started = time.perf_counter()
         doc = part.Parent
+        # WHICH BODY: the same one the no-argument route would measure. Until
+        # 0.3.165 this route always took MainBody while the active route took the
+        # session's active body, so naming the document and not naming it could
+        # answer two different solids - and after catia_move_body the moved one is
+        # the only one the caller cares about (2026-11-23 report, P1-N1, whose
+        # step 6 only worked because the active route reads the active body).
         body = part.MainBody
+        body_source = "main_body"
+        if self._active_document_is(part):
+            try:
+                candidate = self.conn.get_active_part_body()
+            except Exception:  # noqa: BLE001 - MainBody still answers
+                candidate = None
+            if candidate is not None:
+                body, body_source = candidate, "active_body"
         if body.Shapes.Count == 0:
             raise PreconditionRejected(self._no_solid_reason(part, body, label))
         # Where the milliseconds of this route go, measured rather than inferred.
@@ -3145,9 +3204,20 @@ class MeasurementTools:
         t_read = time.perf_counter()
         spa = doc.GetWorkbench("SPAWorkbench")
         measurable = spa.GetMeasurable(part.CreateReferenceFromObject(body))
-        payload: dict[str, Any] = {"document": label, "scope": "main_body",
-                                   "body": str(body.Name)}
+        payload: dict[str, Any] = {"document": label, "scope": body_source,
+                                   "body": str(body.Name),
+                                   "body_source": body_source}
         payload.update(self._measured_quantities(measurable))
+        hidden = self._body_hidden(part, body)
+        payload["body_visible"] = None if hidden is None else not hidden
+        if hidden:
+            payload["body_visible_note"] = (
+                f"the body measured here ('{body.Name}') is HIDDEN. Hiding does not "
+                "suppress: CATIA still counts it, and a part can hold a second, "
+                "visible body with the same volume (catia_move_body leaves exactly "
+                "that - the source hidden and the moved copy in a new body). "
+                "catia_list_bodies reports visible_volume_mm3 and "
+                "hidden_volume_mm3 separately.")
         measure_ms = round((time.perf_counter() - t_read) * 1000, 1)
         volume_mm3 = payload.get("volume_mm3")
         if density and volume_mm3 is not None:
@@ -3526,7 +3596,21 @@ class MeasurementTools:
         # 零件几何体 in work, and the reply said just "volume_mm3" both times - so
         # a plan with two bodies recorded one body's volume and looked like the
         # part's (2026-11-15 report, C6).
-        result: dict[str, Any] = {"scope": "active_body", "body": str(body.Name)}
+        result: dict[str, Any] = {"scope": "active_body", "body": str(body.Name),
+                                  "body_source": "active_body"}
+        # IS THE BODY IT MEASURED EVEN ON SCREEN? A hidden body still holds its
+        # volume, and catia_move_body leaves the source hidden while putting the
+        # moved solid in a new body - so "6000 mm3 at x=10" after a +50 mm move was
+        # a true reading of the wrong body (2026-11-23 report, P1-N1).
+        hidden = self._body_hidden(part, body)
+        result["body_visible"] = None if hidden is None else not hidden
+        if hidden:
+            result["body_visible_note"] = (
+                f"the body measured here ('{body.Name}') is HIDDEN - it is still in "
+                "the part and still counted, but it is not what is on screen. If "
+                "you just moved a solid, catia_move_body puts the moved copy in a "
+                "NEW body and switches to it; this reading is of the source. "
+                "catia_list_bodies shows both, with visible/hidden volumes.")
         # Same reader as the `document=` route: one key table for the same
         # reading (reported 2026-10-27 - `area_cm2` existed on this route only).
         t_read = time.perf_counter()

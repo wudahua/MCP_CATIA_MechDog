@@ -2005,13 +2005,20 @@ class PartDesignTools:
                     "it validates the names, and reports the feature's current "
                     "position, the position asked for and the order that would "
                     "have resulted, so the answer is a plan and not a shrug. "
-                    "It also says what to do instead - rebuild the tail, or use "
-                    "catia_edit_pad / catia_move_body when the real problem is a "
-                    "depth or a position. What CAN be placed is a NEW feature: "
-                    "catia_pad / catia_pocket / catia_hole take insert_after='凸台.1' "
-                    "and build directly after it (0.3.164), so an order that is "
-                    "wrong because a feature arrived late becomes delete-and-redo, "
-                    "not rebuild-everything. Pass force: true to re-read this "
+                    "It also says what to do instead, and the three answers are "
+                    "NOT interchangeable (the 2026-11-23 report, P2-N3, caught "
+                    "this one pointing at catia_move_body without its cost): "
+                    "(a) a wrong DEPTH or size -> catia_edit_pad, in place, the "
+                    "tree survives; (b) a wrong POSITION on a body with few "
+                    "features and nothing built after them -> catia_move_body, "
+                    "which is a rigid move but produces a DEAD SOLID (one "
+                    "CloseSurface, no sketch/pad/fillet history) in a new body - "
+                    "on a 15-feature part that is worse than rebuilding the tail; "
+                    "(c) a wrong position with features still to come -> delete "
+                    "that feature, redraw it, and put it back with insert_after "
+                    "(catia_pad / catia_pocket / catia_hole, 0.3.164) - the tail "
+                    "is rebuilt, but the history survives. Pass force: true to "
+                    "re-read this "
                     "build's interfaces and see whether a reorder member has "
                     "appeared (after a licence or release change)."
                 ),
@@ -8302,6 +8309,19 @@ class PartDesignTools:
                     break
             if feature is not None:
                 break
+            # A BODY ALSO HOLDS GSD ELEMENTS AND SKETCHES OF ITS OWN, in
+            # body.HybridShapes / body.HybridSketches - and this search never
+            # entered them. So the frame scaffolding (<sketch>_FRAME and .O/.U/.V)
+            # could be LISTED by catia_list_features, COUNTED by catia_list_bodies
+            # and reported as still present by a plan's rollback, while deleting
+            # it by name answered "No feature, sketch, GSD element or body named
+            # ..." (reproduced on B30 2026-11-23; 2026-11-23 report P2-N2:
+            # data.rollback.left listed the four names while data.rollback.reply
+            # said they did not exist). The 0.3.146 frame cleanup only worked
+            # because it deletes through its own selection instead of this lookup.
+            feature, kind = self._find_in_body_hybrids(body, target)
+            if feature is not None:
+                break
         if feature is None:
             # GSD elements are not in a body's Shapes: they live in HybridBodies,
             # which this search never entered, so every failed loft / bridging /
@@ -8439,6 +8459,37 @@ class PartDesignTools:
                     ],
                 )
             self._deleted_sketch_datums[target] = self._sketch_axes(feature)
+        # A FRAME PLANE THAT A LIVE SKETCH STANDS ON CANNOT GO. Measured on B30
+        # 2026-11-23: deleting `<sketch>_FRAME` and its three points while the
+        # sketch was still in the tree answered "THE FINAL UPDATE FAILED (方法
+        # Update 失败)" - the sketch's support is the thing that just went, so the
+        # part cannot rebuild. The name is the only handle CATIA gives for this
+        # ownership (Sketch.Plane and Sketch.Support do not exist, 0.3.146), and
+        # the convention is this server's own: a frame sketch's datum is
+        # `<sketch>_FRAME`. Refusing here costs one name split and one sketch-list
+        # read; the alternative is a part in error and a caller who has to work out
+        # why.
+        if self._frame_role(target) == "plane":
+            owner = str(target).split("_FRAME", 1)[0]
+            alive = self._sketch_names()
+            if owner in alive and owner not in (also or set()):
+                raise ArgumentRejected(
+                    f"'{target}' is the datum '{owner}' stands on, and '{owner}' is "
+                    "still in the tree - deleting its support leaves the part "
+                    "unable to update (measured on B30 2026-11-23: the rebuild "
+                    f"fails at '{owner}'). Delete the SKETCH instead: "
+                    f"catia_delete_feature(feature_name='{owner}') takes the "
+                    "profile and, with cleanup_frame_datum='auto', this scaffolding "
+                    "with it. Nothing was deleted.",
+                    code="FRAME_DATUM_IN_USE", stage="validate", modified=False,
+                    data={"frame": target, "sketch": owner},
+                    next_actions=[
+                        f"catia_delete_feature(feature_name='{owner}', "
+                        "cleanup_frame_datum='auto')",
+                        "or pass both names in one call - names=['" + owner + "', '"
+                        + str(target) + "'] - which deletes the sketch first",
+                    ])
+
         sel = self.conn.hso
         try:
             sel.Clear()
@@ -8533,7 +8584,20 @@ class PartDesignTools:
                 pass
         if defer_update:
             # The caller updates once, for the whole list. Saying anything about
-            # the part's state here would be a verdict on a half-applied batch.
+            # the part's state here would be a verdict on a half-applied batch -
+            # EXCEPT for one element. A frame PLANE is defined by the three points
+            # that carry its name, and CATIA cannot rebuild the part while both are
+            # gone in the same deferred batch: measured on B30 2026-11-23, deleting
+            # the plane and then its points and updating ONCE answered "方法
+            # Update 失败" on a part that had just been emptied. `_delete_frame_
+            # scaffold` has updated between the two since 0.3.146 for this reason;
+            # a batch that contains a plane now does the same and pays one extra
+            # update.
+            if self._frame_role(target) == "plane":
+                try:
+                    part.Update()
+                except Exception:  # noqa: BLE001 - the caller's own update reports
+                    pass
             return self._deleted_message(kind, target, before, args)
         try:
             part.Update()
@@ -8750,7 +8814,29 @@ class PartDesignTools:
         while remaining:
             ready = [name for name in remaining
                      if not (set(profiles.get(name, ())) & set(remaining)
-                             - {name})]
+                             - {name})
+                     # A FRAME PLANE BEFORE ITS OWN POINTS. `<sketch>_FRAME` is
+                     # built from `_FRAME.O/.U/.V`; deleting the points first
+                     # leaves the plane defining nothing, and the update at the
+                     # end of the batch FAILS (measured on B30 2026-11-23: 4
+                     # elements deleted in the order a tree listing gives them -
+                     # .O, .U, .V, then the plane - and "THE FINAL UPDATE FAILED"
+                     # on a part that had just been emptied). The plane goes
+                     # first, which is the order `_delete_frame_scaffold` has
+                     # documented since 0.3.146.
+                     # -{name}, because the PLANE's own name has no dot:
+                     # "T5_FRAME".rsplit(".", 1)[0] is "T5_FRAME", i.e. itself,
+                     # and that read as "blocked by itself" - the first version
+                     # fell through to the caller's order and reproduced exactly
+                     # the failure it was written to prevent.
+                     and str(name).rsplit(".", 1)[0] not in (set(remaining)
+                                                            - {name})
+                     # ... and the plane goes LAST of all when the sketch it
+                     # supports is in the same batch: the sketch has to be gone
+                     # first, or the rebuild has no support to build against.
+                     and not (self._frame_role(name) == "plane"
+                              and str(name).split("_FRAME", 1)[0]
+                              in (set(remaining) - {name}))]
             if not ready:
                 # A cycle cannot happen with a profile relation, but a name that
                 # consumes itself would make this loop run forever - say nothing
@@ -9136,6 +9222,28 @@ class PartDesignTools:
         return (f" ONE update at the end: the part updates, {len(removed)} "
                 f"element(s) removed ({names}).")
 
+    @staticmethod
+    def _frame_role(name: str) -> str | None:
+        """``"plane"`` / ``"point"`` for frame scaffolding, else ``None``.
+
+        ``<sketch>_FRAME`` (and a retried ``<sketch>_FRAME.2``) is the plane built
+        through three points; ``<sketch>_FRAME.O|U|V`` are those points. The plane
+        is DEFINED by them, so it has to go before them - that ordering is what
+        ``_delete_frame_scaffold`` has documented since 0.3.146 and what the batch
+        delete now follows (measured on B30 2026-11-23: one selection with all
+        four left the part unable to update).
+        """
+        text = str(name or "")
+        if "_FRAME" not in text:
+            return None
+        rest = text.split("_FRAME", 1)[1]
+        segments = [piece for piece in rest.split(".") if piece]
+        if segments and segments[-1] in ("O", "U", "V"):
+            return "point"
+        if not segments or (len(segments) == 1 and segments[0].isdigit()):
+            return "plane"
+        return None
+
     def _delete_owned(self, names: list[str]) -> tuple[list[str], list[str]]:
         """Delete the construction elements a feature created, in ONE selection.
 
@@ -9164,19 +9272,45 @@ class PartDesignTools:
         targets = [(name, obj) for name in wanted
                    for obj in found.get(name, [])]
 
-        if targets:
+        # A FRAME PLANE AND ITS OWN POINTS CANNOT GO IN ONE SELECTION. Measured on
+        # B30 2026-11-23: four scaffolding elements deleted together answered
+        # "THE FINAL UPDATE FAILED (方法 Update 失败)" on a part that had just been
+        # emptied - the plane is defined by those points, so the rebuild in
+        # between sees a plane whose definition is gone. `_delete_frame_scaffold`
+        # has deleted them plane-first since 0.3.146 for exactly this reason; the
+        # batch does the same now, and pays the extra update only when scaffolding
+        # is in the list.
+        planes = [pair for pair in targets if self._frame_role(pair[0]) == "plane"]
+        points = [pair for pair in targets if self._frame_role(pair[0]) == "point"]
+        plain = [pair for pair in targets if self._frame_role(pair[0]) is None]
+        passes = [plain] if plain else []
+        if planes:
+            passes.append(planes + points)
+        elif points:
+            passes.append(points)
+        for pass_index, batch in enumerate(passes):
+            if pass_index:
+                # The update BETWEEN the plane and its points is the whole point
+                # of splitting them; a failure here is reported by the caller's
+                # own final update, which runs after this.
+                try:
+                    part.Update()
+                except Exception:  # noqa: BLE001 - the caller reports the state
+                    pass
+            if not batch:
+                continue
             try:
                 sel.Clear()
-                for _name, obj in targets:
+                for _name, obj in batch:
                     sel.Add(obj)
                 sel.Delete()
-                removed.extend(name for name, _obj in targets)
+                removed.extend(name for name, _obj in batch)
             except Exception:  # noqa: BLE001 - fall back to one at a time
                 try:
                     sel.Clear()
                 except Exception:  # noqa: BLE001
                     pass
-                for name, obj in targets:
+                for name, obj in batch:
                     try:
                         sel.Clear()
                         sel.Add(obj)
@@ -9237,6 +9371,37 @@ class PartDesignTools:
 
         walk(part.HybridBodies)
         return found
+
+    @staticmethod
+    def _find_in_body_hybrids(body: Any, target: str) -> tuple[Any, str]:
+        """A GSD element or a sketch living in a BODY; ``(node, kind)``.
+
+        Both containers exist on every body (``body.HybridShapes`` holds GSD
+        elements and, on this build, the frame datum scaffolding that
+        ``catia_create_sketch(plane={type:'frame'})`` leaves behind; a sketch drawn
+        inside a body's own set lands in ``body.HybridSketches``). Measured on B30
+        2026-11-23: a frame sketch left ``T5_Empty_FRAME.O/.U/.V`` and
+        ``T5_Empty_FRAME`` in ``body.HybridShapes``, while ``part.HybridBodies``
+        stayed EMPTY - which is why the geometrical-set search never saw them.
+
+        Kind is "sketch" for HybridSketches so the open-sketch guard and the
+        consumed-sketch guard still apply to it; everything else is a GSD element.
+        """
+        for collection, label in (("HybridShapes", "GSD element"),
+                                  ("HybridSketches", "sketch")):
+            try:
+                items = getattr(body, collection)
+                count = int(items.Count)
+            except Exception:  # noqa: BLE001 - not every body answers both
+                continue
+            for position in range(1, count + 1):
+                try:
+                    node = items.Item(position)
+                except Exception:  # noqa: BLE001 - one unreadable element
+                    continue
+                if str(getattr(node, "Name", "")) == target:
+                    return node, label
+        return None, ""
 
     @staticmethod
     def _find_in_geometrical_sets(part: Any, target: str
@@ -9716,6 +9881,19 @@ class PartDesignTools:
         owners: dict[str, int] = {}
         legacy = 0
         total = 0
+        # WHICH OWNERS STILL EXIST. The scaffolding outlives its sketch, so a
+        # count alone lets a reader believe `T5_Empty` is still there when only
+        # its frame is (2026-11-23 report, P2-N2: "12 elements, and one of the
+        # three sketches no longer exists"). Read from the body's own Sketches,
+        # not from this session's records: a sketch deleted by another client, or
+        # by a rollback, is gone whether or not this process drew it.
+        present: set[str] = set()
+        readable = True
+        try:
+            for position in range(1, int(body.Sketches.Count) + 1):
+                present.add(str(body.Sketches.Item(position).Name))
+        except Exception:  # noqa: BLE001 - no sketch list, no claim either way
+            readable = False
         try:
             shapes = body.HybridShapes
             for index in range(1, int(shapes.Count) + 1):
@@ -9729,12 +9907,29 @@ class PartDesignTools:
                     total += 1
         except Exception:  # noqa: BLE001 - a listing must not fail over this
             return {"element_count": 0, "sketches": [], "legacy": 0}
-        return {
-            "element_count": total,
-            "sketches": [{"sketch": owner, "elements": count}
-                         for owner, count in sorted(owners.items())],
-            "legacy": legacy,
-        }
+        entries = []
+        for owner, count in sorted(owners.items()):
+            entry: dict[str, Any] = {"sketch": owner, "elements": count}
+            if readable:
+                # Only a readable sketch list can say "gone". A body whose
+                # Sketches cannot be read says NOTHING rather than "absent".
+                entry["sketch_present"] = owner in present
+            entries.append(entry)
+        orphans = [entry["sketch"] for entry in entries
+                   if entry.get("sketch_present") is False]
+        result: dict[str, Any] = {"element_count": total, "sketches": entries,
+                                  "legacy": legacy}
+        if orphans:
+            result["orphans"] = orphans
+            result["orphans_note"] = (
+                f"{len(orphans)} of these owner sketches are GONE ("
+                + ", ".join(orphans[:6])
+                + "), so what is left is pure scaffolding: nothing stands on those "
+                "datums and nothing will. Delete them by name - catia_delete_feature"
+                "(names=['<sketch>_FRAME', '<sketch>_FRAME.O', '<sketch>_FRAME.U', "
+                "'<sketch>_FRAME.V']) - which works since 0.3.165: the elements live "
+                "in the body's own HybridShapes and the lookup used to miss them.")
+        return result
 
     @staticmethod
     def _shared_sketch_names(part: Any) -> dict[str, int]:
@@ -10402,6 +10597,57 @@ class PartDesignTools:
             active = None
         return active if active is not None else part.MainBody
 
+    def _activate_body_after_move(self, part: Any, moved: Any) -> str:
+        """Point the session at the moved body, and say what a read-back proved.
+
+        THE MEASUREMENT AFTER A MOVE WAS THE PRE-MOVE ONE. `catia_move_body` built
+        the moved solid in a NEW body and left the session on the source (that is
+        what `_hide_node`/`InWorkObject` restoration did), while
+        `catia_get_inertia` measures `conn.get_active_part_body()` - so the next
+        call answered the source body's centre of gravity, 50 mm away from where
+        the caller had just put the solid, with no warning anywhere. Reproduced on
+        B30 2026-11-23 (2026-11-23 report, P1-N1): a +50 mm move of a block whose
+        centroid was x=10 still read x=10, and only `catia_set_active_body` on the
+        new body made it read 60.
+
+        The moved solid is the thing the caller asked for, so the session follows
+        it. The assignment is READ BACK rather than assumed: on this build
+        InWorkObject can report success while CATIA keeps pointing somewhere else
+        (0.3.x, measured), and "the next measurement is the moved one" is a claim
+        about state, not about a call returning.
+        """
+        name = str(getattr(moved, "Name", ""))
+        try:
+            self.conn.active_body = moved
+        except Exception:  # noqa: BLE001 - the note below still has to be honest
+            pass
+        try:
+            part.InWorkObject = moved
+        except Exception:  # noqa: BLE001 - reported by the read-back
+            pass
+        try:
+            active = self.conn.get_active_part_body()
+            active_name = str(active.Name) if active is not None else ""
+        except Exception:  # noqa: BLE001
+            active_name = ""
+        in_work = self._in_work_name(part)
+        if active_name == name:
+            return (
+                f"The ACTIVE body is now '{name}' (read back: active='{name}'"
+                + (f", in_work_object='{in_work}'" if in_work else "")
+                + "), so catia_get_inertia measures the MOVED solid. That is the "
+                "change that makes the next measurement honest: until 0.3.165 this "
+                "call left the session on the source body, and the next "
+                "catia_get_inertia answered the PRE-move centre of gravity.")
+        return (
+            f"The active body is STILL '{active_name or '?'}' - switching to "
+            f"'{name}' did not take (read back: active='{active_name}', "
+            f"in_work_object='{in_work or '?'}'). The moved solid is real; what is "
+            f"wrong is which body the session points at. Call "
+            f"catia_set_active_body(name='{name}') before measuring, or "
+            "catia_get_inertia will answer the source body's numbers - and they "
+            "are the numbers from BEFORE the move.")
+
     def _hide_node(self, node: Any) -> bool | None:
         """Hide one tree node; ``True``/``False`` from the read-back, None if it
         could not even be asked. SetShow(0) shows and SetShow(1) hides here."""
@@ -10608,6 +10854,11 @@ class PartDesignTools:
         surface_hidden = self._hide_node(translate) if translate is not None else None
         hide_wanted = bool(args.get("hide_source", True))
         source_hidden = self._hide_node(body) if hide_wanted else None
+        # THE SESSION FOLLOWS THE SOLID (0.3.165). See _activate_body_after_move:
+        # without this the very next catia_get_inertia answered the source body,
+        # i.e. the geometry as it was BEFORE the move.
+        activate_note = self._activate_body_after_move(
+            part, part.Bodies.Item(moved_name))
         self.conn.refresh_display()
 
         feature_names = []
@@ -10625,6 +10876,7 @@ class PartDesignTools:
             + f") mm. The solid is now in body '{moved_name}'"
             + (f" (feature(s): {', '.join(feature_names)})" if feature_names else "")
             + ".\n"
+            + activate_note + "\n"
             "WHY IT IS BUILT THIS WAY: CATIA V5 has no transform for a solid. "
             "Part, Body and Shape declare no move/translate/position member; "
             "ShapeFactory's AddNewTranslate2 and AddNewAxisToAxis2 return a feature "
@@ -10892,9 +11144,15 @@ class PartDesignTools:
                 "catia_delete_feature removes the features that must come after "
                 "the insertion point, and they are re-created from their own "
                 "sketches - that is the only way to change an order on this build",
-                "If the real problem is a wrong depth, catia_edit_pad changes it "
-                "in place; if it is a wrong position, catia_move_body moves the "
-                "whole solid",
+                "A wrong DEPTH is not a reorder: catia_edit_pad changes it in "
+                "place and the tree survives",
+                "A wrong POSITION with features still built after it: delete it "
+                "(catia_delete_feature), draw it again, and put it back where it "
+                "belongs with insert_after - the tail is rebuilt but the history "
+                "stays. catia_move_body is the OTHER answer: it moves the solid "
+                "rigidly but returns a DEAD SOLID (one CloseSurface, no sketch, "
+                "pad or fillet history) in a new body, so use it only when there "
+                "is nothing downstream to lose",
                 "Pass force: true to re-read this build's interfaces and see "
                 "whether an ordering member has appeared since",
             ])
@@ -11041,6 +11299,8 @@ class PartDesignTools:
 
         out = []
         total_volume = 0.0
+        visible_volume = 0.0
+        hidden_volume = 0.0
         total_faces = 0
         total_excluded = 0
         for i in range(1, bodies.Count + 1):
@@ -11051,6 +11311,26 @@ class PartDesignTools:
                 "features": body.Shapes.Count,
                 "active": str(body.Name) == active_name,
             }
+            # IS THIS BODY SHOWN? The member does not exist - measured on B30
+            # 2026-11-23, Body.Visible / .Show / .IsVisible / .Hidden all raise
+            # "Item.X" - so the reading is the one catia_set_visibility already
+            # uses: select the body and ask VisProperties.GetShow, which answers
+            # (0, 1) hidden and (0, 0) shown. The 2026-11-23 report (P1-N1) needed
+            # it because a hidden body still holds volume: after catia_move_body
+            # the source is hidden and the part holds 6000 + 6000, and a total
+            # alone reads like "this part is 12 cm3".
+            try:
+                sel.Clear()
+                sel.Add(body)
+                state = sel.VisProperties.GetShow()
+                entry["visible"] = not bool(state[1])
+            except Exception:  # noqa: BLE001 - an unreadable state is not "shown"
+                entry["visible"] = None
+            finally:
+                try:
+                    sel.Clear()
+                except Exception:  # noqa: BLE001
+                    pass
             # An empty body has nothing to measure; that is normal for a freshly
             # created one, not an error.
             if body.Shapes.Count:
@@ -11061,6 +11341,10 @@ class PartDesignTools:
                         volume = measurable.Volume * 1e9
                         entry["volume_mm3"] = round(volume, 1)
                         total_volume += volume
+                        if entry.get("visible") is False:
+                            hidden_volume += volume
+                        elif entry.get("visible") is True:
+                            visible_volume += volume
                     except Exception:
                         pass
                 try:
@@ -11096,9 +11380,29 @@ class PartDesignTools:
         payload = {
             "bodies": out,
             "count": len(out),
+            # total_volume_mm3 stays "every body", because that is what a part
+            # with several solids MEANS (Merge = false) and a caller summing it
+            # must keep working. What the 2026-11-23 report (P1-N1) ran into is
+            # that a hidden body keeps its volume, so after catia_move_body the
+            # total is the source PLUS the moved copy and reads like the part
+            # doubled. Both halves are published now, and the note below fires
+            # exactly in that case.
             "total_volume_mm3": round(total_volume, 1),
+            "visible_volume_mm3": round(visible_volume, 1),
+            "hidden_volume_mm3": round(hidden_volume, 1),
             "total_faces": total_faces,
         }
+        if hidden_volume > 0:
+            payload["volume_note"] = (
+                f"{hidden_volume:.1f} mm3 of the total sits in body(ies) that are "
+                "HIDDEN. Hiding a body does not suppress it: CATIA keeps it in the "
+                "part's mass properties, and catia_get_inertia measures only the "
+                "ACTIVE body - so total_volume_mm3 here and volume_mm3 there "
+                "answer two different questions. This is what catia_move_body "
+                "leaves behind (the source keeps its features and is hidden, the "
+                "moved solid is a new body); delete the source body if you meant "
+                "to replace it, and read visible_volume_mm3 for the solid you can "
+                "see.")
         # A STALE HANDLE IS NOT A SILENT "NO ACTIVE BODY" (0.3.95). A boolean
         # consumes its tool body; with conn.active_body still pointing at the
         # consumed one, every entry above reads active:false and the caller is

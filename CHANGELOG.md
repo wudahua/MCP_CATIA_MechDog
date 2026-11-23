@@ -2,6 +2,85 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.165] — 2026-11-23 · a true reading of the wrong solid
+
+The 2026-11-23 report re-opened its four parts and fifteen instances on 0.3.164
+and re-measured them: **identical, to the digit** (Step 2227.5 / Box 89495.6695 /
+Belt 237427.178 / Part 1 621566.7907, assembly 975219.6382 at (568.668, 384.854,
+139.5017)), and the three P0s from the previous round closed. It found one new P1
+and two P2s. All three reproduced on B30 before anything was changed
+(`scripts/b30_v0502_report_probe.py`).
+
+**P1-N1 - `catia_move_body` moved the solid and left the session behind.**
+`catia_get_inertia` reads `conn.get_active_part_body()`, and the move left that on
+the SOURCE body while the moved solid sat in a new one. Reproduced: a 20x30x10
+block (centroid x = 10) moved +50 mm, then measured - **x = 10**, no warning
+anywhere, `scope: "active_body"` and `body: "零件几何体"` saying only which body,
+never that it was the old one. `catia_list_bodies` totalled both solids
+(6000 + 6000 = 12000), because hiding a body does not suppress it. Three changes:
+
+* the move now **switches the active body** to the moved one and reads it back
+  (`active='零件几何体_MOVED', in_work_object='零件几何体_MOVED'`), and the reply
+  says so AND says what the old behaviour cost - measured after the fix: x = 60;
+* `catia_list_bodies` publishes `visible` per body plus `visible_volume_mm3` and
+  `hidden_volume_mm3`, and a `volume_note` when anything is hidden. `total_volume
+  _mm3` keeps its meaning ("every body", which is what a multi-body part is) so a
+  caller's arithmetic does not change under it - measured: 12000 total, 6000
+  visible, 6000 hidden;
+* `catia_get_inertia` carries `body_visible` and, when the body it measured is
+  hidden, a note naming the case. The `document=` route no longer insists on
+  `MainBody`: when that document is the active one it measures the same body the
+  no-argument route would, and says which (`body_source`).
+
+**P2-N2 - `data.rollback.left` listed four elements that `data.rollback.reply`
+said did not exist.** Both were true, which is why it was not cosmetic: the frame
+scaffolding (`T5_Empty_FRAME` and .O/.U/.V) lives in **`body.HybridShapes`**, the
+rollback's `left` walked the tree and saw them, and `catia_delete_feature` looked
+in `part.HybridBodies`, which was empty. Reproduced word for word: "Deleted 0
+element(s) for 4 name(s) given. Failed (4): 'T5_Empty_FRAME.O' (No feature,
+sketch, GSD element or body named ...)" with all four sitting in the tree. The
+delete now searches both containers. Two follow-ons came out of the measurement:
+
+* deleting a frame plane and its three points **in one selection breaks the
+  rebuild** ("THE FINAL UPDATE FAILED" on a part that had just been emptied).
+  The batch now orders the plane before its own points AND forces one update after
+  it, which is what `_delete_frame_scaffold` has done since 0.3.146. Measured
+  after the fix: plane, update, points, update - "the part updates";
+* a plane whose sketch still stands on it is **refused** (`FRAME_DATUM_IN_USE`,
+  naming the sketch to delete instead), because CATIA cannot rebuild a sketch
+  whose support just went. Measured both ways.
+
+`frame_scaffolding` also stops implying the owner is alive: each entry carries
+`sketch_present` (only when the sketch list could be read - an unreadable list is
+not evidence of absence) and the payload adds `orphans` + a note saying how to
+delete them.
+
+**P2-N3 - the reorder advice sent a 15-feature part into a dead solid.**
+`catia_reorder_feature` said "use catia_edit_pad / catia_move_body when the real
+problem is a depth or a position", and `catia_move_body` itself documents that its
+result has no history. The advice is now a three-way branch: a wrong depth ->
+`catia_edit_pad` (in place); a wrong position with features after it -> delete and
+redraw, then `insert_after`; a wrong position with nothing downstream ->
+`catia_move_body`, with its cost in the same sentence.
+
+**Two claims in the report did not reproduce**, and the measurement is here so the
+next reader does not have to take either on trust:
+
+* "`catia_delete_feature(names=['倒圆角.*'])` is not supported" - it is, since
+  0.3.161. Measured on B30: `Expanded '倒圆角.*' matched 4 element(s): 倒圆角.13,
+  .14, .18, .20. Deleted 4 element(s)`;
+* "`catia_list_components` does not return `fixed`" - it does, as `null`, because
+  it cannot be read. It was missing from the `names_only: true` shape only, which
+  is exactly the shape that omits everything but identity; both shapes carry it
+  now, from one class constant (`FIXED_STATE_NOTE`) so the two cannot drift.
+
+**README gained the section the report asked for** - 「本机做不到的四件事」:
+assembly constraints/fixing, feature direction, feature reordering, and an exact
+bounding box, each with the tool that answers it in detail.
+
+Tests 2627 (14 new in `test_reported_issues_2026_11_23_v0503.py`). B30 acceptance
+`b30_v0503_acceptance.py` 23/23.
+
 ## [0.3.164] — 2026-11-23 · `insert_after`: the half of "reorder" this build can do
 
 0.3.163 measured that no interface on this build can move an existing feature,

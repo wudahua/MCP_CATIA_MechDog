@@ -2489,6 +2489,20 @@ class AssemblyTools:
             "catia_new_product), then list again."
         )
 
+    #: One fact, one string: "is this instance fixed" cannot be read on this build.
+    #: It is published in BOTH shapes of catia_list_components (names_only and the
+    #: full listing) because the 2026-11-23 report looked at one of them and said
+    #: the field was missing - a fact that lives in two places has to be one value.
+    FIXED_STATE_NOTE = (
+        "unknown - this build cannot read it. Probed on B30 2026-11-23: "
+        "Product.IsFixed, Product.Move.IsFixed, Product.IsInactive, "
+        "Product.IsRoot and Product.IsReference all raise. What DOES work is "
+        "the assembly's own default: the FIRST component inserted is fixed by "
+        "CATIA, every later one floats - and there is no call here that can "
+        "change that, because a fixed component is a constraint and "
+        "catia_fix_constraint refuses on this environment (AddMonoEltCst "
+        "E_FAIL on 14 codes). Put the instance that must be fixed FIRST.")
+
     def _list_components(self, part_number: str | None = None,
                          names_only: bool = False,
                          include_color: bool = False,
@@ -2625,12 +2639,14 @@ class AssemblyTools:
                 "components": [],
                 "count": 0,
                 "occurrence_scope": "per_part",
+                "fixed_state": self.FIXED_STATE_NOTE,
                 "note": ("the active assembly holds no component, so this is an "
                          "empty list and not a failure - add one with "
                          "catia_add_component"),
             }
             if names_only:
-                payload["read"] = ("index, name, part_number and occurrence only")
+                payload["read"] = ("index, name, part_number, occurrence and fixed "
+                                   "only")
             else:
                 payload["convention"] = "matrix"
             return json.dumps(payload, indent=2, ensure_ascii=False)
@@ -2651,15 +2667,7 @@ class AssemblyTools:
         # is the honest answer, and it stops the next caller looking.
         for entry in components:
             entry["fixed"] = None
-        payload["fixed_state"] = (
-            "unknown - this build cannot read it. Probed on B30 2026-11-23: "
-            "Product.IsFixed, Product.Move.IsFixed, Product.IsInactive, "
-            "Product.IsRoot and Product.IsReference all raise. What DOES work is "
-            "the assembly's own default: the FIRST component inserted is fixed by "
-            "CATIA, every later one floats - and there is no call here that can "
-            "change that, because a fixed component is a constraint and "
-            "catia_fix_constraint refuses on this environment (AddMonoEltCst "
-            "E_FAIL on 14 codes). Put the instance that must be fixed FIRST.")
+        payload["fixed_state"] = self.FIXED_STATE_NOTE
         if broken:
             # The repair is ONE call per part, not one per instance (2026-11-21
             # report P1-11: 8 broken instances meant 8 calls, each of which then
@@ -2708,9 +2716,14 @@ class AssemblyTools:
                        "named, so they are not in that call." if unnamed else "")
                 )
         if names_only:
-            payload["read"] = ("index, name, part_number and occurrence only - "
-                               "no position, no rotation, no broken-link check, "
-                               "so no 'convention' anywhere in this reply")
+            # `fixed` is in every entry in BOTH shapes; it is `null` because it
+            # cannot be read (see FIXED_STATE_NOTE). Omitting the key in this
+            # shape is what made the report say the field did not exist.
+            for entry in components:
+                entry.setdefault("fixed", None)
+            payload["read"] = ("index, name, part_number, occurrence and fixed "
+                               "only - no position, no rotation, no broken-link "
+                               "check, so no 'convention' anywhere in this reply")
         else:
             payload["convention"] = "matrix"
         # Always an object, never a bare list: a caller that has to branch on the
