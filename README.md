@@ -1,12 +1,12 @@
-# MCP_CATIA_MechDog 0.3.161
+# MCP_CATIA_MechDog 0.3.162
 
-![version](https://img.shields.io/badge/version-0.3.161-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![CATIA](https://img.shields.io/badge/CATIA-V5%20R30%20(B30)-orange) ![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20http-purple)
+![version](https://img.shields.io/badge/version-0.3.162-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![CATIA](https://img.shields.io/badge/CATIA-V5%20R30%20(B30)-orange) ![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20http-purple)
 
-当前正式版 **0.3.161**——2026-11-23 的报告用本 MCP 从一句需求建了 4 个零件 + 15 实例装配，约 160 次调用，四个零件都落在了体积/面积/包围盒容差内；但**三个 P0 的共同形状是「返回成功而几何不是要的那个」**。**P0-1 180° 弧方向静默判反**：正好半圆时两个方向扫掠都是 π，于是「是否超过半圈」由坐标落在对径点哪一侧的浮点噪声决定（报告里是 4.0e-08 rad，而阈值是 1e-9）——8 个圆头 3 个翻、5 个没翻，看起来像随机；回执一个字都没说。现在 ±1e-6 rad 内的扫掠**直接取 π** 并保留 `direction`，点式与角式共用同一条规则（原来是两份差 1e-9 的拷贝），并且**回执打印弧的中点（bulge apex）**，画的是哪一半可以直接读出来。本机实测：报告那条弧从 (216.2036, 22.2279) 纠正为 (206.1402, 15.1814)，用它建的 125 mm 胶囊拉伸 **16541.7904 mm³ 对解析值 16541.7903**。**P0-2 省略棱参数的圆角只做了 4/12 却说 ok:true**：枚举路径用 `strict=False`，理由是「这些棱不是你选的」——理由对，但对调用者错：首句写着「Every edge ... enumerated」，4/12 埋在正文里，现在抛 `PARTIAL_EDGES_FAILED` 并带 `done`/`applied`/`rejected_reasons`/`self_enumerated`，`modified:true`（确实建成了四条），并把报告验证过的配方写进 next_actions：4 条平行棱一次 + 每端 1 条棱 `propagation='tangency'`。本机实测：一次调用 4/12、V 89725.3096（报告的 89725.31），配方给出 **26 面/48 棱/24 顶点、V 89495.6695**——逐位相同。**P0-3 回滚删正在编辑的草图会弹模态框卡死会话**：现在回滚**先关**那张草图并点名，`catia_delete_feature` 也改成动手前就拒；并把批量里每个草图的绝对轴系**在删除之前**读出来，级联消失的草图不再留下孤立的 `_FRAME`；批量结束时被别的东西带走的名字不再算「删不掉」。本机实测：6 个元素（含 frame 脚手架）全清、`verified:true`、不再卡。另修 **P1-1**（弦==直径被当矛盾，`CHORD_TOL`=1e-5 且报文印阈值）、**P1-2**（开放轮廓预检 1e-6 比记录本身还精细，改成 1e-3 并打印实际间隙）、**P1-3**（`names` 支持 `*`/`?` 通配，按当前树展开并把展开结果写进回执；匹配不到就拒）、**P2-1**（`catia_set_visibility` 收组件实例名，并用 `VisProperties.GetShow` **回读** (0,1)/(0,0)）、**P2-3**（共用端点被误报自交：新增 `seam` 类，并给出到端点的实测距离）、**P1-4**（新工具 **`catia_edit_pad`**：改已建特征的深度，25×45×80 改 20 → 22500.0000 mm³ 并报出 1125 mm² 的隐含面积；方向仍不可读写，回执直说）、**P1-5/P2-2**（`fixed` 与 `method="exact"` 都不可得，成员逐一点名实测）。  · [变更日志](CHANGELOG.md) · [Releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases)
+当前正式版 **0.3.162**——补上 2026-11-23 报告 P1-4 要的那个调用：**`catia_move_body(dx, dy, dz)`**。报告为一个首件偏了 5 mm 的 15 特征零件整件重画了两遍，原话是「只要有这个，一次调用就能修」。本机实测 V5 **没有实体平移**：`Part`/`Body`/`Shape` 三个接口一个 move/translate/position 成员都没有；`ShapeFactory` 的 `AddNewTranslate2` / `AddNewAxisToAxis2` 确实返回一个特征节点，但那个节点**建不起来**（body、pad、选择集三种上下文都 `Update` 失败，且 `Distance`/`Vector` 根本读不到，缺的参数补不上）；GSD 的 `AddNewTranslate` 传实体引用得到的是**它的边界面**（面积与实体相同、体积不存在）。所以工具走的是第三条：**平移边界面 + `CloseSurface` 闭合回实体**，并且**按刚体运动验收**——体积、面积前后必须逐位不变、重心必须正好移动 (dx,dy,dz)，任何一项不符就抛 `MOVE_NOT_RIGID` 并给出两组数。本机实测：25×45×80 方块移 +5 → V 90000.0000→90000.0000、A 13450.0000→13450.0000、重心 (12.5,22.5,40)→(17.5,22.5,40)；带通孔件 83716.8147→83716.8147；同 body 两个分离实体 102000.0000→102000.0000（包络 x 0..110→0..120）；带圆角件 44690.9734→44690.9734——后三个正是「粗糙实现会静默丢料」的场景。代价写进回执：结果是一个**死实体**（只有 `封闭曲面.1`，没有草图/凸台/圆角历史），落在**新 body**（在原 body 里闭合它自己会成环、`Update` 必失败），源 body 保留全部特征（默认**隐藏**，所以视图与网格包络只剩一个实体）。  · [变更日志](CHANGELOG.md) · [Releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases)
 
 > 让 AI 客户端通过 MCP，在 CATIA V5 里建**原生可编辑的实体特征**——并且每一步都能量回来。
 
-MCP_CATIA_MechDog 是运行在你自己 Windows 电脑上的本地 MCP 服务（stdio，可选 HTTP）。它把 CATIA V5 的 **COM Automation** 封装成 **156 个工具**（14 组），供 WorkBuddy、Claude Desktop、Cursor 等支持 MCP 的客户端调用：从一句需求出发，生成带草图、拉伸、切除、圆角、曲面与装配关系的 `.CATPart` / `.CATProduct`，保存到磁盘，再把体积、面积、面/边/顶点数读回来核对。
+MCP_CATIA_MechDog 是运行在你自己 Windows 电脑上的本地 MCP 服务（stdio，可选 HTTP）。它把 CATIA V5 的 **COM Automation** 封装成 **157 个工具**（14 组），供 WorkBuddy、Claude Desktop、Cursor 等支持 MCP 的客户端调用：从一句需求出发，生成带草图、拉伸、切除、圆角、曲面与装配关系的 `.CATPart` / `.CATProduct`，保存到磁盘，再把体积、面积、面/边/顶点数读回来核对。
 
 本仓库是 [daiemon12/catia-v5-mcp-server](https://github.com/daiemon12/catia-v5-mcp-server)（MIT，Adam M'HAMDI）的 **lite fork**：只保留「按书面规格把实体建出来、并且自己验证」这一条主线，只做加法与修补，不重写 COM 层。上游注释里那些实机验证过的坑，是本项目最大的资产。
 
@@ -111,7 +111,7 @@ python -m venv .venv
 | --- | ---: | --- |
 | Document | 12 | 新建 / 打开 / 保存 / 关闭 / 列举，`catia_save_as_copy`；保存遇模态框会重试 |
 | Sketcher | 19 | 线、矩形、圆、椭圆、圆弧、轮廓、样条（含控制点 B 样条）、约束与尺寸；重开已关闭的草图、删单个元素；`catia_sketch_copy` 把轮廓复述到另一个平面；`catia_sketch_strokes` 一次画完整个字形轮廓 |
-| Part Design | 27 | 凸台、凹槽、旋转槽、旋转体、孔、圆角、倒角、阵列、镜像、抽壳、多截面实体、多体；圆角/倒角漏掉具名边时返回 `PARTIAL_EDGES_FAILED` 并列出成功与拒绝两组 |
+| Part Design | 28 | 凸台、凹槽、旋转槽、旋转体、孔、圆角、倒角、阵列、镜像、抽壳、多截面实体、多体；圆角/倒角漏掉具名边时返回 `PARTIAL_EDGES_FAILED` 并列出成功与拒绝两组 |
 | Generative Shape Design | 41 | 线框与曲面、提取、边界、缝合、曲面圆角、脊线、旋转/平移/环形阵列、法向平面、角度平面、旋转曲面与封闭、`catia_surface_engrave`、`catia_solid_tube`、`catia_gsd_splines`、`catia_solid_sweep_variable`（半径表扫掠，站点可为椭圆）、`catia_measure_deviation`、`catia_surface_probe`（沿给定方向求曲面高度，先自校准再出数） |
 | Assembly | 14 | 新建、加件、列举、约束、组件位姿读写（两种矩阵约定互报偏差与正交性）、重命名、复制、替换 |
 | Appearance | 3 | 装配按实例、零件按节点上色；写颜色会 flush 零件（不 `Update()` 不上屏） |

@@ -31,8 +31,8 @@ def test_registered_tools_and_schemas_are_unchanged():
     # 0.3.124 solid_sweep_variable = 147; 0.3.125 set_constraint_value = 148;
     # 0.3.127 catia_server_info = 149; 0.3.128 read/import_drawing = 151;
     # 0.3.140 surface_probe = 154; 0.3.152 probe_assembly_constraints = 155;
-    # 0.3.161 edit_pad = 156.
-    assert len(server._tool_router) == 156
+    # 0.3.161 edit_pad = 156; 0.3.162 move_body = 157.
+    assert len(server._tool_router) == 157
     assert not any(name.startswith("catia_caa") for name in server._tool_router)
     for schema in server._schemas.values():
         Draft202012Validator.check_schema(schema)

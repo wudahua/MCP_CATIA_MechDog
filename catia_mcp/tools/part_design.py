@@ -1811,6 +1811,80 @@ class PartDesignTools:
                 },
             },
             {
+                "name": "catia_move_body",
+                "description": (
+                    "Move a whole solid body by (dx, dy, dz) millimetres, and prove "
+                    "the shape did not change: the volume and the surface area are "
+                    "compared before and after, and the centre of gravity must move "
+                    "by exactly the vector asked for. Any difference is refused with "
+                    "MOVE_NOT_RIGID and the two sets of numbers.\n"
+                    "\n"
+                    "HOW, because it decides what you get back: CATIA V5 exposes no "
+                    "transform for a SOLID. Measured on B30 2026-11-23 - Part, Body "
+                    "and Shape declare no move/translate/position member at all; "
+                    "ShapeFactory's AddNewTranslate2 and AddNewAxisToAxis2 do build a "
+                    "feature, but it rebuilds nowhere (body, pad and selection as "
+                    "in-work object all fail with 'Update', and it exposes no "
+                    "Distance/Vector to set); and GSD's AddNewTranslate on a body "
+                    "reference returns the body's BOUNDARY, not the body (its Area "
+                    "equals the solid's and its Volume raises). So this tool "
+                    "translates that boundary and closes it back into a solid.\n"
+                    "\n"
+                    "WHAT THAT COSTS: the result is a DEAD SOLID - one "
+                    "CloseSurface feature, no sketch/pad/fillet history - in a NEW "
+                    "body, and the source body stays in the tree with every feature "
+                    "it had (by default it is hidden, so the picture and the mesh "
+                    "envelope show the moved part only). Features that referenced "
+                    "the source body's faces do NOT move with it. A translated "
+                    "surface is left in a geometrical set named '<body>_MOVE' "
+                    "because the closed solid depends on it."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "dx": {
+                            "type": "number",
+                            "description": "Millimetres along +X. At least one of "
+                                           "dx, dy, dz must be non-zero.",
+                        },
+                        "dy": {"type": "number",
+                               "description": "Millimetres along +Y."},
+                        "dz": {"type": "number",
+                               "description": "Millimetres along +Z."},
+                        "name": {
+                            "type": "string",
+                            "description": (
+                                "Body to move. Default: the active body (the one "
+                                "catia_new_body last switched to), else the MainBody."
+                            ),
+                        },
+                        "new_body_name": {
+                            "type": "string",
+                            "description": (
+                                "Name for the body that receives the moved solid. "
+                                "Default '<name>_MOVED'."
+                            ),
+                        },
+                        "hide_source": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": (
+                                "Hide the source body after the move, so the part "
+                                "looks and measures as one solid. False keeps both "
+                                "visible, overlapping."
+                            ),
+                        },
+                        "document": {
+                            "type": "string",
+                            "description": (
+                                "Part document to act on, by name or full path. "
+                                "Default: the active document."
+                            ),
+                        },
+                    },
+                },
+            },
+            {
                 "name": "catia_list_bodies",
                 "description": (
                     "List every solid body in the active part, with its volume and "
@@ -2209,6 +2283,8 @@ class PartDesignTools:
             case "catia_delete_body":
                 return self._delete_body(arguments["name"],
                                          bool(arguments.get("force", False)))
+            case "catia_move_body":
+                return self._move_body(arguments)
             case "catia_list_bodies":
                 return self._list_bodies()
             case "catia_set_active_body":
@@ -9746,6 +9822,334 @@ class PartDesignTools:
             , code="DELETE_NOT_CONFIRMED", stage="execute")
         return (f"Body '{name}' deleted ({before} -> {after} bodies)."
                 + (f" Its {count} feature(s) went with it." if count else ""))
+
+    # ────────────────────────────────────────────────────────────
+    # Moving a solid body — boundary translate + CloseSurface
+    # ────────────────────────────────────────────────────────────
+
+    #: A rigid move changes neither volume nor area; these are the RELATIVE
+    #: tolerances those two comparisons use. 1e-6 is a millionth of the body, far
+    #: below any real change of shape and far above the double-precision noise of
+    #: a measurable (measured 2026-11-23: 90000.0000 vs 90000.0000).
+    MOVE_VOLUME_TOL = 1e-6
+    #: ... and the centre of gravity has to move by the vector asked for, in mm.
+    #: A translation moves it EXACTLY, so this is loose only for the measurable's
+    #: own rounding.
+    MOVE_COG_TOL = 5e-3
+
+    def _solid_stats(self, part: Any, body: Any
+                     ) -> tuple[float | None, float | None, list[float] | None,
+                                str]:
+        """``(volume_mm3, area_mm2, centre_mm, note)`` for one body's solid."""
+        volume, cog, note = self._mass_probe(part, body)
+        if volume is None:
+            return None, None, None, note or "the body holds no solid to measure"
+        area = None
+        try:
+            doc = part.Parent
+            spa = doc.GetWorkbench("SPAWorkbench")
+            measurable = spa.GetMeasurable(part.CreateReferenceFromObject(body))
+            area = float(measurable.Area) * 1e6            # m2 -> mm2
+        except Exception:  # noqa: BLE001 - the volume still answers
+            area = None
+        return volume, area, cog, ""
+
+    def _free_body_name(self, part: Any, wanted: str) -> str:
+        """``wanted`` or ``wanted.2``/``.3``… - a name no body or set already has.
+
+        Nothing in CATIA stops two tree nodes from sharing a name, and this
+        server has produced duplicates before (see GSDTools._free_name). The
+        moved body is meant to be ADDRESSABLE by the reply's own sentence, so the
+        name is chosen against the live tree rather than assumed.
+        """
+        taken = set()
+        for collection in (part.Bodies, part.HybridBodies):
+            try:
+                for index in range(1, collection.Count + 1):
+                    taken.add(str(collection.Item(index).Name))
+            except Exception:  # noqa: BLE001 - a collection that will not enumerate
+                taken.add(str(wanted))
+        candidate = str(wanted)
+        for index in range(2, 52):
+            if candidate not in taken:
+                return candidate
+            candidate = f"{wanted}.{index}"
+        return candidate
+
+    def _default_body(self, part: Any) -> Any:
+        """The body a call acts on when no name was given: active, else MainBody.
+
+        ``catia_new_body`` switches the active body, so "the one features are
+        going into" is what a caller means by "the body" - but the connection
+        remembers no body until something asks, and the MainBody is the only
+        answer that always exists.
+        """
+        try:
+            active = self.conn.get_active_part_body()
+        except Exception:  # noqa: BLE001 - the MainBody still answers
+            active = None
+        return active if active is not None else part.MainBody
+
+    def _hide_node(self, node: Any) -> bool | None:
+        """Hide one tree node; ``True``/``False`` from the read-back, None if it
+        could not even be asked. SetShow(0) shows and SetShow(1) hides here."""
+        sel = self.conn.hso
+        try:
+            sel.Clear()
+            sel.Add(node)
+            sel.VisProperties.SetShow(1)
+            try:
+                state = sel.VisProperties.GetShow()
+            except Exception:  # noqa: BLE001 - hiding still happened
+                return None
+            if isinstance(state, (tuple, list)):
+                return bool(state[1]) if len(state) > 1 else bool(state[0])
+            return bool(state)
+        except Exception:  # noqa: BLE001
+            return None
+        finally:
+            try:
+                sel.Clear()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _move_body(self, args: dict[str, Any]) -> str:
+        """Move a whole solid body, and prove the shape came with it unchanged.
+
+        The 2026-11-23 report (P1-4) lost two full rebuilds of a 15-feature part
+        to a first pad being 5 mm out, and asked for exactly this call: "with
+        only this, one call would have fixed it".
+
+        There is no solid transform in V5's automation API, and the three routes
+        tried on B30 2026-11-23 all failed in their own way:
+
+        * ``Part``/``Body``/``Shape`` declare no move/translate/position member
+          (TypeInfo, 29/41 members read out by name — the earlier "0 members"
+          reading came from calling GetDocumentation, which raises here);
+        * ``ShapeFactory.AddNewTranslate2(distance)`` and
+          ``AddNewAxisToAxis2(ref, target)`` DO return a feature
+          (``平移.1`` / ``定位变换.1`` appended to ``body.Shapes``), but that
+          feature rebuilds nowhere: ``UpdateObject`` and ``part.Update`` both
+          fail on the body, on the pad, and with the body in the selection, and
+          the object exposes no ``Distance``/``Vector``/``ElemToTranslate`` to
+          set, so the missing argument cannot be supplied;
+        * GSD's ``AddNewTranslate(bodyRef, direction, distance)`` is accepted and
+          produces the body's BOUNDARY - measured: Area 13450.0000 mm2 (the
+          solid's own), Volume raises, part volume unchanged.
+
+        So the boundary is what this tool moves, and ``CloseSurface`` turns it
+        back into a solid. Measured on B30 2026-11-23: a 25 x 45 x 80 block moved
+        5 mm in x gives V 90000.0000 / A 13450.0000 (both unchanged, to six
+        decimals) with the centre of gravity at (17.5000, 22.5000, 40.0000) -
+        exactly (12.5, 22.5, 40) + (5, 0, 0); a body with a through hole
+        83716.8147 -> 83716.8147; two disjoint pads in one body 102000.0000 ->
+        102000.0000 with the envelope x 0..110 -> 0..120; a filleted block
+        44690.9734 -> 44690.9734. Three of those four are the cases where a
+        careless version would have lost material silently, which is why the
+        checks below are refusals and not warnings.
+
+        The costs, in the reply as well as here: the moved body is a dead solid
+        (one CloseSurface), it lands in a NEW body because a CloseSurface in the
+        same body as the surface it closes is circular and fails to update, the
+        source body keeps every feature (hidden by default so the picture and the
+        mesh envelope show one solid), and a feature that referenced the old
+        body's faces does not move.
+        """
+        self.conn.ensure_connected()
+        delta = (float(args.get("dx") or 0.0), float(args.get("dy") or 0.0),
+                 float(args.get("dz") or 0.0))
+        distance = math.sqrt(sum(component * component for component in delta))
+        if distance <= 1e-9:
+            raise ArgumentRejected(
+                "dx, dy and dz are all zero, so there is nothing to move. Pass at "
+                "least one non-zero component in millimetres.",
+                code="BAD_ARGUMENT", stage="validate", modified=False)
+
+        part, target_note = self._target_part(args.get("document"), activate=True)
+        body = (self._body_named(part, str(args["name"])) if args.get("name")
+                else self._default_body(part))
+        body_name = str(body.Name)
+        volume_before, area_before, cog_before, why = self._solid_stats(part, body)
+        if volume_before is None:
+            raise PreconditionRejected(
+                f"'{body_name}' has no solid to move: {why}. A body that only "
+                "holds sketches or surfaces has nothing to translate - nothing "
+                "was changed.",
+                code="BODY_HAS_NO_SOLID", stage="validate", modified=False,
+                next_actions=[
+                    "catia_list_bodies shows each body's volume and feature count",
+                    "if the geometry is in a geometrical set, it is a surface: "
+                    "catia_gsd_translate moves that on its own",
+                ])
+
+        wanted_body = str(args.get("new_body_name") or f"{body_name}_MOVED")
+        moved_name = self._free_body_name(part, wanted_body)
+        geoset_name = self._free_body_name(part, f"{body_name}_MOVE")
+        features_before = []
+        try:
+            features_before = [str(shape.Name) for shape in body.Shapes]
+        except Exception:  # noqa: BLE001 - the count is a courtesy
+            features_before = []
+
+        factory = part.HybridShapeFactory
+        saved_in_work = getattr(part, "InWorkObject", None)
+        translate = None
+        closed = None
+        try:
+            direction = factory.AddNewDirectionByCoord(
+                *(component / distance for component in delta))
+            geoset = part.HybridBodies.Add()
+            geoset.Name = geoset_name
+            geoset.AppendHybridShape(direction)
+            direction.Name = f"{geoset_name}_dir"
+            part.UpdateObject(direction)
+
+            translate = factory.AddNewTranslate(
+                part.CreateReferenceFromObject(body), direction, distance)
+            geoset.AppendHybridShape(translate)
+            translate.Name = f"{geoset_name}_TRANS"
+            part.UpdateObject(translate)
+
+            moved = part.Bodies.Add()
+            moved.Name = moved_name
+            part.InWorkObject = moved
+            closed = part.ShapeFactory.AddNewCloseSurface(
+                part.CreateReferenceFromObject(translate))
+            part.UpdateObject(closed)
+        except Exception as exc:  # noqa: BLE001 - the leftovers are named below
+            reason = str(exc).splitlines()[0][:200]
+            try:
+                part.InWorkObject = saved_in_work
+            except Exception:  # noqa: BLE001
+                pass
+            raise CodedError(
+                f"CATIA refused to build the moved solid for '{body_name}': "
+                f"{reason}. The translate step is the one that usually refuses, "
+                "and it does so when the body's boundary cannot be built as a "
+                "closed shell - a body with an open surface in it, or one whose "
+                f"last feature is broken. Leftovers in the tree: geometrical set "
+                f"'{geoset_name}'"
+                + (f" and body '{moved_name}'" if closed is None and translate else "")
+                + ". Nothing of the original geometry was changed.",
+                code="MOVE_FAILED", stage="execute", modified=True,
+                data={"body": body_name, "geoset": geoset_name,
+                      "moved_body": moved_name if translate else None,
+                      "volume_before_mm3": round(volume_before, 4)},
+                next_actions=[
+                    "catia_delete_feature(names=['" + geoset_name + "_TRANS', "
+                    "'" + geoset_name + "_dir']) removes the leftovers",
+                    "catia_diagnose reports a body whose last feature fails to "
+                    "update",
+                ])
+        finally:
+            try:
+                part.InWorkObject = saved_in_work
+            except Exception:  # noqa: BLE001
+                pass
+
+        volume_after, area_after, cog_after, after_why = self._solid_stats(
+            part, part.Bodies.Item(moved_name))
+        if volume_after is None:
+            raise CodedError(
+                f"The moved solid was built in body '{moved_name}' but cannot be "
+                f"measured: {after_why}. Do not use it - the source body "
+                f"'{body_name}' is untouched.",
+                code="MOVE_UNVERIFIED", stage="execute", modified=True,
+                data={"body": body_name, "moved_body": moved_name})
+
+        problems = []
+        if abs(volume_after - volume_before) > self.MOVE_VOLUME_TOL * max(
+                1.0, volume_before):
+            problems.append(
+                f"volume {volume_before:.4f} -> {volume_after:.4f} mm3")
+        if (area_before is not None and area_after is not None
+                and abs(area_after - area_before) > self.MOVE_VOLUME_TOL * max(
+                    1.0, area_before)):
+            problems.append(f"area {area_before:.4f} -> {area_after:.4f} mm2")
+        if cog_before and cog_after:
+            moved_by = [cog_after[index] - cog_before[index] for index in range(3)]
+            if any(abs(moved_by[index] - delta[index]) > self.MOVE_COG_TOL
+                   for index in range(3)):
+                problems.append(
+                    "centre of gravity moved ("
+                    + ", ".join(f"{value:.4f}" for value in moved_by)
+                    + ") mm, not (" + ", ".join(f"{value:.4f}" for value in delta)
+                    + ")")
+        if problems:
+            raise CodedError(
+                f"The move was built but is NOT RIGID: "
+                + "; ".join(problems)
+                + ". A translate that changes the volume or the area has changed "
+                f"the shape, so it is refused rather than reported as a move. The "
+                f"result is in body '{moved_name}' and the source '{body_name}' is "
+                "untouched - delete the moved body if you do not want it.",
+                code="MOVE_NOT_RIGID", stage="execute", modified=True,
+                data={"body": body_name, "moved_body": moved_name,
+                      "delta": list(delta),
+                      "volume_before_mm3": round(volume_before, 4),
+                      "volume_after_mm3": round(volume_after, 4),
+                      "area_before_mm2": None if area_before is None
+                      else round(area_before, 4),
+                      "area_after_mm2": None if area_after is None
+                      else round(area_after, 4)})
+
+        surface_hidden = self._hide_node(translate) if translate is not None else None
+        hide_wanted = bool(args.get("hide_source", True))
+        source_hidden = self._hide_node(body) if hide_wanted else None
+        self.conn.refresh_display()
+
+        feature_names = []
+        try:
+            feature_names = [str(shape.Name)
+                             for shape in part.Bodies.Item(moved_name).Shapes]
+        except Exception:  # noqa: BLE001
+            feature_names = []
+
+        moved_by = ([cog_after[index] - cog_before[index] for index in range(3)]
+                    if cog_before and cog_after else list(delta))
+        reply = (
+            f"Moved '{body_name}' by ("
+            + ", ".join(f"{value:.4f}" for value in delta)
+            + f") mm. The solid is now in body '{moved_name}'"
+            + (f" (feature(s): {', '.join(feature_names)})" if feature_names else "")
+            + ".\n"
+            "WHY IT IS BUILT THIS WAY: CATIA V5 has no transform for a solid. "
+            "Part, Body and Shape declare no move/translate/position member; "
+            "ShapeFactory's AddNewTranslate2 and AddNewAxisToAxis2 return a feature "
+            "that rebuilds nowhere and exposes nothing to set; and GSD's translate "
+            "on a body gives its boundary (area equal to the solid's, volume "
+            "absent). So the boundary was translated and closed back into a solid "
+            "- which is a rigid motion, and is checked as one.\n"
+            "CHECKED: volume "
+            + f"{volume_before:.4f} -> {volume_after:.4f} mm3"
+            + (f", area {area_before:.4f} -> {area_after:.4f} mm2"
+               if area_before is not None and area_after is not None else "")
+            + ", centre of gravity moved ("
+            + ", ".join(f"{value:.4f}" for value in moved_by)
+            + ") mm. A move that changed the volume or the area would have been "
+            "refused as MOVE_NOT_RIGID.\n"
+            "WHAT THIS COSTS: the result is a DEAD SOLID - geometry only, no "
+            "sketch, pad or fillet history. The source body is still in the tree "
+            "with its "
+            f"{len(features_before)} feature(s)"
+            + ("" if not hide_wanted else
+               " and is now HIDDEN, so the view and the mesh envelope show one "
+               "solid; pass hide_source=false to keep both visible"
+               if source_hidden else
+               " and the hide was REFUSED, so both solids are on screen"
+               if source_hidden is False else
+               " and whether it is hidden could not be read back")
+            + ("" if hide_wanted else
+               "; it is still VISIBLE, so the part currently holds both solids "
+               "and any envelope you measure covers both")
+            + f". Any feature that referenced '{body_name}'s faces did not move. "
+            f"The translated surface stays in geometrical set '{geoset_name}' "
+            "because the closed solid depends on it"
+            + ("." if surface_hidden is not False else
+               ", and it is still VISIBLE.")
+            + (f" {target_note}." if target_note else "")
+        )
+        return reply
 
     def _new_body(self, name: str | None = None) -> str:
         """Create a solid body and route subsequent features into it."""

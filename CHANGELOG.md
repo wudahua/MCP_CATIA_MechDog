@@ -2,6 +2,70 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.162] — 2026-11-23 · `catia_move_body`, and what a moved solid costs
+
+The 2026-11-23 report's P1-4: its `Part 1` had 15 features before it noticed the
+first pad was 5 mm out, `catia_delete_feature` on that pad breaks the fourteen
+after it, so the part was rebuilt twice. It asked for one call:
+`catia_move_body(dx, dy, dz)` — "with only this, the 5 mm error costs one call".
+
+**V5 has no transform for a solid, and that had to be measured before promising
+one.** Three routes, all tried on B30 2026-11-23:
+
+* `Part`, `Body` and `Shape` declare **no** move/translate/position member
+  (TypeInfo read by `GetNames`; the same read through `GetDocumentation` returns
+  0 members on this build for every one of them, including the 110-member
+  `ShapeFactory`, which is why an enumeration can lie about an interface).
+* `ShapeFactory.AddNewTranslate2(iDistance)` and `AddNewAxisToAxis2(ref, target)`
+  DO return a feature — `平移.1` / `定位变换.1` appear in `body.Shapes` — but it
+  rebuilds nowhere: `UpdateObject` and `part.Update` both fail with the body, the
+  pad and the body-as-selection as the in-work object, and the object exposes no
+  `Distance`, `Vector`, `ElemToTranslate` or `Value` to set, so the argument the
+  1-argument signature does not take cannot be supplied afterwards either.
+* GSD's `AddNewTranslate(bodyRef, direction, distance)` is accepted and produces
+  the body's **boundary**: its `Area` equals the solid's own (13450.0000 mm2),
+  its `Volume` raises, and the part's volume does not change.
+
+**So the tool moves the boundary and closes it back into a solid** —
+`HybridShapeFactory.AddNewTranslate` + `ShapeFactory.AddNewCloseSurface` — and
+then *refuses the result unless it is a rigid motion*: volume unchanged, area
+unchanged (both to 1e-6 relative), and the centre of gravity moved by exactly the
+vector asked for (5e-3 mm). Anything else raises `MOVE_NOT_RIGID` with both sets
+of numbers, because "the volume grew" and "the body moved" are different claims.
+
+Measured on B30, and each one is a case where a careless version loses material
+silently:
+
+| body | before | after | envelope |
+|---|---|---|---|
+| 25 × 45 × 80 block, +5 x | V 90000.0000 / A 13450.0000 | V 90000.0000 / A 13450.0000 | x 5..30 |
+| block with a through hole, +10 z | 83716.8147 | 83716.8147 | z 10..90 |
+| two disjoint pads in one body, +10 x | 102000.0000 | 102000.0000 | x 10..120 |
+| block with four edge fillets, +5 z | 44690.9734 | 44690.9734 | z 5..45 |
+
+Centre of gravity: (12.5, 22.5000, 40) → (17.5, 22.5, 40) for the first, which is
+the requested (5, 0, 0) and nothing else.
+
+**What the reply says the result costs**, because it is not what the report
+imagined: the moved solid is a DEAD SOLID (one `封闭曲面.1`, no sketch, pad or
+fillet history), it lands in a **new body** (`CloseSurface` inside the body whose
+boundary it closes is circular and fails to update — tried), the source body keeps
+every feature and is **hidden** by default so the view and the mesh envelope show
+one solid, and a feature that referenced the source body's faces does not move
+with it. A translated surface stays in geometrical set `<body>_MOVE`, hidden,
+because the closed solid depends on it.
+
+Refusals that happen before anything is touched: a zero vector (`BAD_ARGUMENT`),
+a body with no solid (`BODY_HAS_NO_SOLID`, with the list of bodies), an assembly
+as the active document (the same refusal the other feature tools give, naming the
+remedy) and `document=<assembly>` (`NOT_A_PART_DOCUMENT`).
+
+Tests 2588 (10 new in `test_reported_issues_2026_11_23_v0499.py`, including the
+one that pins the COG check: same volume and area with an unmoved centre of
+gravity is still `MOVE_NOT_RIGID`). B30 acceptance `b30_v0499_move_accept.py`
+17/17; capability probes `b30_v0499_body_move_probe{,2,3,4,5,6,7,8,9,10,11}.py`
+record every route that was tried and refused.
+
 ## [0.3.161] — 2026-11-23 · three ok:true calls that built the wrong solid
 
 The 2026-11-23 report modelled a conveyor from a written spec - four parts, 15
