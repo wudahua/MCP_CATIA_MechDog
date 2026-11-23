@@ -1885,6 +1885,86 @@ class PartDesignTools:
                 },
             },
             {
+                "name": "catia_reorder_feature",
+                "description": (
+                    "Move a feature to a different position in its body's history.\n"
+                    "\n"
+                    "THIS BUILD CANNOT DO IT, and the call refuses in 0 ms with "
+                    "UNSUPPORTED_CAPABILITY and modified: false, BEFORE CATIA is "
+                    "asked, instead of failing halfway. Measured on B30 "
+                    "2026-11-23: the Shapes collection declares 25 members "
+                    "(Item, Count, _NewEnum, GetBoundary, Parent - no Insert, "
+                    "Move or Remove), a Shape 41, a Body 29, a Part 54, and none "
+                    "of them has an ordering member; Selection DOES have "
+                    "Copy/Paste, but a pasted feature is APPENDED - the in-work "
+                    "object set to an earlier feature changed nothing, and the "
+                    "copy landed at the end of the tree. `Part.InWorkObject` is "
+                    "the one ordering control that works, and it only places a "
+                    "NEW feature (measured: [凸台.1, 凹槽.2, 凹槽.1]); an existing "
+                    "one cannot be moved, by that or anything else.\n"
+                    "\n"
+                    "The refusal still does the work of understanding the call: "
+                    "it validates the names, and reports the feature's current "
+                    "position, the position asked for and the order that would "
+                    "have resulted, so the answer is a plan and not a shrug. "
+                    "It also says what to do instead - rebuild the tail, or use "
+                    "catia_edit_pad / catia_move_body when the real problem is a "
+                    "depth or a position. Pass force: true to re-read this "
+                    "build's interfaces and see whether a reorder member has "
+                    "appeared (after a licence or release change)."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "feature": {
+                            "type": "string",
+                            "description": "Feature to move, by tree name.",
+                        },
+                        "before": {
+                            "type": "string",
+                            "description": (
+                                "Put 'feature' immediately BEFORE this feature "
+                                "(same body)."
+                            ),
+                        },
+                        "after": {
+                            "type": "string",
+                            "description": (
+                                "Put 'feature' immediately AFTER this feature "
+                                "(same body)."
+                            ),
+                        },
+                        "index": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "1-based position to move it to.",
+                        },
+                        "last": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "Move it to the end of the body.",
+                        },
+                        "force": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Re-read the interfaces instead of refusing: "
+                                "reports which ordering members exist NOW, "
+                                "without changing anything."
+                            ),
+                        },
+                        "document": {
+                            "type": "string",
+                            "description": (
+                                "Part document to read, by name or full path. "
+                                "Default: the active document."
+                            ),
+                        },
+                    },
+                    "required": ["feature"],
+                },
+            },
+            {
                 "name": "catia_list_bodies",
                 "description": (
                     "List every solid body in the active part, with its volume and "
@@ -2285,6 +2365,8 @@ class PartDesignTools:
                                          bool(arguments.get("force", False)))
             case "catia_move_body":
                 return self._move_body(arguments)
+            case "catia_reorder_feature":
+                return self._reorder_feature(arguments)
             case "catia_list_bodies":
                 return self._list_bodies()
             case "catia_set_active_body":
@@ -10150,6 +10232,291 @@ class PartDesignTools:
             + (f" {target_note}." if target_note else "")
         )
         return reply
+
+    # ────────────────────────────────────────────────────────────
+    # Reordering — the answer is "this build cannot", with the plan
+    # ────────────────────────────────────────────────────────────
+
+    #: Whole WORDS that would make a reorder possible: a member called
+    #: MoveFeature or SetOrder counts, and a name that merely contains those
+    #: letters does not. Substring matching was the first version and the real
+    #: interfaces shot it down on the first run: Selection declares Remove and
+    #: Remove2 (which contain "move") and Body declares OrderedGeometricalSets
+    #: (which contains "order"), so the tool announced "an ordering member now
+    #: exists" about a build that has none. A name is not a capability, and a
+    #: substring is not even a name.
+    ORDER_MEMBER_WORDS = ("reorder", "move", "insert", "sort", "swap", "order")
+
+    #: ... minus the ones whose NAME matches but whose meaning does not.
+    #: InsertHybridShape is the whole reason this exists: "insert" is in its
+    #: name, but it inserts a geometrical (GSD) element into a body - it cannot
+    #: put a solid feature at a position, and on this build it refuses one
+    #: outright ("方法 InsertHybridShape 失败", measured 0.3.162). Counting it as
+    #: an ordering member would have turned the force report into "an ordering
+    #: member now exists", which is the opposite of what was measured.
+    ORDER_MEMBER_EXEMPT = {
+        "InsertHybridShape": ("inserts a GSD element into a body, not a feature "
+                              "into its history - and it refuses a solid"),
+    }
+
+    @staticmethod
+    def _member_words(member: str) -> set[str]:
+        """The CamelCase words of a member name, lower-cased.
+
+        ``Remove`` -> {remove}; ``OrderedGeometricalSets`` ->
+        {ordered, geometrical, sets}; ``MoveFeature`` -> {move, feature}. That
+        distinction is the whole point: only a WHOLE word is evidence.
+        """
+        return {word.lower()
+                for word in re.findall(r"[A-Z]+(?![a-z])|[A-Z][a-z0-9]*|[a-z0-9]+",
+                                       member)}
+
+    def _declared_members(self, obj: Any) -> tuple[list[str], str]:
+        """Every member the interface declares; ``(names, note)``.
+
+        ``GetFuncDesc(i).GetDocumentation(-1)`` raises for EVERY member on this
+        build: an enumeration through it reports 0 members for an interface that
+        declares 110 (found in 0.3.162 while looking for a solid translate, and
+        only caught because the count looked impossible). The names come from
+        ``GetNames(memid)``.
+        """
+        try:
+            info = obj._oleobj_.GetTypeInfo()
+            count = info.GetTypeAttr().cFuncs
+        except Exception as exc:  # noqa: BLE001 - reported in the note
+            return [], f"{type(exc).__name__}: {str(exc).splitlines()[0][:70]}"
+        names: list[str] = []
+        for index in range(count):
+            try:
+                desc = info.GetFuncDesc(index)
+                found = info.GetNames(desc.memid)
+            except Exception:  # noqa: BLE001 - some entries are not callable
+                continue
+            if found:
+                names.append(found[0])
+        return names, ""
+
+    def _feature_position(self, part: Any, name: str
+                          ) -> tuple[Any, list[str], int]:
+        """``(body, feature names in tree order, 1-based index)`` for a feature.
+
+        Raises ``FEATURE_NOT_FOUND`` listing the body's own features, because
+        "not found" without the list is the report's "feature names drift" all
+        over again.
+        """
+        seen: list[str] = []
+        for body_index in range(1, part.Bodies.Count + 1):
+            body = part.Bodies.Item(body_index)
+            order: list[str] = []
+            try:
+                for index in range(1, body.Shapes.Count + 1):
+                    order.append(str(body.Shapes.Item(index).Name))
+            except Exception:  # noqa: BLE001 - an unreadable body is skipped
+                continue
+            for index, label in enumerate(order, start=1):
+                if label == name:
+                    return body, order, index
+            if order:
+                seen.append(f"{body.Name}: {', '.join(order)}")
+        raise CodedError(
+            f"No feature named '{name}' in '{part.Name}'. "
+            + ("Features: " + " | ".join(seen) + ". " if seen else
+               "The part holds no solid features. ")
+            + "Nothing was reordered and nothing was changed.",
+            code="FEATURE_NOT_FOUND", stage="validate", modified=False,
+            next_actions=[
+                "catia_list_features shows every feature in tree order, with "
+                "the body it belongs to",
+            ])
+
+    def _reorder_feature(self, args: dict[str, Any]) -> str:
+        """Refuse to move a feature, with the plan and with the measurement.
+
+        The 2026-11-23 report (P1-4, third suggestion) asked for this tool after
+        its 15-feature part had one feature in the wrong place. The tool exists
+        now because the NAME is worked out if a caller needs it - but the honest
+        answer on this build is that an existing feature cannot be moved, and the
+        refusal says so in 0 ms with ``modified: false`` rather than sending
+        something to CATIA that cannot work.
+
+        What was measured on B30 2026-11-23 (11 probes, scripts/):
+        ``b30_v0499_reorder_probe.py`` - the Shapes collection declares 25
+        members (Item, Count, _NewEnum, GetBoundary, Parent: no Insert, Move or
+        Remove), a Shape 41, a Body 29 (only InsertHybridShape, which refuses a
+        solid - see 0.3.162), a Part 54, the Selection 46, the Application 82;
+        ``probe2`` - Selection.Copy/Paste work but a pasted feature is APPENDED:
+        with the in-work object on the pad, ``凹槽.2`` still landed at index 3
+        with volume and area unchanged;
+        ``probe4`` - ``Part.InWorkObject`` DOES place a NEW feature at a chosen
+        position (``[凸台.1, 凹槽.2, 凹槽.1]``), and that feature stays inert
+        until a full ``part.Update()`` (volume 87738.0533 after UpdateObject,
+        85476.1066 after Update).
+
+        So insertion is a create-time property, and moving an existing feature
+        has no route at all. ``force: true`` re-reads the interfaces and reports
+        what is there now, without touching anything.
+        """
+        self.conn.ensure_connected()
+        part, note = self._target_part(args.get("document"), activate=False)
+        name = str(args["feature"])
+        body, order, current = self._feature_position(part, name)
+
+        choices = [key for key in ("before", "after", "index")
+                   if args.get(key) is not None]
+        if args.get("last"):
+            choices.append("last")
+        if len(choices) != 1:
+            raise ArgumentRejected(
+                f"Say where '{name}' should go: exactly one of before=<feature>, "
+                f"after=<feature>, index=<1..{len(order)}> or last=true. Got "
+                f"{', '.join(choices) or 'none'}. Nothing was changed.",
+                code="BAD_ARGUMENT", stage="validate", modified=False)
+
+        rest = [label for label in order if label != name]
+        if choices[0] == "last":
+            position = len(rest)
+        elif choices[0] == "index":
+            wanted = int(args["index"])
+            if not 1 <= wanted <= len(order):
+                raise ArgumentOutOfRange(
+                    f"index={wanted} is outside 1..{len(order)} - '{body.Name}' "
+                    f"holds {len(order)} feature(s): {', '.join(order)}.",
+                    code="INDEX_OUT_OF_RANGE", stage="validate", modified=False)
+            position = wanted - 1
+        else:
+            anchor = str(args[choices[0]])
+            if anchor == name:
+                raise ArgumentRejected(
+                    f"'{name}' cannot be put {choices[0]} itself.",
+                    code="BAD_ARGUMENT", stage="validate", modified=False)
+            if anchor not in rest:
+                # Either it does not exist, or it belongs to another body - and
+                # those are different answers, so they are measured separately.
+                other_body = None
+                for body_index in range(1, part.Bodies.Count + 1):
+                    candidate = part.Bodies.Item(body_index)
+                    if str(candidate.Name) == str(body.Name):
+                        continue
+                    for index in range(1, candidate.Shapes.Count + 1):
+                        if str(candidate.Shapes.Item(index).Name) == anchor:
+                            other_body = str(candidate.Name)
+                            break
+                    if other_body:
+                        break
+                if other_body:
+                    raise PreconditionRejected(
+                        f"'{anchor}' is in body '{other_body}' and '{name}' is in "
+                        f"'{body.Name}'. A feature can only be ordered inside its "
+                        "own body's history; nothing was changed.",
+                        code="TARGET_IN_OTHER_BODY", stage="validate",
+                        modified=False)
+                raise CodedError(
+                    f"No feature named '{anchor}' in body '{body.Name}'. "
+                    f"Features there: {', '.join(order)}. Nothing was changed.",
+                    code="FEATURE_NOT_FOUND", stage="validate", modified=False)
+            position = rest.index(anchor) + (1 if choices[0] == "after" else 0)
+
+        resulting = rest[:position] + [name] + rest[position:]
+        target = resulting.index(name) + 1
+
+        if resulting == order:
+            return (
+                f"'{name}' is already at position {current} of {len(order)} in "
+                f"'{body.Name}', and the order that was asked for is the order it "
+                f"has: {', '.join(order)}. Nothing was changed."
+                + (f" {note}." if note else ""))
+
+        if args.get("force"):
+            return self._reorder_capability_report(part, body, name, order,
+                                                   resulting)
+
+        raise CodedError(
+            f"'{name}' cannot be moved: THIS BUILD HAS NO REORDER, and this is a "
+            "refusal before CATIA was asked, so nothing was changed. The plan "
+            f"would have been position {current} -> {target} of {len(order)}: "
+            f"{', '.join(order)} -> {', '.join(resulting)}. "
+            "Measured on B30 2026-11-23: the Shapes collection declares 25 "
+            "members (Item, Count, _NewEnum, GetBoundary, Parent - no Insert, "
+            "Move or Remove), a Shape 41, a Body 29, a Part 54, the Selection 46 "
+            "and the Application 82, and none of them has an ordering member. "
+            "Selection.Copy/Paste DO work, but a pasted feature is APPENDED: with "
+            "the in-work object set to the first feature, the copy still landed "
+            "at the end of the tree, volume and area unchanged. "
+            "Part.InWorkObject is the only ordering control that works and it "
+            "places a NEW feature (measured: [凸台.1, 凹槽.2, 凹槽.1]) - and even "
+            "then the feature stays inert until a full part.Update() (volume "
+            "87738.0533 after UpdateObject, 85476.1066 after Update). Moving an "
+            "existing feature has no route on this build.",
+            code="UNSUPPORTED_CAPABILITY", stage="validate", modified=False,
+            data={
+                "feature": name,
+                "body": str(body.Name),
+                "current_index": current,
+                "target_index": target,
+                "order": order,
+                "resulting_order": resulting,
+                "moved": False,
+            },
+            next_actions=[
+                "Rebuild the tail: catia_list_features shows the order, "
+                "catia_delete_feature removes the features that must come after "
+                "the insertion point, and they are re-created from their own "
+                "sketches - that is the only way to change an order on this build",
+                "If the real problem is a wrong depth, catia_edit_pad changes it "
+                "in place; if it is a wrong position, catia_move_body moves the "
+                "whole solid",
+                "Pass force: true to re-read this build's interfaces and see "
+                "whether an ordering member has appeared since",
+            ])
+
+    def _reorder_capability_report(self, part: Any, body: Any, name: str,
+                                   order: list[str],
+                                   resulting: list[str]) -> str:
+        """``force: true`` - what the interfaces declare NOW, nothing changed."""
+        rows: list[str] = []
+        hits: list[str] = []
+        probes = (("Body.Shapes", body.Shapes),
+                  ("Shape", body.Shapes.Item(1) if len(order) else None),
+                  ("Body", body),
+                  ("Part", part),
+                  ("Selection", getattr(self.conn, "hso", None)))
+        for label, obj in probes:
+            if obj is None:
+                continue
+            names, error = self._declared_members(obj)
+            if error:
+                rows.append(f"{label}: could not be read ({error})")
+                continue
+            ordering = [member for member in names
+                        if self._member_words(member)
+                        & set(self.ORDER_MEMBER_WORDS)]
+            exempt = [member for member in ordering
+                      if member in self.ORDER_MEMBER_EXEMPT]
+            ordering = [member for member in ordering
+                        if member not in self.ORDER_MEMBER_EXEMPT]
+            rows.append(f"{label}: {len(names)} member(s), ordering: "
+                        + (", ".join(ordering) if ordering else "NONE")
+                        + "".join(f" (not {member}: "
+                                  f"{self.ORDER_MEMBER_EXEMPT[member]})"
+                                  for member in exempt))
+            hits.extend(f"{label}.{member}" for member in ordering)
+        verdict = (
+            f"An ordering member now exists ({', '.join(hits)}), so this build "
+            "may have changed since 0.3.163 - but this tool has no code path for "
+            "it, and nothing was attempted."
+            if hits else
+            "No ordering member is declared anywhere, so the verdict stands: an "
+            "existing feature cannot be moved on this build."
+        )
+        return (
+            f"REORDER CAPABILITY on '{part.Name}' (nothing was changed): "
+            + "; ".join(rows) + f". {verdict} The plan for '{name}' would take it "
+            f"from position {order.index(name) + 1} to "
+            f"{resulting.index(name) + 1} of {len(order)}: "
+            f"{', '.join(resulting)}. Rebuild the tail instead - "
+            "catia_delete_feature then re-create, with catia_list_features giving "
+            "the order."
+        )
 
     def _new_body(self, name: str | None = None) -> str:
         """Create a solid body and route subsequent features into it."""

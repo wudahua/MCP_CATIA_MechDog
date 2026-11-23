@@ -2,6 +2,62 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.163] — 2026-11-23 · `catia_reorder_feature`: the plan, then the measured no
+
+The 2026-11-23 report's P1-4, third suggestion. Its 15-feature part had one
+feature in the wrong place and the only route was a rebuild, so it asked for a
+reorder tool. **This build cannot reorder a feature**, and the tool's job became
+to prove that, understand the call anyway, and refuse before touching CATIA.
+
+What was measured on B30 2026-11-23 (four probes, `scripts/b30_v0499_reorder_probe*.py`):
+
+| interface | members | ordering member |
+|---|---|---|
+| `Body.Shapes` (the collection) | 25 | none - `Item`, `Count`, `_NewEnum`, `GetBoundary`, `Parent` |
+| `Shape` (a Pad) | 41 | none |
+| `Body` | 29 | `InsertHybridShape` only, and it refuses a solid |
+| `Part` | 54 | none |
+| `Selection` | 46 | `Copy`/`Paste` - and a pasted feature is **APPENDED** |
+| `Application` | 82 | none |
+
+Paste is the obvious workaround and it does not work: with the in-work object set
+to the FIRST feature, the copied pocket still landed at the END of the tree
+(`[凸台.1, 凹槽.1, 凹槽.2]`), volume and area unchanged. `Part.InWorkObject` is
+the only ordering control that works, and it places a **new** feature -
+`[凸台.1, 凹槽.2, 凹槽.1]`, measured by calling the factory raw with the in-work
+object left on the pad - and even that feature stays inert until a **full
+`part.Update()`**: volume was still 87738.0533 after `UpdateObject` and became
+85476.1066 after `Update`. So insertion is a create-time property; moving an
+existing feature has no route at all.
+
+The tool therefore validates the names (a wrong name is a `FEATURE_NOT_FOUND`
+that lists the body's features, not an "unsupported"), computes the current
+position, the position asked for and the order that would have resulted, and then
+raises `UNSUPPORTED_CAPABILITY` with `modified: false`, the member table, and the
+three routes that do work: rebuild the tail, `catia_edit_pad` for a depth,
+`catia_move_body` for a position. Asking for the order the body already has is a
+**success** ("already at position 1 of 3"), not a refusal. `force: true` re-reads
+the interfaces and reports whether an ordering member has appeared since.
+
+**Two of this tool's own verdicts were wrong first, and both were fixed by a
+measurement rather than by rewording:**
+
+* the hint list matched substrings, so `Selection.Remove` (contains "move") and
+  `Body.OrderedGeometricalSets` (contains "order") were reported as ordering
+  members and the force report announced "an ordering member now exists" about a
+  build that has none. Matching is now on **whole CamelCase words**
+  (`Remove` -> {remove}, `OrderedGeometricalSets` -> {ordered, geometrical,
+  sets}, `MoveFeature` -> {move, feature});
+* `InsertHybridShape` really does contain "insert", and it is still not an
+  ordering control - it inserts a GSD element into a body and refuses a solid
+  feature (measured 0.3.162). It is now named and EXCLUDED with that reason in
+  the same sentence, instead of being counted or silently dropped.
+
+Tests 2602 (14 new in `test_reported_issues_2026_11_23_v0500.py`, including the
+one that pins the false-positive fix). B30 acceptance
+`b30_v0500_reorder_accept.py` 20/20: the refusal leaves the tree order and the
+volume untouched, and every argument check has its own code.
+
 ## [0.3.162] — 2026-11-23 · `catia_move_body`, and what a moved solid costs
 
 The 2026-11-23 report's P1-4: its `Part 1` had 15 features before it noticed the

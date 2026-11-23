@@ -1,12 +1,12 @@
-# MCP_CATIA_MechDog 0.3.162
+# MCP_CATIA_MechDog 0.3.163
 
-![version](https://img.shields.io/badge/version-0.3.162-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![CATIA](https://img.shields.io/badge/CATIA-V5%20R30%20(B30)-orange) ![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20http-purple)
+![version](https://img.shields.io/badge/version-0.3.163-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![CATIA](https://img.shields.io/badge/CATIA-V5%20R30%20(B30)-orange) ![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20http-purple)
 
-当前正式版 **0.3.162**——补上 2026-11-23 报告 P1-4 要的那个调用：**`catia_move_body(dx, dy, dz)`**。报告为一个首件偏了 5 mm 的 15 特征零件整件重画了两遍，原话是「只要有这个，一次调用就能修」。本机实测 V5 **没有实体平移**：`Part`/`Body`/`Shape` 三个接口一个 move/translate/position 成员都没有；`ShapeFactory` 的 `AddNewTranslate2` / `AddNewAxisToAxis2` 确实返回一个特征节点，但那个节点**建不起来**（body、pad、选择集三种上下文都 `Update` 失败，且 `Distance`/`Vector` 根本读不到，缺的参数补不上）；GSD 的 `AddNewTranslate` 传实体引用得到的是**它的边界面**（面积与实体相同、体积不存在）。所以工具走的是第三条：**平移边界面 + `CloseSurface` 闭合回实体**，并且**按刚体运动验收**——体积、面积前后必须逐位不变、重心必须正好移动 (dx,dy,dz)，任何一项不符就抛 `MOVE_NOT_RIGID` 并给出两组数。本机实测：25×45×80 方块移 +5 → V 90000.0000→90000.0000、A 13450.0000→13450.0000、重心 (12.5,22.5,40)→(17.5,22.5,40)；带通孔件 83716.8147→83716.8147；同 body 两个分离实体 102000.0000→102000.0000（包络 x 0..110→0..120）；带圆角件 44690.9734→44690.9734——后三个正是「粗糙实现会静默丢料」的场景。代价写进回执：结果是一个**死实体**（只有 `封闭曲面.1`，没有草图/凸台/圆角历史），落在**新 body**（在原 body 里闭合它自己会成环、`Update` 必失败），源 body 保留全部特征（默认**隐藏**，所以视图与网格包络只剩一个实体）。  · [变更日志](CHANGELOG.md) · [Releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases)
+当前正式版 **0.3.163**——2026-11-23 报告 P1-4 的第三条建议 **`catia_reorder_feature`**。结论是**这个 build 不能重排特征**，而工具的价值在于把这个“不能”讲成可执行的东西：它照常校验名字、算出当前位置与目标位置的差异和“本该得到的顺序”，然后 **0 ms 内以 `UNSUPPORTED_CAPABILITY` + `modified:false` 拒绝**，并且**不碰 CATIA**。本机实测：`Shapes` 集合 25 个成员（`Item`/`Count`/`_NewEnum`/`GetBoundary`/`Parent`，没有 Insert/Move/Remove）、`Shape` 41、`Body` 29、`Part` 54、`Selection` 46，没有任何排序成员；`Selection.Copy/Paste` 能用，但**粘贴只会追加**（把 InWorkObject 指向前一个特征，`凹槽.2` 仍然落在树尾，体积面积不变）；唯一真能控制顺序的是 `Part.InWorkObject`，而它只对**新建**特征生效（实测树变成 `[凸台.1, 凹槽.2, 凹槽.1]`），而且那个特征要等**整份 `part.Update()`** 才生效（`UpdateObject` 之后体积仍是 87738.0533，`Update` 之后才是 85476.1066）。`force: true` 会重新读接口并报告「现在到底有没有排序成员」——这里踩到一个自己的判据错误并修掉了：关键词子串匹配把 `Remove`（含 move）和 `OrderedGeometricalSets`（含 order）当成能力，现在按 **CamelCase 整词**比对，`InsertHybridShape` 则点名排除并给出理由（它插的是 GSD 元素，且对实体特征直接失败）。  · [变更日志](CHANGELOG.md) · [Releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases)
 
 > 让 AI 客户端通过 MCP，在 CATIA V5 里建**原生可编辑的实体特征**——并且每一步都能量回来。
 
-MCP_CATIA_MechDog 是运行在你自己 Windows 电脑上的本地 MCP 服务（stdio，可选 HTTP）。它把 CATIA V5 的 **COM Automation** 封装成 **157 个工具**（14 组），供 WorkBuddy、Claude Desktop、Cursor 等支持 MCP 的客户端调用：从一句需求出发，生成带草图、拉伸、切除、圆角、曲面与装配关系的 `.CATPart` / `.CATProduct`，保存到磁盘，再把体积、面积、面/边/顶点数读回来核对。
+MCP_CATIA_MechDog 是运行在你自己 Windows 电脑上的本地 MCP 服务（stdio，可选 HTTP）。它把 CATIA V5 的 **COM Automation** 封装成 **158 个工具**（14 组），供 WorkBuddy、Claude Desktop、Cursor 等支持 MCP 的客户端调用：从一句需求出发，生成带草图、拉伸、切除、圆角、曲面与装配关系的 `.CATPart` / `.CATProduct`，保存到磁盘，再把体积、面积、面/边/顶点数读回来核对。
 
 本仓库是 [daiemon12/catia-v5-mcp-server](https://github.com/daiemon12/catia-v5-mcp-server)（MIT，Adam M'HAMDI）的 **lite fork**：只保留「按书面规格把实体建出来、并且自己验证」这一条主线，只做加法与修补，不重写 COM 层。上游注释里那些实机验证过的坑，是本项目最大的资产。
 
@@ -111,7 +111,7 @@ python -m venv .venv
 | --- | ---: | --- |
 | Document | 12 | 新建 / 打开 / 保存 / 关闭 / 列举，`catia_save_as_copy`；保存遇模态框会重试 |
 | Sketcher | 19 | 线、矩形、圆、椭圆、圆弧、轮廓、样条（含控制点 B 样条）、约束与尺寸；重开已关闭的草图、删单个元素；`catia_sketch_copy` 把轮廓复述到另一个平面；`catia_sketch_strokes` 一次画完整个字形轮廓 |
-| Part Design | 28 | 凸台、凹槽、旋转槽、旋转体、孔、圆角、倒角、阵列、镜像、抽壳、多截面实体、多体；圆角/倒角漏掉具名边时返回 `PARTIAL_EDGES_FAILED` 并列出成功与拒绝两组 |
+| Part Design | 29 | 凸台、凹槽、旋转槽、旋转体、孔、圆角、倒角、阵列、镜像、抽壳、多截面实体、多体；圆角/倒角漏掉具名边时返回 `PARTIAL_EDGES_FAILED` 并列出成功与拒绝两组 |
 | Generative Shape Design | 41 | 线框与曲面、提取、边界、缝合、曲面圆角、脊线、旋转/平移/环形阵列、法向平面、角度平面、旋转曲面与封闭、`catia_surface_engrave`、`catia_solid_tube`、`catia_gsd_splines`、`catia_solid_sweep_variable`（半径表扫掠，站点可为椭圆）、`catia_measure_deviation`、`catia_surface_probe`（沿给定方向求曲面高度，先自校准再出数） |
 | Assembly | 14 | 新建、加件、列举、约束、组件位姿读写（两种矩阵约定互报偏差与正交性）、重命名、复制、替换 |
 | Appearance | 3 | 装配按实例、零件按节点上色；写颜色会 flush 零件（不 `Update()` 不上屏） |
