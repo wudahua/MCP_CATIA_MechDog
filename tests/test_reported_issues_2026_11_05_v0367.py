@@ -161,8 +161,8 @@ def test_the_real_server_still_matches_its_router():
     # catia_solid_tube and 0.3.122 catia_gsd_splines, for 146; 0.3.124
     # catia_solid_sweep_variable for 147; 0.3.125 set_constraint_value for 148;
     # 0.3.127 catia_server_info for 149; 0.3.128 the drawing readers for 151;
-    # 0.3.140 catia_surface_probe for 154.
-    assert _check_tools_match_router() == 155
+    # 0.3.140 catia_surface_probe for 154; 0.3.161 catia_edit_pad for 156.
+    assert _check_tools_match_router() == 156
 
 
 # ── the two hanging suggestions from the 0.3.60 report ─────────────────────

@@ -91,7 +91,11 @@ def test_all_edges_enumerates_the_body_instead_of_the_feature():
     # renumbered by the first fillet that rebuilds.
     assert specs[0]["faces"] == ["Pad.1;2", "Sketch.1;1"]
     assert specs[0]["length_mm"] == pytest.approx(9.6047)
-    assert "Every edge of '零件几何体' (3 edge(s))" in reply
+    # 0.3.161: "Every edge ... enumerated" read as a claim that all 12 had been
+    # filleted, which is what the 2026-11-23 report (P0-2) was told while 4 of
+    # them had built. The sentence now says the edges were OFFERED, and the count
+    # that took comes from the batch.
+    assert "All 3 edge(s) of '零件几何体' were OFFERED" in reply
 
 
 def test_all_edges_retries_below_the_budget():
@@ -208,7 +212,11 @@ def test_chamfer_had_the_same_dead_end_and_gets_the_same_treatment():
 
     assert seen[0]["specs"][0]["index"] == 1
     assert seen[0]["sequential_retry"] is True
-    assert "Every edge of '零件几何体' (3 edge(s))" in reply
+    # 0.3.161: "Every edge ... enumerated" read as a claim that all 12 had been
+    # filleted, which is what the 2026-11-23 report (P0-2) was told while 4 of
+    # them had built. The sentence now says the edges were OFFERED, and the count
+    # that took comes from the batch.
+    assert "All 3 edge(s) of '零件几何体' were OFFERED" in reply
     # The zero-budget case must stop, and say that it stopped.
     tools._chamfer_all_edges(2.0, 45, 1)
     assert seen[1]["sequential_retry"] is False

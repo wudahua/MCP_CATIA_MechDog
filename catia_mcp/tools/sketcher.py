@@ -168,6 +168,12 @@ def _seam_report(plan: Sequence[dict[str, Any]],
     return "; ".join(said) + more, len(loose), widest
 
 
+#: How close to a half circle a sweep counts as one, in radians. Inside this
+#: band `direction` alone decides which of the two semicircles is drawn, because
+#: BOTH directions sweep pi. It is not a formality - see `_sweep_choice`.
+HALF_CIRCLE_TOL = 1e-6
+
+
 def _sweep_choice(a1: float, a2: float, direction: str,
                   major: bool) -> tuple[float, float, bool]:
     """Which way round an arc runs, from the angles of its two endpoints.
@@ -181,13 +187,36 @@ def _sweep_choice(a1: float, a2: float, direction: str,
     The rule: `direction` picks the way, but a sweep past half a circle flips it
     unless `major` says the long way is what was meant. Reported 2026-11-01: two
     endpoints 4.39 degrees apart answered "355.6117 degrees counter-clockwise".
+
+    THE HALF CIRCLE IS THE ONE PLACE THE RULE HAS NO ANSWER, and it used to pick
+    by floating-point noise (2026-11-23 report, P0-1). At exactly 180 degrees
+    both ways round sweep pi, so "more than half a circle" is decided by whether
+    the caller's coordinates came out a hair above or below antipodal. The
+    report's capsule slot: centre (211.171943, 18.704630) R6.142572, p1
+    (207.648709, 23.736330), p2 (214.695178, 13.672929), direction 'ccw' - the
+    two ends are 180.0000023 degrees apart, 4.0e-08 rad past half, so the old
+    `> pi + 1e-9` test flipped it and drew the OTHER semicircle: the cap bulged
+    into the slot instead of out of it, and 3 of the report's 8 caps came out
+    that way (5 came out right, because their own rounding fell just under pi).
+    Nothing in the reply said so; the 2352 mm3 of missing material did.
+
+    So a sweep within `HALF_CIRCLE_TOL` of pi is SET to pi and `direction` is
+    kept. 1e-6 rad is 0.000057 degrees - 0.006 mm of arc at R100, and far below
+    any difference a caller can mean; the coordinate rounding that produced the
+    report's 4e-08 is what this band has to cover, and 6-decimal inputs at R6
+    produce up to ~2e-07.
     """
     ccw = (a2 - a1) % (2 * math.pi)
     chosen_ccw = direction != "cw"
     sweep = ccw if chosen_ccw else (2 * math.pi - ccw)
-    if not major and sweep > math.pi + 1e-9:
-        chosen_ccw = not chosen_ccw
-        sweep = 2 * math.pi - sweep
+    if not major:
+        if sweep > math.pi + HALF_CIRCLE_TOL:
+            chosen_ccw = not chosen_ccw
+            sweep = 2 * math.pi - sweep
+        elif abs(sweep - math.pi) <= HALF_CIRCLE_TOL:
+            # Exactly half: honour `direction`, and make the sweep exactly pi so
+            # the arc ends ON the other endpoint rather than a hair past it.
+            sweep = math.pi
     start = a1 if chosen_ccw else a2
     return start, sweep, chosen_ccw
 
@@ -197,6 +226,23 @@ def _sweep_choice(a1: float, a2: float, direction: str,
 #: endpoints describe two different arcs and the call is refused; below it they
 #: are one arc with rounding in the ends.
 ARC_CENTRE_DRIFT_LIMIT = 0.05
+
+#: How much longer than the diameter a chord may be and still count as the caller's
+#: rounding rather than as a contradiction, in mm.
+#:
+#: It was 1e-9 mm, which is asking the caller's own coordinates for more accuracy
+#: than they carry. The 2026-11-23 report (P1-1) handed this build a semicircle -
+#: R30, ends at (625.533624, 345.467040) and (659.948211, 296.317917) - whose ends
+#: were 60.00000075 mm apart, 3.75e-07 mm past the diameter, and the call was
+#: refused with "the two ends are 60.0000 mm apart, which is more than the 60.0000
+#: mm diameter, so no arc of R30.0000 can join them at all". The same sketch built
+#: fine on their other part, so the tool was unpredictable on 6-decimal data.
+#:
+#: 1e-5 mm covers the 0.5e-6 rounding of two coordinates each end (up to ~1.4e-6
+#: on the chord, ~0.7e-6 on the half) with an order to spare, and is still 100x
+#: below CATIA's own 1e-3 mm modelling precision - a chord that much too long is
+#: not geometry, it is the last digit of a coordinate.
+CHORD_TOL = 1e-5
 
 
 def _circle_at_radius(first: Sequence[float], second: Sequence[float],
@@ -224,7 +270,7 @@ def _circle_at_radius(first: Sequence[float], second: Sequence[float],
     ax, ay = float(first[0]), float(first[1])
     bx, by = float(second[0]), float(second[1])
     half = math.hypot(bx - ax, by - ay) / 2.0
-    if half <= 1e-12 or radius < half - 1e-9:
+    if half <= 1e-12 or half > radius + CHORD_TOL:
         return None
     middle_x, middle_y = (ax + bx) / 2.0, (ay + by) / 2.0
     nx, ny = ay - by, bx - ax            # normal to the chord, before scaling
@@ -232,6 +278,10 @@ def _circle_at_radius(first: Sequence[float], second: Sequence[float],
     if norm <= 1e-12:
         return None
     nx, ny = nx / norm, ny / norm
+    # A chord within CHORD_TOL of the diameter is a HALF CIRCLE: there is exactly
+    # one circle of this radius through the two ends and its centre is the chord's
+    # midpoint, so `height` is 0 (clamped - the ends cannot both be pushed out to
+    # the radius without moving the centre, and the centre is what gives).
     height = math.sqrt(max(0.0, radius * radius - half * half))
     best: tuple[list[float], float] | None = None
     for sign in (1.0, -1.0):
@@ -253,8 +303,21 @@ def _project_to_circle(point: Sequence[float], center: Sequence[float],
     return [center[0] + dx * scale, center[1] + dy * scale]
 
 
+def _fmt_coord(value: float) -> str:
+    """Four decimals, and never ``-0.0000``.
+
+    The same rule as ``_mm`` (which was written for ``centred on (-0.000, 0.000)``
+    in 0.3.113) at the precision points are printed with. It showed up again as a
+    bulge apex of ``(-0.0000, -20.0000)`` for an arc whose apex is exactly
+    (0, -20): a minus sign on a coordinate that is zero reads as a direction.
+    """
+    if abs(value) < 5e-5:
+        return "0.0000"
+    return f"{value:.4f}"
+
+
 def _fmt_point(point: Sequence[float]) -> str:
-    return f"({point[0]:.4f}, {point[1]:.4f})"
+    return "(" + ", ".join(_fmt_coord(float(c)) for c in point[:2]) + ")"
 
 
 def _fmt_gap(value: float) -> str:
@@ -831,11 +894,16 @@ class SketcherTools:
                                 "When this flips the arc, the reply says so and "
                                 "names both sweeps. It applies to both forms: with "
                                 "two angles it keeps the sweep you asked for instead "
-                                "of flipping to the short way. It has NO effect on a "
-                                "request that is already a half circle or less: the "
-                                "sweep is the same either way, so setting it on a "
-                                "short arc changes nothing (reported 2026-11-01 as a "
-                                "possible defect, which it is not)."
+                                "of flipping to the short way. Its one real effect "
+                                "on a HALF CIRCLE is to change nothing: at exactly "
+                                "180 degrees both ways round sweep 180, so the sweep "
+                                "is the same either way and `direction` alone "
+                                "decides WHICH of the two semicircles is drawn "
+                                "(measured 2026-11-23: a slot cap with direction="
+                                "'ccw' came out inside out, and 3 of 8 identical "
+                                "caps did). The reply prints the arc's bulge apex - "
+                                "the point halfway round - so which half it is can "
+                                "be read back rather than assumed."
                             ),
                         },
                     },
@@ -4056,15 +4124,16 @@ class SketcherTools:
                                      if sweep < math.pi else 1.0)
                     adjust = [
                         f"arc {number}: R{radius:.4f} is KEPT and its centre "
-                        f"moved {drift:.4f} mm to {_fmt_point(moved_center)}, "
-                        f"because the ends you gave were up to {deviation:.4f} mm "
+                        f"moved {_fmt_gap(drift)} mm to {_fmt_point(moved_center)}, "
+                        f"because the ends you gave were up to "
+                        f"{_fmt_gap(deviation)} mm "
                         "off that circle and an arc is drawn from "
                         "centre+radius+angles - the ends have to lie on it. "
                         "Moving the centre by the size of that error is the "
                         "smallest change that closes them"
                         + (f"; a circle fitted through the ends AND the arc's "
                            f"midpoint would have moved it {amplification:.0f}x "
-                           f"further (~{amplification * deviation:.4f} mm), "
+                           f"further (~{_fmt_gap(amplification * deviation)} mm), "
                            "because that midpoint is computed from this radius "
                            "rather than measured" if amplification > 2 else "")
                         + "."]
@@ -4089,23 +4158,26 @@ class SketcherTools:
                              _point_gap(second, drawn_second))
                     chord = _point_gap(first, second)
                     if fitted is None:
-                        why = (f"The two ends are {chord:.4f} mm apart, which is "
-                               f"more than the {2 * radius:.4f} mm diameter, so "
-                               f"no arc of R{radius:.4f} can join them at all.")
+                        why = (f"The two ends are {_fmt_gap(chord)} mm apart, which "
+                               f"is more than the {2 * radius:.4f} mm diameter by "
+                               f"more than the {CHORD_TOL:g} mm this build allows "
+                               f"for coordinate rounding, so no arc of "
+                               f"R{radius:.4f} can join them at all.")
                     else:
                         why = (f"Putting both ends on a R{radius:.4f} circle "
-                               f"would move the centre {fitted[1]:.4f} mm "
+                               f"would move the centre {_fmt_gap(fitted[1])} mm "
                                f"({fitted[1] / radius:.1%} of the radius), which "
                                "is a different arc, not rounding.")
                     raise ArgumentRejected(
                         f"Segment {number} (arc) contradicts itself: its ends "
                         f"{_fmt_point(first)} and {_fmt_point(second)} are "
-                        f"{radials[0]:.4f} and {radials[1]:.4f} mm from the "
-                        f"centre {_fmt_point(center)}, while 'radius' says "
+                        f"{_fmt_gap(radials[0])} and {_fmt_gap(radials[1])} mm from "
+                        f"the centre {_fmt_point(center)}, while 'radius' says "
                         f"R{radius:.4f}. {why} Drawing it either way would be a "
                         "guess, and at R"
-                        f"{radius:.4f} each end lands {moved[0]:.4f} / "
-                        f"{moved[1]:.4f} mm from where it was given, which leaves "
+                        f"{radius:.4f} each end lands {_fmt_gap(moved[0])} / "
+                        f"{_fmt_gap(moved[1])} mm from where it was given, which "
+                        "leaves "
                         "the profile OPEN - and a pad or pocket on an open "
                         "profile builds nothing. Nothing was drawn. Two fixes, "
                         "and they are different arcs:\n"
@@ -4750,7 +4822,7 @@ class SketcherTools:
             # drifted apart in the first place.
             start_rad, sweep_rad, chosen_ccw = _sweep_choice(a1, a2, direction, major)
             end_rad = start_rad + sweep_rad
-            flipped = (not major) and raw_sweep > math.pi + 1e-9
+            flipped = (not major) and raw_sweep > math.pi + HALF_CIRCLE_TOL
             start_angle = math.degrees(start_rad)
             end_angle = math.degrees(end_rad)
             if flipped:
@@ -4759,11 +4831,18 @@ class SketcherTools:
                     f"deg): going {direction} from p1 to p2 the long way is "
                     f"{360 - math.degrees(sweep_rad):.4f} deg. Pass major=true if "
                     "that arc really is more than half a circle.")
-            elif abs(math.degrees(sweep_rad) - 180) < 0.5:
+            elif abs(sweep_rad - math.pi) <= HALF_CIRCLE_TOL:
+                # BOTH WAYS ROUND SWEEP PI HERE, so the sweep angle cannot say
+                # which half this is - only `direction` can, and it DID, which is
+                # the fix (P0-1): the reply states the half instead of claiming
+                # the direction decided nothing.
                 notes.append(
-                    " The endpoints are 180 deg apart, so direction decides "
-                    "nothing here - the arc is a half circle either way, and it "
-                    "was drawn exactly as written.")
+                    f" The two ends are exactly half a circle apart, so the sweep "
+                    f"is 180 deg either way and `direction` decides WHICH half: "
+                    f"this is the {'counter-clockwise' if chosen_ccw else 'clockwise'}"
+                    f" one from p1 to p2, bulging to "
+                    f"{_fmt_point((cx + radius * math.cos(start_rad + sweep_rad / 2), cy + radius * math.sin(start_rad + sweep_rad / 2)))}"
+                    ". The other half is what you get with the other direction.")
         elif start_angle is not None and end_angle is not None:
             start_rad = math.radians(start_angle)
             end_rad = math.radians(end_angle)
@@ -4783,21 +4862,31 @@ class SketcherTools:
                     "circle, so the arc would sweep nothing. Use "
                     "catia_sketch_circle for a full circle.",
                     code="DEGENERATE_ARC")
-            ccw_wanted = direction != "cw"
-            sweep = span if ccw_wanted else (2 * math.pi - span)
-            if not major and sweep > math.pi + 1e-9:
-                ccw_wanted = not ccw_wanted
-                sweep = 2 * math.pi - sweep
+            # ONE RULE, NOT TWO (2026-11-23). This branch carried its own copy of
+            # the short-way rule, and the copy is where the 180-degree flip went
+            # wrong on the point form - the same expression, one tolerance apart.
+            # Both forms now call _sweep_choice, so a half circle is a half
+            # circle from either way of naming it.
+            raw_sweep = span if direction != "cw" else (2 * math.pi - span)
+            start_rad, sweep, ccw_wanted = _sweep_choice(
+                first_rad, second_rad, direction, major)
+            end_rad = start_rad + sweep
+            if not major and raw_sweep > math.pi + HALF_CIRCLE_TOL:
                 notes.append(
                     f" Took the SHORT way round ({math.degrees(sweep):.4f} deg) "
                     f"between {start_angle:g} and {end_angle:g} deg: walking "
                     f"{direction} from the first angle to the second is "
                     f"{360 - math.degrees(sweep):.4f} deg. Pass major=true if that "
                     "arc really is more than half a circle.")
-            if ccw_wanted:
-                start_rad, end_rad = first_rad, first_rad + sweep
-            else:
-                start_rad, end_rad = second_rad, second_rad + sweep
+            elif abs(sweep - math.pi) <= HALF_CIRCLE_TOL:
+                notes.append(
+                    " The two angles are exactly half a circle apart, so the "
+                    "sweep is 180 deg either way and `direction` decides WHICH "
+                    f"half: this is the "
+                    f"{'counter-clockwise' if ccw_wanted else 'clockwise'} one, "
+                    "bulging to "
+                    f"{_fmt_point((cx + radius * math.cos(start_rad + sweep / 2), cy + radius * math.sin(start_rad + sweep / 2)))}"
+                    ". The other direction gives the other half.")
             # THE REPLY DESCRIBED A PAIR THAT IS NOT AN ARC (0.3.95). It said
             # "from 90 deg to 0 deg - swept 90 counter-clockwise", and 90 -> 0
             # is clockwise; the two clauses contradicted each other in the same
@@ -4857,10 +4946,19 @@ class SketcherTools:
         )
         self._note_element("arc", cx=cx, cy=cy, radius=radius,
                            start_rad=start_rad, sweep_rad=end_rad - start_rad)
+        # THE MIDPOINT, ALWAYS (2026-11-23 report, P0-1 suggestion 3). A swept
+        # angle of 180 says nothing about WHICH semicircle was drawn, and the
+        # report's reader had no way to tell from the reply - it took a volume
+        # comparison of the finished part to find three caps inside out. The
+        # point halfway round is the one number that answers "which side does
+        # this bulge to", and it is already computed here.
+        middle = (cx + radius * math.cos(start_rad + (end_rad - start_rad) / 2),
+                  cy + radius * math.sin(start_rad + (end_rad - start_rad) / 2))
         return (
             f"Arc created at ({cx}, {cy}), radius={radius} mm, "
             f"{span} ({swept}), arc length "
-            f"{radius * math.radians(abs(sweep)):.4f} mm"
+            f"{radius * math.radians(abs(sweep)):.4f} mm, bulge apex "
+            f"{_fmt_point(middle)}"
             + "".join(notes)
         )
 

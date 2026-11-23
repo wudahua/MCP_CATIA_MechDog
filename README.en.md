@@ -2,7 +2,7 @@
 
 > **中文入口见 [README.md](README.md)。** This file is the full English reference: every tool, every measurement behind it, and every known limit.
 
-**0.3.160** · [what changed](CHANGELOG.md) ·
+**0.3.161** · [what changed](CHANGELOG.md) ·
 [releases](https://github.com/wudahua/MCP_CATIA_MechDog/releases) ·
 [known limits](#known-limits)
 
@@ -14,7 +14,7 @@ defects that make that loop lie to you. Most of the work since 0.3.0 came from
 people rebuilding real assemblies with it: the changelog is a list of things that
 produced a plausible number, a wrong number, or no explanation at all.
 
-**155 tools** (upstream 98 + 57 added, and nothing dropped any more: knowledge
+**156 tools** (upstream 98 + 58 added, and nothing dropped any more: knowledge
 came back in 0.3.63 and drafting in 0.3.64, each after its tools were measured on
 B30 rather than trusted). Nothing in the COM layer was rewritten — the value of upstream is
 the field-verified knowledge in its comments, so this fork is strictly add /
@@ -2176,7 +2176,7 @@ asks, on that same file (297.011 x 210.016 mm per page, as a PDF reader reports)
 |---|---|---|
 | Document | 12 | new/open/save/close/list + `catia_save_as_copy`; `catia_save_document` retries around dialogs |
 | Sketcher | 19 | lines, rectangles, circles, constraints; reopen a closed sketch and delete one element; `catia_sketch_copy` replays a profile onto another plane; `catia_sketch_strokes` draws a whole letter outline in one call, and `catia_text_strokes` supplies those outlines from a built-in single-line font (it can hand the points back, and always reports the box the text occupies; its baseline runs along the sketch's own +H); `catia_sketch_ellipse` draws a slanted ellipse in one curve AND makes both semi-axes dimensional constraints (so a user parameter drives them - `set_parameter` on 7 undriven ellipses changed nothing, measured 2026-11-14); `catia_set_constraint_value` changes one sketch dimension and reports what moved; `catia_sketch_profile` draws a MIXED outline - straight runs and arcs, each with its own primitive - in one call, and checks the junctions on the endpoints that will be DRAWN (it rebuilds each arc's circle through them) |
-| Part Design | 26 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, solid loft, bodies (create / list / delete)… since 0.3.139 a fillet/chamfer that leaves a NAMED edge out is `PARTIAL_EDGES_FAILED` with the applied and rejected lists, instead of a `1/2 edge(s) done` sentence |
+| Part Design | 27 | pad, pocket, groove, fillet, chamfer, hole, patterns, mirror, shell, solid loft, bodies (create / list / delete)… since 0.3.139 a fillet/chamfer that leaves a NAMED edge out is `PARTIAL_EDGES_FAILED` with the applied and rejected lists, instead of a `1/2 edge(s) done` sentence |
 | Generative Shape Design | 41 | wireframe and surfaces, extract, `boundary`, `heal`, `fillet_surface`, `spine`, `rotate`, `translate`, `circ_pattern` (rotate+join), `plane_normal_to_curve`, `plane_angle`, revolve + close surface, and `catia_surface_engrave` (a constant-depth groove along a curve on a curved face, with `curves=[...]` for a whole word in one boolean); `catia_solid_tube` sweeps one circle along a curve into a closed solid (the six-step bend in one call); `catia_gsd_splines` builds a whole section chain in one call (17 calls become 1, a mid-chain refusal reports what exists instead of rolling back, and `source_file=` reads those sections from a JSON or CSV file); `catia_solid_sweep_variable` sweeps a RADIUS TABLE along a spine - one profile per station, one loft through them, judged against the ruled-cone sum (8 168.2 mm³ against 8 168.1 on a 50 mm cone); since 0.3.126 a station may be an ELLIPSE (`[[t, rx, ry], ...]`, semi-axes), built as a closed spline through 64 points that lie on it because GSD has no ellipse primitive - measured at -0.001 % of the exact perimeter, and 1 099.56 mm³ against the analytic 1 099.56 for a 10x6 -> 5x3 loft; `catia_measure_deviation` samples a curve along its length and reports how far each sample sits from a body or a face; `catia_surface_probe` answers the other direction - given points, it returns the CLOSEST POINT ON THE SURFACE, the distance and the normal there, and with `direction` the surface HEIGHT along that axis (verified against a cone whose radius is analytic, 0.0000 mm; the normal is the foot-to-probe vector, and every call re-reads one foot stepped 0.5 mm off before quoting anything); a GSD element or set is removed with `catia_delete_feature` |
 | Assembly | **14** | upstream 9 + get/set component transform, rename, list constraints, copy component, replace component |
 | Appearance | **3** | `catia_colorize_assembly`, `catia_set_color`, `catia_get_color` - per-instance colour in an assembly, per-node in a part; since 0.3.138 the write flushes the part (a colour is not on screen until `part.Update()`) and `Face.N` is refused with the measurement, because on this build it colours the whole solid |

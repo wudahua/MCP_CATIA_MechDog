@@ -6,6 +6,7 @@ RectPattern, CircPattern, Mirror, Rib, Slot, Shell, Thickness, Draft.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import math
 import re
@@ -18,7 +19,7 @@ from catia_mcp.results import CodedError, FeatureRejected, PreconditionRejected
 from catia_mcp import sketch_frames
 from catia_mcp.sketch_frames import BASES, frame_of, point_world
 from catia_mcp.results import ArgumentOutOfRange, ArgumentRejected
-from catia_mcp.geometry2d import open_ends, segments_of
+from catia_mcp.geometry2d import JUNCTION_TOL, free_ends_with_gaps, segments_of
 from catia_mcp.topo_search import (
     edge_fingerprint,
     face_keys,
@@ -438,6 +439,73 @@ class PartDesignTools:
                     # call with neither is rejected before CATIA is touched:
                     # height for one side, limit1 (with optional limit2) for two.
                     "anyOf": [{"required": ["height"]}, {"required": ["limit1"]}],
+                },
+            },
+            {
+                "name": "catia_edit_pad",
+                "description": (
+                    "CHANGE THE DEPTH OF A FEATURE THAT ALREADY EXISTS - a pad, a "
+                    "pocket, a shaft or a groove - instead of throwing the part "
+                    "away. Until 0.3.161 the only way to fix a pad built to the "
+                    "wrong depth was to delete it, which breaks every feature "
+                    "after it, so the 2026-11-23 report rebuilt a 15-feature part "
+                    "twice for a 5 mm mistake (P1-4). "
+                    "MEASURED on B30 2026-11-23: Pad.FirstLimit.Dimension.Value "
+                    "reads and writes (80 -> 20 on a 25x45 block gave 22500 mm3, "
+                    "exactly 25*45*20), SecondLimit.Dimension.Value reads 0 on a "
+                    "one-sided pad, and Pad.IsSymmetric reads. WHAT CANNOT BE "
+                    "EDITED, and is not offered: the DIRECTION (Pad.Direction, "
+                    "Pad.Reversed, Pad.Symmetric, FirstLimit.Type all raise "
+                    "'Item.X' on this build), a seed surface, and any reordering "
+                    "(Part and Body have no Insert/Reorder). A pad that points "
+                    "the wrong way is still a rebuild - what this fixes is the "
+                    "SIZE. "
+                    "The reply gives the old and new value, the volume before and "
+                    "after, and the IMPLIED AREA of the change (volume moved / "
+                    "depth changed) - a pad whose sketch is 25 x 45 answers 1125 "
+                    "mm2 there, and a change that landed on the wrong side "
+                    "answers the same number with the opposite sign."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "feature_name": {
+                            "type": "string",
+                            "description": (
+                                "Feature to change ('凸台.1', '凹槽.2' - see "
+                                "catia_list_features). Any Part Design feature that "
+                                "carries a FirstLimit works; one that does not is "
+                                "refused by name."
+                            ),
+                        },
+                        "height": {
+                            "type": "number",
+                            "description": (
+                                "New depth of the FIRST limit, in mm. This is the "
+                                "number catia_pad was given as 'height'."
+                            ),
+                        },
+                        "second_height": {
+                            "type": "number",
+                            "description": (
+                                "New depth of the SECOND limit, in mm. A one-sided "
+                                "pad reads 0 here, and setting it makes the pad "
+                                "TWO-SIDED: measured on B30 2026-11-23, a 25x45 pad "
+                                "at 20 mm plus a 5 mm second limit gave 28125 mm3, "
+                                "exactly 25*45*25. Leave it out to keep the feature "
+                                "one-sided."
+                            ),
+                        },
+                        "symmetric": {
+                            "type": "boolean",
+                            "description": (
+                                "Set the feature's IsSymmetric flag. It reads back "
+                                "on this build; when the read-back disagrees the "
+                                "change is undone and the call says so."
+                            ),
+                        },
+                    },
+                    "required": ["feature_name"],
                 },
             },
             {
@@ -1483,7 +1551,18 @@ class PartDesignTools:
                             "description": (
                                 "Delete several features/GSD elements by name in one "
                                 "call. Cannot be combined with feature_name, index or "
-                                "last; failures are reported per name."
+                                "last; failures are reported per name. An entry with "
+                                "'*' or '?' is a PATTERN, matched against the "
+                                "elements that exist now ('*' any run, '?' one "
+                                "character) and expanded before anything is deleted - "
+                                "the reply prints what it matched. Feature names do "
+                                "not survive a rebuild (the same four fillets came "
+                                "back as 倒圆角.13/.14/.18/.19, then .37/.38/.42, "
+                                "then .61/.62/.66/.67 - 2026-11-23 report), so "
+                                "['倒圆角.*'] is the form that keeps working where a "
+                                "list typed from a previous call does not. A pattern "
+                                "that matches nothing is REFUSED: deleting nothing "
+                                "successfully reads as a cleanup that happened."
                             ),
                         },
                         "cascade": {
@@ -1794,7 +1873,16 @@ class PartDesignTools:
                             "description": (
                                 "Tree name: a body ('零件几何体'), a geometrical set "
                                 "('GSD_Set'), an element inside one ('S1', 'Closed'), "
-                                "a feature, or a sketch."
+                                "a feature, a sketch - or, in an assembly document, "
+                                "a COMPONENT INSTANCE ('P05_leg.3', or a path like "
+                                "'ASM/SUB.1/leg.2'). An instance name was refused "
+                                "until 0.3.161 ('No tree node named ... in any of "
+                                "the 4 part(s)'), which made 'hide that side plate and "
+                                "look inside' impossible. An instance is hidden "
+                                "through the product's own Selection and the result "
+                                "is READ BACK with VisProperties.GetShow - measured "
+                                "on B30 2026-11-23, (0, 1) is hidden and (0, 0) is "
+                                "shown - so the reply states a reading."
                             ),
                         },
                         "kind": {
@@ -2073,6 +2161,8 @@ class PartDesignTools:
                 return self._pad(arguments)
             case "catia_pocket":
                 return self._pocket(arguments)
+            case "catia_edit_pad":
+                return self._edit_pad(arguments)
             case "catia_shaft":
                 return self._shaft(arguments)
             case "catia_groove":
@@ -2579,12 +2669,17 @@ class PartDesignTools:
             pass
         return body
 
-    def _sketch_open_ends(self, name: str) -> tuple[list[tuple[float, float]], int]:
+    def _sketch_open_ends(self, name: str) -> tuple[list[dict[str, Any]], int]:
         """Free ends of one sketch, from the drawing record; ``(ends, segments)``.
 
         ``([], 0)`` means "nothing was recorded" - a sketch reopened from disk,
         or one filled by something other than this server - which is NOT the same
         as a closed sketch, so the caller must not read it as a clean bill.
+
+        Each end carries the distance to the nearest other end (see
+        ``geometry2d.free_ends_with_gaps``): the 2026-11-23 report (P1-2) was
+        shown two coordinates that printed the same at four decimals and had no
+        way to tell a rounding from a blunder.
         """
         outlines = getattr(self.conn, "sketch_outlines", None) or {}
         try:
@@ -2595,7 +2690,7 @@ class PartDesignTools:
         if not record:
             return [], 0
         segments = segments_of(record.get("elements") or [])
-        return open_ends(segments), len(segments)
+        return free_ends_with_gaps(segments), len(segments)
 
     def _refuse_open_curves(self, sketch: Any, allow: bool) -> None:
         """Refuse a pad/pocket whose sketch holds an open curve, BEFORE CATIA runs.
@@ -2619,6 +2714,14 @@ class PartDesignTools:
         ``allow=True`` is the escape hatch, and it exists on purpose: a rule that
         can only ever say no is worse than CATIA's own answer when the record is
         wrong about the sketch. See the argument's description.
+
+        AND THE THRESHOLD HAS TO MATCH THE RECORD'S PRECISION (2026-11-23 report,
+        P1-2). It was 1e-6, finer than the gap an arc leaves when its ends are the
+        radial projections CATIA actually drew - so every profile mixing
+        `catia_sketch_arc` with `catia_sketch_profile` was refused, and the caller
+        had to pass allow_open_curves=true (i.e. disable the guard) to build a
+        sketch that was fine. `JUNCTION_TOL` is 1e-3 mm, and the reply prints the
+        measured distance, so a 9e-7 gap and a 0.0009 gap no longer read alike.
         """
         if allow:
             return
@@ -2626,8 +2729,16 @@ class PartDesignTools:
         ends, segments = self._sketch_open_ends(name)
         if not ends:
             return
-        listed = ", ".join(f"({x:.4f}, {y:.4f})" for x, y in ends[:8])
-        more = "" if len(ends) <= 8 else f", and {len(ends) - 8} more"
+        listed = ", ".join(
+            f"({entry['point'][0]:.4f}, {entry['point'][1]:.4f})"
+            + ("" if entry["nearest_mm"] is None
+               else f" whose nearest other end is {entry['nearest_mm']:.3e} mm "
+                    "away"
+                    + (f" ('{entry['nearest_label']}')"
+                       if entry["nearest_label"] else ""))
+            for entry in ends[:6])
+        more = "" if len(ends) <= 6 else f", and {len(ends) - 6} more"
+        widest = max((entry["nearest_mm"] or 0.0) for entry in ends)
         raise PreconditionRejected(
             f"'{name}' holds {len(ends)} free endpoint(s) - {listed}{more} - so it "
             "is not a closed contour, and a pad or pocket on it removes NOTHING. "
@@ -2635,10 +2746,18 @@ class PartDesignTools:
             "alone cut 603.2 mm3, and the same circle with ONE open spline through "
             "it, one open spline inside it, or one open line through it removed "
             "0 mm3 in all three. The open curve is the cause - it does not have to "
-            "divide anything, and it does not have to be a spline. Nothing was "
-            f"built and nothing was rolled back ({segments} segment(s) checked, "
-            "from the coordinates this session gave the sketch tools).",
+            "divide anything, and it does not have to be a spline. "
+            f"A gap of {JUNCTION_TOL:g} mm or less counts as JOINED here, so these "
+            f"{len(ends)} are wider than that (widest {widest:.3e} mm). Under "
+            "1e-4 mm the gap is the rounding of the coordinates the sketch was "
+            "drawn from, and nothing needs doing; from 0.01 mm up it is a real gap "
+            "and the two ends have to meet. "
+            f"Nothing was built and nothing was rolled back ({segments} segment(s) "
+            "checked, from the coordinates this session gave the sketch tools).",
             code="SKETCH_HAS_OPEN_CURVES", stage="validate", modified=False,
+            data={"sketch": name, "free_ends": len(ends),
+                  "widest_gap_mm": widest, "joined_below_mm": JUNCTION_TOL,
+                  "ends": ends[:20]},
             next_actions=[
                 "Put the open curve(s) in their OWN sketch: they are boundaries or "
                 "guides, and pad/pocket never needed them. Draw the closed region "
@@ -4293,6 +4412,47 @@ class PartDesignTools:
                 code="MAX_EDGES_OUT_OF_RANGE", stage="validate")
         return value
 
+    def _as_enumerated(self, refusal: CodedError, total: int,
+                       kind: str) -> CodedError:
+        """Re-raise a batch refusal as "the set was chosen by ME, not by you".
+
+        The all-edges paths enumerate the body and hand every edge over, so a
+        partial result is still a partial result - but the caller did not choose
+        that set, and the sentence has to say which half of the problem they own.
+        It is added HERE rather than inside the batch machinery so the batch
+        keeps one meaning for both callers (2026-11-23 report, P0-2: a 12-edge
+        box answered ok:true reading "Every edge ... enumerated" with 4 built).
+
+        The recipe in the next action is measured, not suggested: on that same
+        25x45x80 box, 4 edges parallel to the extrusion in one call and then ONE
+        rim edge per end with propagation='tangency' gives the full 26-face
+        solid at V 89495.6695 / A 12930.4246 - the corpus values to the digit.
+        """
+        message = (str(refusal)
+                   + f" THIS SET WAS CHOSEN BY THE TOOL, NOT BY YOU: no edge was "
+                   f"named, so all {total} edge(s) of the body were offered. "
+                   "Refusing the enclosing rims is normal - their ends land on "
+                   "the surfaces the first fillets just made - so a partial "
+                   "answer here means 'the body cannot take that many fillets "
+                   "one per edge', not 'you addressed the wrong edges'.")
+        data = dict(getattr(refusal, "data", {}) or {})
+        data["self_enumerated"] = True
+        return CodedError(
+            message,
+            code=getattr(refusal, "code", None),
+            modified=getattr(refusal, "modified", None),
+            stage=getattr(refusal, "stage", None),
+            data=data,
+            next_actions=list(getattr(refusal, "next_actions", []) or []) + [
+                "Take a whole RIM in one call instead of one edge at a time: "
+                "catia_%s(edge_name=<one rim edge>, propagation='tangency') "
+                "propagates along the tangent chain, so one call closes an end "
+                "face. Measured 2026-11-23 on a 25x45x80 block: the 4 edges "
+                "parallel to the extrusion in one call plus one rim edge per end "
+                "with tangency gives all 26 faces and the exact volume, where 12 "
+                "separate calls built 4." % kind,
+            ])
+
     def _fillet_all_edges(self, radius: float, propagation: int,
                           limit: int) -> str:
         """Fillet every edge of the body by ENUMERATING them.
@@ -4334,15 +4494,12 @@ class PartDesignTools:
                          if entry["length"] is not None)
         too_short = [value for value in lengths if value < 2 * radius]
 
-        started = time.perf_counter()
-        reply = self._fillet_many(radius, specs, propagation,
-                                  sequential_retry=sequential, strict=False)
-        elapsed = time.perf_counter() - started
-        head = (f"Every edge of '{body.Name}' ({total} edge(s)): enumerated "
-                "rather than taken from the feature, because CATIA's "
-                "whole-feature fillet call does not build on B30 (measured: "
-                "2-edge cylinder, 12-edge rectangle and two polylines all fail "
-                "at construction, whatever the propagation). ")
+        head = (f"All {total} edge(s) of '{body.Name}' were OFFERED to one fillet "
+                f"each: enumerated rather than taken from the feature, because "
+                f"CATIA's whole-feature fillet call does not build on B30 "
+                f"(measured: 2-edge cylinder, 12-edge rectangle and two polylines "
+                f"all fail at construction, whatever the propagation). How many "
+                f"TOOK is in the next sentence, and it is not always all of them. ")
         # The shortest-edge count is ARITHMETIC and used to sit AFTER the
         # attempt, so callers paid for it before reading it. Measured on the
         # 2026-11-11 report's own part (381 edges, R1.5): the batch attempt took
@@ -4374,6 +4531,21 @@ class PartDesignTools:
                      "catia_fillet(edge_names=[...]) retries each one on its "
                      "own and names what failed. Raise max_edges only if you "
                      "accept the time.")
+        # THE CALL GOES LAST, AFTER THE ARITHMETIC (0.3.161). It used to sit
+        # first and the sentences about "166 of 381 edges are shorter than 2*R"
+        # were appended after it - so when the batch refused (which since
+        # 0.3.161 it does, instead of answering ok:true) the caller lost the one
+        # paragraph that explains WHY those edges refuse. Everything above is
+        # arithmetic on the edge table; none of it needed CATIA.
+        started = time.perf_counter()
+        try:
+            reply = self._fillet_many(radius, specs, propagation,
+                                      sequential_retry=sequential, strict=True)
+        except CodedError as refusal:
+            enriched = self._as_enumerated(refusal, total, "fillet")
+            enriched.args = (head + str(enriched),)
+            raise enriched from refusal
+        elapsed = time.perf_counter() - started
         # The reply used to end with names and no clock, so a caller could not
         # size the next call - reported 2026-11-12 after 147 edges (46 built,
         # 101 refused) came back from a long call with no elapsed time at all.
@@ -4640,6 +4812,22 @@ class PartDesignTools:
                         "ones that refuse - 381 edges of a real part took 458 s), "
                         "and this call was given more edges than it will spend "
                         "that on.")
+                if strict:
+                    # "0/381 done" as ordinary prose is the same half-truth the
+                    # 2026-11-14 report caught on a two-edge batch: nothing was
+                    # built, and any caller branching on status was told the call
+                    # succeeded. It travels as a failure with modified=false.
+                    raise CodedError(
+                        head, code="EDGES_REJECTED", modified=False,
+                        stage="execute",
+                        data={"kind": "chamfer" if label == "Chamfer" else "fillet",
+                              "value": radius, "requested": len(names), "done": 0,
+                              "applied": [], "rejected": [], "not_attempted": True},
+                        next_actions=[
+                            "Send a bounded set of edges instead of all of them "
+                            "(catia_list_edges shows length and bounding faces), "
+                            "or raise max_edges to pay for the one-at-a-time retry",
+                        ])
                 return head
             fresh_names, fresh_refs = (resolve() if resolve is not None
                                        else (names, refs))
@@ -4726,6 +4914,18 @@ class PartDesignTools:
         themselves, and some of those are too short by arithmetic (a bevel of L on
         an edge shorter than 2L cannot meet its neighbour). Counting that as a
         failed call would make the honest use of the tool unusable.
+        ``self_enumerated`` is NOT the same as "the caller asked for this set',
+        and 0.3.160 got that wrong (2026-11-23 report, P0-2). ``strict=False``
+        was justified by "those edges were not named by the caller, so a partial
+        result is not a broken promise" - but a 25x45x80 block asked for
+        ``catia_fillet(radius=2)`` and answered ``ok: true`` reading "Every edge
+        of '零件几何体' (12 edge(s)): enumerated ...", while 4 of the 12 had
+        built. The other 8 (the two end faces' rims) refuse because their ends
+        land on the fillet surfaces the first four just made, the volume said
+        89725.31 against 89495.67, and NOTHING in the reply said a machine could
+        read. So the enumerated path passes strict=True as well; what differs is
+        the sentence and ``data.self_enumerated``, which tell the caller the
+        edges were chosen by the tool rather than by them.
         """
         requested = len(names)
         code = "PARTIAL_EDGES_FAILED" if done else "EDGES_REJECTED"
@@ -5070,19 +5270,12 @@ class PartDesignTools:
                          if entry["length"] is not None)
         too_short = [value for value in lengths if value < 2 * length]
 
-        started = time.perf_counter()
-        reply = (self._chamfer_many(length, angle, specs,
-                                    sequential_retry=sequential, strict=False,
-                                    length2=length2)
-                 if length2 else
-                 self._chamfer_many(length, angle, specs,
-                                    sequential_retry=sequential, strict=False))
-        elapsed = time.perf_counter() - started
-        head = (f"Every edge of '{body.Name}' ({total} edge(s)): enumerated "
-                "rather than taken from the feature, because CATIA's "
-                "whole-feature chamfer call does not build on B30 (measured: "
-                "feature reference and body reference both fail at construction "
-                "on a 2-edge cylinder and a 12-edge rectangle). ")
+        head = (f"All {total} edge(s) of '{body.Name}' were OFFERED to one bevel "
+                f"each: enumerated rather than taken from the feature, because "
+                f"CATIA's whole-feature chamfer call does not build on B30 "
+                f"(measured: feature reference and body reference both fail at "
+                f"construction on a 2-edge cylinder and a 12-edge rectangle). How "
+                f"many TOOK is in the next sentence. ")
         if lengths and too_short:
             # 2*L is where two bevels of this size meet at a shared corner, so
             # the count is a warning about corners, not a proof about any one
@@ -5103,6 +5296,21 @@ class PartDesignTools:
                 "rebuild plus a separate feature. ")
             head += ("NEXT: choose the edges yourself and send a bounded batch - "
                      "catia_list_edges shows length and bounding faces.")
+        # Same order as the fillet: the arithmetic first, the call last, so a
+        # refusal still carries the paragraph that explains the rejected edges.
+        started = time.perf_counter()
+        try:
+            reply = (self._chamfer_many(length, angle, specs,
+                                        sequential_retry=sequential, strict=True,
+                                        length2=length2)
+                     if length2 else
+                     self._chamfer_many(length, angle, specs,
+                                        sequential_retry=sequential, strict=True))
+        except CodedError as refusal:
+            enriched = self._as_enumerated(refusal, total, "chamfer")
+            enriched.args = (head + str(enriched),)
+            raise enriched from refusal
+        elapsed = time.perf_counter() - started
         return head + reply + f" Took {elapsed:.1f} s."
 
     def _chamfer_readback(self, feature: Any, length: float,
@@ -5242,6 +5450,21 @@ class PartDesignTools:
                                         resolve=lambda: self._resolve_edge_specs(body, specs),
                                         sequential_retry=sequential_retry,
                                         strict=strict)
+        except CodedError as refusal:
+            # A PARTIAL BEVEL STILL OWES THE READ-BACK. Since 0.3.161 the
+            # all-edges path raises when some edges refuse instead of returning
+            # that as prose, and the sentence this feature can add - what Mode
+            # says and how much material actually went - is exactly what a
+            # caller needs then. It is appended rather than lost.
+            if created:
+                after = self._mass_probe(part, body)[0]
+                try:
+                    refusal.args = (str(refusal) + self._chamfer_readback(
+                        created[0], length, length2, angle,
+                        before_volume, after, names),)
+                except Exception:  # noqa: BLE001 - the refusal stands without it
+                    pass
+            raise
         finally:
             self._clear_selection()
             self.conn.refresh_display()
@@ -6799,6 +7022,321 @@ class PartDesignTools:
         self.conn.refresh_display()
         return f"Thickness added: {offset} mm on {face_name}. Feature: '{thickness.Name}'"
 
+    def _element_names(self, part: Any) -> list[str]:
+        """Every name this tool could delete, in tree order.
+
+        Bodies' features, their sketches, the hybrid shapes in each body and the
+        geometrical sets (nested ones included) - the same four places
+        ``_delete_one`` searches, so a pattern can never match something the
+        delete then cannot reach. Names are NOT de-duplicated here: two elements
+        may share one (that is the documented duplicate-name case), and the
+        expansion has to see both or it would silently delete one.
+        """
+        names: list[str] = []
+
+        def add(node: Any) -> None:
+            try:
+                name = str(getattr(node, "Name", "") or "")
+            except Exception:  # noqa: BLE001 - an unreadable node has no name
+                return
+            if name:
+                names.append(name)
+
+        try:
+            bodies = part.Bodies
+            for index in range(1, int(bodies.Count) + 1):
+                body = bodies.Item(index)
+                add(body)
+                for collection in ("Shapes", "Sketches", "HybridShapes"):
+                    try:
+                        items = getattr(body, collection)
+                        for position in range(1, int(items.Count) + 1):
+                            add(items.Item(position))
+                    except Exception:  # noqa: BLE001 - that collection is absent
+                        continue
+        except Exception:  # noqa: BLE001 - no body list, no expansion
+            return names
+
+        def walk(holder: Any) -> None:
+            add(holder)
+            try:
+                shapes = holder.HybridShapes
+                for position in range(1, int(shapes.Count) + 1):
+                    add(shapes.Item(position))
+            except Exception:  # noqa: BLE001 - an empty set
+                pass
+            try:
+                inner = holder.HybridBodies
+                for position in range(1, int(inner.Count) + 1):
+                    walk(inner.Item(position))
+            except Exception:  # noqa: BLE001 - a set without children
+                pass
+
+        try:
+            sets = part.HybridBodies
+            for index in range(1, int(sets.Count) + 1):
+                walk(sets.Item(index))
+        except Exception:  # noqa: BLE001 - a part without geometrical sets
+            pass
+        return names
+
+    def _expand_name_patterns(self, part: Any, names: list[str]
+                              ) -> tuple[list[str], list[str]]:
+        """``names`` with every ``*``/``?`` entry replaced by what it matches.
+
+        Returns ``(expanded, notes)``; the notes are printed in the reply so the
+        caller sees the expansion. A pattern that matches NOTHING is refused:
+        deleting "nothing" successfully is how a caller comes to believe a
+        cleanup happened (2026-11-23 report, P1-3 - the names it had written down
+        were from before the rebuild, and three of four no longer existed).
+        """
+        if not any("*" in name or "?" in name for name in names):
+            return list(names), []
+        candidates = self._element_names(part)
+        expanded: list[str] = []
+        notes: list[str] = []
+        for name in names:
+            if "*" not in name and "?" not in name:
+                expanded.append(name)
+                continue
+            hits = [candidate for candidate in dict.fromkeys(candidates)
+                    if fnmatch.fnmatchcase(candidate, name)]
+            if not hits:
+                sample = ", ".join(dict.fromkeys(candidates))[:300]
+                raise ArgumentRejected(
+                    f"'{name}' matches no element in this part. A pattern is "
+                    "expanded against the tree as it is NOW ('*' any run of "
+                    "characters, '?' one), so a name written down before a "
+                    "rebuild can match nothing - and deleting nothing "
+                    "successfully would read as a cleanup that happened. Nothing "
+                    f"was deleted. The part holds: {sample}",
+                    code="PATTERN_MATCHED_NOTHING", stage="execute",
+                    modified=False,
+                    next_actions=[
+                        "catia_list_features shows the names that exist now",
+                    ])
+            expanded.extend(hits)
+            notes.append(f"'{name}' matched {len(hits)} element(s): "
+                         + ", ".join(hits[:8])
+                         + (f", ... ({len(hits) - 8} more)" if len(hits) > 8 else ""))
+        # One name twice would delete twice; the batch already reports how many
+        # OBJECTS went, so duplicates here would make that count a lie.
+        return list(dict.fromkeys(expanded)), notes
+
+    def _edit_pad(self, args: dict[str, Any]) -> str:
+        """Change the depth of a feature that already exists.
+
+        The gap the 2026-11-23 report (P1-4) hit hardest: a pad built 5 mm too
+        deep, 15 features later, and no route but deleting it - which breaks
+        everything after it - so the part was rebuilt twice.
+
+        What this build allows, measured on B30 2026-11-23: ``FirstLimit`` and
+        ``SecondLimit`` answer a ``Dimension`` whose ``Value`` reads AND writes
+        (a 25x45 block padded to 80 and then set to 20 gave 22500 mm3, exactly
+        25*45*20), ``IsSymmetric`` reads. What it does NOT allow:
+        ``Pad.Direction``, ``Pad.Reversed``, ``Pad.Symmetric``, ``Pad.Offset``,
+        ``FirstLimit.Type`` all raise ``Item.X``, so the direction of an existing
+        pad cannot be read, let alone flipped - that is still a rebuild, and the
+        reply says so instead of pretending otherwise.
+
+        THE UNDO IS REAL. A value that CATIA accepts and then fails to rebuild
+        leaves the feature in error, so the old numbers are written back and the
+        part updated again before the refusal goes out; ``modified`` is false only
+        when that restore succeeded (``_restore_limits``).
+        """
+        self.conn.ensure_connected()
+        part = self.conn.get_active_part()
+        body = self._prepare_body(part)
+        name = str(args.get("feature_name") or "").strip()
+        if not name:
+            raise ArgumentRejected(
+                "catia_edit_pad needs 'feature_name' - the feature whose depth is "
+                "wrong, e.g. '凸台.1' (catia_list_features lists them). Nothing "
+                "was changed.",
+                code="BAD_ARGUMENT", stage="validate", modified=False)
+        wanted_first = args.get("height")
+        wanted_second = args.get("second_height")
+        wanted_symmetric = args.get("symmetric")
+        if wanted_first is None and wanted_second is None and wanted_symmetric is None:
+            raise ArgumentRejected(
+                "catia_edit_pad was given nothing to change: pass 'height' "
+                "(the first limit's depth), 'second_height' (a two-sided feature's "
+                "other side) or 'symmetric'. Nothing was changed.",
+                code="BAD_ARGUMENT", stage="validate", modified=False)
+        for label, value in (("height", wanted_first), ("second_height", wanted_second)):
+            if value is None:
+                continue
+            try:
+                number = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ArgumentRejected(
+                    f"'{label}' has to be a number of millimetres; got {value!r}. "
+                    "Nothing was changed.",
+                    code="BAD_ARGUMENT", stage="validate") from exc
+            if number <= 0:
+                raise ArgumentOutOfRange(
+                    f"'{label}' must be greater than 0; got {number:g}. A zero "
+                    "depth is not a feature - delete it instead.",
+                    code="DEPTH_OUT_OF_RANGE", stage="validate")
+            if label == "height":
+                wanted_first = number
+            else:
+                wanted_second = number
+
+        feature = None
+        try:
+            shapes = body.Shapes
+            for index in range(1, int(shapes.Count) + 1):
+                candidate = shapes.Item(index)
+                if str(getattr(candidate, "Name", "") or "") == name:
+                    feature = candidate
+                    break
+        except Exception:  # noqa: BLE001 - unreadable body, no claim
+            feature = None
+        if feature is None:
+            available = []
+            try:
+                shapes = body.Shapes
+                for index in range(1, int(shapes.Count) + 1):
+                    available.append(str(shapes.Item(index).Name))
+            except Exception:  # noqa: BLE001 - a list is a courtesy
+                available = []
+            raise ArgumentRejected(
+                f"No feature named '{name}' in '{body.Name}'. "
+                f"catia_list_features shows what is there"
+                + (f" ({', '.join(available[:12])}"
+                   + (f", ... ({len(available) - 12} more)" if len(available) > 12 else "")
+                   + ")" if available else "")
+                + ". Nothing was changed.",
+                code="FEATURE_NOT_FOUND", stage="execute", modified=False)
+
+        first_value, first_dimension = self._limit_dimension(feature, "FirstLimit")
+        second_value, second_dimension = self._limit_dimension(feature, "SecondLimit")
+        if wanted_first is not None and first_dimension is None:
+            raise ArgumentRejected(
+                f"'{name}' has no FirstLimit dimension to change - it is not a "
+                "depth-based feature (a fillet, a chamfer, a pattern or a boolean "
+                "answers nothing here). Measured on B30 2026-11-23: pads, pockets, "
+                "shafts and grooves do. Nothing was changed.",
+                code="NOT_A_LIMIT_FEATURE", stage="execute", modified=False)
+        if wanted_second is not None and second_dimension is None:
+            raise ArgumentRejected(
+                f"'{name}' has no SecondLimit dimension - it is a one-sided "
+                "feature, so there is no second depth to set. Pass 'height' "
+                "instead. Nothing was changed.",
+                code="NOT_A_LIMIT_FEATURE", stage="execute", modified=False)
+
+        before = self._mass_probe(part, body)[0]
+        old_symmetric = None
+        if wanted_symmetric is not None:
+            try:
+                old_symmetric = bool(feature.IsSymmetric)
+            except Exception as error:  # noqa: BLE001 - no flag, no change
+                raise ArgumentRejected(
+                    f"'{name}' does not answer IsSymmetric "
+                    f"({str(error).splitlines()[0][:80]}), so it cannot be set "
+                    "here. Nothing was changed.",
+                    code="NOT_A_LIMIT_FEATURE", stage="execute",
+                    modified=False) from error
+
+        changes: list[str] = []
+        try:
+            if wanted_first is not None:
+                first_dimension.Value = wanted_first
+                changes.append(f"first limit {self._mm_text(first_value)} -> "
+                               f"{self._mm_text(wanted_first)} mm")
+            if wanted_second is not None:
+                second_dimension.Value = wanted_second
+                changes.append(f"second limit {self._mm_text(second_value)} -> "
+                               f"{self._mm_text(wanted_second)} mm")
+            if wanted_symmetric is not None:
+                feature.IsSymmetric = bool(wanted_symmetric)
+                changes.append(f"IsSymmetric {old_symmetric} -> "
+                               f"{bool(wanted_symmetric)}")
+            part.UpdateObject(feature)
+        except Exception as error:  # noqa: BLE001 - undo and report
+            restored = self._restore_limits(part, feature, first_dimension,
+                                            first_value, second_dimension,
+                                            second_value, old_symmetric)
+            raise CodedError(
+                f"'{name}' refused the change ({str(error).splitlines()[0][:140]}). "
+                + ("The old values were written back and the part rebuilt, so "
+                   "nothing was changed."
+                   if restored else
+                   "The old values were written back but the part did NOT rebuild "
+                   "cleanly - inspect it with catia_list_features before building "
+                   "anything else.")
+                + f" Tried: {'; '.join(changes)}.",
+                code="EDIT_FEATURE_FAILED",
+                modified=not restored, stage="execute",
+                data={"feature": name,
+                      "first_limit_before_mm": first_value,
+                      "second_limit_before_mm": second_value,
+                      "attempted": changes,
+                      "restored": restored}) from error
+
+        after = self._mass_probe(part, body)[0]
+        new_first, _ = self._limit_dimension(feature, "FirstLimit")
+        new_second, _ = self._limit_dimension(feature, "SecondLimit")
+        read_back = (f"Feature now reads {self._mm_text(new_first)} mm on the first "
+                     f"limit and {self._mm_text(new_second)} mm on the second")
+        delta_note = ""
+        if before is not None and after is not None:
+            moved = after - before
+            depths = [abs((wanted_first if wanted_first is not None else first_value)
+                          - (first_value if first_value is not None else 0.0))]
+            if wanted_second is not None and second_value is not None:
+                depths.append(abs(wanted_second - second_value))
+            depth_change = max(depths) if depths else 0.0
+            delta_note = (f" Volume {before:.4f} -> {after:.4f} mm3 "
+                          f"({moved:+.4f}).")
+            if depth_change > 1e-9:
+                # The MAGNITUDE is the area; the sign belongs to the volume and
+                # would mislead here (shrinking a pad is a legitimate negative).
+                delta_note += (f" That is {abs(moved) / depth_change:.4f} mm2 of "
+                               "area per millimetre of depth changed - a pad's "
+                               "sketch area answers the same number, and the sign "
+                               "of the volume change is just which way it moved.")
+        self.conn.refresh_display()
+        return (f"'{name}' changed: {'; '.join(changes)}. {read_back}."
+                + delta_note
+                + " The DIRECTION of an existing feature cannot be read or "
+                "changed on this build (measured 2026-11-23: Pad.Direction, "
+                "Pad.Reversed, Pad.Symmetric and FirstLimit.Type all raise "
+                "Item.X) - a feature that points the wrong way still has to be "
+                "rebuilt, but its depth no longer does.")
+
+    @staticmethod
+    def _mm_text(value: float | None) -> str:
+        return "?" if value is None else f"{value:g}"
+
+    @staticmethod
+    def _limit_dimension(feature: Any, limit: str
+                         ) -> tuple[float | None, Any]:
+        """``(value, Dimension)`` of a feature's limit, ``(None, None)`` if absent."""
+        try:
+            dimension = getattr(feature, limit).Dimension
+            return float(dimension.Value), dimension
+        except Exception:  # noqa: BLE001 - the feature has no such limit
+            return None, None
+
+    def _restore_limits(self, part: Any, feature: Any,
+                        first_dimension: Any, first_value: float | None,
+                        second_dimension: Any, second_value: float | None,
+                        old_symmetric: bool | None) -> bool:
+        """Put the old depths back and rebuild; True only if that worked."""
+        try:
+            if first_dimension is not None and first_value is not None:
+                first_dimension.Value = first_value
+            if second_dimension is not None and second_value is not None:
+                second_dimension.Value = second_value
+            if old_symmetric is not None:
+                feature.IsSymmetric = old_symmetric
+            part.UpdateObject(feature)
+            return True
+        except Exception:  # noqa: BLE001 - reported by the caller
+            return False
+
     def _delete_feature(self, args: dict[str, Any]) -> str:
         """Delete one feature, or several when 'names' is given.
 
@@ -6828,18 +7366,40 @@ class PartDesignTools:
                 )
             many = [str(item) for item in many]
             part = self.conn.get_active_part()
+            # A PATTERN IS EXPANDED AGAINST THE LIVE TREE, HERE AND ONLY HERE
+            # (2026-11-23 report, P1-3). Feature names do not survive a rebuild:
+            # the same four fillets came back as 倒圆角.13/.14/.18/.19, then
+            # .37/.38/.42, then .61/.62/.66/.67 - so a list written before the
+            # rebuild cannot be used after it, and the report had to spend a
+            # round trip on catia_list_features before every cleanup. A name with
+            # * or ? is now matched against the elements that ACTUALLY exist, and
+            # what it matched is printed - the caller sees the expansion instead
+            # of trusting it.
+            many, pattern_notes = self._expand_name_patterns(part, many)
             # GSD elements go in ONE selection: on a 636-point clean-up the
             # per-name route took 49.9 s for 91 elements (0.3.50, measured on
             # B30 2026-11-03), because each name re-walked the whole tree and
             # then updated the part. Whatever is not in a geometrical set is a
             # Part Design feature and still goes through _delete_one, which
             # knows about bodies and indexes.
+            # THE AXES OF EVERY SKETCH IN THE BATCH, READ BEFORE ANYTHING GOES.
+            # 2026-11-23 report (P0-3): a failed plan rolled back with names that
+            # included a sketch WHOSE FEATURE was also in the list, so CATIA
+            # cascaded the sketch - and a cascaded sketch never reaches
+            # _delete_one, which is the only place its axes were captured. The
+            # frame cleanup then had no datum to compare, 'auto' refused by
+            # design ("unknown must not delete"), and the _FRAME + 3 points
+            # survived a rollback that was supposed to take everything back.
+            # Reading them here costs one script call per sketch that actually
+            # HAS a frame scaffold, and only on this path.
+            self._capture_sketch_datums(part, many)
             found = self._map_geometrical_sets(part, set(many))
             gsd_names = [name for name in many if name in found]
             others = [name for name in many if name not in found]
             deleted, kept = self._delete_owned(gsd_names) if gsd_names else ([], [])
             done: list[str] = list(deleted)
             failed: list[str] = [f"'{name}' (could not be deleted)" for name in kept]
+            failed_names: list[str] = list(kept)
             removed_features: list[str] = []
             # A SKETCH TAKEN BY A FEATURE EARLIER IN THE SAME CALL IS NOT A
             # FAILURE. The first B30 acceptance run of this batch form
@@ -6881,6 +7441,7 @@ class PartDesignTools:
                                         f"'{went_with[name]}')")
                         continue
                     failed.append(f"'{name}' ({first[:120]})")
+                    failed_names.append(name)
             # Kept OUT of `done`: that list is counted as elements removed, and a
             # sentence about the update is not one.
             scaffold_note = ""
@@ -6934,12 +7495,41 @@ class PartDesignTools:
 
             update_note = (self._final_update_note(removed_features)
                            if removed_features else "")
+            # A NAME THAT IS GONE IS NOT A FAILURE (2026-11-23 report, P0-3 item
+            # 3). The batch collects a refusal per name as it goes, and the frame
+            # cleanup runs AFTERWARDS - so a call could delete the sketch, clean
+            # up its `_FRAME` + 3 points, and still list all four as "could not
+            # be deleted" in the same reply that said the sketch went. The tree
+            # is the arbiter, and it has just been walked for the leftovers: a
+            # name that is no longer there did not fail, it was taken by
+            # something else this call did.
+            quietly_gone = 0
+            if failed:
+                alive = set(self._element_names(part))
+                # AN EMPTY WALK IS NOT AN EMPTY PART. If the tree cannot be read,
+                # nothing is dropped from the failure list - "unknown" must not
+                # turn a refusal into a success, which is the same rule the frame
+                # cleanup applies to a datum it cannot compare.
+                if alive:
+                    survivors = [(text, name)
+                                 for text, name in zip(failed, failed_names)
+                                 if name in alive]
+                    quietly_gone = len(failed) - len(survivors)
+                    failed = [text for text, _name in survivors]
+                    failed_names = [name for _text, name in survivors]
             # `deleted` counts OBJECTS, so a name that two elements carried
             # contributes two entries: saying "1 of 1" after removing two of them
             # would be the same kind of half-truth this batch exists to avoid.
             duplicates = [name for name in gsd_names if len(found.get(name, [])) > 1]
-            summary = (f"Deleted {len(done) + len(cascaded)} element(s) for "
-                       f"{len(many)} name(s) given.")
+            summary = (f"Deleted {len(done) + len(cascaded) + quietly_gone} "
+                       f"element(s) for {len(many)} name(s) given.")
+            if quietly_gone:
+                summary += (f" {quietly_gone} of them went with a feature this "
+                            "call deleted rather than by name (the frame "
+                            "scaffolding of a deleted sketch, or a sketch its own "
+                            "feature cascaded) - they were refused when they were "
+                            "asked for and are gone now, so they are not counted "
+                            "as failures.")
             if cascaded:
                 summary += (" Also gone, taken by a feature deleted above: "
                             + ", ".join(cascaded) + ".")
@@ -6948,6 +7538,12 @@ class PartDesignTools:
                     f"'{name}' x{len(found[name])}" for name in duplicates) + ".")
             if failed:
                 summary += f" Failed ({len(failed)}): " + "; ".join(failed) + "."
+            if pattern_notes:
+                # The expansion is part of the answer: a caller who wrote
+                # '倒圆角.*' has to see WHICH four features that meant, because
+                # the names it would have guessed are not the ones in the tree.
+                summary = ("Expanded " + "; ".join(pattern_notes) + ". "
+                           + summary)
             return summary + " " + " ".join(done) + scaffold_note + update_note
         return self._delete_one(args, None)
 
@@ -6982,6 +7578,11 @@ class PartDesignTools:
                 "last, which is the accident this preview exists to prevent). "
                 "Nothing was deleted.",
                 code="BAD_ARGUMENT", stage="validate", modified=False)
+        # A PATTERN PREVIEWS WHAT IT WOULD TAKE, and the expansion is the point -
+        # a dry run that answered for the literal string '*.*' would be worse
+        # than no preview at all (2026-11-23 report, P1-3).
+        targets, pattern_notes = self._expand_name_patterns(
+            self.conn.get_active_part(), targets)
         shapes = body.Shapes
         order = {str(shapes.Item(i).Name): i
                  for i in range(1, int(shapes.Count) + 1)}
@@ -7031,6 +7632,8 @@ class PartDesignTools:
                           "feature that consumes this one fails its update.")
             lines.append(piece)
         return ("DRY RUN - nothing was deleted, created or updated. "
+                + ("Expanded " + "; ".join(pattern_notes) + ". "
+                   if pattern_notes else "")
                 + " ".join(lines))
 
     def _delete_one(self, args: dict[str, Any], forced: str | None,
@@ -7184,6 +7787,32 @@ class PartDesignTools:
         # cascades), and the old reply said nothing about it - the reporter lost
         # 草图.3 with 凹槽.1 and only found out on the next pocket call.
         before = self._sketch_names()
+        # THE MODAL DIALOG IS PREVENTED HERE, NOT EXPLAINED AFTERWARDS. Deleting
+        # the sketch this session has open in the editor makes CATIA put up a
+        # message box ("剪切数据时发生错误 / 无法删除正在编辑的草图") and the COM
+        # call does not return until a human dismisses it - the session is frozen
+        # for as long as nobody is at the keyboard (2026-11-23 report, P0-3: a
+        # run_plan rollback hung there). This used to be diagnosed in the
+        # `except` below, i.e. after the dialog. Asking first costs one attribute
+        # read and the dialog never appears.
+        if kind == "sketch":
+            open_sketch = getattr(self.conn, "open_sketch", None)
+            if open_sketch and str(open_sketch) == str(target):
+                raise CodedError(
+                    f"SKETCH_IS_OPEN: '{target}' is the sketch this session is "
+                    "editing, and CATIA will not delete a sketch while it is "
+                    "open - it answers with a MODAL dialog that no automation can "
+                    "dismiss, so the call would hang until someone clicks OK. "
+                    "Nothing was deleted. Close it with catia_close_sketch and "
+                    "send the same call again (measured on B30 2026-11-12: that is "
+                    "all it takes). Do NOT close or re-open the document: that "
+                    "loses the sketch and anything not saved.",
+                    code="SKETCH_IS_OPEN", stage="execute", modified=False,
+                    next_actions=[
+                        "catia_close_sketch, then catia_delete_feature again with "
+                        "the same name",
+                    ],
+                )
         # THE PLANE HAS TO BE READ NOW. After the delete there is nothing left to
         # ask, and the frame cleanup needs to know whether a surviving sketch was
         # standing on this datum or merely somewhere in the same body.
@@ -7543,6 +8172,48 @@ class PartDesignTools:
             ordered.extend(ready)
             remaining = [name for name in remaining if name not in ready]
         return ordered
+
+    def _capture_sketch_datums(self, part: Any, names: list[str]) -> None:
+        """Record where each named sketch's own axes are, before anything goes.
+
+        A sketch deleted BY ITS FEATURE never reaches ``_delete_one``, so its
+        axes were never captured, and ``cleanup_frame_datum='auto'`` then has to
+        refuse the frame scaffolding it left behind - "unknown must not delete",
+        which is the right rule applied to a question this call could have
+        answered a second earlier (2026-11-23 report, P0-3). One read here and
+        the rollback takes the ``_FRAME`` with the sketch.
+
+        Only sketches that HAVE a frame scaffold are read, because the read is a
+        CATScript evaluation per sketch and there is nothing to decide about a
+        sketch that leaves no scaffolding. Everything is best-effort: a read that
+        fails leaves the datum unknown, which is the state this call found it in.
+        """
+        wanted = {str(name) for name in names}
+        candidates: list[tuple[str, Any]] = []
+        try:
+            bodies = part.Bodies
+            for index in range(1, int(bodies.Count) + 1):
+                sketches = bodies.Item(index).Sketches
+                for position in range(1, int(sketches.Count) + 1):
+                    sketch = sketches.Item(position)
+                    name = str(getattr(sketch, "Name", "") or "")
+                    if (name in wanted and name not in self._deleted_sketch_datums
+                            and self._has_frame_scaffold(name)):
+                        candidates.append((name, sketch))
+        except Exception:  # noqa: BLE001 - no list, no capture
+            return
+        if not candidates:
+            return
+        try:
+            axes = sketch_frames.read_absolute_axes(
+                self.conn.app, [sketch for _name, sketch in candidates])
+        except Exception:  # noqa: BLE001 - unknown stays unknown
+            return
+        if not axes or len(axes) != len(candidates):
+            return
+        for (name, _sketch), one in zip(candidates, axes):
+            if one:
+                self._deleted_sketch_datums[name] = one
 
     def _sketch_axes(self, sketch: Any) -> Any:
         """``(origin, H, V)`` of a sketch's own axes, or None.
@@ -9349,6 +10020,107 @@ class PartDesignTools:
                 continue
             self._collect_component_parts(nested, depth + 1, out, seen)
 
+    def _find_component(self, product: Any, name: str,
+                        prefix: str = "") -> tuple[str, Any] | None:
+        """The instance whose name (or path) is ``name``, with its path.
+
+        Recurses into sub-assemblies: a 15-instance product usually has two
+        levels, and a name that only exists one level down is still the name the
+        caller sees in the tree.
+        """
+        try:
+            children = product.Products
+        except Exception:  # noqa: BLE001 - a leaf component has no Products
+            return None
+        try:
+            count = int(children.Count)
+        except Exception:  # noqa: BLE001 - unreadable list, no claim
+            return None
+        for index in range(1, count + 1):
+            try:
+                child = children.Item(index)
+                child_name = str(child.Name)
+            except Exception:  # noqa: BLE001 - one unreadable instance
+                continue
+            path = f"{prefix}{child_name}"
+            if name in (child_name, path):
+                return path, child
+            deeper = self._find_component(child, name, f"{path}/")
+            if deeper is not None:
+                return deeper
+        return None
+
+    def _set_component_visibility(self, name: str, show: bool) -> str | None:
+        """Hide/show an assembly COMPONENT by instance name; None = not a component.
+
+        The read-back is the point. ``Selection.VisProperties.SetShow`` needs
+        something selected, and ``Product`` exposes no readable Visibility member
+        on this build (measured 2026-11-23: ``Visibility``, ``IsFixed``,
+        ``IsInactive``, ``IsRoot`` and ``IsReference`` all raise ``Item.X``), so
+        the only honest way to answer is to select the instance again and ask
+        ``GetShow()`` - which answers ``(0, 1)`` hidden, ``(0, 0)`` shown.
+        """
+        try:
+            document = self.conn.active_document
+            product = getattr(document, "Product", None)
+        except Exception:  # noqa: BLE001 - no document, no components
+            return None
+        if product is None:
+            return None
+        found = self._find_component(product, name)
+        if found is None:
+            return None
+        path, instance = found
+        selection = self.conn.hso
+        try:
+            selection.Clear()
+            selection.Add(instance)
+            selection.VisProperties.SetShow(0 if show else 1)
+            selection.Clear()
+            selection.Add(instance)
+            state = selection.VisProperties.GetShow()
+        except Exception as error:  # noqa: BLE001 - the instance is not selectable
+            raise CodedError(
+                f"'{path}' is a component of this product, but CATIA refused to "
+                f"change its visibility ({str(error).splitlines()[0][:120]}). "
+                "Nothing was changed. Instance visibility needs the instance "
+                "selectable in the product document; catia_set_visibility on the "
+                "part under it still works for the part's own tree.",
+                code="COMPONENT_VISIBILITY_FAILED", stage="execute",
+                modified=False) from error
+        finally:
+            try:
+                selection.Clear()
+            except Exception:  # noqa: BLE001 - a selection left behind
+                pass
+        hidden = None
+        try:
+            hidden = bool(int(state[1]))
+        except Exception:  # noqa: BLE001 - a build that answers a bare int
+            hidden = None
+        wanted_hidden = not show
+        note = ""
+        if hidden is not None and hidden != wanted_hidden:
+            note = (f" THE READ-BACK DISAGREES: GetShow() answered {tuple(state)}, "
+                    f"so it is {'hidden' if hidden else 'shown'}, not "
+                    f"{'hidden' if wanted_hidden else 'shown'}.")
+        others = 0
+        try:
+            others = int(product.Products.Count) - 1
+        except Exception:  # noqa: BLE001 - a count is a courtesy
+            pass
+        self.conn.refresh_display()
+        return (
+            f"Component '{path}' is now {'shown' if show else 'hidden'}"
+            + (f" (read back: VisProperties.GetShow() -> {tuple(state)})"
+               if hidden is not None else "")
+            + note
+            + (f" The other {others} component(s) of the product are untouched."
+               if others > 0 else "")
+            + " Component visibility is session state in the PRODUCT document - "
+            "save the product if it has to survive the session."
+        )
+
     def _set_visibility(self, name: str, show: bool) -> str:
         """Show or hide a tree node BY NAME, in one part or in a whole assembly.
 
@@ -9362,8 +10134,22 @@ class PartDesignTools:
         0.3.73: a Product walks every part under it instead of refusing. Each part
         is touched through its OWN Selection, so the active document never moves -
         which is the point, because the assembly is what the caller is looking at.
+
+        0.3.161: an ASSEMBLY COMPONENT can be named too, which it could not
+        before. `catia_set_visibility(name="Part1.1")` answered ARGUMENT_REJECTED
+        ("No tree node named 'Part1.1' in any of the 4 part(s)") because the name
+        was only ever looked for in a PART's tree, and a component instance is not
+        a tree node of a part - so "hide that side plate and look inside the
+        frame" was impossible (2026-11-23 report, P2-1). The instance is selected
+        in the PRODUCT's own Selection and its VisProperties.SetShow is used,
+        then READ BACK with GetShow: measured on B30 2026-11-23, GetShow answers
+        (0, 1) when hidden and (0, 0) when shown, so the reply states a reading
+        rather than a wish.
         """
         self.conn.ensure_connected()
+        component = self._set_component_visibility(name, show)
+        if component is not None:
+            return component
         targets = self._visibility_parts()
         try:
             active = str(self.conn.active_document.Name)

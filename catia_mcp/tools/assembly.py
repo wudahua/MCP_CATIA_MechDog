@@ -2640,6 +2640,26 @@ class AssemblyTools:
         # "matrix" describes something.
         payload: dict[str, Any] = {"components": components, "count": len(components),
                                    "occurrence_scope": "per_part"}
+        # "IS THIS INSTANCE FIXED?" CANNOT BE ANSWERED ON THIS BUILD, and saying
+        # so once is better than a field that is silently missing. Measured on B30
+        # 2026-11-23: Product.Visibility, Product.IsFixed, Product.IsInactive,
+        # Product.IsRoot, Product.IsReference and Product.Move.IsFixed all raise
+        # ("Item.IsFixed" / "<unknown>.IsFixed"), and a fixed instance is
+        # represented by a constraint that catia_fix_constraint cannot create here
+        # either (AddMonoEltCst E_FAIL on 14 codes). The 2026-11-23 report asked
+        # for this field three times in one paragraph; `fixed: null` plus this note
+        # is the honest answer, and it stops the next caller looking.
+        for entry in components:
+            entry["fixed"] = None
+        payload["fixed_state"] = (
+            "unknown - this build cannot read it. Probed on B30 2026-11-23: "
+            "Product.IsFixed, Product.Move.IsFixed, Product.IsInactive, "
+            "Product.IsRoot and Product.IsReference all raise. What DOES work is "
+            "the assembly's own default: the FIRST component inserted is fixed by "
+            "CATIA, every later one floats - and there is no call here that can "
+            "change that, because a fixed component is a constraint and "
+            "catia_fix_constraint refuses on this environment (AddMonoEltCst "
+            "E_FAIL on 14 codes). Put the instance that must be fixed FIRST.")
         if broken:
             # The repair is ONE call per part, not one per instance (2026-11-21
             # report P1-11: 8 broken instances meant 8 calls, each of which then

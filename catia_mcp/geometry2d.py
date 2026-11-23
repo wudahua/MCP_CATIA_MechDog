@@ -205,8 +205,34 @@ def _arc_arc(one: dict[str, Any], other: dict[str, Any]) -> list[tuple[float, fl
 
 def _near_any_end(point: tuple[float, float], segment: dict[str, Any],
                   tol: float) -> bool:
-    return any(math.hypot(point[0] - end[0], point[1] - end[1]) <= tol
+    return _gap_to_ends(point, segment) <= tol
+
+
+def _gap_to_ends(point: tuple[float, float], segment: dict[str, Any]) -> float:
+    """How far ``point`` is from the NEAREST end of ``segment``."""
+    return min(math.hypot(point[0] - end[0], point[1] - end[1])
                for end in (segment["a"], segment["b"]))
+
+
+#: How far apart two elements may meet and still be READ as meeting, in mm.
+#:
+#: Wider than ``tol`` on purpose, and for a reason the 2026-11-23 report (P2-3)
+#: measured: it drew four capsule slots as arcs plus lines, and
+#: ``catia_close_sketch`` answered "THE OUTLINE CROSSES ITSELF in 3 place(s):
+#: 'arc #1' crosses 'line #10' at (207.6510, 23.7380)" - which is exactly where
+#: arc #1 STARTS and line #10 ENDS. The 0.0032 mm between them is the record's
+#: own error: `catia_sketch_arc` writes the ends CATIA drew (the radial
+#: projection of p1/p2), and when the ends are not on the circle it moves the
+#: centre to keep the radius, which shifts both ends by the endpoint error.
+#: 1e-3 mm was set from 0.0004 mm seams; 3.2e-3 mm is the same phenomenon one
+#: order out.
+#:
+#: The price is stated where it is paid: a REAL crossing that happens within
+#: 1e-2 mm of an end of both elements reads as a seam instead. At that distance
+#: a pad sees a corner either way, and the distances are printed with every
+#: entry, so the caller can overrule the classification instead of arguing with
+#: a sentence.
+SEAM_TOL = 1e-2
 
 
 def crossings(segments: list[dict[str, Any]], tol: float = 1e-3,
@@ -225,6 +251,14 @@ def crossings(segments: list[dict[str, Any]], tol: float = 1e-3,
         bar of an ``I`` ends on its stem), and not wrong for a profile either -
         but a T junction makes the outline branched, so it is not one closed
         region and a pad on it does something other than what was drawn.
+    ``"seam"``
+        The intersection is at an endpoint of BOTH, but they are up to
+        ``SEAM_TOL`` apart instead of ``tol``: the drawing record's own error
+        where an arc's ends were projected. A G0 joint, not a defect - and the
+        reason the 2026-11-23 report was told its legal slot profile crossed
+        itself. Every entry also carries ``gap_a_mm`` / ``gap_b_mm``, the
+        distance from the point to the nearest end of each segment, so the
+        classification can be checked against the numbers instead of trusted.
 
     Why the two are separated (2026-11-12 report): all of its four "crossings"
     were legal seams at one shoulder corner, and the letter ``I`` in ``CATIA``
@@ -269,16 +303,23 @@ def crossings(segments: list[dict[str, Any]], tol: float = 1e-3,
             if not points:
                 continue
             for point in points:
-                at_one = _near_any_end(point, one, tol)
-                at_other = _near_any_end(point, other, tol)
-                if at_one and at_other:
+                gap_a = _gap_to_ends(point, one)
+                gap_b = _gap_to_ends(point, other)
+                if gap_a <= tol and gap_b <= tol:
                     # A shared corner: this is what a chain looks like.
                     continue
+                if gap_a <= SEAM_TOL and gap_b <= SEAM_TOL:
+                    kind = "seam"
+                elif gap_a <= tol or gap_b <= tol:
+                    kind = "touch"
+                else:
+                    kind = "crossing"
                 found.append({
                     "a": one["source"], "b": other["source"],
                     "label_a": one["label"], "label_b": other["label"],
                     "point": (round(point[0], 4), round(point[1], 4)),
-                    "kind": "touch" if (at_one or at_other) else "crossing",
+                    "kind": kind,
+                    "gap_a_mm": gap_a, "gap_b_mm": gap_b,
                 })
                 if len(found) >= limit:
                     return found
@@ -299,9 +340,10 @@ def describe(found: list[dict[str, Any]], segment_count: int,
     """
     real = [item for item in found if item.get("kind") == "crossing"]
     touches = [item for item in found if item.get("kind") == "touch"]
+    seams = [item for item in found if item.get("kind") == "seam"]
 
     parts: list[str] = []
-    if not real and not touches:
+    if not real and not touches and not seams:
         return (f" The outline does not cross itself ({segment_count} "
                 "segment(s) checked, from the elements this session drew).")
     if real:
@@ -340,12 +382,46 @@ def describe(found: list[dict[str, Any]], segment_count: int,
             "is not why a pad would fail. It does mean the outline is BRANCHED "
             "rather than one closed loop, which is fine for engraving along the "
             "strokes and is not fine as a pad profile.")
+    if seams:
+        listed = [
+            f"'{item['label_a']}' meets '{item['label_b']}' at "
+            f"({item['point'][0]:.4f}, {item['point'][1]:.4f}) with "
+            f"{max(item['gap_a_mm'], item['gap_b_mm']):.3e} mm between them"
+            for item in seams[:6]
+        ]
+        more = "" if len(seams) <= 6 else f"; and {len(seams) - 6} more"
+        parts.append(
+            f" NOTE: {len(seams)} place(s) where two elements MEET at an end of "
+            "each: " + "; ".join(listed) + more
+            + ". These are SEAMS, not crossings - the two ends are meant to be "
+            "one point, and the distance between them is what the drawing record "
+            f"holds (an arc's ends are the ones CATIA drew, and up to {SEAM_TOL:g} "
+            "mm from the p1/p2 given). Nothing needs fixing.")
     return "".join(parts) + (" (Checked from the elements this session drew; "
                              "CATIA cannot hand sketch coordinates back.)")
 
 
+#: How far apart two ends may be and still count as the same junction, in mm.
+#:
+#: It was 1e-6, which asked the drawing record for more precision than the
+#: coordinates it holds. `catia_sketch_arc` records the ends CATIA actually
+#: drew - the radial projection of p1/p2 onto the circle - so mixing an arc with
+#: a `catia_sketch_profile` line whose p1 is the caller's exact value leaves a
+#: gap of the projection error, which is the endpoint's own rounding: ~1e-7 for
+#: the 2026-11-23 report's R30 semicircle, and up to 1e-3 where an arc silently
+#: moved its centre to keep its radius. The report had to pass
+#: `allow_open_curves=true` on EVERY arc+line profile, which switches off the
+#: guard that exists to save a wasted pad.
+#:
+#: 1e-3 mm is the same threshold `crossings` uses and for the same reason: it is
+#: CATIA's own modelling precision, an order of magnitude under the narrowest
+#: real gap this check has ever seen, and the reply prints the distance it
+#: measured so a 9e-7 gap and a 0.0009 gap do not read alike.
+JUNCTION_TOL = 1e-3
+
+
 def open_ends(segments: Iterable[dict[str, Any]],
-              tol: float = 1e-6) -> list[tuple[float, float]]:
+              tol: float = JUNCTION_TOL) -> list[tuple[float, float]]:
     """Endpoints that belong to only ONE segment: the outline is not closed.
 
     A different question from ``crossings`` and the one pad/pocket actually cares
@@ -366,27 +442,46 @@ def open_ends(segments: Iterable[dict[str, Any]],
     is closed BY ITSELF and is skipped: its two ends are one point, and counting
     that point as free would call every circle an open profile.
 
-    ``tol`` is the same 1e-6 the rest of this module uses for "the same point".
-    The sketch tools record the coordinates they were GIVEN, so a pair of ends
-    that differ by less than a micron is the same junction.
+    ``tol`` is ``JUNCTION_TOL``, and it is deliberately WIDER than the 1e-6 this
+    module uses elsewhere for "the same point": see that constant. A pair of ends
+    that differ by a fraction of a micron is the same junction, and a pad needs to
+    hear about the gaps that are actual gaps.
+    """
+    return [entry["point"] for entry in free_ends_with_gaps(segments, tol)]
+
+
+def free_ends_with_gaps(segments: Iterable[dict[str, Any]],
+                        tol: float = JUNCTION_TOL) -> list[dict[str, Any]]:
+    """Each free end WITH the distance to its nearest other end.
+
+    The number is the point (2026-11-23 report, P1-2): the refusal printed two
+    coordinates that were identical to four decimals and said "2 free
+    endpoint(s)", so the caller could not tell a 1e-7 rounding from a 0.5 mm
+    mistake and could only switch the check off. Every entry carries
+    ``point``, ``nearest_mm`` (None when this is the only segment) and
+    ``nearest_label``.
     """
     items = list(segments)
-    free: list[tuple[float, float]] = []
+    free: list[dict[str, Any]] = []
     for index, segment in enumerate(items):
         first = (float(segment["a"][0]), float(segment["a"][1]))
         second = (float(segment["b"][0]), float(segment["b"][1]))
         if math.dist(first, second) <= tol:
             continue
         for point in (first, second):
-            met = False
+            best: tuple[float, str] | None = None
             for other_index, other in enumerate(items):
                 if other_index == index:
                     continue
-                if (math.dist(point, (float(other["a"][0]), float(other["a"][1]))) <= tol
-                        or math.dist(point, (float(other["b"][0]),
-                                             float(other["b"][1]))) <= tol):
-                    met = True
-                    break
-            if not met:
-                free.append((round(point[0], 6), round(point[1], 6)))
+                for end in (other["a"], other["b"]):
+                    distance = math.dist(point, (float(end[0]), float(end[1])))
+                    if best is None or distance < best[0]:
+                        best = (distance, str(other.get("label") or ""))
+            if best is not None and best[0] <= tol:
+                continue
+            free.append({
+                "point": (round(point[0], 6), round(point[1], 6)),
+                "nearest_mm": None if best is None else round(best[0], 9),
+                "nearest_label": None if best is None else best[1],
+            })
     return free

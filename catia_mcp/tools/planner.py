@@ -610,6 +610,18 @@ class PlannerTools:
         if not ordered:
             report["verified"] = True
             return report
+        # A SKETCH STILL OPEN IN THE EDITOR CANNOT BE DELETED, and asking anyway
+        # freezes the session: CATIA answers with a modal dialog and the COM call
+        # does not return until a human clicks OK (2026-11-23 report, P0-3 - the
+        # reply said "partly_rolled_back" while CATIA sat behind a message box,
+        # and the root cause was never named). The plan built that sketch, so the
+        # plan may close it; anything else is leaving the session stuck for a
+        # rollback that could not finish.
+        closed, still_open = self._close_open_sketch()
+        if closed:
+            report["open_sketch_closed"] = closed
+        if still_open:
+            report["open_sketch_still_open"] = still_open
         handler = self._router.get("catia_delete_feature")
         if handler is None:
             report["error"] = "catia_delete_feature is not bound to this planner"
@@ -627,6 +639,29 @@ class PlannerTools:
         report["left"] = [name for name in ordered if name in left_names]
         report["verified"] = True
         return report
+
+    def _close_open_sketch(self) -> tuple[str | None, str | None]:
+        """``(the sketch that was closed, the sketch that is still open)``.
+
+        Both are needed: "I closed it" is what makes the delete possible, and
+        "it is still open" is what explains a rollback that could not finish.
+        Neither is the same fact as "there was nothing open", which is
+        ``(None, None)``.
+        """
+        name = getattr(self.conn, "open_sketch", None)
+        if not name:
+            return None, None
+        handler = self._router.get("catia_close_sketch") if self._router else None
+        if handler is None:
+            return None, str(name)
+        try:
+            handler.execute("catia_close_sketch", {})
+        except Exception:  # noqa: BLE001 - reported as "still open"
+            return None, str(name)
+        still = getattr(self.conn, "open_sketch", None)
+        if still:
+            return None, str(still)
+        return str(name), None
 
     def _validate_expect(self, expect: Any) -> list[str]:
         """Everything wrong with `expect`, before a single step runs.
@@ -923,6 +958,21 @@ class PlannerTools:
                 names = ", ".join(created[:4]) + (
                     f", ... ({len(created) - 4} more)" if len(created) > 4 else "")
                 if rollback_report is not None:
+                    closed = rollback_report.get("open_sketch_closed")
+                    if closed:
+                        message += (f" The sketch '{closed}' was still open in the "
+                                    "editor, so it was CLOSED before the rollback: "
+                                    "CATIA will not delete an open sketch, and it "
+                                    "asks with a modal dialog that blocks the "
+                                    "session until someone clicks OK.")
+                    still_open = rollback_report.get("open_sketch_still_open")
+                    if still_open:
+                        message += (f" The sketch '{still_open}' is STILL OPEN and "
+                                    "could not be closed, so CATIA will refuse to "
+                                    "delete it - and the refusal arrives as a modal "
+                                    "dialog that blocks the session. Close it with "
+                                    "catia_close_sketch before rolling anything "
+                                    "else back.")
                     if not rollback_report.get("verified"):
                         message += (f" {len(created)} element(s) had already been "
                                     f"built ({names}) and rollback=true was asked "

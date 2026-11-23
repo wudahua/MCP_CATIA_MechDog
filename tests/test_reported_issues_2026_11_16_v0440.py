@@ -95,16 +95,49 @@ def test_a_chamfer_is_reported_as_a_chamfer_not_as_a_fillet():
     assert "catia_chamfer" in " ".join(caught.value.next_actions)
 
 
-def test_the_all_edges_path_keeps_answering_in_prose():
-    """catia_fillet/chamfer with no edge named enumerate every edge themselves.
-    A short edge being refused there is arithmetic, not a failed call - so the
-    batch that does it must not raise."""
+def test_the_all_edges_path_now_reports_a_partial_result_as_a_failure():
+    """0.3.160 answered ok:true here. 0.3.161 does not, and the old pin is withdrawn.
+
+    This test used to assert ``strict=False`` in both all-edges methods, on the
+    reasoning that "a short edge being refused is arithmetic, not a failed call".
+    The reasoning was right about the CAUSE and wrong about the CALLER: the
+    2026-11-23 report (P0-2) asked ``catia_fillet(radius=2)`` on a 12-edge box,
+    got ``ok: true`` reading "Every edge ... enumerated", and had 4 of the 12
+    built - a 229.6 mm3 difference it found by comparing volumes afterwards.
+    Arithmetic that the caller cannot see is indistinguishable from a success
+    they can act on. The batch now raises with ``PARTIAL_EDGES_FAILED`` (or
+    ``EDGES_REJECTED`` when nothing built), carries ``modified`` = whether
+    anything did, and the all-edges layer adds ``self_enumerated`` plus the
+    measured tangency-rim recipe.
+    """
     from catia_mcp.tools.part_design import PartDesignTools
 
     source = inspect.getsource(PartDesignTools._fillet_all_edges)
-    assert "strict=False" in source
+    assert "strict=False" not in source
+    assert "strict=True" in source
+    assert "_as_enumerated" in source
     chamfer = inspect.getsource(PartDesignTools._chamfer_all_edges)
-    assert "strict=False" in chamfer
+    assert "strict=False" not in chamfer
+    assert "_as_enumerated" in chamfer
+
+
+def test_the_enumeration_layer_says_the_set_was_chosen_by_the_tool():
+    """`data.self_enumerated` is what separates "you named these" from "I did"."""
+    from catia_mcp.results import CodedError as Refusal
+    from catia_mcp.tools.part_design import PartDesignTools
+
+    tools = PartDesignTools(connection=None)
+    original = Refusal("Fillet R2: 4/12 edge(s) done (...)",
+                       code="PARTIAL_EDGES_FAILED", modified=True, stage="execute",
+                       data={"requested": 12, "done": 4})
+    enriched = tools._as_enumerated(original, 12, "fillet")
+    assert enriched.data["self_enumerated"] is True
+    assert enriched.data["done"] == 4              # the numbers survive
+    assert enriched.code == "PARTIAL_EDGES_FAILED"
+    assert enriched.modified is True
+    assert "CHOSEN BY THE TOOL, NOT BY YOU" in str(enriched)
+    assert "tangency" in " ".join(enriched.next_actions)
+    assert "4/12" in str(enriched)
 
 
 def test_the_anchor_report_travels_with_the_failure():

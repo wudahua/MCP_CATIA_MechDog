@@ -2,6 +2,132 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.161] — 2026-11-23 · three ok:true calls that built the wrong solid
+
+The 2026-11-23 report modelled a conveyor from a written spec - four parts, 15
+instances, ~160 tool calls, no import - and finished with every part inside a
+tolerance of the source. Three P0s shared one shape: **the call succeeded, the
+geometry was not what was asked for, and only a volume comparison found out.**
+
+**P0-1 - a 180-degree arc with `direction="ccw"` came out inside out.** The
+report's cap: centre (211.171943, 18.704630) R6.142572, ends 180.0000023 degrees
+apart. At exactly half a circle BOTH ways round sweep pi, so "past half a circle"
+was decided by whether the coordinates came out a hair above or below antipodal -
+4.0e-08 rad here, against a 1e-9 threshold. Three of the report's eight caps
+flipped and five did not, which is why it looked random; nothing in the reply
+said which half had been drawn. A sweep within `HALF_CIRCLE_TOL` (1e-6 rad, =
+0.006 mm of arc at R100 and 20x the coordinate noise that produced the report's
+4e-08) is now SET to pi and `direction` is kept, and the point form and the angle
+form share one rule instead of two copies 1e-9 apart. The reply prints the arc's
+**bulge apex** - the point halfway round - so which half it is can be read back
+rather than inferred. Measured on B30: the report's cap bulges to (206.1402,
+15.1814) instead of (216.2036, 22.2279), and the 125 mm capsule built from it
+pads to **16541.7904 mm3 against the analytic 16541.7903**.
+
+**P0-2 - `catia_fillet(radius=2)` with no edge named built 4 of 12 and said
+`ok: true`.** The enumerated path handed every edge to the batch with
+`strict=False`, justified by "the caller did not choose these edges". That was
+right about the cause and wrong about the caller: the reply's first sentence read
+"Every edge ... enumerated", the count 4/12 was buried in prose, and the 8 that
+refused (the two end rims, whose ends land on the fillets the first four just
+made) were invisible to anything that branches on status. It now raises
+`PARTIAL_EDGES_FAILED` with `done`, `applied`, `rejected_reasons` and
+`self_enumerated: true`, keeps `modified: true` because four DID build, and offers
+the recipe the report validated: the 4 edges parallel to the extrusion in one
+call, then ONE rim edge per end with `propagation='tangency'`. Measured on B30 on
+the report's own 25x45x80 block: the one-call attempt gives 4/12 and V 89725.3096
+(the report's 89725.31), the recipe gives **26 faces / 48 edges / 24 vertices,
+V 89495.6695** - the corpus value to the digit. The arithmetic paragraph ("166 of
+381 edges are shorter than 2R") now travels with the refusal instead of being
+appended after the call that lost it.
+
+**P0-3 - `run_plan(rollback=true)` froze the session behind a modal dialog.**
+Deleting a sketch that is open in the editor makes CATIA put up
+「无法删除正在编辑的草图」, and the COM call does not return until a human clicks
+OK - the plan answered `partly_rolled_back` while the session sat behind the box,
+and the reason was never named. The rollback now closes the sketch FIRST (the
+plan built it, so the plan may close it) and says which one; `catia_delete_feature`
+refuses the same name up front instead of discovering it in `except`. Two
+follow-on corrections: a sketch's own axes are read for every name in a batch
+BEFORE anything goes, so a cascaded sketch's `_FRAME` + 3 points are no longer
+orphaned by `cleanup_frame_datum='auto'`; and a name that is gone by the end of
+the batch is no longer reported as "could not be deleted" - the tree is the
+arbiter. Measured on B30: the plan fails with `SK_FR` open, the reply names it,
+**all 6 elements including the frame scaffolding are gone**, `verified: true`,
+and the batch reply reads "Deleted 6 element(s) for 6 name(s) given. 4 of them
+went with a feature this call deleted" instead of "Failed (4)".
+
+**P1-1 - a semicircle refused as "chord longer than the diameter".** R30 with
+6-decimal ends came out 60.00000075 mm apart, 3.75e-07 past the diameter, against
+a 1e-9 tolerance - and the same sketch built fine in the report's other part.
+`CHORD_TOL` is 1e-5 mm (100x below CATIA's own 1e-3 modelling precision, and above
+the 0.7e-6 a rounded coordinate can produce), the refusal now prints the threshold
+it used, and the numbers in the "centre moved" note go through `_fmt_gap` so a
+7.07e-07 mm move is no longer printed as `0.0000`.
+
+**P1-2 - the open-profile pre-check was finer than the record it checked.**
+`SKETCH_HAS_OPEN_CURVES` used 1e-6 mm, which is smaller than the gap
+`catia_sketch_arc` leaves when it records the ends CATIA actually drew, so every
+profile mixing an arc with a line had to pass `allow_open_curves=true` - i.e.
+switch the guard off - to build a sketch that was fine. `JUNCTION_TOL` is 1e-3 mm
+(the same threshold `crossings` uses), and every free end is reported WITH the
+distance to its nearest neighbour, so a 9e-7 rounding and a 0.0009 mistake no
+longer print the same four-decimal coordinate.
+
+**P1-3 - feature names do not survive a rebuild.** The same four fillets came
+back as 倒圆角.13/.14/.18/.19, then .37/.38/.42, then .61/.62/.66/.67, so a list
+written from a previous call could not be used - the report had to spend a round
+trip on `catia_list_features` before every cleanup. `names` now accepts `*` and
+`?`, expanded against the live tree, with the expansion printed
+(`catia_delete_feature(names=['倒圆角.*'])` → "'倒圆角.*' matched 4 element(s)"),
+and a pattern that matches nothing is REFUSED, because deleting nothing
+successfully reads as a cleanup that happened. The fingerprint collision was
+already refused with its candidates; that is the documented route, and it still
+is.
+
+**P2-1 - a component instance can be hidden by name.** `set_visibility(name=
+"Part1.1")` answered "No tree node named ... in any of the 4 part(s)" because the
+name was only looked for in a PART's tree, and an instance is not a tree node of
+a part. Instances are now found (nested sub-assemblies included), hidden through
+the product's own Selection, and **read back** with `VisProperties.GetShow` -
+measured on B30, `(0, 1)` hidden and `(0, 0)` shown - so the reply states a
+reading. `catia_list_components` carries `fixed: null` per component and one
+`fixed_state` paragraph saying why: `Product.IsFixed`, `Product.Move.IsFixed`,
+`Product.IsInactive`, `Product.IsRoot` and `Product.IsReference` all raise on this
+build, and fixing a component is a constraint this environment cannot create - so
+the only working route is still "insert the one that must be fixed first".
+
+**P1-4 - `catia_edit_pad`, because a 5 mm error cost two rebuilds.** A feature's
+depth can now be changed after it exists: `FirstLimit.Dimension.Value` reads and
+writes, `SecondLimit.Dimension.Value` reads (and setting it on a one-sided pad
+makes it two-sided), `IsSymmetric` reads. Measured on B30: a 25x45x80 pad set to
+20 gives **22500.0000 mm3** (exactly 25x45x20) and reports "1125.0000 mm2 of area
+per millimetre" - the sketch's own area - so a change that landed on the wrong
+side is visible in the same sentence; adding a 5 mm second limit gives 28125
+(exactly 25x45x25). The FAILED path restores the old values and rebuilds before
+refusing, so `modified` is false only when that restore worked. The DIRECTION of
+an existing feature still cannot be read or changed (`Pad.Direction`,
+`Pad.Reversed`, `Pad.Symmetric`, `FirstLimit.Type` all raise `Item.X`), and the
+reply says so rather than implying otherwise.
+
+**P2-2 - no `method="exact"` exists, and now that is an experiment rather than a
+shrug.** Re-probed on B30 for the report: a `Measurable` answers Volume and Area
+and RAISES for `GetBox`, `GetBoundingBox`, `CenterOfGravity`, `MomentsOfInertia`,
+`GetPlane`, `GetAxisSystem`, `Length` and `Perimeter` - on a whole body and on a
+single face alike. The tool description carries the list, so the 0.5-0.7 % a
+curved face's crown costs is a stated limit instead of an unexplained number.
+
+**P2-3 - a seam is not a crossing.** `catia_close_sketch` said "THE OUTLINE
+CROSSES ITSELF in 3 place(s): 'arc #1' crosses 'line #10' at (207.6510, 23.7380)"
+- which is exactly where arc #1 starts and line #10 ends. The 0.0032 mm between
+them is the drawing record's own error: an arc's ends are the ones CATIA drew, and
+when they are not on the circle the centre moves to keep the radius. A third
+category `seam` (both ends within `SEAM_TOL` = 1e-2 mm) now reports them as
+"SEAMS, not crossings ... Nothing needs fixing", with the measured distance in
+the sentence; every entry also carries `gap_a_mm` / `gap_b_mm`, so the
+classification can be checked against numbers instead of trusted. A real crossing
+still says CROSSES ITSELF.
+
 ## [0.3.160] — 2026-11-22 · a coordinate you can address, a document you can name, and a mirror that stays shut
 
 The four items the 2026-11-22 reports left open. Two are new capability, one is a

@@ -134,14 +134,31 @@ def test_major_true_still_gives_the_long_arc():
 
 
 def test_a_half_circle_is_drawn_as_written_and_says_so():
-    """180 degrees has two answers only in the arithmetic, not in the geometry."""
+    """180 degrees: which half is drawn is `direction`'s decision, and it says so.
+
+    This test used to assert "direction decides nothing here", and that sentence
+    was wrong: at exactly 180 degrees both ways round sweep 180, so the SWEEP
+    cannot tell them apart - but the two semicircles are different geometry. The
+    2026-11-23 report (P0-1) is what the sentence cost: a slot cap asked for
+    direction='ccw' came out bulging into the slot, and the reply said the
+    direction had decided nothing. The reply now names the half and prints the
+    apex it bulges to.
+    """
     tools, factory = _arc_tools()
     p1 = [20.0, 0.0]
     p2 = [-20.0, 0.0]
     reply = tools._draw_arc(0.0, 0.0, 20.0, p1=p1, p2=p2, direction="ccw")
     _, _, _, start, end = factory.calls[0]
     assert math.degrees(end - start) == pytest.approx(180.0, abs=1e-6)
-    assert "direction decides nothing here" in reply
+    assert "direction decides nothing here" not in reply
+    assert "decides WHICH half" in reply
+    assert "counter-clockwise" in reply
+    # counter-clockwise from (20, 0) bulges UP through (0, 20).
+    assert "bulging to (0.0000, 20.0000)" in reply
+
+    other, other_factory = _arc_tools()
+    other_reply = other._draw_arc(0.0, 0.0, 20.0, p1=p1, p2=p2, direction="cw")
+    assert "bulging to (0.0000, -20.0000)" in other_reply
 
 
 def test_two_endpoints_on_top_of_each_other_are_refused():
