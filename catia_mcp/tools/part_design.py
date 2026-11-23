@@ -429,6 +429,46 @@ class PartDesignTools:
                             ),
                             "default": False,
                         },
+                        "insert_after": {
+                            "type": "string",
+                            "description": (
+                                "Name of a SOLID feature of the active body "
+                                "('凸台.1', '凹槽.2'): the new feature is built "
+                                "directly AFTER it in the history instead of at "
+                                "the end. Until 0.3.164 this server always "
+                                "appended, because _prepare_body puts "
+                                "InWorkObject back on the body before every "
+                                "factory call - and the 2026-11-23 report's "
+                                "15-feature part needed one feature moved out of "
+                                "the middle (P1-4). MEASURED on B30 2026-11-23: "
+                                "with InWorkObject left on the first feature, "
+                                "CATIA itself places a raw AddNewPocket at index "
+                                "2 of 3 ([凸台.1, 凹槽.2, 凹槽.1]), so the "
+                                "insertion point exists - this server was the "
+                                "thing in front of it. "
+                                "IT IS NOT ONE FEATURE BEING BUILT. Every "
+                                "feature after the insertion point is "
+                                "recomputed, and UpdateObject alone does not do "
+                                "that: the new feature's own update leaves the "
+                                "volume unchanged until a full part.Update() "
+                                "(measured: 87738.0533 -> 85476.1066 only after "
+                                "Update). So this call rebuilds the whole part "
+                                "and is slower by the cost of the tail. If the "
+                                "rebuild fails - a fillet whose edge got "
+                                "shorter, a pocket whose support moved - the new "
+                                "feature is taken back out, the reply says "
+                                "whether the part is whole again and, if not, "
+                                "which element still fails. "
+                                "The reply also reads the tree back: a feature "
+                                "can add exactly the right material and still "
+                                "sit at the wrong place, so 'Placed at position "
+                                "3 of 5' is a reading, not a claim. Naming a "
+                                "feature that is not in this body is refused "
+                                "before anything is built, with the body's "
+                                "features and their positions. Omit it to "
+                                "append, which is what every call did before."
+                            ),
+                        },
                         "sketch_name": {
                             "type": "string",
                             "description": "Name of sketch to use. If not specified, uses the last created sketch.",
@@ -633,6 +673,46 @@ class PartDesignTools:
                                 "slot ends up 38.1 long in total, not 76.2."
                             ),
                             "default": False,
+                        },
+                        "insert_after": {
+                            "type": "string",
+                            "description": (
+                                "Name of a SOLID feature of the active body "
+                                "('凸台.1', '凹槽.2'): the new feature is built "
+                                "directly AFTER it in the history instead of at "
+                                "the end. Until 0.3.164 this server always "
+                                "appended, because _prepare_body puts "
+                                "InWorkObject back on the body before every "
+                                "factory call - and the 2026-11-23 report's "
+                                "15-feature part needed one feature moved out of "
+                                "the middle (P1-4). MEASURED on B30 2026-11-23: "
+                                "with InWorkObject left on the first feature, "
+                                "CATIA itself places a raw AddNewPocket at index "
+                                "2 of 3 ([凸台.1, 凹槽.2, 凹槽.1]), so the "
+                                "insertion point exists - this server was the "
+                                "thing in front of it. "
+                                "IT IS NOT ONE FEATURE BEING BUILT. Every "
+                                "feature after the insertion point is "
+                                "recomputed, and UpdateObject alone does not do "
+                                "that: the new feature's own update leaves the "
+                                "volume unchanged until a full part.Update() "
+                                "(measured: 87738.0533 -> 85476.1066 only after "
+                                "Update). So this call rebuilds the whole part "
+                                "and is slower by the cost of the tail. If the "
+                                "rebuild fails - a fillet whose edge got "
+                                "shorter, a pocket whose support moved - the new "
+                                "feature is taken back out, the reply says "
+                                "whether the part is whole again and, if not, "
+                                "which element still fails. "
+                                "The reply also reads the tree back: a feature "
+                                "can add exactly the right material and still "
+                                "sit at the wrong place, so 'Placed at position "
+                                "3 of 5' is a reading, not a claim. Naming a "
+                                "feature that is not in this body is refused "
+                                "before anything is built, with the body's "
+                                "features and their positions. Omit it to "
+                                "append, which is what every call did before."
+                            ),
                         },
                         "sketch_name": {
                             "type": "string",
@@ -1056,6 +1136,24 @@ class PartDesignTools:
                                 "the write instead)."
                             ),
                             "default": False,
+                        },
+                        "insert_after": {
+                            "type": "string",
+                            "description": (
+                                "Name of a SOLID feature of the active body "
+                                "('凸台.1', '凹槽.2'): the hole is built directly "
+                                "AFTER it in the history instead of at the end, "
+                                "which is what catia_pad and catia_pocket mean by "
+                                "the same argument (measured on B30 2026-11-23: "
+                                "leaving InWorkObject on an earlier feature makes "
+                                "CATIA insert the new one there). The whole part "
+                                "is rebuilt afterwards by a full part.Update(), "
+                                "because UpdateObject does not rebuild the "
+                                "features that follow; if that "
+                                "rebuild fails the hole is taken out and the "
+                                "reply says whether the part is whole again and "
+                                "what still fails. Omit it to append."
+                            ),
                         },
                         "sketch_name": {
                             "type": "string",
@@ -1909,7 +2007,11 @@ class PartDesignTools:
                     "have resulted, so the answer is a plan and not a shrug. "
                     "It also says what to do instead - rebuild the tail, or use "
                     "catia_edit_pad / catia_move_body when the real problem is a "
-                    "depth or a position. Pass force: true to re-read this "
+                    "depth or a position. What CAN be placed is a NEW feature: "
+                    "catia_pad / catia_pocket / catia_hole take insert_after='凸台.1' "
+                    "and build directly after it (0.3.164), so an order that is "
+                    "wrong because a feature arrived late becomes delete-and-redo, "
+                    "not rebuild-everything. Pass force: true to re-read this "
                     "build's interfaces and see whether a reorder member has "
                     "appeared (after a licence or release change)."
                 ),
@@ -3011,6 +3113,264 @@ class PartDesignTools:
         # hands back the request the caller did not make: z -1..+4.
         return True, first_side, second_side, None, direction, symmetric
 
+    # ── building a feature at a chosen place in the history ─────────────
+    #
+    # The 2026-11-23 report's P1-4 wanted ONE feature moved out of 15. There is
+    # no reorder on this build (0.3.163 measured every interface), but there IS
+    # an insertion point, and this server was the thing standing in front of it:
+    # `_prepare_body` puts `Part.InWorkObject` back on the body before every
+    # factory call - deliberately, because a GSD call leaves it on the geometrical
+    # set - so every feature this server ever built went to the end of the tree.
+    #
+    # Measured on B30 2026-11-23 (scripts/b30_v0499_reorder_probe4.py): with the
+    # in-work object left on the FIRST feature, a raw AddNewPocket landed at
+    # index 2 of 3 - [凸台.1, 凹槽.2, 凹槽.1]. So CATIA inserts; this server only
+    # has to stop re-pointing the in-work object and then tell the truth about
+    # what an insertion costs.
+    #
+    # Two facts separate "placed" from "silently inert":
+    #
+    #   1. `UpdateObject(new)` does NOT rebuild a feature that is not last. Same
+    #      probe: the volume stayed 87738.0533 after UpdateObject and became
+    #      85476.1066 only after a full `part.Update()`. Every insertion path
+    #      therefore rebuilds the whole part, and pays for it.
+    #   2. That rebuild recomputes every feature AFTER the insertion point, and
+    #      any one of them can fail - a fillet whose edge got shorter, a pocket
+    #      whose support face moved. A feature left failing poisons every later
+    #      update (0.3.7's lesson), so an insertion that breaks the tail is taken
+    #      back out and the reply says which elements are still bad.
+
+    def _body_feature_names(self, body: Any) -> list[str]:
+        """The body's solid features, in BUILD ORDER."""
+        try:
+            shapes = body.Shapes
+            return [str(shapes.Item(i).Name) for i in range(1, shapes.Count + 1)]
+        except Exception:  # noqa: BLE001 - the caller reports the empty list
+            return []
+
+    def _insert_plan(self, part: Any, body: Any, name: Any) -> dict[str, Any] | None:
+        """Where the new feature must go: ``{target, name, index, downstream}``.
+
+        ``None`` means the caller did not ask for a position. Everything that can
+        be checked from the tree is checked here, BEFORE the factory runs, so an
+        impossible insertion point costs no feature node and no rebuild.
+        """
+        if not name:
+            return None
+        wanted = str(name)
+        shapes = []
+        try:
+            collection = body.Shapes
+            shapes = [collection.Item(i) for i in range(1, collection.Count + 1)]
+        except Exception:  # noqa: BLE001 - reported as "no features"
+            shapes = []
+        names = [str(getattr(shape, "Name", "")) for shape in shapes]
+        if wanted in names:
+            index = names.index(wanted)
+            return {"target": shapes[index], "name": wanted, "index": index,
+                    "downstream": names[index + 1:]}
+        # Not here. Say WHERE it is if it is in another body - "not found" about a
+        # name that exists three bodies over is the kind of true-but-useless
+        # answer the 2026-11-23 report kept having to work around.
+        elsewhere: list[str] = []
+        try:
+            for b in range(1, part.Bodies.Count + 1):
+                other = part.Bodies.Item(b)
+                if str(other.Name) == str(body.Name):
+                    continue
+                try:
+                    rows = [str(other.Shapes.Item(i).Name)
+                            for i in range(1, other.Shapes.Count + 1)]
+                except Exception:  # noqa: BLE001 - a body with no solid
+                    rows = []
+                if wanted in rows:
+                    elsewhere.append(str(other.Name))
+        except Exception:  # noqa: BLE001 - the refusal below still stands
+            elsewhere = []
+        listing = ", ".join(f"{label} ({i + 1})" for i, label in enumerate(names))
+        raise ArgumentRejected(
+            f"'{wanted}' is not a feature of '{body.Name}', so there is nothing to "
+            "insert after."
+            + (f" It IS a feature of {', '.join(repr(x) for x in elsewhere)} - an "
+               "insertion point has to be in the body being built"
+               if elsewhere else "")
+            + f" That body's features, in build order: "
+            + (listing or "none - it has no solid feature yet") + ". "
+            "insert_after names a SOLID feature (catia_list_features lists them "
+            "with their positions); a sketch, a geometrical set or a body is not "
+            "an insertion point. Nothing was created and nothing was measured.",
+            code="FEATURE_NOT_FOUND",
+            next_actions=[
+                "catia_list_features shows every feature of the active body in "
+                "build order, with the name to pass here",
+                "Omit insert_after to append at the end - that is what every call "
+                "did before 0.3.164",
+                "catia_set_active_body if the feature you meant belongs to another "
+                "body: an insertion point cannot cross bodies",
+            ],
+            data={"insert_after": wanted, "body": str(body.Name),
+                  "features": names, "found_in": elsewhere})
+
+    def _update_placed(self, part: Any, feature: Any,
+                       insert: dict[str, Any] | None) -> Exception | None:
+        """Rebuild, the whole part when the feature was inserted.
+
+        ``UpdateObject`` is right for a feature at the end - it is the only thing
+        that has to be rebuilt - and silently wrong for one in the middle: the
+        node updates, the volume does NOT move until the features after it are
+        recomputed, and the caller then reads "this feature added nothing" about a
+        feature that is perfectly fine. Measured on B30 2026-11-23.
+        """
+        if insert is None:
+            return self._try_update(part, feature)
+        try:
+            part.Update()
+            return None
+        except Exception as exc:  # noqa: BLE001 - the caller measures, then rolls back
+            return exc
+
+    def _verify_insertion(self, part: Any, body: Any, created: list[Any],
+                          insert: dict[str, Any]) -> str:
+        """Check the new feature(s) really landed where they were asked for.
+
+        ``created`` is one feature, or the pair a mid-plane cut builds. The claim
+        being tested is positional, so it is tested against the tree and not
+        against the volume: a feature can add exactly the right material and sit
+        at the end of the history.
+
+        Raises ``INSERT_POSITION_WRONG`` when the tree disagrees. The geometry is
+        LEFT IN PLACE in that case: it is the material the caller asked for, and
+        deleting a good solid because a sentence would otherwise be false is the
+        worse of the two answers - so ``modified`` is true and the reply says
+        where it actually landed.
+        """
+        names = self._body_feature_names(body)
+        expected = [str(getattr(feature, "Name", "")) for feature in created]
+        start = insert["index"] + 1
+        window = names[start:start + len(expected)]
+        if window == expected:
+            try:
+                part.InWorkObject = body
+            except Exception:  # noqa: BLE001 - _prepare_body re-points it anyway
+                pass
+            tail = names[start + len(expected):]
+            where = (f"position {start + 1} of {len(names)}"
+                     if len(expected) == 1 else
+                     f"positions {start + 1}-{start + len(expected)} of {len(names)}")
+            return (
+                f" Placed at {where}, directly after '{insert['name']}' as asked. "
+                f"The {len(tail)} feature(s) built after it ("
+                + (", ".join(tail) if tail else "none") + ") were REBUILT by a full "
+                "part.Update() - that is what an insertion costs, and it is why "
+                "UpdateObject alone is not enough here.")
+        raise CodedError(
+            f"The feature was built but NOT where it was asked for, so this call "
+            f"is a failure and the solid was left in place rather than deleted. "
+            f"Asked to insert after '{insert['name']}' (position "
+            f"{insert['index'] + 1}), which puts "
+            + ("it" if len(expected) == 1 else "them")
+            + f" at {'position' if len(expected) == 1 else 'positions'} "
+            f"{start + 1}"
+            + ("" if len(expected) == 1 else f"-{start + len(expected)}")
+            + f". The tree reads: {', '.join(names) or 'no features'}. The "
+            "material is the material you asked for - only its place in the "
+            "history is wrong, and the features that consume it were rebuilt "
+            "against the old order.",
+            code="INSERT_POSITION_WRONG", stage="execute", modified=True,
+            next_actions=[
+                "catia_list_features shows the actual order; the feature is in the "
+                "tree and can be deleted with catia_delete_feature",
+                "Rebuild from the insertion point if the order matters: this build "
+                "cannot move a feature (catia_reorder_feature explains what was "
+                "measured)",
+            ],
+            data={"insert_after": insert["name"], "wanted_position": start + 1,
+                  "created": expected, "order": names})
+
+    def _insert_rejected(self, part: Any, body: Any, feature: Any, sketch: Any,
+                         insert: dict[str, Any], update_error: Any,
+                         before: float | None, after: float | None) -> None:
+        """An insertion that did not work: take it out, say what is left broken.
+
+        Three things have to be established, and each one changes the sentence:
+
+        * did the new feature come back out (``_remove_feature``);
+        * does the part update again afterwards, and to the volume it had - an
+          insertion that leaves the tail in error is a broken document, not a
+          failed call;
+        * if it still does not update, WHICH element fails, because the caller
+          cannot bisect a 15-feature tree by hand.
+        """
+        name = str(getattr(feature, "Name", ""))
+        sketch_name = getattr(sketch, "Name", None)
+        gone = self._remove_feature(part, feature, body)
+        rebuilt = True
+        rebuild_error = None
+        try:
+            part.Update()
+        except Exception as exc:  # noqa: BLE001 - reported below
+            rebuilt = False
+            rebuild_error = exc
+        now = self._body_volume_mm3(part, body)
+        restored = (rebuilt and before is not None and now is not None
+                    and abs(now - before) <= 1e-6 * max(1.0, abs(before)))
+        culprits = failing_elements(part) if not rebuilt else []
+        survived = self._sketch_present(part, sketch) if sketch is not None else True
+        recovery, _usable = self._recover_lost_sketch(
+            part, body, sketch_name, survived,
+            requested=getattr(sketch, "Name", None))
+        tail = insert["downstream"]
+        measured = (f"Volume {before:.4f} -> {after:.4f} mm3 was measured"
+                    if before is not None and after is not None else
+                    "The volume could not be measured")
+        message = (
+            f"Inserting '{name}' after '{insert['name']}' failed, so it was "
+            + ("removed again" if gone else
+               "left in the tree (it could NOT be removed - close the document "
+               "without saving)")
+            + ". An insertion is not one feature being built: it rebuilds every "
+            f"feature after '{insert['name']}' - here "
+            f"{len(tail)} of them ({', '.join(tail) or 'none'}), by a full "
+            "part.Update(). " + measured + "."
+            + ("" if before is None or after is None else
+               (" The feature was not the problem: it moved nothing, which is "
+                "what a refused rebuild looks like from the volume."
+                if abs(after - before) <= 1e-6 else ""))
+            + (f" After taking it out the part updates again and the volume is "
+               f"{now:.4f} mm3, so the document is as it was."
+               if restored else
+               " THE PART IS STILL IN ERROR: the insertion was undone but the "
+               "rebuild after it failed"
+               + (f" at {describe(culprits)}" if culprits else
+                  " and no single element reproduces it, so it is a relation "
+                  "between features")
+               + f" ({rebuild_error}). Build nothing else until that is cleared: "
+               "every later update stops there. catia_update_part names it again.")
+            + recovery)
+        raise FeatureRejected(
+            message,
+            rolled_back=bool(gone and restored),
+            modified=not restored,
+            code="INSERTION_REJECTED",
+            next_actions=[
+                "catia_list_features shows the current order, and catia_update_part "
+                "names the element that fails to rebuild",
+                "Insert after a LATER feature, or omit insert_after to append at "
+                "the end: the further back the insertion point, the fewer features "
+                "have to be rebuilt",
+                "If the new feature itself is the problem (it moved no material "
+                "even at the end of the tree), fix its sketch or extent first - "
+                "the ordinary pad/pocket causes are listed by a call without "
+                "insert_after",
+            ],
+            data={"insert_after": insert["name"],
+                  "position": insert["index"] + 1,
+                  "downstream": tail,
+                  "volume_before_mm3": before,
+                  "volume_after_mm3": after,
+                  "volume_restored_mm3": now,
+                  "still_failing": culprits})
+
     def _pad(self, args: dict[str, Any]) -> str:
         two_sided, first_side, second_side, height, direction, symmetric = \
             self._pad_extents(args)
@@ -3018,6 +3378,16 @@ class PartDesignTools:
         part = self.conn.get_active_part()
         body = self._prepare_body(part)
         sf = part.ShapeFactory
+
+        insert = self._insert_plan(part, body, args.get("insert_after"))
+        append_note = ""
+        if insert is not None and not insert["downstream"]:
+            append_note = (f" insert_after='{insert['name']}' is already the LAST "
+                           "feature of this body, so the new feature would land at "
+                           "the end anyway - this was an ordinary append.")
+            insert = None
+        if insert is not None:
+            part.InWorkObject = insert["target"]
 
         sketch = self._get_last_sketch(args.get("sketch_name"))
         # The name the CALLER used, which after a rebuild is not the sketch's
@@ -3066,11 +3436,7 @@ class PartDesignTools:
         elif direction == "reverse":
             pad.DirectionOrientation = 1  # catReverse
 
-        update_error = None
-        try:
-            part.UpdateObject(pad)
-        except Exception as exc:  # noqa: BLE001 - judged by volume below
-            update_error = exc
+        update_error = self._update_placed(part, pad, insert)
         after, took = self._settle(part, body, before, expect="add")
 
         # The same node, flipped, instead of a second throwaway pad. Measured
@@ -3086,7 +3452,11 @@ class PartDesignTools:
         # would silently hand back the mirror image of what was asked for.
         if took is False and not symmetric and not two_sided:
             pad.DirectionOrientation = 0 if direction == "reverse" else 1
-            flip_error = self._try_update(part, pad)
+            # _update_placed, not _try_update: when the pad was INSERTED, its
+            # effect only exists after the whole part has been rebuilt, so the
+            # single-node update would read as "no material either way" and roll
+            # back a pad that is fine.
+            flip_error = self._update_placed(part, pad, insert)
             after, retook = self._settle(part, body, before, expect="add")
             if retook:
                 flipped = True
@@ -3097,11 +3467,20 @@ class PartDesignTools:
                 # Air both ways. Put the requested orientation back so the tree
                 # would say what was asked for, then roll the node back below.
                 pad.DirectionOrientation = 1 if direction == "reverse" else 0
-                self._try_update(part, pad)
+                self._update_placed(part, pad, insert)
                 after = self._body_volume_mm3(part, body)
                 took = False
 
         if took is False:
+            if insert is not None:
+                # An insertion that grew nothing is a different failure from a
+                # pad that grew nothing at the END: the features after it were
+                # rebuilt against the new node, and one of them may be what broke.
+                # _insert_rejected takes the node out, rebuilds, and says whether
+                # the part is whole again - which is the fact that decides whether
+                # the caller may build anything else.
+                self._insert_rejected(part, body, pad, sketch, insert,
+                                      update_error, before, after)
             # Nothing grew either way: drop the dead node so the document stays
             # usable. This is the case that used to poison the whole part - a pad
             # on an open profile left '凸台.N' behind and every later update
@@ -3194,7 +3573,12 @@ class PartDesignTools:
             note += (" (direction auto-flipped to reach material: the requested "
                      "side was empty, and the same feature keeps the material it "
                      "was asked for on the other side)")
-        return f"Pad created: {span} ({direction}). Feature: '{pad.Name}'{note}"
+        if insert is not None:
+            # Reads the tree back: the volume says the material is there, and only
+            # the tree says WHERE in the history it went.
+            note += self._verify_insertion(part, body, [pad], insert)
+        return (f"Pad created: {span} ({direction}). Feature: '{pad.Name}'"
+                f"{note}{append_note}")
 
     def _volume_probe(self, part: Any, body: Any) -> tuple[float | None, str | None]:
         """Measure the body's volume in mm3, or explain why it cannot be.
@@ -3323,6 +3707,16 @@ class PartDesignTools:
         body = self._prepare_body(part)
         sf = part.ShapeFactory
 
+        insert = self._insert_plan(part, body, args.get("insert_after"))
+        append_note = ""
+        if insert is not None and not insert["downstream"]:
+            append_note = (f" insert_after='{insert['name']}' is already the LAST "
+                           "feature of this body, so the new feature would land at "
+                           "the end anyway - this was an ordinary append.")
+            insert = None
+        if insert is not None:
+            part.InWorkObject = insert["target"]
+
         sketch = self._get_last_sketch(args.get("sketch_name"))
         requested_name = args.get("sketch_name")
         self._refuse_open_curves(sketch, bool(args.get("allow_open_curves", False)))
@@ -3352,7 +3746,7 @@ class PartDesignTools:
         # the orientation is set explicitly in both cases (field-verified:
         # the wrong side produces a tree feature that removes nothing).
         pocket.DirectionOrientation = 1 if reverse else 0
-        update_error = self._try_update(part, pocket)
+        update_error = self._update_placed(part, pocket, insert)
         after, took = self._settle(part, body, before, expect="subtract")
 
         explicit_direction = "direction" in args or symmetric
@@ -3364,7 +3758,7 @@ class PartDesignTools:
             # exists and say so - failing the whole feature (which is what
             # happened to the reporter) leaves a 2-feature hole to patch by hand.
             pocket.DirectionOrientation = 0 if reverse else 1
-            retry_error = self._try_update(part, pocket)
+            retry_error = self._update_placed(part, pocket, insert)
             after, retook = self._settle(part, body, before, expect="subtract")
             if retook:
                 flipped = True
@@ -3381,7 +3775,7 @@ class PartDesignTools:
             # literal ("reverse means reverse", 0.3.5) - asking for the air side
             # is an error, and the next_actions below name the way back.
             pocket.DirectionOrientation = 0 if reverse else 1
-            retry_error = self._try_update(part, pocket)
+            retry_error = self._update_placed(part, pocket, insert)
             after, retook = self._settle(part, body, before, expect="subtract")
             if retook:
                 flipped = True
@@ -3391,11 +3785,14 @@ class PartDesignTools:
                 # Air on both sides: put the requested orientation back so the
                 # tree reflects the original intent, then roll back below.
                 pocket.DirectionOrientation = 1 if reverse else 0
-                self._try_update(part, pocket)
+                self._update_placed(part, pocket, insert)
                 after = self._body_volume_mm3(part, body)
                 took = False
 
         if took is False:
+            if insert is not None:
+                self._insert_rejected(part, body, pocket, sketch, insert,
+                                      update_error, before, after)
             # Nothing was removed. Two different stories used to be told here,
             # and one of them was a lie: UpdateObject can raise *after* the cut
             # is already in the geometry. Deciding on the volume keeps the
@@ -3523,13 +3920,17 @@ class PartDesignTools:
             topology_note = (
                 "" if mirror is None
                 else self._midplane_topology_note(mirror))
-            return (
+            outcome = (
                 f"Pocket {names} created: {extent}{flip_note}. "
                 f"Removed {removed:.1f} mm3 ({before:.1f} -> {after:.1f})."
                 + topology_note
                 + self._pocket_area_note(sketch, depth, through_all, symmetric,
-                                         single_sided)
-            )
+                                         single_sided))
+            if insert is not None:
+                outcome += self._verify_insertion(
+                    part, body, [pocket] + ([mirror] if mirror is not None else []),
+                    insert)
+            return outcome + append_note
         # No volume, no verdict: say which measurement failed rather than
         # blaming "this installation" for a cut the same session may verify on
         # the next call. A raised update next to an unreadable volume is a
@@ -3615,6 +4016,15 @@ class PartDesignTools:
         part = self.conn.get_active_part()
         body = self._prepare_body(part)
         sf = part.ShapeFactory
+        insert = self._insert_plan(part, body, args.get("insert_after"))
+        append_note = ""
+        if insert is not None and not insert["downstream"]:
+            append_note = (f" insert_after='{insert['name']}' is already the LAST "
+                           "feature of this body, so the new feature would land at "
+                           "the end anyway - this was an ordinary append.")
+            insert = None
+        if insert is not None:
+            part.InWorkObject = insert["target"]
         sketch = self._get_last_sketch(args.get("sketch_name"))
         self._refuse_open_curves(sketch, bool(args.get("allow_open_curves", False)))
         reverse = args.get("direction") == "reverse"
@@ -3638,9 +4048,12 @@ class PartDesignTools:
                     code="POCKET_SECOND_LIMIT_UNSUPPORTED", stage="execute",
                     modified=False) from error
         pocket.DirectionOrientation = 1 if reverse else 0
-        self._try_update(part, pocket)
+        update_error = self._update_placed(part, pocket, insert)
         after, took = self._settle(part, body, before, expect="subtract")
         if took is False:
+            if insert is not None:
+                self._insert_rejected(part, body, pocket, sketch, insert,
+                                      update_error, before, after)
             gone = self._remove_feature(part, pocket, body)
             stayed = (f"The volume stayed {before:.1f} mm3."
                       if before is not None else
@@ -3654,10 +4067,12 @@ class PartDesignTools:
         self.conn.refresh_display()
         removed = (f"{before - after:.1f} mm3" if before is not None
                    and after is not None else "an unmeasured amount")
+        placed = (self._verify_insertion(part, body, [pocket], insert)
+                  if insert is not None else "")
         return (f"Pocket created: {first_side:.3f} mm one way + "
                 f"{second_side:.3f} mm the other (total "
                 f"{first_side + second_side:.3f} mm), removed {removed}. Feature: "
-                f"'{pocket.Name}'")
+                f"'{pocket.Name}'{placed}{append_note}")
 
     def _pocket_area_note(self, sketch: Any, depth: float | None,
                           through_all: bool, symmetric: bool,
@@ -5714,6 +6129,16 @@ class PartDesignTools:
         body = self._prepare_body(part)
         sf = part.ShapeFactory
 
+        insert = self._insert_plan(part, body, args.get("insert_after"))
+        append_note = ""
+        if insert is not None and not insert["downstream"]:
+            append_note = (f" insert_after='{insert['name']}' is already the LAST "
+                           "feature of this body, so the new feature would land at "
+                           "the end anyway - this was an ordinary append.")
+            insert = None
+        if insert is not None:
+            part.InWorkObject = insert["target"]
+
         sketch = self._get_last_sketch(args.get("sketch_name"))
         sketch_name = getattr(sketch, "Name", None)
         diameter = args["diameter"]
@@ -5770,7 +6195,7 @@ class PartDesignTools:
         # threading before the first update breaks the rebuild (upstream f9751a1,
         # field-verified on B30). So this update happens first, and the threading
         # is applied to a hole that already exists.
-        update_error = self._try_update(part, hole)
+        update_error = self._update_placed(part, hole, insert)
         thread_note = self._apply_threading(part, hole, threaded)
 
         self.conn.refresh_display()
@@ -5781,6 +6206,9 @@ class PartDesignTools:
             took = (after - before) < -1e-6
         extent = "through all" if through_all else f"depth {depth} mm"
         if took is False:
+            if insert is not None:
+                self._insert_rejected(part, body, hole, sketch, insert,
+                                      update_error, before, after)
             gone = self._remove_feature(part, hole, body)
             survived = self._sketch_present(part, sketch)
             recovery, sketch_usable = self._recover_lost_sketch(
@@ -5843,11 +6271,13 @@ class PartDesignTools:
                 removed, diameter, depth, through_all, hole_type, threaded)
             position_note = self._bore_position_note(
                 before, cog_before, after, cog_after, target, placement, diameter)
+            placed = (self._verify_insertion(part, body, [hole], insert)
+                      if insert is not None else "")
             return (
                 f"Hole created: D{diameter} mm, {extent}. Removed {removed:.1f} mm3 "
                 f"({before:.1f} -> {after:.1f}). Feature: '{hole.Name}'."
                 f"{length_note}{position_note}{axis_note}{type_note}"
-                f"{thread_note}{note}"
+                f"{thread_note}{note}{placed}{append_note}"
             )
         why = volume_note or "the volume came back empty"
         return self._unverified(

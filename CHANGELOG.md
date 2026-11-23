@@ -2,6 +2,73 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.164] — 2026-11-23 · `insert_after`: the half of "reorder" this build can do
+
+0.3.163 measured that no interface on this build can move an existing feature,
+and the 2026-11-23 report (P1-4) had to rebuild a 15-feature part twice. But an
+INSERTION point does exist, and this server was the thing standing in front of
+it: `_prepare_body` puts `Part.InWorkObject` back on the body before every
+factory call — deliberately, because a GSD call leaves it on the geometrical set
+and the next Part Design factory then fails with a bare "method failed" — so
+every feature this server ever built went to the end of the history. 0.3.163's
+own probe (`b30_v0499_reorder_probe4.py`) showed CATIA inserting a raw pocket at
+index 2 of 3 when the in-work object was left alone.
+
+`catia_pad`, `catia_pocket` and `catia_hole` now take `insert_after` naming a
+solid feature of the active body, and the new feature is built directly after it.
+
+**An insertion is not one feature being built.** Two facts were measured before
+the tool was written, and each one is a way to lie:
+
+* `UpdateObject(new)` does NOT rebuild the features that follow. Measured on
+  B30 2026-11-23: the volume stayed 87738.0533 after `UpdateObject` and became
+  85476.1066 only after a full `part.Update()`. A tool that judged the insertion
+  by its own `UpdateObject` would report "this feature added nothing" about a
+  feature that is fine. So the insertion path rebuilds the whole part, and the
+  reply says so — with the tail named.
+* The rebuild can fail on something you did not touch — a fillet whose edge got
+  shorter, a pocket whose support face moved. The new feature is then taken out,
+  the part is rebuilt again, and the answer is about **the document**, not about
+  the feature: `INSERTION_REJECTED` with `rolled_back`, `modified` and
+  `still_failing` all measured, and "THE PART IS STILL IN ERROR" when taking the
+  feature out was not enough. This is the one raise site that can truthfully say
+  `rolled_back: true` AND `modified: true`, which is why `FeatureRejected` grew
+  `modified` and `data` — the envelope used to infer `modified` from
+  `rolled_back` alone.
+
+Measured on B30, one new document per cell (`scripts/b30_v0501_insert_probe.py`,
+17/17):
+
+| cell | result |
+|---|---|
+| `catia_pocket(insert_after='凸台.1')` | history `[凸台.1, 凹槽.2, 凹槽.1]`, V 87738.0533 -> 85476.1066; reply reads **"Placed at position 2 of 3"** back from the tree |
+| `catia_pad(insert_after='凹槽.1')` | history `[凸台.1, 凹槽.1, 凸台.3, 凸台.2]`, "Placed at position 3 of 4" |
+| `insert_after='凸台.9'` | `FEATURE_NOT_FOUND` before the factory runs, listing `凸台.1 (1), 凹槽.1 (2)` and nothing created |
+| `insert_after` = the last feature | success that says "already the LAST feature … this was an ordinary append" |
+
+**And the order changes the solid**, which is the whole point of having it. The
+same three calls — a 25x45x30 pad, a Φ8 through bore, a 20x20x10 plate on top —
+give **36242.0355 mm3** when the plate is appended (it covers the bore's mouth,
+and the bore stays cut through the pad underneath) and **35739.3807 mm3** when
+the plate is inserted between the pad and the bore (the bore is cut last and
+passes through the plate too). The 502.65 mm3 between them is exactly
+π·4²·10, which is the plate's own disc.
+
+Two of that cell's first three attempts are recorded here because they are
+findings, not noise: a CLOSED RING (20x20 outline with a 12x12 hole) contributed
+its full 20x20x10 and the bore was left untouched **in both orders** — the ring's
+opening is a separate region and the pocket does not take it into account; a
+U-shaped outline behaved the same way. A plate has no second region to get wrong.
+
+`catia_reorder_feature` still refuses, and its refusal now points here: an
+insertion point is how a feature gets to a chosen place, and the feature that is
+already there still has to be deleted and rebuilt.
+
+Tests 2613 (11 new in `test_reported_issues_2026_11_23_v0501.py`: the tree is the
+arbiter for "placed", `UpdateObject` vs `part.Update` for an insertion, a
+position that came out wrong is a failure even though it built, and the two ways
+a rollback can leave the part broken or whole).
+
 ## [0.3.163] — 2026-11-23 · `catia_reorder_feature`: the plan, then the measured no
 
 The 2026-11-23 report's P1-4, third suggestion. Its 15-feature part had one

@@ -27,11 +27,24 @@ class FeatureRejected(RuntimeError):
 
     def __init__(self, message: str, rolled_back: bool,
                  next_actions: list[str] | None = None,
-                 code: str | None = None) -> None:
+                 code: str | None = None,
+                 modified: bool | None = None,
+                 data: dict[str, Any] | None = None) -> None:
         super().__init__(message)
         self.rolled_back = bool(rolled_back)
         if next_actions:
             self.next_actions = list(next_actions)
+        # ``rolled_back`` is the usual route to ``modified``, and it is the wrong
+        # one the moment a rollback can FAIL: a feature that could not be taken
+        # back out leaves the model changed, and an insert whose removal was not
+        # followed by a successful rebuild leaves a part in error. 0.3.164's
+        # insertion path is the first raise site that knows both, so it says it
+        # here instead of letting the envelope infer the opposite (the 2026-10-25
+        # lesson, applied to a new pair of facts).
+        if modified is not None:
+            self.modified = bool(modified)
+        if data:
+            self.data = dict(data)
         # A raise site that knows what CATIA refused can name the code, so the
         # envelope stops depending on the wording of the message. Without this,
         # one sentence edited in 0.3.77 turned the solid loft's failure from
